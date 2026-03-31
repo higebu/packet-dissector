@@ -34,33 +34,20 @@ publish: check
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Build crate list dynamically from workspace metadata in dependency order:
-    #   1. core  2. reassembly, test-alloc  3. protocol crates (sorted)  4. facade
-    core="packet-dissector-core"
-    last="packet-dissector"
-    early=("packet-dissector-reassembly" "packet-dissector-test-alloc")
+    # Build crate list in dependency order via topological sort
+    mapfile -t crates < <(
+        cargo metadata --format-version 1 --no-deps | jq -r '
+          .packages[] |
+          .name as $name |
+          .dependencies[] |
+          select(.path != null) |
+          "\(.name) \($name)"
+        ' | tsort
+    )
 
-    all_crates=$(cargo metadata --format-version 1 --no-deps \
-        | jq -r '.packages[].name' \
-        | sort)
-
-    crates=("$core")
-    for e in "${early[@]}"; do
-        if echo "$all_crates" | grep -qx "$e"; then
-            crates+=("$e")
-        fi
-    done
-    while IFS= read -r c; do
-        [[ "$c" == "$core" || "$c" == "$last" ]] && continue
-        [[ " ${early[*]} " == *" $c "* ]] && continue
-        crates+=("$c")
-    done <<< "$all_crates"
-    crates+=("$last")
-
-    echo "=== Dry run ==="
+    echo "Crates to publish (in order):"
     for crate in "${crates[@]}"; do
-        echo "  Checking $crate..."
-        cargo publish --dry-run -p "$crate" 2>&1 | tail -1
+        echo "  - $crate"
     done
 
     echo ""
