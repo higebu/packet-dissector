@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Zero-copy Rust crate for layered network packet parsing. Dissectors are registered and chained via a registry-based architecture.
+Rust crate for layered network packet parsing. Dissectors are registered and chained via a registry-based architecture.
 
 - **Rust edition**: 2024, **MSRV**: 1.85
 - **Linting / formatting**: clippy, rustfmt (default settings), taplo for TOML
@@ -41,7 +41,7 @@ All development follows test-first methodology:
 
 ```bash
 cargo test --all-targets
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo fmt -- --check
 taplo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
@@ -127,7 +127,7 @@ For port-based dispatch: `packet_dissector_core::dissector::choose_port(src, dst
 
 Each protocol has its own feature flag in `crates/packet-dissector/Cargo.toml`. `default` enables all.
 
-Groups: `layer2` (ethernet, arp), `layer3` (ipv4, ipv6, icmp, icmpv6), `layer4` (tcp, udp, sctp).
+Feature groups and their members are defined in `crates/packet-dissector/Cargo.toml` under `[features]`.
 
 ```rust
 #[cfg(feature = "ipv4")]
@@ -176,8 +176,6 @@ Cargo.toml                        # Workspace root (virtual manifest)
 crates/
 ├── packet-dissector-core/        # Core types: Dissector trait, Packet, Field, errors
 ├── packet-dissector-<protocol>/  # Per-protocol crate (depends on core only)
-│                                 # Protocols: ethernet, arp, ipv4, ipv6, icmp, icmpv6,
-│                                 #   tcp, udp, sctp, dns, dhcp, dhcpv6, srv6
 └── packet-dissector/             # Facade: re-exports + DissectorRegistry + feature flags
     ├── src/ (lib.rs, registry.rs)
     ├── tests/                    # Integration + allocation tests
