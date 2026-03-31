@@ -1,0 +1,6 @@
+/target
+/tmp
+.claude/settings.local.json
+*.pcap
+*.pcapng
+*.profraw

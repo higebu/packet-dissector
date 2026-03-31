@@ -1,0 +1,14 @@
+[package]
+name = "packet-dissector-reassembly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Generic reassembly utilities for packet-dissector: offset-based buffer with gap tracking for IP fragment and TCP stream reassembly"
+readme = "README.md"
+keywords = ["packet", "network", "reassembly", "fragment", "stream"]
+categories = ["network-programming"]
+
+[dependencies]
+thiserror = { workspace = true }

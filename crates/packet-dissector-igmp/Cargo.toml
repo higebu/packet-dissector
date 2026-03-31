@@ -1,0 +1,17 @@
+[package]
+name = "packet-dissector-igmp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "igmp"]
+categories = ["network-programming", "parser-implementations"]
+description = "IGMP (RFC 2236, RFC 3376) dissector for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+
+[dev-dependencies]
+packet-dissector-test-alloc = { workspace = true }

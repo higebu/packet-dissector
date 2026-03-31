@@ -1,0 +1,79 @@
+name: Continuous Benchmarking
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, edited, synchronize, closed]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark_base:
+    name: Benchmark base
+    if: github.event_name == 'push'
+    permissions:
+      checks: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: bencherdev/bencher@main
+      - name: Track base branch benchmarks
+        run: |
+          bencher run \
+          --project packet-dissector \
+          --token '${{ secrets.BENCHER_API_TOKEN }}' \
+          --branch main \
+          --testbed ubuntu-latest \
+          --threshold-measure latency \
+          --threshold-test t_test \
+          --threshold-max-sample-size 64 \
+          --threshold-upper-boundary 0.99 \
+          --thresholds-reset \
+          --err \
+          --adapter rust_criterion \
+          --github-actions '${{ secrets.GITHUB_TOKEN }}' \
+          "cargo bench"
+
+  benchmark_pr:
+    name: Benchmark PR
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: bencherdev/bencher@main
+      - name: Track PR benchmarks
+        run: |
+          bencher run \
+          --project packet-dissector \
+          --token '${{ secrets.BENCHER_API_TOKEN }}' \
+          --branch "$GITHUB_HEAD_REF" \
+          --start-point "$GITHUB_BASE_REF" \
+          --start-point-hash '${{ github.event.pull_request.base.sha }}' \
+          --start-point-clone-thresholds \
+          --start-point-reset \
+          --testbed ubuntu-latest \
+          --err \
+          --adapter rust_criterion \
+          --github-actions '${{ secrets.GITHUB_TOKEN }}' \
+          "cargo bench"
+
+  archive_pr:
+    name: Archive closed PR
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: bencherdev/bencher@main
+      - name: Archive closed PR branch
+        run: |
+          bencher archive \
+          --project packet-dissector \
+          --token '${{ secrets.BENCHER_API_TOKEN }}' \
+          --branch "$GITHUB_HEAD_REF"

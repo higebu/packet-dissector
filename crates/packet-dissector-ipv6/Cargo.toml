@@ -1,0 +1,22 @@
+[package]
+name = "packet-dissector-ipv6"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "ipv6"]
+categories = ["network-programming", "parser-implementations"]
+description = "IPv6 (RFC 8200) dissector with extension header support for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false

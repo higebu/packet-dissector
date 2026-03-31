@@ -1,0 +1,14 @@
+[package]
+name = "packet-dissector-pcap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "pcap"]
+categories = ["network-programming", "parser-implementations"]
+description = "Pcap/pcapng reader and writer for packet-dissector"
+
+[dependencies]
+thiserror.workspace = true

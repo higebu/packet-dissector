@@ -1,0 +1,22 @@
+[package]
+name = "packet-dissector-dhcpv6"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "dhcpv6"]
+categories = ["network-programming", "parser-implementations"]
+description = "DHCPv6 (RFC 8415 / RFC 9915) dissector for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false

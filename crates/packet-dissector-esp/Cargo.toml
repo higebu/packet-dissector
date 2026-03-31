@@ -1,0 +1,31 @@
+[package]
+name = "packet-dissector-esp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "ipsec"]
+categories = ["network-programming", "parser-implementations"]
+description = "IP Encapsulating Security Payload (ESP, RFC 4303) dissector for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+aes = { workspace = true, optional = true }
+cbc = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
+
+[features]
+decrypt = ["aes", "cbc", "aes-gcm"]
+
+[dev-dependencies]
+aes = { workspace = true }
+aes-gcm = { workspace = true }
+cbc = { workspace = true }
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false

@@ -1,0 +1,22 @@
+[package]
+name = "packet-dissector-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "tls"]
+categories = ["network-programming", "parser-implementations"]
+description = "TLS (RFC 5246, RFC 8446) record layer dissector for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false

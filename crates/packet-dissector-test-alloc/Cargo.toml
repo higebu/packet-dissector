@@ -1,0 +1,14 @@
+[package]
+name = "packet-dissector-test-alloc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Allocation-counting test utilities for packet-dissector crates"
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "testing", "allocations"]
+categories = ["development-tools::testing"]
+
+[dependencies]
+packet-dissector-core = { workspace = true }

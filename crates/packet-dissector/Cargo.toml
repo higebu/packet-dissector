@@ -1,0 +1,216 @@
+[package]
+name = "packet-dissector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "A Rust crate for zero-copy parsing of layered network packets with registry-based protocol chaining"
+readme = "../../README.md"
+keywords = ["packet", "network", "dissector", "parser", "protocol"]
+categories = ["network-programming", "parser-implementations"]
+
+[features]
+default = [
+  "ethernet",
+  "linux_sll",
+  "linux_sll2",
+  "arp",
+  "lacp",
+  "ipv4",
+  "ipv6",
+  "icmp",
+  "icmpv6",
+  "igmp",
+  "tcp",
+  "udp",
+  "sctp",
+  "dns",
+  "mdns",
+  "dhcp",
+  "dhcpv6",
+  "srv6",
+  "gtpv1u",
+  "gtpv2c",
+  "pfcp",
+  "http",
+  "http2",
+  "sip",
+  "diameter",
+  "nas5g",
+  "ngap",
+  "geneve",
+  "gre",
+  "vxlan",
+  "lldp",
+  "stp",
+  "mpls",
+  "ntp",
+  "ospf",
+  "vrrp",
+  "bfd",
+  "isis",
+  "bgp",
+  "l2tp",
+  "l2tpv3",
+  "tls",
+  "ppp",
+  "radius",
+  "ah",
+  "esp",
+  "esp-decrypt",
+  "ike",
+  "rtp",
+  "quic",
+  "stun",
+]
+ethernet = ["dep:packet-dissector-ethernet"]
+linux_sll = ["dep:packet-dissector-linux-sll"]
+linux_sll2 = ["dep:packet-dissector-linux-sll2"]
+arp = ["dep:packet-dissector-arp"]
+lacp = ["dep:packet-dissector-lacp"]
+ipv4 = ["dep:packet-dissector-ipv4"]
+ipv6 = ["dep:packet-dissector-ipv6"]
+icmp = ["dep:packet-dissector-icmp"]
+icmpv6 = ["dep:packet-dissector-icmpv6"]
+igmp = ["dep:packet-dissector-igmp"]
+tcp = ["dep:packet-dissector-tcp", "dep:packet-dissector-reassembly"]
+udp = ["dep:packet-dissector-udp"]
+sctp = ["dep:packet-dissector-sctp"]
+dns = ["dep:packet-dissector-dns"]
+mdns = ["dep:packet-dissector-mdns"]
+dhcp = ["dep:packet-dissector-dhcp"]
+dhcpv6 = ["dep:packet-dissector-dhcpv6"]
+srv6 = ["dep:packet-dissector-srv6"]
+gtpv1u = ["dep:packet-dissector-gtpv1u"]
+gtpv2c = ["dep:packet-dissector-gtpv2c"]
+pfcp = ["dep:packet-dissector-pfcp"]
+http = ["dep:packet-dissector-http"]
+http2 = ["dep:packet-dissector-http2"]
+sip = ["dep:packet-dissector-sip"]
+diameter = ["dep:packet-dissector-diameter"]
+nas5g = ["dep:packet-dissector-nas5g"]
+ngap = ["dep:packet-dissector-ngap", "nas5g"]
+geneve = ["dep:packet-dissector-geneve"]
+gre = ["dep:packet-dissector-gre"]
+vxlan = ["dep:packet-dissector-vxlan"]
+lldp = ["dep:packet-dissector-lldp"]
+stp = ["dep:packet-dissector-stp"]
+mpls = ["dep:packet-dissector-mpls"]
+ntp = ["dep:packet-dissector-ntp"]
+ospf = ["dep:packet-dissector-ospf"]
+vrrp = ["dep:packet-dissector-vrrp"]
+bfd = ["dep:packet-dissector-bfd"]
+isis = ["dep:packet-dissector-isis"]
+bgp = ["dep:packet-dissector-bgp"]
+l2tp = ["dep:packet-dissector-l2tp"]
+l2tpv3 = ["dep:packet-dissector-l2tpv3"]
+tls = ["dep:packet-dissector-tls"]
+ppp = ["dep:packet-dissector-ppp"]
+radius = ["dep:packet-dissector-radius"]
+ah = ["dep:packet-dissector-ah"]
+esp = ["dep:packet-dissector-esp"]
+ike = ["dep:packet-dissector-ike"]
+esp-decrypt = ["esp", "packet-dissector-esp/decrypt"]
+rtp = ["dep:packet-dissector-rtp"]
+quic = ["dep:packet-dissector-quic"]
+stun = ["dep:packet-dissector-stun"]
+
+## Convenience feature groups
+layer2 = [
+  "ethernet",
+  "linux_sll",
+  "linux_sll2",
+  "arp",
+  "lacp",
+  "lldp",
+  "stp",
+  "ppp",
+]
+layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]
+layer4 = ["tcp", "udp", "sctp"]
+application = [
+  "dns",
+  "mdns",
+  "dhcp",
+  "dhcpv6",
+  "http",
+  "http2",
+  "sip",
+  "diameter",
+  "ntp",
+  "radius",
+  "rtp",
+  "tls",
+  "quic",
+  "stun",
+]
+tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
+routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
+ipsec = ["ah", "esp", "ike"]
+3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+packet-dissector-reassembly = { workspace = true, optional = true }
+packet-dissector-ethernet = { workspace = true, optional = true }
+packet-dissector-linux-sll = { workspace = true, optional = true }
+packet-dissector-linux-sll2 = { workspace = true, optional = true }
+packet-dissector-arp = { workspace = true, optional = true }
+packet-dissector-lacp = { workspace = true, optional = true }
+packet-dissector-ipv4 = { workspace = true, optional = true }
+packet-dissector-ipv6 = { workspace = true, optional = true }
+packet-dissector-icmp = { workspace = true, optional = true }
+packet-dissector-icmpv6 = { workspace = true, optional = true }
+packet-dissector-igmp = { workspace = true, optional = true }
+packet-dissector-tcp = { workspace = true, optional = true }
+packet-dissector-udp = { workspace = true, optional = true }
+packet-dissector-sctp = { workspace = true, optional = true }
+packet-dissector-dns = { workspace = true, optional = true }
+packet-dissector-mdns = { workspace = true, optional = true }
+packet-dissector-dhcp = { workspace = true, optional = true }
+packet-dissector-dhcpv6 = { workspace = true, optional = true }
+packet-dissector-srv6 = { workspace = true, optional = true }
+packet-dissector-gtpv1u = { workspace = true, optional = true }
+packet-dissector-gtpv2c = { workspace = true, optional = true }
+packet-dissector-pfcp = { workspace = true, optional = true }
+packet-dissector-http = { workspace = true, optional = true }
+packet-dissector-http2 = { workspace = true, optional = true }
+packet-dissector-sip = { workspace = true, optional = true }
+packet-dissector-diameter = { workspace = true, optional = true }
+packet-dissector-nas5g = { workspace = true, optional = true }
+packet-dissector-ngap = { workspace = true, optional = true }
+packet-dissector-geneve = { workspace = true, optional = true }
+packet-dissector-gre = { workspace = true, optional = true }
+packet-dissector-vxlan = { workspace = true, optional = true }
+packet-dissector-lldp = { workspace = true, optional = true }
+packet-dissector-stp = { workspace = true, optional = true }
+packet-dissector-mpls = { workspace = true, optional = true }
+packet-dissector-ntp = { workspace = true, optional = true }
+packet-dissector-ospf = { workspace = true, optional = true }
+packet-dissector-vrrp = { workspace = true, optional = true }
+packet-dissector-bfd = { workspace = true, optional = true }
+packet-dissector-isis = { workspace = true, optional = true }
+packet-dissector-bgp = { workspace = true, optional = true }
+packet-dissector-l2tp = { workspace = true, optional = true }
+packet-dissector-l2tpv3 = { workspace = true, optional = true }
+packet-dissector-tls = { workspace = true, optional = true }
+packet-dissector-ppp = { workspace = true, optional = true }
+packet-dissector-radius = { workspace = true, optional = true }
+packet-dissector-ah = { workspace = true, optional = true }
+packet-dissector-esp = { workspace = true, optional = true }
+packet-dissector-ike = { workspace = true, optional = true }
+packet-dissector-rtp = { workspace = true, optional = true }
+packet-dissector-quic = { workspace = true, optional = true }
+packet-dissector-stun = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true

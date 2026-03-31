@@ -1,0 +1,22 @@
+[package]
+name = "packet-dissector-ike"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "ipsec"]
+categories = ["network-programming", "parser-implementations"]
+description = "Internet Key Exchange (IKEv1/IKEv2, RFC 2408/RFC 7296) dissector for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false

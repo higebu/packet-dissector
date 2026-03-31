@@ -1,0 +1,22 @@
+[package]
+name = "packet-dissector-ospf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "ospf"]
+categories = ["network-programming", "parser-implementations"]
+description = "OSPFv2 (RFC 2328) and OSPFv3 (RFC 5340) dissectors for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false
