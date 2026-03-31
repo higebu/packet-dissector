@@ -1,3 +1,5 @@
+exclude = ["target/**"]
+
 [formatting]
 align_entries = false
 array_auto_collapse = false
