@@ -5,13 +5,29 @@
 //!
 //! ## Supported Applications
 //! - Diameter Base Protocol (RFC 6733, Application-ID 0)
-//! - 3GPP S6a/S6d — MME/SGSN–HSS interface (TS 29.272, Application-ID 16777251)
-//! - 3GPP S13/S13' — ME Identity Check (TS 29.272, Application-ID 16777252)
-//! - 3GPP S7a — VCSG interface (TS 29.272, Application-ID 16777308)
+//! - Diameter Credit-Control (RFC 4006, Application-ID 4)
+//! - 3GPP Cx (TS 29.229, Application-ID 16777216) — IMS HSS
+//! - 3GPP Sh (TS 29.329, Application-ID 16777217) — User Profile
+//! - 3GPP Zh (TS 29.109, Application-ID 16777221) — GBA
+//! - 3GPP Rx (TS 29.214, Application-ID 16777236) — QoS Authorization
+//! - 3GPP Gx (TS 29.212, Application-ID 16777238) — Policy and Charging Control
+//! - 3GPP S6a/S6d (TS 29.272, Application-ID 16777251) — MME/SGSN–HSS
+//! - 3GPP S13/S13' (TS 29.272, Application-ID 16777252) — ME Identity Check
+//! - 3GPP SWm (TS 29.273, Application-ID 16777264) — Non-3GPP Access
+//! - 3GPP SWx (TS 29.273, Application-ID 16777265) — Non-3GPP Access Registration
+//! - 3GPP S6b (TS 29.273, Application-ID 16777272) — Non-3GPP Access
+//! - 3GPP S7a/S7d (TS 29.272, Application-ID 16777308) — VCSG
 //!
 //! ## References
 //! - RFC 6733: <https://www.rfc-editor.org/rfc/rfc6733>
+//! - RFC 4006: <https://www.rfc-editor.org/rfc/rfc4006>
+//! - 3GPP TS 29.212: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.212/>
+//! - 3GPP TS 29.214: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.214/>
+//! - 3GPP TS 29.229: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.229/>
 //! - 3GPP TS 29.272: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.272/>
+//! - 3GPP TS 29.273: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.273/>
+//! - 3GPP TS 29.329: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.329/>
+//! - 3GPP TS 32.299: <https://www.3gpp.org/ftp/Specs/archive/32_series/32.299/>
 
 #![deny(missing_docs)]
 
