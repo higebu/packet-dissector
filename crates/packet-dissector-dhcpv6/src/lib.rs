@@ -1215,3 +1215,1637 @@ fn parse_options<'pkt>(
     buf.end_container(options_arr_idx);
     Ok(relay_message_range)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use packet_dissector_core::dissector::{DispatchHint, Dissector};
+    use packet_dissector_core::field::FieldValue;
+    use packet_dissector_core::packet::DissectBuffer;
+
+    // # RFC 9915 / RFC 8415 (DHCPv6) Coverage
+    //
+    // | RFC Section | Description                              | Test                                           |
+    // |-------------|------------------------------------------|-------------------------------------------------|
+    // | 7.3         | Message Type Names                       | dhcpv6_msg_type_display_fn                      |
+    // | 8           | Client/Server Message Format             | parse_solicit_no_options                         |
+    // | 8           | Truncated client/server                  | parse_empty_data, parse_truncated_client_server  |
+    // | 8           | All client/server types                  | parse_all_client_server_msg_types                |
+    // | 8           | Offset handling                          | parse_request_with_offset                        |
+    // | 9           | Relay Message Format                     | parse_relay_forw, parse_relay_repl               |
+    // | 9           | Truncated relay                          | parse_relay_truncated                            |
+    // | 9           | Relay with inner client/server           | parse_relay_with_inner_client_server             |
+    // | 9           | Nested relay                             | parse_relay_with_nested_relay                    |
+    // | 19.1        | Relay Nesting Depth Limit (32)           | parse_relay_max_depth_exceeded                   |
+    // | 21.1        | Option Encoding                          | parse_multiple_options                           |
+    // | 21.1        | Option length overflow                   | parse_option_data_exceeds_packet                 |
+    // | 21.2        | Client Identifier (Option 1)             | parse_option_client_id                           |
+    // | 21.3        | Server Identifier (Option 2)             | parse_option_server_id                           |
+    // | 21.4        | IA_NA (Option 3)                         | parse_option_ia_na_*                             |
+    // | 21.5        | IA_TA (Option 4)                         | parse_option_ia_ta_*                             |
+    // | 21.6        | IA Address (Option 5)                    | parse_option_ia_addr_*                           |
+    // | 21.7        | Option Request (Option 6)                | parse_option_request_*                           |
+    // | 21.8        | Preference (Option 7)                    | parse_option_preference*                         |
+    // | 21.9        | Elapsed Time (Option 8)                  | parse_option_elapsed_time*                       |
+    // | 21.10       | Relay Message (Option 9)                 | parse_option_relay_message                       |
+    // | 21.11       | Authentication (Option 11)               | parse_option_auth_*                              |
+    // | 21.12       | Server Unicast (Option 12)               | parse_option_server_unicast*                     |
+    // | 21.13       | Status Code (Option 13)                  | parse_option_status_code*                        |
+    // | 21.14       | Rapid Commit (Option 14)                 | parse_option_rapid_commit                        |
+    // | 21.15       | User Class (Option 15)                   | parse_option_user_class                          |
+    // | 21.16       | Vendor Class (Option 16)                 | parse_option_vendor_class_*                      |
+    // | 21.17       | Vendor-specific Info (Option 17)         | parse_option_vendor_info_*                       |
+    // | 21.18       | Interface-Id (Option 18)                 | parse_option_interface_id                        |
+    // | 21.19       | Reconfigure Message (Option 19)          | parse_option_reconfigure_msg*                    |
+    // | 21.20       | Reconfigure Accept (Option 20)           | parse_option_reconfigure_accept                  |
+    // | 21.21       | IA_PD (Option 25)                        | parse_option_ia_pd_*                             |
+    // | 21.22       | IA Prefix (Option 26)                    | parse_option_ia_prefix_*                         |
+    //
+    // # RFC 3646 Coverage
+    //
+    // | RFC Section | Description                              | Test                                           |
+    // |-------------|------------------------------------------|-------------------------------------------------|
+    // | 3           | DNS Recursive Name Server (Option 23)    | parse_option_dns_servers*                        |
+    // | 4           | Domain Search List (Option 24)           | parse_option_domain_search_*                     |
+    //
+    // # RFC 4704 Coverage
+    //
+    // | RFC Section | Description                              | Test                                           |
+    // |-------------|------------------------------------------|-------------------------------------------------|
+    // | 4           | Client FQDN (Option 39)                  | parse_option_client_fqdn*                        |
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    /// Build a DHCPv6 client/server message: msg_type(1) + transaction_id(3) + options.
+    fn build_dhcpv6(msg_type: u8, txid: u32, options: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(4 + options.len());
+        pkt.push(msg_type);
+        // transaction-id is 3 bytes (big-endian, lower 24 bits of txid)
+        pkt.push((txid >> 16) as u8);
+        pkt.push((txid >> 8) as u8);
+        pkt.push(txid as u8);
+        pkt.extend_from_slice(options);
+        pkt
+    }
+
+    /// Encode a DHCPv6 option: code(2) + length(2) + data.
+    fn dhcpv6_option(code: u16, data: &[u8]) -> Vec<u8> {
+        let mut opt = Vec::with_capacity(4 + data.len());
+        opt.extend_from_slice(&code.to_be_bytes());
+        opt.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        opt.extend_from_slice(data);
+        opt
+    }
+
+    /// Build a DHCPv6 relay message: msg_type(1) + hop_count(1) + link_addr(16) + peer_addr(16) + options.
+    fn build_relay(
+        msg_type: u8,
+        hop_count: u8,
+        link_addr: [u8; 16],
+        peer_addr: [u8; 16],
+        options: &[u8],
+    ) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(34 + options.len());
+        pkt.push(msg_type);
+        pkt.push(hop_count);
+        pkt.extend_from_slice(&link_addr);
+        pkt.extend_from_slice(&peer_addr);
+        pkt.extend_from_slice(options);
+        pkt
+    }
+
+    /// Find the first option object matching `code` in the options array.
+    /// Returns the nested fields of that option object.
+    fn find_option_fields<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        layer: &'a packet_dissector_core::packet::Layer,
+        code: u16,
+    ) -> &'a [packet_dissector_core::field::Field<'pkt>] {
+        let options = buf.field_by_name(layer, "options").unwrap();
+        let opts_range = options.value.as_container_range().unwrap();
+        let opt_objects = buf.nested_fields(opts_range);
+        for obj in opt_objects {
+            let inner_range = obj.value.as_container_range().unwrap();
+            let inner_fields = buf.nested_fields(inner_range);
+            if let Some(code_field) = inner_fields.iter().find(|f| f.name() == "code") {
+                if code_field.value == FieldValue::U16(code) {
+                    return inner_fields;
+                }
+            }
+        }
+        panic!("option with code {code} not found");
+    }
+
+    /// Check whether an option with the given code exists.
+    fn has_option(
+        buf: &DissectBuffer<'_>,
+        layer: &packet_dissector_core::packet::Layer,
+        code: u16,
+    ) -> bool {
+        let options = buf.field_by_name(layer, "options").unwrap();
+        let opts_range = options.value.as_container_range().unwrap();
+        let opt_objects = buf.nested_fields(opts_range);
+        for obj in opt_objects {
+            if let Some(inner_range) = obj.value.as_container_range() {
+                let inner_fields = buf.nested_fields(inner_range);
+                if let Some(code_field) = inner_fields.iter().find(|f| f.name() == "code") {
+                    if code_field.value == FieldValue::U16(code) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    // ── Group 1: Metadata ────────────────────────────────────────────
+
+    #[test]
+    fn dhcpv6_dissector_metadata() {
+        let d = Dhcpv6Dissector;
+        assert_eq!(d.name(), "Dynamic Host Configuration Protocol for IPv6");
+        assert_eq!(d.short_name(), "DHCPv6");
+        assert_eq!(d.field_descriptors().len(), FIELD_DESCRIPTORS.len());
+    }
+
+    #[test]
+    fn dhcpv6_msg_type_display_fn() {
+        let display_fn = FIELD_DESCRIPTORS[FD_MSG_TYPE].display_fn.unwrap();
+        let siblings: &[packet_dissector_core::field::Field<'_>] = &[];
+
+        // All 13 named types
+        assert_eq!(display_fn(&FieldValue::U8(1), siblings), Some("SOLICIT"));
+        assert_eq!(display_fn(&FieldValue::U8(2), siblings), Some("ADVERTISE"));
+        assert_eq!(display_fn(&FieldValue::U8(3), siblings), Some("REQUEST"));
+        assert_eq!(display_fn(&FieldValue::U8(4), siblings), Some("CONFIRM"));
+        assert_eq!(display_fn(&FieldValue::U8(5), siblings), Some("RENEW"));
+        assert_eq!(display_fn(&FieldValue::U8(6), siblings), Some("REBIND"));
+        assert_eq!(display_fn(&FieldValue::U8(7), siblings), Some("REPLY"));
+        assert_eq!(display_fn(&FieldValue::U8(8), siblings), Some("RELEASE"));
+        assert_eq!(display_fn(&FieldValue::U8(9), siblings), Some("DECLINE"));
+        assert_eq!(
+            display_fn(&FieldValue::U8(10), siblings),
+            Some("RECONFIGURE")
+        );
+        assert_eq!(
+            display_fn(&FieldValue::U8(11), siblings),
+            Some("INFORMATION_REQUEST")
+        );
+        assert_eq!(
+            display_fn(&FieldValue::U8(12), siblings),
+            Some("RELAY_FORW")
+        );
+        assert_eq!(
+            display_fn(&FieldValue::U8(13), siblings),
+            Some("RELAY_REPL")
+        );
+        // Unknown type
+        assert_eq!(display_fn(&FieldValue::U8(255), siblings), None);
+        // Non-U8 variant
+        assert_eq!(display_fn(&FieldValue::U16(1), siblings), None);
+    }
+
+    // ── Group 2: Header parsing ──────────────────────────────────────
+
+    #[test]
+    fn parse_empty_data() {
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        let err = d.dissect(&[], &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 1,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_truncated_client_server() {
+        let d = Dhcpv6Dissector;
+        let data = [1u8, 0, 0]; // 3 bytes, needs 4
+        let mut buf = DissectBuffer::new();
+        let err = d.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 4,
+                actual: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_solicit_no_options() {
+        let pkt = build_dhcpv6(1, 0xABCDEF, &[]);
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        let result = d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        assert_eq!(result.next, DispatchHint::End);
+        assert_eq!(buf.layers().len(), 1);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.name, "DHCPv6");
+
+        assert_eq!(
+            buf.field_by_name(layer, "msg_type").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "transaction_id").unwrap().value,
+            FieldValue::U32(0xABCDEF)
+        );
+    }
+
+    #[test]
+    fn parse_request_with_offset() {
+        let pkt = build_dhcpv6(3, 0x123456, &[]);
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        let offset = 42;
+        d.dissect(&pkt, &mut buf, offset).unwrap();
+
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.range.start, 42);
+        assert_eq!(layer.range.end, 42 + 4);
+        assert_eq!(
+            buf.field_by_name(layer, "msg_type").unwrap().range.start,
+            42
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "transaction_id")
+                .unwrap()
+                .range
+                .start,
+            43
+        );
+    }
+
+    #[test]
+    fn parse_all_client_server_msg_types() {
+        let d = Dhcpv6Dissector;
+        for msg_type in 1..=11u8 {
+            let pkt = build_dhcpv6(msg_type, 1, &[]);
+            let mut buf = DissectBuffer::new();
+            let result = d.dissect(&pkt, &mut buf, 0).unwrap();
+            assert_eq!(result.next, DispatchHint::End);
+            assert_eq!(
+                buf.field_by_name(&buf.layers()[0], "msg_type")
+                    .unwrap()
+                    .value,
+                FieldValue::U8(msg_type)
+            );
+        }
+    }
+
+    // ── Group 3: Relay messages ──────────────────────────────────────
+
+    #[test]
+    fn parse_relay_forw() {
+        let link: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let peer: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let pkt = build_relay(12, 0, link, peer, &[]);
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        let result = d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        assert_eq!(result.next, DispatchHint::End);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "msg_type").unwrap().value,
+            FieldValue::U8(12)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "hop_count").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "link_address").unwrap().value,
+            FieldValue::Ipv6Addr(link)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "peer_address").unwrap().value,
+            FieldValue::Ipv6Addr(peer)
+        );
+    }
+
+    #[test]
+    fn parse_relay_repl() {
+        let pkt = build_relay(13, 5, [0; 16], [0; 16], &[]);
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(
+            buf.field_by_name(&buf.layers()[0], "msg_type")
+                .unwrap()
+                .value,
+            FieldValue::U8(13)
+        );
+        assert_eq!(
+            buf.field_by_name(&buf.layers()[0], "hop_count")
+                .unwrap()
+                .value,
+            FieldValue::U8(5)
+        );
+    }
+
+    #[test]
+    fn parse_relay_truncated() {
+        let d = Dhcpv6Dissector;
+        // msg_type=12 but only 33 bytes (needs 34)
+        let data = [12u8; 33];
+        let mut buf = DissectBuffer::new();
+        let err = d.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 34,
+                actual: 33
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_relay_with_inner_client_server() {
+        // Build inner SOLICIT message
+        let inner = build_dhcpv6(1, 0x111111, &[]);
+        let relay_opt = dhcpv6_option(9, &inner);
+        let pkt = build_relay(12, 0, [0; 16], [0; 16], &relay_opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        // Should produce 2 layers: relay + inner client/server
+        assert_eq!(buf.layers().len(), 2);
+        assert_eq!(
+            buf.field_by_name(&buf.layers()[0], "msg_type")
+                .unwrap()
+                .value,
+            FieldValue::U8(12)
+        );
+        assert_eq!(
+            buf.field_by_name(&buf.layers()[1], "msg_type")
+                .unwrap()
+                .value,
+            FieldValue::U8(1)
+        );
+    }
+
+    #[test]
+    fn parse_relay_with_nested_relay() {
+        // Inner relay containing a SOLICIT
+        let solicit = build_dhcpv6(1, 0x222222, &[]);
+        let inner_relay_opt = dhcpv6_option(9, &solicit);
+        let inner_relay = build_relay(12, 1, [0; 16], [0; 16], &inner_relay_opt);
+        let outer_relay_opt = dhcpv6_option(9, &inner_relay);
+        let pkt = build_relay(12, 0, [0; 16], [0; 16], &outer_relay_opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        // 3 layers: outer relay + inner relay + SOLICIT
+        assert_eq!(buf.layers().len(), 3);
+    }
+
+    #[test]
+    fn parse_relay_max_depth_exceeded() {
+        // Build 33 levels of relay nesting to exceed MAX_RELAY_DEPTH (32)
+        let inner = build_dhcpv6(1, 1, &[]);
+        let mut current = inner;
+        for i in 0..33 {
+            let opt = dhcpv6_option(9, &current);
+            current = build_relay(12, i as u8, [0; 16], [0; 16], &opt);
+        }
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        // The outermost relay dissect succeeds, but deep nesting triggers the error
+        // which is silently ignored (let _ = parse_inner_message). So we check that
+        // fewer than 34 layers are produced.
+        let _ = d.dissect(&current, &mut buf, 0);
+        assert!(buf.layers().len() < 34);
+    }
+
+    #[test]
+    fn parse_inner_message_empty() {
+        // Relay with an empty Relay Message option (9) — inner parse fails silently
+        let relay_opt = dhcpv6_option(9, &[]);
+        let pkt = build_relay(12, 0, [0; 16], [0; 16], &relay_opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        // Only 1 layer (relay), no inner layer created
+        assert_eq!(buf.layers().len(), 1);
+    }
+
+    // ── Group 4: Option 1 — Client Identifier ────────────────────────
+
+    #[test]
+    fn parse_option_client_id() {
+        let duid = [0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD];
+        let opt = dhcpv6_option(1, &duid);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 1);
+        let client_id = fields.iter().find(|f| f.name() == "client_id").unwrap();
+        assert_eq!(client_id.value, FieldValue::Bytes(&duid));
+    }
+
+    // ── Group 5: Option 2 — Server Identifier ────────────────────────
+
+    #[test]
+    fn parse_option_server_id() {
+        let duid = [0x00, 0x02, 0x11, 0x22, 0x33, 0x44];
+        let opt = dhcpv6_option(2, &duid);
+        let pkt = build_dhcpv6(2, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 2);
+        let server_id = fields.iter().find(|f| f.name() == "server_id").unwrap();
+        assert_eq!(server_id.value, FieldValue::Bytes(&duid));
+    }
+
+    // ── Group 6: Option 3 — IA_NA ────────────────────────────────────
+
+    #[test]
+    fn parse_option_ia_na_full() {
+        // IAID(4) + T1(4) + T2(4) = 12 bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_be_bytes()); // IAID = 1
+        data.extend_from_slice(&3600u32.to_be_bytes()); // T1 = 3600
+        data.extend_from_slice(&5400u32.to_be_bytes()); // T2 = 5400
+        let opt = dhcpv6_option(3, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 3);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "iaid").unwrap().value,
+            FieldValue::U32(1)
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "t1").unwrap().value,
+            FieldValue::U32(3600)
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "t2").unwrap().value,
+            FieldValue::U32(5400)
+        );
+    }
+
+    #[test]
+    fn parse_option_ia_na_exact_12() {
+        let mut data = vec![0u8; 12];
+        data[0..4].copy_from_slice(&1u32.to_be_bytes());
+        data[4..8].copy_from_slice(&100u32.to_be_bytes());
+        data[8..12].copy_from_slice(&200u32.to_be_bytes());
+        let opt = dhcpv6_option(3, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 3);
+        // Should have iaid, t1, t2 but no sub-options
+        assert!(fields.iter().any(|f| f.name() == "iaid"));
+        assert!(!fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_na_with_suboptions() {
+        // IA_NA with IA Address sub-option
+        let addr: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let mut ia_addr_data = Vec::new();
+        ia_addr_data.extend_from_slice(&addr);
+        ia_addr_data.extend_from_slice(&7200u32.to_be_bytes()); // preferred
+        ia_addr_data.extend_from_slice(&7500u32.to_be_bytes()); // valid
+        let sub_opt = dhcpv6_option(5, &ia_addr_data);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_be_bytes()); // IAID
+        data.extend_from_slice(&3600u32.to_be_bytes()); // T1
+        data.extend_from_slice(&5400u32.to_be_bytes()); // T2
+        data.extend_from_slice(&sub_opt);
+        let opt = dhcpv6_option(3, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 3);
+        assert!(fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_na_short() {
+        // Less than 12 bytes → falls back to ia_na raw bytes
+        let data = [0u8; 8];
+        let opt = dhcpv6_option(3, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 3);
+        assert!(fields.iter().any(|f| f.name() == "ia_na"));
+    }
+
+    // ── Group 7: Option 4 — IA_TA ────────────────────────────────────
+
+    #[test]
+    fn parse_option_ia_ta_full() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&42u32.to_be_bytes()); // IAID
+        let opt = dhcpv6_option(4, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 4);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "iaid").unwrap().value,
+            FieldValue::U32(42)
+        );
+    }
+
+    #[test]
+    fn parse_option_ia_ta_with_suboptions() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_be_bytes()); // IAID
+        // Add a sub-option (IA Address)
+        let mut ia_addr_data = vec![0u8; 24];
+        ia_addr_data[0..16]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        ia_addr_data[16..20].copy_from_slice(&100u32.to_be_bytes());
+        ia_addr_data[20..24].copy_from_slice(&200u32.to_be_bytes());
+        data.extend_from_slice(&dhcpv6_option(5, &ia_addr_data));
+        let opt = dhcpv6_option(4, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 4);
+        assert!(fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_ta_short() {
+        let data = [0u8; 2]; // < 4 bytes
+        let opt = dhcpv6_option(4, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 4);
+        assert!(fields.iter().any(|f| f.name() == "ia_ta"));
+    }
+
+    // ── Group 8: Option 5 — IA Address ───────────────────────────────
+
+    #[test]
+    fn parse_option_ia_addr_full() {
+        let addr: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let mut data = Vec::new();
+        data.extend_from_slice(&addr);
+        data.extend_from_slice(&3600u32.to_be_bytes()); // preferred
+        data.extend_from_slice(&7200u32.to_be_bytes()); // valid
+
+        let opt = dhcpv6_option(5, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 5);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "address").unwrap().value,
+            FieldValue::Ipv6Addr(addr)
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "preferred_lifetime")
+                .unwrap()
+                .value,
+            FieldValue::U32(3600)
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "valid_lifetime")
+                .unwrap()
+                .value,
+            FieldValue::U32(7200)
+        );
+    }
+
+    #[test]
+    fn parse_option_ia_addr_exact_24() {
+        let mut data = vec![0u8; 24];
+        data[0..16].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        data[16..20].copy_from_slice(&100u32.to_be_bytes());
+        data[20..24].copy_from_slice(&200u32.to_be_bytes());
+        let opt = dhcpv6_option(5, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 5);
+        assert!(fields.iter().any(|f| f.name() == "address"));
+        assert!(!fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_addr_with_suboptions() {
+        let mut data = vec![0u8; 24];
+        data[0..16].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        data[16..20].copy_from_slice(&100u32.to_be_bytes());
+        data[20..24].copy_from_slice(&200u32.to_be_bytes());
+        // Status code sub-option
+        let mut status_data = Vec::new();
+        status_data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&dhcpv6_option(13, &status_data));
+        let opt = dhcpv6_option(5, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 5);
+        assert!(fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_addr_short() {
+        let data = [0u8; 16]; // < 24 bytes
+        let opt = dhcpv6_option(5, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 5);
+        assert!(fields.iter().any(|f| f.name() == "ia_addr"));
+    }
+
+    // ── Group 9: Option 6 — Option Request ───────────────────────────
+
+    #[test]
+    fn parse_option_request_list() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&23u16.to_be_bytes()); // DNS
+        data.extend_from_slice(&24u16.to_be_bytes()); // Domain search
+        data.extend_from_slice(&39u16.to_be_bytes()); // Client FQDN
+        let opt = dhcpv6_option(6, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 6);
+        let req_opts = fields
+            .iter()
+            .find(|f| f.name() == "requested_options")
+            .unwrap();
+        let range = req_opts.value.as_container_range().unwrap();
+        let items = buf.nested_fields(range);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].value, FieldValue::U16(23));
+        assert_eq!(items[1].value, FieldValue::U16(24));
+        assert_eq!(items[2].value, FieldValue::U16(39));
+    }
+
+    #[test]
+    fn parse_option_request_empty() {
+        let opt = dhcpv6_option(6, &[]);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 6);
+        let req_opts = fields
+            .iter()
+            .find(|f| f.name() == "requested_options")
+            .unwrap();
+        let range = req_opts.value.as_container_range().unwrap();
+        assert_eq!(buf.nested_fields(range).len(), 0);
+    }
+
+    // ── Group 10: Option 7 — Preference ──────────────────────────────
+
+    #[test]
+    fn parse_option_preference() {
+        let opt = dhcpv6_option(7, &[255]);
+        let pkt = build_dhcpv6(2, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 7);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "preference")
+                .unwrap()
+                .value,
+            FieldValue::U8(255)
+        );
+    }
+
+    #[test]
+    fn parse_option_preference_empty() {
+        // Empty preference data — skipped entirely (no container created for code 7)
+        let opt = dhcpv6_option(7, &[]);
+        let pkt = build_dhcpv6(2, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        // Option 7 is skipped when data is empty
+        assert!(!has_option(&buf, &buf.layers()[0], 7));
+    }
+
+    // ── Group 11: Option 8 — Elapsed Time ────────────────────────────
+
+    #[test]
+    fn parse_option_elapsed_time() {
+        let opt = dhcpv6_option(8, &100u16.to_be_bytes());
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 8);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "elapsed_time")
+                .unwrap()
+                .value,
+            FieldValue::U16(100)
+        );
+    }
+
+    #[test]
+    fn parse_option_elapsed_time_short() {
+        let opt = dhcpv6_option(8, &[0x01]); // only 1 byte, needs 2
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        // Skipped: no option object for code 8
+        assert!(!has_option(&buf, &buf.layers()[0], 8));
+    }
+
+    // ── Group 12: Option 9 — Relay Message ───────────────────────────
+
+    #[test]
+    fn parse_option_relay_message() {
+        let inner = build_dhcpv6(1, 0x123456, &[]);
+        let opt = dhcpv6_option(9, &inner);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 9);
+        let relay_msg = fields.iter().find(|f| f.name() == "relay_message").unwrap();
+        assert_eq!(relay_msg.value, FieldValue::Bytes(inner.as_slice()));
+
+        // Inner message is also parsed as a second layer
+        assert_eq!(buf.layers().len(), 2);
+    }
+
+    // ── Group 13: Option 11 — Authentication ─────────────────────────
+
+    #[test]
+    fn parse_option_auth_full() {
+        // protocol(1) + algorithm(1) + rdm(1) + replay_detection(8) = 11 bytes
+        let data: [u8; 11] = [3, 1, 0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let opt = dhcpv6_option(11, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 11);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "protocol")
+                .unwrap()
+                .value,
+            FieldValue::U8(3)
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "algorithm")
+                .unwrap()
+                .value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "rdm").unwrap().value,
+            FieldValue::U8(0)
+        );
+        let replay = fields
+            .iter()
+            .find(|f| f.name() == "replay_detection")
+            .unwrap();
+        assert_eq!(
+            replay.value,
+            FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+        );
+        // No information field when exactly 11 bytes
+        assert!(!fields.iter().any(|f| f.name() == "information"));
+    }
+
+    #[test]
+    fn parse_option_auth_with_info() {
+        let mut data = vec![3u8, 1, 0];
+        data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        data.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // auth info
+        let opt = dhcpv6_option(11, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 11);
+        let info = fields.iter().find(|f| f.name() == "information").unwrap();
+        assert_eq!(info.value, FieldValue::Bytes(&[0xAA, 0xBB, 0xCC]));
+    }
+
+    #[test]
+    fn parse_option_auth_short() {
+        let data = [0u8; 5]; // < 11 bytes
+        let opt = dhcpv6_option(11, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 11);
+        assert!(fields.iter().any(|f| f.name() == "authentication"));
+    }
+
+    // ── Group 14: Option 12 — Server Unicast ─────────────────────────
+
+    #[test]
+    fn parse_option_server_unicast() {
+        let addr: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let opt = dhcpv6_option(12, &addr);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 12);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "server_unicast")
+                .unwrap()
+                .value,
+            FieldValue::Ipv6Addr(addr)
+        );
+    }
+
+    #[test]
+    fn parse_option_server_unicast_short() {
+        let data = [0u8; 8]; // < 16 bytes
+        let opt = dhcpv6_option(12, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        // Skipped: option 12 needs 16 bytes
+        assert!(!has_option(&buf, &buf.layers()[0], 12));
+    }
+
+    // ── Group 15: Option 13 — Status Code ────────────────────────────
+
+    #[test]
+    fn parse_option_status_code() {
+        let opt = dhcpv6_option(13, &0u16.to_be_bytes()); // Success
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 13);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "status_code")
+                .unwrap()
+                .value,
+            FieldValue::U16(0)
+        );
+        assert!(!fields.iter().any(|f| f.name() == "status_message"));
+    }
+
+    #[test]
+    fn parse_option_status_code_with_message() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(b"Success");
+        let opt = dhcpv6_option(13, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 13);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "status_message")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(b"Success")
+        );
+    }
+
+    #[test]
+    fn parse_option_status_code_short() {
+        let opt = dhcpv6_option(13, &[0x00]); // only 1 byte, needs 2
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        assert!(!has_option(&buf, &buf.layers()[0], 13));
+    }
+
+    // ── Group 16: Option 14 — Rapid Commit ───────────────────────────
+
+    #[test]
+    fn parse_option_rapid_commit() {
+        let opt = dhcpv6_option(14, &[]);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 14);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "code").unwrap().value,
+            FieldValue::U16(14)
+        );
+        // Only code, no other fields
+        assert_eq!(fields.len(), 1);
+    }
+
+    // ── Group 17: Option 15 — User Class ─────────────────────────────
+
+    #[test]
+    fn parse_option_user_class() {
+        let data = [0x00, 0x04, 0x74, 0x65, 0x73, 0x74]; // len=4 + "test"
+        let opt = dhcpv6_option(15, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 15);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "user_class")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&data)
+        );
+    }
+
+    // ── Group 18: Option 16 — Vendor Class ───────────────────────────
+
+    #[test]
+    fn parse_option_vendor_class_full() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&9u32.to_be_bytes()); // enterprise number = 9
+        let opt = dhcpv6_option(16, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 16);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "enterprise_number")
+                .unwrap()
+                .value,
+            FieldValue::U32(9)
+        );
+        assert!(!fields.iter().any(|f| f.name() == "data"));
+    }
+
+    #[test]
+    fn parse_option_vendor_class_with_data() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&9u32.to_be_bytes());
+        data.extend_from_slice(b"class_data");
+        let opt = dhcpv6_option(16, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 16);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "data").unwrap().value,
+            FieldValue::Bytes(b"class_data")
+        );
+    }
+
+    #[test]
+    fn parse_option_vendor_class_short() {
+        let data = [0u8; 2]; // < 4 bytes
+        let opt = dhcpv6_option(16, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 16);
+        assert!(fields.iter().any(|f| f.name() == "vendor_class"));
+    }
+
+    // ── Group 19: Option 17 — Vendor-specific Info ───────────────────
+
+    #[test]
+    fn parse_option_vendor_info_full() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&311u32.to_be_bytes());
+        let opt = dhcpv6_option(17, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 17);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "enterprise_number")
+                .unwrap()
+                .value,
+            FieldValue::U32(311)
+        );
+    }
+
+    #[test]
+    fn parse_option_vendor_info_with_data() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&311u32.to_be_bytes());
+        data.extend_from_slice(b"vendor_data");
+        let opt = dhcpv6_option(17, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 17);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "data").unwrap().value,
+            FieldValue::Bytes(b"vendor_data")
+        );
+    }
+
+    #[test]
+    fn parse_option_vendor_info_short() {
+        let data = [0u8; 3]; // < 4 bytes
+        let opt = dhcpv6_option(17, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 17);
+        assert!(fields.iter().any(|f| f.name() == "vendor_info"));
+    }
+
+    // ── Group 20: Option 18 — Interface-Id ───────────────────────────
+
+    #[test]
+    fn parse_option_interface_id() {
+        let data = b"eth0";
+        let opt = dhcpv6_option(18, data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 18);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "interface_id")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(b"eth0")
+        );
+    }
+
+    // ── Group 21: Option 19 — Reconfigure Message ────────────────────
+
+    #[test]
+    fn parse_option_reconfigure_msg() {
+        let opt = dhcpv6_option(19, &[5]); // msg_type = RENEW
+        let pkt = build_dhcpv6(10, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 19);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "msg_type")
+                .unwrap()
+                .value,
+            FieldValue::U8(5)
+        );
+    }
+
+    #[test]
+    fn parse_option_reconfigure_msg_empty() {
+        let opt = dhcpv6_option(19, &[]);
+        let pkt = build_dhcpv6(10, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        assert!(!has_option(&buf, &buf.layers()[0], 19));
+    }
+
+    // ── Group 22: Option 20 — Reconfigure Accept ─────────────────────
+
+    #[test]
+    fn parse_option_reconfigure_accept() {
+        let opt = dhcpv6_option(20, &[]);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 20);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "code").unwrap().value,
+            FieldValue::U16(20)
+        );
+    }
+
+    // ── Group 23: Option 23 — DNS Recursive Name Servers ─────────────
+
+    #[test]
+    fn parse_option_dns_servers() {
+        let addr1: [u8; 16] = [
+            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88,
+        ];
+        let addr2: [u8; 16] = [
+            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x44,
+        ];
+        let mut data = Vec::new();
+        data.extend_from_slice(&addr1);
+        data.extend_from_slice(&addr2);
+        let opt = dhcpv6_option(23, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 23);
+        let dns = fields.iter().find(|f| f.name() == "dns_servers").unwrap();
+        let range = dns.value.as_container_range().unwrap();
+        let items = buf.nested_fields(range);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].value, FieldValue::Ipv6Addr(addr1));
+        assert_eq!(items[1].value, FieldValue::Ipv6Addr(addr2));
+    }
+
+    #[test]
+    fn parse_option_dns_servers_empty() {
+        let opt = dhcpv6_option(23, &[]);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 23);
+        let dns = fields.iter().find(|f| f.name() == "dns_servers").unwrap();
+        let range = dns.value.as_container_range().unwrap();
+        assert_eq!(buf.nested_fields(range).len(), 0);
+    }
+
+    // ── Group 24: Option 24 — Domain Search List ─────────────────────
+
+    #[test]
+    fn parse_option_domain_search_single() {
+        // DNS-encoded: \x07example\x03com\x00
+        let data = b"\x07example\x03com\x00";
+        let opt = dhcpv6_option(24, data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 24);
+        let search = fields.iter().find(|f| f.name() == "domain_search").unwrap();
+        let range = search.value.as_container_range().unwrap();
+        let items = buf.nested_fields(range);
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn parse_option_domain_search_multiple() {
+        // Two DNS-encoded domains
+        let mut data = Vec::new();
+        data.extend_from_slice(b"\x07example\x03com\x00");
+        data.extend_from_slice(b"\x04test\x03org\x00");
+        let opt = dhcpv6_option(24, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 24);
+        let search = fields.iter().find(|f| f.name() == "domain_search").unwrap();
+        let range = search.value.as_container_range().unwrap();
+        assert_eq!(buf.nested_fields(range).len(), 2);
+    }
+
+    #[test]
+    fn parse_option_domain_search_compression_pointer() {
+        // Domain with compression pointer: 0xC0 0x00
+        let data = [0x03, b'f', b'o', b'o', 0xC0, 0x00];
+        let opt = dhcpv6_option(24, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 24);
+        let search = fields.iter().find(|f| f.name() == "domain_search").unwrap();
+        let range = search.value.as_container_range().unwrap();
+        assert_eq!(buf.nested_fields(range).len(), 1);
+    }
+
+    #[test]
+    fn parse_option_domain_search_empty_label_only() {
+        // Root label only — no real labels, has_labels is false
+        let data = [0x00];
+        let opt = dhcpv6_option(24, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 24);
+        let search = fields.iter().find(|f| f.name() == "domain_search").unwrap();
+        let range = search.value.as_container_range().unwrap();
+        assert_eq!(buf.nested_fields(range).len(), 0);
+    }
+
+    // ── Group 25: Option 25 — IA_PD ──────────────────────────────────
+
+    #[test]
+    fn parse_option_ia_pd_full() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&10u32.to_be_bytes()); // IAID
+        data.extend_from_slice(&1800u32.to_be_bytes()); // T1
+        data.extend_from_slice(&2700u32.to_be_bytes()); // T2
+        let opt = dhcpv6_option(25, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 25);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "iaid").unwrap().value,
+            FieldValue::U32(10)
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "t1").unwrap().value,
+            FieldValue::U32(1800)
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "t2").unwrap().value,
+            FieldValue::U32(2700)
+        );
+    }
+
+    #[test]
+    fn parse_option_ia_pd_with_suboptions() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&10u32.to_be_bytes());
+        data.extend_from_slice(&1800u32.to_be_bytes());
+        data.extend_from_slice(&2700u32.to_be_bytes());
+        // IA Prefix sub-option
+        let mut prefix_data = Vec::new();
+        prefix_data.extend_from_slice(&3600u32.to_be_bytes()); // preferred lifetime
+        prefix_data.extend_from_slice(&7200u32.to_be_bytes()); // valid lifetime
+        prefix_data.push(48); // prefix length
+        prefix_data
+            .extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        data.extend_from_slice(&dhcpv6_option(26, &prefix_data));
+        let opt = dhcpv6_option(25, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 25);
+        assert!(fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_pd_short() {
+        let data = [0u8; 8]; // < 12 bytes
+        let opt = dhcpv6_option(25, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 25);
+        assert!(fields.iter().any(|f| f.name() == "ia_pd"));
+    }
+
+    // ── Group 26: Option 26 — IA Prefix ──────────────────────────────
+
+    #[test]
+    fn parse_option_ia_prefix_full() {
+        let prefix_addr: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut data = Vec::new();
+        data.extend_from_slice(&3600u32.to_be_bytes()); // preferred lifetime
+        data.extend_from_slice(&7200u32.to_be_bytes()); // valid lifetime
+        data.push(48); // prefix length
+        data.extend_from_slice(&prefix_addr);
+        let opt = dhcpv6_option(26, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 26);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "preferred_lifetime")
+                .unwrap()
+                .value,
+            FieldValue::U32(3600)
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "valid_lifetime")
+                .unwrap()
+                .value,
+            FieldValue::U32(7200)
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.name() == "prefix_length")
+                .unwrap()
+                .value,
+            FieldValue::U8(48)
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "prefix").unwrap().value,
+            FieldValue::Ipv6Addr(prefix_addr)
+        );
+    }
+
+    #[test]
+    fn parse_option_ia_prefix_exact_25() {
+        let mut data = vec![0u8; 25];
+        data[0..4].copy_from_slice(&100u32.to_be_bytes());
+        data[4..8].copy_from_slice(&200u32.to_be_bytes());
+        data[8] = 64;
+        // prefix at 9..25 already zeroed
+        let opt = dhcpv6_option(26, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 26);
+        assert!(fields.iter().any(|f| f.name() == "prefix"));
+        assert!(!fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_prefix_with_suboptions() {
+        let mut data = vec![0u8; 25];
+        data[0..4].copy_from_slice(&100u32.to_be_bytes());
+        data[4..8].copy_from_slice(&200u32.to_be_bytes());
+        data[8] = 48;
+        // Add status code sub-option
+        let mut status_data = Vec::new();
+        status_data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&dhcpv6_option(13, &status_data));
+        let opt = dhcpv6_option(26, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 26);
+        assert!(fields.iter().any(|f| f.name() == "options"));
+    }
+
+    #[test]
+    fn parse_option_ia_prefix_short() {
+        let data = [0u8; 20]; // < 25 bytes
+        let opt = dhcpv6_option(26, &data);
+        let pkt = build_dhcpv6(7, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 26);
+        assert!(fields.iter().any(|f| f.name() == "ia_prefix"));
+    }
+
+    // ── Group 27: Option 39 — Client FQDN ────────────────────────────
+
+    #[test]
+    fn parse_option_client_fqdn() {
+        let mut data = Vec::new();
+        data.push(0x01); // flags
+        data.extend_from_slice(b"\x06client\x07example\x03com\x00");
+        let opt = dhcpv6_option(39, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 39);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "flags").unwrap().value,
+            FieldValue::U8(0x01)
+        );
+        assert!(fields.iter().any(|f| f.name() == "fqdn"));
+    }
+
+    #[test]
+    fn parse_option_client_fqdn_flags_only() {
+        let data = [0x00]; // flags only, no domain
+        let opt = dhcpv6_option(39, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 39);
+        assert!(fields.iter().any(|f| f.name() == "flags"));
+        assert!(!fields.iter().any(|f| f.name() == "fqdn"));
+    }
+
+    #[test]
+    fn parse_option_client_fqdn_empty() {
+        let opt = dhcpv6_option(39, &[]);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        assert!(!has_option(&buf, &buf.layers()[0], 39));
+    }
+
+    // ── Group 28: Unknown Option ─────────────────────────────────────
+
+    #[test]
+    fn parse_option_unknown() {
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+        let opt = dhcpv6_option(999, &data);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let fields = find_option_fields(&buf, &buf.layers()[0], 999);
+        assert_eq!(
+            fields.iter().find(|f| f.name() == "data").unwrap().value,
+            FieldValue::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF])
+        );
+    }
+
+    // ── Group 29: Edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn parse_multiple_options() {
+        let mut opts = Vec::new();
+        opts.extend_from_slice(&dhcpv6_option(1, &[0x00, 0x01, 0xAA, 0xBB]));
+        opts.extend_from_slice(&dhcpv6_option(8, &100u16.to_be_bytes()));
+        opts.extend_from_slice(&dhcpv6_option(6, &23u16.to_be_bytes()));
+        let pkt = build_dhcpv6(1, 1, &opts);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        assert!(has_option(&buf, &buf.layers()[0], 1));
+        assert!(has_option(&buf, &buf.layers()[0], 8));
+        assert!(has_option(&buf, &buf.layers()[0], 6));
+    }
+
+    #[test]
+    fn parse_option_data_exceeds_packet() {
+        // Manually craft an option where option_len exceeds available data
+        let mut pkt = build_dhcpv6(1, 1, &[]);
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // option code 0
+        pkt.extend_from_slice(&100u16.to_be_bytes()); // option len = 100, but no data
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        let err = d.dissect(&pkt, &mut buf, 0).unwrap_err();
+        assert!(matches!(err, PacketError::Truncated { .. }));
+    }
+}
