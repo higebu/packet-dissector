@@ -2312,7 +2312,7 @@ fn parse_dns_edns0_tcp_keepalive_with_timeout() {
         opt0.iter().find(|f| f.name() == "timeout").unwrap().value,
         FieldValue::U16(1200)
     );
-    assert!(opt0.iter().find(|f| f.name() == "data").is_none());
+    assert!(!opt0.iter().any(|f| f.name() == "data"));
 }
 
 #[test]
@@ -2368,6 +2368,6 @@ fn parse_dns_edns0_tcp_keepalive_no_timeout() {
         opt0.iter().find(|f| f.name() == "length").unwrap().value,
         FieldValue::U16(0)
     );
-    assert!(opt0.iter().find(|f| f.name() == "timeout").is_none());
-    assert!(opt0.iter().find(|f| f.name() == "data").is_none());
+    assert!(!opt0.iter().any(|f| f.name() == "timeout"));
+    assert!(!opt0.iter().any(|f| f.name() == "data"));
 }
