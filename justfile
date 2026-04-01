@@ -28,59 +28,48 @@ test:
 changelog:
     git-cliff -o CHANGELOG.md
 
-# Publish all crates to crates.io in dependency order.
-# Runs dry-run first, then prompts for confirmation.
-publish: check
+# Publish all crates in dependency order (called from GitHub Actions)
+publish:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Build crate list in dependency order via topological sort
     mapfile -t crates < <(
         cargo metadata --format-version 1 --no-deps | jq -r '
-          .packages[] |
-          .name as $name |
-          .dependencies[] |
-          select(.path != null) |
-          "\(.name) \($name)"
+          (.packages[].name | "\(.) \(.)"),
+          (.packages[] |
+            .name as $name |
+            .dependencies[] |
+            select(.path != null) |
+            "\(.name) \($name)")
         ' | tsort
     )
 
-    echo "Crates to publish (in order):"
-    for crate in "${crates[@]}"; do
-        echo "  - $crate"
-    done
-
-    echo ""
-    read -rp "Publish all ${#crates[@]} crates to crates.io? [y/N] " confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        echo "Aborted."
-        exit 1
-    fi
-
-    echo ""
-    echo "=== Publishing ==="
+    echo "Publishing ${#crates[@]} crates..."
     for crate in "${crates[@]}"; do
         echo "Publishing $crate..."
-        cargo publish -p "$crate"
-        echo "  Waiting {{publish_delay}}s for index propagation..."
-        sleep {{publish_delay}}
+        if output=$(cargo publish -p "$crate" 2>&1); then
+            echo "  Waiting {{publish_delay}}s for index propagation..."
+            sleep {{publish_delay}}
+        elif echo "$output" | grep -q "already exists"; then
+            echo "  Already published, skipping"
+        else
+            echo "$output"
+            exit 1
+        fi
     done
 
-    echo ""
     echo "All crates published successfully!"
 
-# Publish a single crate (for retrying after a failure)
-publish-one crate:
-    cargo publish -p {{crate}}
-
-# Bump version, generate changelog, and commit
+# Bump version, update README, generate changelog, commit, and tag
 release version:
     #!/usr/bin/env bash
     set -euo pipefail
+    major_minor=$(echo "{{version}}" | cut -d. -f1-2)
     cargo release version {{version}} --execute --no-confirm
-    version=$(cargo metadata --format-version 1 --no-deps | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
-    git-cliff --tag "v${version}" -o CHANGELOG.md
+    sed -i "s/packet-dissector = \"[0-9]*\.[0-9]*\"/packet-dissector = \"${major_minor}\"/g" README.md
+    sed -i "s/version = \"[0-9]*\.[0-9]*\"/version = \"${major_minor}\"/g" README.md
+    git-cliff --tag "v{{version}}" -o CHANGELOG.md
     git add -A
-    git commit -m "chore(release): v${version}"
-    git tag -a "v${version}" -m "v${version}"
+    git commit -m "chore(release): v{{version}}"
+    git tag -a "v{{version}}" -m "v{{version}}"
     echo "Review the commit, then run: git push --follow-tags"
