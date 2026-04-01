@@ -98,6 +98,31 @@ pub fn command_name(code: u32, is_request: bool) -> &'static str {
         // 3GPP TS 29.272, Section 7.2.2, Table 7.2.2/2 — S13/S13' Command Codes
         (324, true) => "ME-Identity-Check-Request",
         (324, false) => "ME-Identity-Check-Answer",
+        // RFC 7155, Section 3.1 — https://www.rfc-editor.org/rfc/rfc7155#section-3.1
+        (265, true) => "AA-Request",
+        (265, false) => "AA-Answer",
+        // 3GPP TS 29.229, Section 6.1, Table 6.1/1 — Cx/Dx Command Codes
+        (300, true) => "User-Authorization-Request",
+        (300, false) => "User-Authorization-Answer",
+        (301, true) => "Server-Assignment-Request",
+        (301, false) => "Server-Assignment-Answer",
+        (302, true) => "Location-Info-Request",
+        (302, false) => "Location-Info-Answer",
+        (303, true) => "Multimedia-Auth-Request",
+        (303, false) => "Multimedia-Auth-Answer",
+        (304, true) => "Registration-Termination-Request",
+        (304, false) => "Registration-Termination-Answer",
+        (305, true) => "Push-Profile-Request",
+        (305, false) => "Push-Profile-Answer",
+        // 3GPP TS 29.329, Section 6.1, Table 6.1/1 — Sh Command Codes
+        (306, true) => "User-Data-Request",
+        (306, false) => "User-Data-Answer",
+        (307, true) => "Profile-Update-Request",
+        (307, false) => "Profile-Update-Answer",
+        (308, true) => "Subscribe-Notifications-Request",
+        (308, false) => "Subscribe-Notifications-Answer",
+        (309, true) => "Push-Notification-Request",
+        (309, false) => "Push-Notification-Answer",
         _ => "Unknown",
     }
 }
@@ -112,9 +137,25 @@ pub fn application_name(app_id: u32) -> &'static str {
         3 => "Diameter Base Accounting",
         // RFC 4006, Section 1.2 — https://www.rfc-editor.org/rfc/rfc4006#section-1.2
         4 => "Diameter Credit-Control",
+        // 3GPP TS 29.229, Section 6.2 — Cx/Dx Application Identifier
+        16777216 => "3GPP Cx",
+        // 3GPP TS 29.329, Section 6.2 — Sh Application Identifier
+        16777217 => "3GPP Sh",
+        // 3GPP TS 29.109, Section 6.2 — Zh Application Identifier
+        16777221 => "3GPP Zh",
+        // 3GPP TS 29.214, Section 5.1 — Rx Application Identifier
+        16777236 => "3GPP Rx",
+        // 3GPP TS 29.212, Section 5.1 — Gx Application Identifier
+        16777238 => "3GPP Gx",
         // 3GPP TS 29.272, Section 7.1.8
         16777251 => "3GPP S6a/S6d",
         16777252 => "3GPP S13/S13'",
+        // 3GPP TS 29.273, Section 9 — SWm Application Identifier
+        16777264 => "3GPP SWm",
+        // 3GPP TS 29.273, Section 8 — SWx Application Identifier
+        16777265 => "3GPP SWx",
+        // 3GPP TS 29.273, Section 10 — S6b Application Identifier
+        16777272 => "3GPP S6b",
         16777308 => "3GPP S7a/S7d",
         _ => "Unknown",
     }
@@ -128,16 +169,32 @@ pub const AVP_CODE_EXPERIMENTAL_RESULT_CODE: u32 = 298;
 /// 3GPP TS 29.272, Section 7.4 — Result-Code and Experimental-Result Values.
 pub fn experimental_result_code_name(code: u32) -> &'static str {
     match code {
-        // 3GPP TS 29.272, Section 7.4.3 — Permanent Failures
+        // 3GPP TS 29.229, Section 6.2 — Cx/Dx Experimental Result Codes (Success)
+        2001 => "DIAMETER_FIRST_REGISTRATION",
+        2002 => "DIAMETER_SUBSEQUENT_REGISTRATION",
+        2003 => "DIAMETER_UNREGISTERED_SERVICE",
+        2004 => "DIAMETER_SUCCESS_SERVER_NAME_NOT_STORED",
+        // 3GPP TS 29.272, Section 7.4.4 — Transient Failures
+        4181 => "DIAMETER_AUTHENTICATION_DATA_UNAVAILABLE",
+        4182 => "DIAMETER_ERROR_CAMEL_SUBSCRIPTION_PRESENT",
+        // 3GPP TS 29.272, Section 7.4.3 / TS 29.229, Section 6.2 — Permanent Failures
         5001 => "DIAMETER_ERROR_USER_UNKNOWN",
+        5002 => "DIAMETER_ERROR_IDENTITIES_DONT_MATCH",
+        5003 => "DIAMETER_ERROR_IDENTITY_NOT_REGISTERED",
         5004 => "DIAMETER_ERROR_ROAMING_NOT_ALLOWED",
+        5011 => "DIAMETER_ERROR_FEATURE_UNSUPPORTED",
+        // 3GPP TS 29.214, Section 5.5 — Rx Permanent Failures
+        5061 => "DIAMETER_ERROR_IP_CAN_SESSION_NOT_AVAILABLE",
+        5063 => "DIAMETER_ERROR_REQUESTED_SERVICE_NOT_AUTHORIZED",
+        // 3GPP TS 29.212, Section 5.6 — Gx Permanent Failures
+        5065 => "DIAMETER_ERROR_BEARER_NOT_AUTHORIZED",
+        5066 => "DIAMETER_ERROR_TRAFFIC_MAPPING_INFO_REJECTED",
+        5144 => "DIAMETER_ERROR_CONFLICTING_REQUEST",
+        // 3GPP TS 29.272, Section 7.4.3 — S6a/S6d Permanent Failures
         5420 => "DIAMETER_ERROR_UNKNOWN_EPS_SUBSCRIPTION",
         5421 => "DIAMETER_ERROR_RAT_NOT_ALLOWED",
         5422 => "DIAMETER_ERROR_EQUIPMENT_UNKNOWN",
         5423 => "DIAMETER_ERROR_UNKNOWN_SERVING_NODE",
-        // 3GPP TS 29.272, Section 7.4.4 — Transient Failures
-        4181 => "DIAMETER_AUTHENTICATION_DATA_UNAVAILABLE",
-        4182 => "DIAMETER_ERROR_CAMEL_SUBSCRIPTION_PRESENT",
         _ => "Unknown",
     }
 }
@@ -542,6 +599,119 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Grouped,
         },
     ),
+    // RFC 4006, Section 8 — Credit-Control AVPs
+    (
+        412,
+        AvpDef {
+            name: "CC-Input-Octets",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    (
+        414,
+        AvpDef {
+            name: "CC-Output-Octets",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    (
+        415,
+        AvpDef {
+            name: "CC-Request-Number",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    (
+        416,
+        AvpDef {
+            name: "CC-Request-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    (
+        420,
+        AvpDef {
+            name: "CC-Time",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    (
+        421,
+        AvpDef {
+            name: "CC-Total-Octets",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    (
+        432,
+        AvpDef {
+            name: "Rating-Group",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    (
+        437,
+        AvpDef {
+            name: "Requested-Service-Unit",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    (
+        439,
+        AvpDef {
+            name: "Service-Identifier",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    (
+        443,
+        AvpDef {
+            name: "Subscription-Id",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    (
+        444,
+        AvpDef {
+            name: "Subscription-Id-Data",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    (
+        450,
+        AvpDef {
+            name: "Subscription-Id-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    (
+        452,
+        AvpDef {
+            name: "Tariff-Change-Usage",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    (
+        454,
+        AvpDef {
+            name: "CC-Sub-Session-Id",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    (
+        456,
+        AvpDef {
+            name: "Used-Service-Unit",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    (
+        461,
+        AvpDef {
+            name: "Service-Context-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
     (
         480,
         AvpDef {
@@ -583,29 +753,119 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
 
 /// 3GPP vendor-specific AVPs (vendor_id=10415), sorted by AVP code for binary search.
 ///
-/// 3GPP TS 29.272, Section 7.3, Table 7.3.1/1 — S6a/S6d, S7a/S7d and S13/S13' specific AVPs.
+/// - 3GPP TS 29.212, Table 5.3.0.1 — Gx AVPs (Policy and Charging Control)
+/// - 3GPP TS 29.214, Table 5.3.0.1 — Rx AVPs (QoS Authorization)
+/// - 3GPP TS 29.229, Table 6.3.1 — Cx/Dx AVPs (IMS HSS)
+/// - 3GPP TS 29.272, Section 7.3, Table 7.3.1/1 — S6a/S6d, S7a/S7d and S13/S13' specific AVPs
+/// - 3GPP TS 29.329, Table 6.3.1 — Sh AVPs (User Profile)
+/// - 3GPP TS 32.299, Table 7.1 — Charging AVPs
 #[rustfmt::skip]
 static TGPP_AVPS: &[(u32, AvpDef)] = &[
     // 3GPP TS 29.061 — Interworking (re-used by TS 29.272, Table 7.3.1/2)
     (13,   AvpDef { name: "3GPP-Charging-Characteristics", avp_type: AvpType::UTF8String }),
-    // 3GPP TS 29.214 — Rx (re-used by TS 29.272, Table 7.3.1/2)
+    // 3GPP TS 29.214, Table 5.3.0.1 — Rx AVPs
+    (504,  AvpDef { name: "AF-Application-Identifier", avp_type: AvpType::OctetString }),
+    (505,  AvpDef { name: "AF-Charging-Identifier", avp_type: AvpType::OctetString }),
+    (507,  AvpDef { name: "Flow-Description", avp_type: AvpType::OctetString }),
+    (509,  AvpDef { name: "Flow-Number", avp_type: AvpType::Unsigned32 }),
+    (511,  AvpDef { name: "Flow-Status", avp_type: AvpType::Enumerated }),
+    (512,  AvpDef { name: "Flow-Usage", avp_type: AvpType::Enumerated }),
+    (513,  AvpDef { name: "Specific-Action", avp_type: AvpType::Enumerated }),
     (515,  AvpDef { name: "Max-Requested-Bandwidth-DL", avp_type: AvpType::Unsigned32 }),
     (516,  AvpDef { name: "Max-Requested-Bandwidth-UL", avp_type: AvpType::Unsigned32 }),
+    (517,  AvpDef { name: "Media-Component-Description", avp_type: AvpType::Grouped }),
+    (518,  AvpDef { name: "Media-Component-Number", avp_type: AvpType::Unsigned32 }),
+    (519,  AvpDef { name: "Media-Sub-Component", avp_type: AvpType::Grouped }),
+    (520,  AvpDef { name: "Media-Type", avp_type: AvpType::Enumerated }),
+    (524,  AvpDef { name: "Codec-Data", avp_type: AvpType::OctetString }),
+    (525,  AvpDef { name: "Service-URN", avp_type: AvpType::OctetString }),
+    (527,  AvpDef { name: "Service-Info-Status", avp_type: AvpType::Enumerated }),
+    (531,  AvpDef { name: "Sponsor-Identity", avp_type: AvpType::UTF8String }),
+    (532,  AvpDef { name: "Application-Service-Provider-Identity", avp_type: AvpType::UTF8String }),
+    (533,  AvpDef { name: "Rx-Request-Type", avp_type: AvpType::Enumerated }),
+    (534,  AvpDef { name: "Min-Requested-Bandwidth-DL", avp_type: AvpType::Unsigned32 }),
+    (535,  AvpDef { name: "Min-Requested-Bandwidth-UL", avp_type: AvpType::Unsigned32 }),
     (554,  AvpDef { name: "Extended-Max-Requested-BW-DL", avp_type: AvpType::Unsigned32 }),
     (555,  AvpDef { name: "Extended-Max-Requested-BW-UL", avp_type: AvpType::Unsigned32 }),
-    // 3GPP TS 29.229 — Cx/Dx (re-used by TS 29.272, Table 7.3.1/2)
+    // 3GPP TS 29.229, Table 6.3.1 — Cx/Dx AVPs
     (600,  AvpDef { name: "Visited-Network-Identifier", avp_type: AvpType::OctetString }),
+    (601,  AvpDef { name: "Public-Identity", avp_type: AvpType::UTF8String }),
+    (602,  AvpDef { name: "Server-Name", avp_type: AvpType::UTF8String }),
+    (603,  AvpDef { name: "Server-Capabilities", avp_type: AvpType::Grouped }),
+    (604,  AvpDef { name: "Mandatory-Capability", avp_type: AvpType::Unsigned32 }),
+    (605,  AvpDef { name: "Optional-Capability", avp_type: AvpType::Unsigned32 }),
+    (606,  AvpDef { name: "User-Data", avp_type: AvpType::OctetString }),
+    (607,  AvpDef { name: "SIP-Number-Auth-Items", avp_type: AvpType::Unsigned32 }),
+    (608,  AvpDef { name: "SIP-Authentication-Scheme", avp_type: AvpType::UTF8String }),
+    (609,  AvpDef { name: "SIP-Authenticate", avp_type: AvpType::OctetString }),
+    (610,  AvpDef { name: "SIP-Authorization", avp_type: AvpType::OctetString }),
+    (611,  AvpDef { name: "SIP-Authentication-Context", avp_type: AvpType::OctetString }),
+    (612,  AvpDef { name: "SIP-Auth-Data-Item", avp_type: AvpType::Grouped }),
+    (613,  AvpDef { name: "SIP-Item-Number", avp_type: AvpType::Unsigned32 }),
+    (614,  AvpDef { name: "Server-Assignment-Type", avp_type: AvpType::Enumerated }),
+    (615,  AvpDef { name: "Deregistration-Reason", avp_type: AvpType::Grouped }),
+    (616,  AvpDef { name: "Reason-Code", avp_type: AvpType::Enumerated }),
+    (617,  AvpDef { name: "Reason-Info", avp_type: AvpType::UTF8String }),
+    (618,  AvpDef { name: "Charging-Information", avp_type: AvpType::Grouped }),
+    (619,  AvpDef { name: "Primary-Event-Charging-Function-Name", avp_type: AvpType::DiameterURI }),
+    (620,  AvpDef { name: "Secondary-Event-Charging-Function-Name", avp_type: AvpType::DiameterURI }),
+    (621,  AvpDef { name: "Primary-Charging-Collection-Function-Name", avp_type: AvpType::DiameterURI }),
+    (622,  AvpDef { name: "Secondary-Charging-Collection-Function-Name", avp_type: AvpType::DiameterURI }),
+    (623,  AvpDef { name: "User-Authorization-Type", avp_type: AvpType::Enumerated }),
+    (624,  AvpDef { name: "User-Data-Already-Available", avp_type: AvpType::Enumerated }),
     (625,  AvpDef { name: "Confidentiality-Key", avp_type: AvpType::OctetString }),
     (626,  AvpDef { name: "Integrity-Key", avp_type: AvpType::OctetString }),
     (628,  AvpDef { name: "Supported-Features", avp_type: AvpType::Grouped }),
     (629,  AvpDef { name: "Feature-List-ID", avp_type: AvpType::Unsigned32 }),
     (630,  AvpDef { name: "Feature-List", avp_type: AvpType::Unsigned32 }),
-    // 3GPP TS 29.329 — Sh (re-used by TS 29.272, Table 7.3.1/2)
+    (632,  AvpDef { name: "LIA-Flags", avp_type: AvpType::Unsigned32 }),
+    (634,  AvpDef { name: "Wildcarded-Public-Identity", avp_type: AvpType::UTF8String }),
+    // 3GPP TS 29.329, Table 6.3.1 — Sh AVPs
+    (700,  AvpDef { name: "User-Identity", avp_type: AvpType::Grouped }),
     (701,  AvpDef { name: "MSISDN", avp_type: AvpType::OctetString }),
-    // 3GPP TS 32.299 — Charging (re-used by TS 29.272, Table 7.3.1/2)
+    (702,  AvpDef { name: "User-Data-Sh", avp_type: AvpType::OctetString }),
+    (703,  AvpDef { name: "Data-Reference", avp_type: AvpType::Enumerated }),
+    (704,  AvpDef { name: "Service-Indication", avp_type: AvpType::OctetString }),
+    (705,  AvpDef { name: "Subs-Req-Type", avp_type: AvpType::Enumerated }),
+    (706,  AvpDef { name: "Requested-Domain", avp_type: AvpType::Enumerated }),
+    (707,  AvpDef { name: "Current-Location", avp_type: AvpType::Enumerated }),
+    (708,  AvpDef { name: "Identity-Set", avp_type: AvpType::Enumerated }),
+    (709,  AvpDef { name: "Expiry-Time", avp_type: AvpType::Time }),
+    (710,  AvpDef { name: "Send-Data-Indication", avp_type: AvpType::Enumerated }),
+    (711,  AvpDef { name: "DSAI-Tag", avp_type: AvpType::OctetString }),
+    // 3GPP TS 32.299, Table 7.1 — Charging AVPs (vendor_id=10415)
     (848,  AvpDef { name: "Served-Party-IP-Address", avp_type: AvpType::Address }),
     (857,  AvpDef { name: "Charged-Party", avp_type: AvpType::UTF8String }),
-    // 3GPP TS 29.212 — Gx/Sd (re-used by TS 29.272, Table 7.3.1/2)
+    (872,  AvpDef { name: "Reporting-Reason", avp_type: AvpType::Enumerated }),
+    (873,  AvpDef { name: "Service-Information", avp_type: AvpType::Grouped }),
+    (874,  AvpDef { name: "PS-Information", avp_type: AvpType::Grouped }),
+    (876,  AvpDef { name: "IMS-Information", avp_type: AvpType::Grouped }),
+    // 3GPP TS 29.212, Table 5.3.0.1 — Gx AVPs
+    (1001, AvpDef { name: "Charging-Rule-Install", avp_type: AvpType::Grouped }),
+    (1002, AvpDef { name: "Charging-Rule-Remove", avp_type: AvpType::Grouped }),
+    (1003, AvpDef { name: "Charging-Rule-Definition", avp_type: AvpType::Grouped }),
+    (1004, AvpDef { name: "Charging-Rule-Base-Name", avp_type: AvpType::UTF8String }),
+    (1005, AvpDef { name: "Charging-Rule-Name", avp_type: AvpType::OctetString }),
+    (1006, AvpDef { name: "Event-Trigger", avp_type: AvpType::Enumerated }),
+    (1007, AvpDef { name: "Metering-Method", avp_type: AvpType::Enumerated }),
+    (1008, AvpDef { name: "Offline", avp_type: AvpType::Enumerated }),
+    (1009, AvpDef { name: "Online", avp_type: AvpType::Enumerated }),
+    (1010, AvpDef { name: "Precedence", avp_type: AvpType::Unsigned32 }),
+    (1011, AvpDef { name: "Reporting-Level", avp_type: AvpType::Enumerated }),
+    (1012, AvpDef { name: "TFT-Filter", avp_type: AvpType::OctetString }),
+    (1013, AvpDef { name: "TFT-Packet-Filter-Information", avp_type: AvpType::Grouped }),
+    (1014, AvpDef { name: "ToS-Traffic-Class", avp_type: AvpType::OctetString }),
+    (1016, AvpDef { name: "QoS-Information", avp_type: AvpType::Grouped }),
+    (1018, AvpDef { name: "Charging-Rule-Report", avp_type: AvpType::Grouped }),
+    (1019, AvpDef { name: "PCC-Rule-Status", avp_type: AvpType::Enumerated }),
+    (1020, AvpDef { name: "Bearer-Identifier", avp_type: AvpType::OctetString }),
+    (1021, AvpDef { name: "Bearer-Operation", avp_type: AvpType::Enumerated }),
+    (1022, AvpDef { name: "Access-Network-Charging-Identifier-Gx", avp_type: AvpType::Grouped }),
+    (1023, AvpDef { name: "Bearer-Control-Mode", avp_type: AvpType::Enumerated }),
+    (1024, AvpDef { name: "Network-Request-Support", avp_type: AvpType::Enumerated }),
+    (1025, AvpDef { name: "Guaranteed-Bitrate-DL", avp_type: AvpType::Unsigned32 }),
+    (1026, AvpDef { name: "Guaranteed-Bitrate-UL", avp_type: AvpType::Unsigned32 }),
+    (1027, AvpDef { name: "IP-CAN-Type", avp_type: AvpType::Enumerated }),
     (1028, AvpDef { name: "QoS-Class-Identifier", avp_type: AvpType::Enumerated }),
     (1032, AvpDef { name: "RAT-Type", avp_type: AvpType::Enumerated }),
     (1034, AvpDef { name: "Allocation-Retention-Priority", avp_type: AvpType::Grouped }),
@@ -614,8 +874,16 @@ static TGPP_AVPS: &[(u32, AvpDef)] = &[
     (1046, AvpDef { name: "Priority-Level", avp_type: AvpType::Unsigned32 }),
     (1047, AvpDef { name: "Pre-emption-Capability", avp_type: AvpType::Enumerated }),
     (1048, AvpDef { name: "Pre-emption-Vulnerability", avp_type: AvpType::Enumerated }),
-    // 3GPP TS 32.299 — Charging (re-used by TS 29.272, Table 7.3.1/2)
+    (1049, AvpDef { name: "Default-EPS-Bearer-QoS", avp_type: AvpType::Grouped }),
+    (1050, AvpDef { name: "AN-GW-Address", avp_type: AvpType::Address }),
+    (1067, AvpDef { name: "Usage-Monitoring-Information", avp_type: AvpType::Grouped }),
+    (1068, AvpDef { name: "Usage-Monitoring-Level", avp_type: AvpType::Enumerated }),
+    (1069, AvpDef { name: "Usage-Monitoring-Report", avp_type: AvpType::Enumerated }),
+    (1070, AvpDef { name: "Usage-Monitoring-Support", avp_type: AvpType::Enumerated }),
+    (1073, AvpDef { name: "Charging-Correlation-Indicator", avp_type: AvpType::Enumerated }),
+    // 3GPP TS 32.299, Table 7.1 — Charging AVPs (continued)
     (1227, AvpDef { name: "PDP-Address", avp_type: AvpType::Address }),
+    (1264, AvpDef { name: "Trigger", avp_type: AvpType::Grouped }),
     // 3GPP TS 29.272 — S6a/S6d, S7a/S7d, S13/S13' (Table 7.3.1/1)
     (1400, AvpDef { name: "Subscription-Data", avp_type: AvpType::Grouped }),
     (1401, AvpDef { name: "Terminal-Information", avp_type: AvpType::Grouped }),
@@ -1383,5 +1651,312 @@ mod tests {
         // DiameterURI — Trace-Reporting-Consumer-Uri (code=1727)
         let def = lookup_avp(10415, 1727).unwrap();
         assert_eq!(def.avp_type, AvpType::DiameterURI);
+    }
+
+    // ── 3GPP Application ID tests ──
+
+    #[test]
+    fn application_name_3gpp_interfaces() {
+        // 3GPP TS 29.229, Section 6.2
+        assert_eq!(application_name(16777216), "3GPP Cx");
+        // 3GPP TS 29.329, Section 6.2
+        assert_eq!(application_name(16777217), "3GPP Sh");
+        // 3GPP TS 29.109, Section 6.2
+        assert_eq!(application_name(16777221), "3GPP Zh");
+        // 3GPP TS 29.214, Section 5.1
+        assert_eq!(application_name(16777236), "3GPP Rx");
+        // 3GPP TS 29.212, Section 5.1
+        assert_eq!(application_name(16777238), "3GPP Gx");
+        // 3GPP TS 29.273, Section 9
+        assert_eq!(application_name(16777264), "3GPP SWm");
+        // 3GPP TS 29.273, Section 8
+        assert_eq!(application_name(16777265), "3GPP SWx");
+        // 3GPP TS 29.273, Section 10
+        assert_eq!(application_name(16777272), "3GPP S6b");
+    }
+
+    // ── 3GPP Cx/Dx command code tests (TS 29.229, Table 6.1/1) ──
+
+    #[test]
+    fn command_name_cx_all_codes() {
+        assert_eq!(command_name(300, true), "User-Authorization-Request");
+        assert_eq!(command_name(300, false), "User-Authorization-Answer");
+        assert_eq!(command_name(301, true), "Server-Assignment-Request");
+        assert_eq!(command_name(301, false), "Server-Assignment-Answer");
+        assert_eq!(command_name(302, true), "Location-Info-Request");
+        assert_eq!(command_name(302, false), "Location-Info-Answer");
+        assert_eq!(command_name(303, true), "Multimedia-Auth-Request");
+        assert_eq!(command_name(303, false), "Multimedia-Auth-Answer");
+        assert_eq!(command_name(304, true), "Registration-Termination-Request");
+        assert_eq!(command_name(304, false), "Registration-Termination-Answer");
+        assert_eq!(command_name(305, true), "Push-Profile-Request");
+        assert_eq!(command_name(305, false), "Push-Profile-Answer");
+    }
+
+    // ── 3GPP Sh command code tests (TS 29.329, Table 6.1/1) ──
+
+    #[test]
+    fn command_name_sh_all_codes() {
+        assert_eq!(command_name(306, true), "User-Data-Request");
+        assert_eq!(command_name(306, false), "User-Data-Answer");
+        assert_eq!(command_name(307, true), "Profile-Update-Request");
+        assert_eq!(command_name(307, false), "Profile-Update-Answer");
+        assert_eq!(command_name(308, true), "Subscribe-Notifications-Request");
+        assert_eq!(command_name(308, false), "Subscribe-Notifications-Answer");
+        assert_eq!(command_name(309, true), "Push-Notification-Request");
+        assert_eq!(command_name(309, false), "Push-Notification-Answer");
+    }
+
+    // ── Rx AA command code test (RFC 7155 / TS 29.214) ──
+
+    #[test]
+    fn command_name_rx_aa() {
+        assert_eq!(command_name(265, true), "AA-Request");
+        assert_eq!(command_name(265, false), "AA-Answer");
+    }
+
+    // ── 3GPP Cx/Dx AVP tests (TS 29.229, Table 6.3.1) ──
+
+    #[test]
+    fn lookup_cx_avps() {
+        let def = lookup_avp(10415, 601).unwrap();
+        assert_eq!(def.name, "Public-Identity");
+        assert_eq!(def.avp_type, AvpType::UTF8String);
+
+        let def = lookup_avp(10415, 602).unwrap();
+        assert_eq!(def.name, "Server-Name");
+        assert_eq!(def.avp_type, AvpType::UTF8String);
+
+        let def = lookup_avp(10415, 603).unwrap();
+        assert_eq!(def.name, "Server-Capabilities");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 612).unwrap();
+        assert_eq!(def.name, "SIP-Auth-Data-Item");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 614).unwrap();
+        assert_eq!(def.name, "Server-Assignment-Type");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+
+        let def = lookup_avp(10415, 615).unwrap();
+        assert_eq!(def.name, "Deregistration-Reason");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 618).unwrap();
+        assert_eq!(def.name, "Charging-Information");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 623).unwrap();
+        assert_eq!(def.name, "User-Authorization-Type");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+    }
+
+    // ── 3GPP Sh AVP tests (TS 29.329, Table 6.3.1) ──
+
+    #[test]
+    fn lookup_sh_avps() {
+        let def = lookup_avp(10415, 700).unwrap();
+        assert_eq!(def.name, "User-Identity");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 702).unwrap();
+        assert_eq!(def.name, "User-Data-Sh");
+        assert_eq!(def.avp_type, AvpType::OctetString);
+
+        let def = lookup_avp(10415, 703).unwrap();
+        assert_eq!(def.name, "Data-Reference");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+
+        let def = lookup_avp(10415, 705).unwrap();
+        assert_eq!(def.name, "Subs-Req-Type");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+    }
+
+    // ── 3GPP Gx AVP tests (TS 29.212, Table 5.3.0.1) ──
+
+    #[test]
+    fn lookup_gx_avps() {
+        let def = lookup_avp(10415, 1001).unwrap();
+        assert_eq!(def.name, "Charging-Rule-Install");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 1003).unwrap();
+        assert_eq!(def.name, "Charging-Rule-Definition");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 1005).unwrap();
+        assert_eq!(def.name, "Charging-Rule-Name");
+        assert_eq!(def.avp_type, AvpType::OctetString);
+
+        let def = lookup_avp(10415, 1006).unwrap();
+        assert_eq!(def.name, "Event-Trigger");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+
+        let def = lookup_avp(10415, 1016).unwrap();
+        assert_eq!(def.name, "QoS-Information");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 1027).unwrap();
+        assert_eq!(def.name, "IP-CAN-Type");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+
+        let def = lookup_avp(10415, 1049).unwrap();
+        assert_eq!(def.name, "Default-EPS-Bearer-QoS");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 1067).unwrap();
+        assert_eq!(def.name, "Usage-Monitoring-Information");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+    }
+
+    // ── 3GPP Rx AVP tests (TS 29.214, Table 5.3.0.1) ──
+
+    #[test]
+    fn lookup_rx_avps() {
+        let def = lookup_avp(10415, 504).unwrap();
+        assert_eq!(def.name, "AF-Application-Identifier");
+        assert_eq!(def.avp_type, AvpType::OctetString);
+
+        let def = lookup_avp(10415, 507).unwrap();
+        assert_eq!(def.name, "Flow-Description");
+        assert_eq!(def.avp_type, AvpType::OctetString);
+
+        let def = lookup_avp(10415, 517).unwrap();
+        assert_eq!(def.name, "Media-Component-Description");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 520).unwrap();
+        assert_eq!(def.name, "Media-Type");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+
+        let def = lookup_avp(10415, 525).unwrap();
+        assert_eq!(def.name, "Service-URN");
+        assert_eq!(def.avp_type, AvpType::OctetString);
+    }
+
+    // ── RFC 4006 Credit-Control AVP tests ──
+
+    #[test]
+    fn lookup_credit_control_avps() {
+        // RFC 4006, Section 8 — Credit-Control AVPs (vendor_id=0)
+        let def = lookup_avp(0, 412).unwrap();
+        assert_eq!(def.name, "CC-Input-Octets");
+        assert_eq!(def.avp_type, AvpType::Unsigned64);
+
+        let def = lookup_avp(0, 416).unwrap();
+        assert_eq!(def.name, "CC-Request-Type");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+
+        let def = lookup_avp(0, 432).unwrap();
+        assert_eq!(def.name, "Rating-Group");
+        assert_eq!(def.avp_type, AvpType::Unsigned32);
+
+        let def = lookup_avp(0, 439).unwrap();
+        assert_eq!(def.name, "Service-Identifier");
+        assert_eq!(def.avp_type, AvpType::Unsigned32);
+
+        let def = lookup_avp(0, 443).unwrap();
+        assert_eq!(def.name, "Subscription-Id");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(0, 461).unwrap();
+        assert_eq!(def.name, "Service-Context-Id");
+        assert_eq!(def.avp_type, AvpType::UTF8String);
+    }
+
+    // ── 3GPP Charging AVP tests (TS 32.299, Table 7.1) ──
+
+    #[test]
+    fn lookup_charging_avps() {
+        let def = lookup_avp(10415, 872).unwrap();
+        assert_eq!(def.name, "Reporting-Reason");
+        assert_eq!(def.avp_type, AvpType::Enumerated);
+
+        let def = lookup_avp(10415, 873).unwrap();
+        assert_eq!(def.name, "Service-Information");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 874).unwrap();
+        assert_eq!(def.name, "PS-Information");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 876).unwrap();
+        assert_eq!(def.name, "IMS-Information");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+
+        let def = lookup_avp(10415, 1264).unwrap();
+        assert_eq!(def.name, "Trigger");
+        assert_eq!(def.avp_type, AvpType::Grouped);
+    }
+
+    // ── 3GPP Experimental-Result-Code tests ──
+
+    #[test]
+    fn experimental_result_code_name_cx_success() {
+        // 3GPP TS 29.229, Section 6.2 — Cx/Dx Success codes
+        assert_eq!(
+            experimental_result_code_name(2001),
+            "DIAMETER_FIRST_REGISTRATION"
+        );
+        assert_eq!(
+            experimental_result_code_name(2002),
+            "DIAMETER_SUBSEQUENT_REGISTRATION"
+        );
+        assert_eq!(
+            experimental_result_code_name(2003),
+            "DIAMETER_UNREGISTERED_SERVICE"
+        );
+        assert_eq!(
+            experimental_result_code_name(2004),
+            "DIAMETER_SUCCESS_SERVER_NAME_NOT_STORED"
+        );
+    }
+
+    #[test]
+    fn experimental_result_code_name_cx_permanent() {
+        // 3GPP TS 29.229, Section 6.2 — Cx/Dx Permanent Failures
+        assert_eq!(
+            experimental_result_code_name(5002),
+            "DIAMETER_ERROR_IDENTITIES_DONT_MATCH"
+        );
+        assert_eq!(
+            experimental_result_code_name(5003),
+            "DIAMETER_ERROR_IDENTITY_NOT_REGISTERED"
+        );
+        assert_eq!(
+            experimental_result_code_name(5011),
+            "DIAMETER_ERROR_FEATURE_UNSUPPORTED"
+        );
+    }
+
+    #[test]
+    fn experimental_result_code_name_gx() {
+        // 3GPP TS 29.212, Section 5.6 — Gx Permanent Failures
+        assert_eq!(
+            experimental_result_code_name(5065),
+            "DIAMETER_ERROR_BEARER_NOT_AUTHORIZED"
+        );
+        assert_eq!(
+            experimental_result_code_name(5066),
+            "DIAMETER_ERROR_TRAFFIC_MAPPING_INFO_REJECTED"
+        );
+        assert_eq!(
+            experimental_result_code_name(5144),
+            "DIAMETER_ERROR_CONFLICTING_REQUEST"
+        );
+    }
+
+    #[test]
+    fn experimental_result_code_name_rx() {
+        // 3GPP TS 29.214, Section 5.5 — Rx Permanent Failures
+        assert_eq!(
+            experimental_result_code_name(5061),
+            "DIAMETER_ERROR_IP_CAN_SESSION_NOT_AVAILABLE"
+        );
+        assert_eq!(
+            experimental_result_code_name(5063),
+            "DIAMETER_ERROR_REQUESTED_SERVICE_NOT_AUTHORIZED"
+        );
     }
 }
