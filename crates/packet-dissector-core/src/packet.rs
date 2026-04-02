@@ -144,6 +144,37 @@ impl<'pkt> DissectBuffer<'pkt> {
         self.aux_chunks.clear();
     }
 
+    /// Clear all stored data and return the buffer with a fresh lifetime.
+    ///
+    /// After [`clear()`](Self::clear), no [`Field`] references to old packet
+    /// data remain (all `Vec` lengths are 0, capacities preserved), so the
+    /// lifetime parameter can safely be rebound to a new packet's data.
+    ///
+    /// This enables reusing a single `DissectBuffer` across packets in a
+    /// streaming loop without per-packet heap allocation:
+    ///
+    /// ```ignore
+    /// let mut buf = DissectBuffer::new();
+    /// for pkt_data in packets {
+    ///     let buf = buf.clear_into();
+    ///     registry.dissect(pkt_data, buf)?;
+    ///     // use buf...
+    /// }
+    /// ```
+    #[allow(unsafe_code)]
+    pub fn clear_into<'new>(&mut self) -> &mut DissectBuffer<'new> {
+        self.clear();
+        // SAFETY: clear() sets all Vec lengths to 0. No Field<'old>
+        // references exist in the buffer. DissectBuffer<'a> and
+        // DissectBuffer<'b> have identical memory layout (the lifetime
+        // is purely phantom through Vec<Field<'a>>). The returned
+        // mutable reference borrows from &mut self, preventing aliasing.
+        #[allow(clippy::unnecessary_cast)]
+        unsafe {
+            &mut *(self as *mut DissectBuffer<'_> as *mut DissectBuffer<'new>)
+        }
+    }
+
     /// Begin a new protocol layer.
     ///
     /// Records the current field count as the layer's field range start.
@@ -842,5 +873,32 @@ mod tests {
         assert_eq!(buf.field_u8(layer, "nonexistent"), None);
         // Type mismatch returns None
         assert_eq!(buf.field_u8(layer, "src_port"), None);
+    }
+
+    #[test]
+    fn dissect_buffer_clear_into_rebinds_lifetime() {
+        let pkt1: &[u8] = &[0x08, 0x00];
+        let pkt2: &[u8] = &[0x86, 0xDD];
+
+        let mut buf: DissectBuffer<'_> = DissectBuffer::new();
+
+        // Fill buffer with pkt1 data.
+        buf.begin_layer("Eth", None, &[], 0..2);
+        buf.push_field(&ETHERTYPE_DESC, FieldValue::Bytes(pkt1), 0..2);
+        buf.end_layer();
+        assert_eq!(buf.fields().len(), 1);
+
+        // clear_into rebinds the lifetime to pkt2.
+        let buf = buf.clear_into();
+        assert!(buf.layers().is_empty());
+        assert!(buf.fields().is_empty());
+
+        // Use buffer with pkt2 data — different lifetime.
+        buf.begin_layer("Eth", None, &[], 0..2);
+        buf.push_field(&ETHERTYPE_DESC, FieldValue::Bytes(pkt2), 0..2);
+        buf.end_layer();
+
+        assert_eq!(buf.fields().len(), 1);
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&[0x86, 0xDD]));
     }
 }
