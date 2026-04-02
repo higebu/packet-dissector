@@ -3,67 +3,67 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/higebu/packet-dissector"
 rust-version = "1.85"
 
 [workspace.dependencies]
-packet-dissector-core = { version = "0.2.0", path = "crates/packet-dissector-core" }
-packet-dissector-ethernet = { version = "0.2.0", path = "crates/packet-dissector-ethernet" }
-packet-dissector-arp = { version = "0.2.0", path = "crates/packet-dissector-arp" }
-packet-dissector-ipv4 = { version = "0.2.0", path = "crates/packet-dissector-ipv4" }
-packet-dissector-ipv6 = { version = "0.2.0", path = "crates/packet-dissector-ipv6" }
-packet-dissector-icmp = { version = "0.2.0", path = "crates/packet-dissector-icmp" }
-packet-dissector-igmp = { version = "0.2.0", path = "crates/packet-dissector-igmp" }
-packet-dissector-icmpv6 = { version = "0.2.0", path = "crates/packet-dissector-icmpv6" }
-packet-dissector-tcp = { version = "0.2.0", path = "crates/packet-dissector-tcp" }
-packet-dissector-udp = { version = "0.2.0", path = "crates/packet-dissector-udp" }
-packet-dissector-dns = { version = "0.2.0", path = "crates/packet-dissector-dns" }
-packet-dissector-mdns = { version = "0.2.0", path = "crates/packet-dissector-mdns" }
-packet-dissector-sctp = { version = "0.2.0", path = "crates/packet-dissector-sctp" }
-packet-dissector-dhcp = { version = "0.2.0", path = "crates/packet-dissector-dhcp" }
-packet-dissector-dhcpv6 = { version = "0.2.0", path = "crates/packet-dissector-dhcpv6" }
-packet-dissector-srv6 = { version = "0.2.0", path = "crates/packet-dissector-srv6" }
-packet-dissector-gtpv1u = { version = "0.2.0", path = "crates/packet-dissector-gtpv1u" }
-packet-dissector-gtpv2c = { version = "0.2.0", path = "crates/packet-dissector-gtpv2c" }
-packet-dissector-pfcp = { version = "0.2.0", path = "crates/packet-dissector-pfcp" }
-packet-dissector-linux-sll = { version = "0.2.0", path = "crates/packet-dissector-linux-sll" }
-packet-dissector-linux-sll2 = { version = "0.2.0", path = "crates/packet-dissector-linux-sll2" }
-packet-dissector-ppp = { version = "0.2.0", path = "crates/packet-dissector-ppp" }
-packet-dissector-stp = { version = "0.2.0", path = "crates/packet-dissector-stp" }
-packet-dissector-http = { version = "0.2.0", path = "crates/packet-dissector-http" }
-packet-dissector-http2 = { version = "0.2.0", path = "crates/packet-dissector-http2" }
-packet-dissector-sip = { version = "0.2.0", path = "crates/packet-dissector-sip" }
-packet-dissector-diameter = { version = "0.2.0", path = "crates/packet-dissector-diameter" }
-packet-dissector-geneve = { version = "0.2.0", path = "crates/packet-dissector-geneve" }
-packet-dissector-gre = { version = "0.2.0", path = "crates/packet-dissector-gre" }
-packet-dissector-mpls = { version = "0.2.0", path = "crates/packet-dissector-mpls" }
-packet-dissector-vxlan = { version = "0.2.0", path = "crates/packet-dissector-vxlan" }
-packet-dissector-lacp = { version = "0.2.0", path = "crates/packet-dissector-lacp" }
-packet-dissector-lldp = { version = "0.2.0", path = "crates/packet-dissector-lldp" }
-packet-dissector-ntp = { version = "0.2.0", path = "crates/packet-dissector-ntp" }
-packet-dissector-ospf = { version = "0.2.0", path = "crates/packet-dissector-ospf" }
-packet-dissector-pcap = { version = "0.2.0", path = "crates/packet-dissector-pcap" }
-packet-dissector-vrrp = { version = "0.2.0", path = "crates/packet-dissector-vrrp" }
-packet-dissector-bfd = { version = "0.2.0", path = "crates/packet-dissector-bfd" }
-packet-dissector-isis = { version = "0.2.0", path = "crates/packet-dissector-isis" }
-packet-dissector-bgp = { version = "0.2.0", path = "crates/packet-dissector-bgp" }
-packet-dissector-l2tp = { version = "0.2.0", path = "crates/packet-dissector-l2tp" }
-packet-dissector-l2tpv3 = { version = "0.2.0", path = "crates/packet-dissector-l2tpv3" }
-packet-dissector-tls = { version = "0.2.0", path = "crates/packet-dissector-tls" }
-packet-dissector-reassembly = { version = "0.2.0", path = "crates/packet-dissector-reassembly" }
-packet-dissector-rtp = { version = "0.2.0", path = "crates/packet-dissector-rtp" }
-packet-dissector-ah = { version = "0.2.0", path = "crates/packet-dissector-ah" }
-packet-dissector-esp = { version = "0.2.0", path = "crates/packet-dissector-esp" }
-packet-dissector-ike = { version = "0.2.0", path = "crates/packet-dissector-ike" }
-packet-dissector-nas5g = { version = "0.2.0", path = "crates/packet-dissector-nas5g" }
-packet-dissector-ngap = { version = "0.2.0", path = "crates/packet-dissector-ngap" }
-packet-dissector-quic = { version = "0.2.0", path = "crates/packet-dissector-quic" }
-packet-dissector-radius = { version = "0.2.0", path = "crates/packet-dissector-radius" }
-packet-dissector-stun = { version = "0.2.0", path = "crates/packet-dissector-stun" }
-packet-dissector-test-alloc = { version = "0.2.0", path = "crates/packet-dissector-test-alloc" }
+packet-dissector-core = { version = "0.2.1", path = "crates/packet-dissector-core" }
+packet-dissector-ethernet = { version = "0.2.1", path = "crates/packet-dissector-ethernet" }
+packet-dissector-arp = { version = "0.2.1", path = "crates/packet-dissector-arp" }
+packet-dissector-ipv4 = { version = "0.2.1", path = "crates/packet-dissector-ipv4" }
+packet-dissector-ipv6 = { version = "0.2.1", path = "crates/packet-dissector-ipv6" }
+packet-dissector-icmp = { version = "0.2.1", path = "crates/packet-dissector-icmp" }
+packet-dissector-igmp = { version = "0.2.1", path = "crates/packet-dissector-igmp" }
+packet-dissector-icmpv6 = { version = "0.2.1", path = "crates/packet-dissector-icmpv6" }
+packet-dissector-tcp = { version = "0.2.1", path = "crates/packet-dissector-tcp" }
+packet-dissector-udp = { version = "0.2.1", path = "crates/packet-dissector-udp" }
+packet-dissector-dns = { version = "0.2.1", path = "crates/packet-dissector-dns" }
+packet-dissector-mdns = { version = "0.2.1", path = "crates/packet-dissector-mdns" }
+packet-dissector-sctp = { version = "0.2.1", path = "crates/packet-dissector-sctp" }
+packet-dissector-dhcp = { version = "0.2.1", path = "crates/packet-dissector-dhcp" }
+packet-dissector-dhcpv6 = { version = "0.2.1", path = "crates/packet-dissector-dhcpv6" }
+packet-dissector-srv6 = { version = "0.2.1", path = "crates/packet-dissector-srv6" }
+packet-dissector-gtpv1u = { version = "0.2.1", path = "crates/packet-dissector-gtpv1u" }
+packet-dissector-gtpv2c = { version = "0.2.1", path = "crates/packet-dissector-gtpv2c" }
+packet-dissector-pfcp = { version = "0.2.1", path = "crates/packet-dissector-pfcp" }
+packet-dissector-linux-sll = { version = "0.2.1", path = "crates/packet-dissector-linux-sll" }
+packet-dissector-linux-sll2 = { version = "0.2.1", path = "crates/packet-dissector-linux-sll2" }
+packet-dissector-ppp = { version = "0.2.1", path = "crates/packet-dissector-ppp" }
+packet-dissector-stp = { version = "0.2.1", path = "crates/packet-dissector-stp" }
+packet-dissector-http = { version = "0.2.1", path = "crates/packet-dissector-http" }
+packet-dissector-http2 = { version = "0.2.1", path = "crates/packet-dissector-http2" }
+packet-dissector-sip = { version = "0.2.1", path = "crates/packet-dissector-sip" }
+packet-dissector-diameter = { version = "0.2.1", path = "crates/packet-dissector-diameter" }
+packet-dissector-geneve = { version = "0.2.1", path = "crates/packet-dissector-geneve" }
+packet-dissector-gre = { version = "0.2.1", path = "crates/packet-dissector-gre" }
+packet-dissector-mpls = { version = "0.2.1", path = "crates/packet-dissector-mpls" }
+packet-dissector-vxlan = { version = "0.2.1", path = "crates/packet-dissector-vxlan" }
+packet-dissector-lacp = { version = "0.2.1", path = "crates/packet-dissector-lacp" }
+packet-dissector-lldp = { version = "0.2.1", path = "crates/packet-dissector-lldp" }
+packet-dissector-ntp = { version = "0.2.1", path = "crates/packet-dissector-ntp" }
+packet-dissector-ospf = { version = "0.2.1", path = "crates/packet-dissector-ospf" }
+packet-dissector-pcap = { version = "0.2.1", path = "crates/packet-dissector-pcap" }
+packet-dissector-vrrp = { version = "0.2.1", path = "crates/packet-dissector-vrrp" }
+packet-dissector-bfd = { version = "0.2.1", path = "crates/packet-dissector-bfd" }
+packet-dissector-isis = { version = "0.2.1", path = "crates/packet-dissector-isis" }
+packet-dissector-bgp = { version = "0.2.1", path = "crates/packet-dissector-bgp" }
+packet-dissector-l2tp = { version = "0.2.1", path = "crates/packet-dissector-l2tp" }
+packet-dissector-l2tpv3 = { version = "0.2.1", path = "crates/packet-dissector-l2tpv3" }
+packet-dissector-tls = { version = "0.2.1", path = "crates/packet-dissector-tls" }
+packet-dissector-reassembly = { version = "0.2.1", path = "crates/packet-dissector-reassembly" }
+packet-dissector-rtp = { version = "0.2.1", path = "crates/packet-dissector-rtp" }
+packet-dissector-ah = { version = "0.2.1", path = "crates/packet-dissector-ah" }
+packet-dissector-esp = { version = "0.2.1", path = "crates/packet-dissector-esp" }
+packet-dissector-ike = { version = "0.2.1", path = "crates/packet-dissector-ike" }
+packet-dissector-nas5g = { version = "0.2.1", path = "crates/packet-dissector-nas5g" }
+packet-dissector-ngap = { version = "0.2.1", path = "crates/packet-dissector-ngap" }
+packet-dissector-quic = { version = "0.2.1", path = "crates/packet-dissector-quic" }
+packet-dissector-radius = { version = "0.2.1", path = "crates/packet-dissector-radius" }
+packet-dissector-stun = { version = "0.2.1", path = "crates/packet-dissector-stun" }
+packet-dissector-test-alloc = { version = "0.2.1", path = "crates/packet-dissector-test-alloc" }
 aes = "0.8"
 cbc = "0.1"
 aes-gcm = "0.10"
