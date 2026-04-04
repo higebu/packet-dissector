@@ -89,6 +89,16 @@ const FD_RECORDS: usize = 25;
 const FD_HOME_AGENT_ADDRESSES: usize = 26;
 const FD_QUERY_INTERVAL: usize = 27;
 const FD_ROBUSTNESS_VARIABLE: usize = 28;
+const FD_INVOKING_PACKET: usize = 29;
+
+/// Minimum IPv6 header size (RFC 8200, Section 3).
+const IPV6_MIN_HEADER: usize = 40;
+
+/// Child field descriptor indices for [`INVOKING_PACKET_CHILDREN`].
+const IPC_VERSION: usize = 0;
+const IPC_NEXT_HEADER: usize = 1;
+const IPC_SRC: usize = 2;
+const IPC_DST: usize = 3;
 
 /// Child field descriptor indices for [`NDP_OPTION_CHILDREN`].
 const NOC_TYPE: usize = 0;
@@ -134,6 +144,15 @@ const MRC_AUX_DATA_LEN: usize = 1;
 const MRC_NUM_SOURCES: usize = 2;
 const MRC_MULTICAST_ADDRESS: usize = 3;
 const MRC_SOURCES: usize = 4;
+
+/// Child field descriptors for the invoking IPv6 packet embedded in error messages
+/// (RFC 4443, Sections 3.1 and 3.3).
+static INVOKING_PACKET_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("version", "Version", FieldType::U8),
+    FieldDescriptor::new("next_header", "Next Header", FieldType::U8),
+    FieldDescriptor::new("src", "Source Address", FieldType::Ipv6Addr),
+    FieldDescriptor::new("dst", "Destination Address", FieldType::Ipv6Addr),
+];
 
 /// Child field descriptors for MLDv2 multicast address record entries.
 static MLDV2_RECORD_CHILDREN: &[FieldDescriptor] = &[
@@ -218,10 +237,62 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional(),
     FieldDescriptor::new("query_interval", "Query Interval", FieldType::U16).optional(),
     FieldDescriptor::new("robustness_variable", "Robustness Variable", FieldType::U16).optional(),
+    // RFC 4443, Sections 3.1/3.3 — invoking packet in error messages
+    FieldDescriptor::new("invoking_packet", "Invoking Packet", FieldType::Object)
+        .optional()
+        .with_children(INVOKING_PACKET_CHILDREN),
 ];
 
 /// ICMPv6 dissector.
 pub struct Icmpv6Dissector;
+
+/// Push invoking packet fields as an Object container into buf.
+///
+/// RFC 4443, Sections 3.1 and 3.3 — error messages include the original IPv6
+/// packet that triggered the error, starting after the 8-byte ICMPv6 header.
+fn push_invoking_packet<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    if data.len() >= IPV6_MIN_HEADER {
+        let version = data[0] >> 4;
+        let next_header = data[6];
+        let mut src = [0u8; 16];
+        src.copy_from_slice(&data[8..24]);
+        let mut dst = [0u8; 16];
+        dst.copy_from_slice(&data[24..40]);
+
+        let obj_idx = buf.begin_container(
+            &FIELD_DESCRIPTORS[FD_INVOKING_PACKET],
+            FieldValue::Object(0..0),
+            offset..offset + data.len(),
+        );
+        buf.push_field(
+            &INVOKING_PACKET_CHILDREN[IPC_VERSION],
+            FieldValue::U8(version),
+            offset..offset + 1,
+        );
+        buf.push_field(
+            &INVOKING_PACKET_CHILDREN[IPC_NEXT_HEADER],
+            FieldValue::U8(next_header),
+            offset + 6..offset + 7,
+        );
+        buf.push_field(
+            &INVOKING_PACKET_CHILDREN[IPC_SRC],
+            FieldValue::Ipv6Addr(src),
+            offset + 8..offset + 24,
+        );
+        buf.push_field(
+            &INVOKING_PACKET_CHILDREN[IPC_DST],
+            FieldValue::Ipv6Addr(dst),
+            offset + 24..offset + 40,
+        );
+        buf.end_container(obj_idx);
+    } else {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_INVOKING_PACKET],
+            FieldValue::Bytes(data),
+            offset..offset + data.len(),
+        );
+    }
+}
 
 /// Parse NDP options (RFC 4861, Section 4.6).
 ///
@@ -721,6 +792,10 @@ impl Dissector for Icmpv6Dissector {
                         offset + 4..offset + 5,
                     );
                 }
+                // RFC 4443 — invoking packet follows the 8-byte header
+                if data.len() > HEADER_SIZE {
+                    push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
+                }
             }
 
             // RFC 4443, Section 3.2 — Packet Too Big (Type 2)
@@ -1095,5 +1170,136 @@ impl Dissector for Icmpv6Dissector {
         buf.end_layer();
 
         Ok(DissectResult::new(total_len, DispatchHint::End))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! # ICMPv6 invoking packet coverage
+    //!
+    //! | RFC Section                          | Description                        | Test                                          |
+    //! |--------------------------------------|------------------------------------|-----------------------------------------------|
+    //! | RFC 4443 §3.1 Destination Unreachable | Invoking IPv6 packet parsing      | parse_dest_unreachable_with_invoking_ipv6      |
+    //! | RFC 4443 §3.3 Time Exceeded          | Invoking IPv6 packet parsing       | parse_time_exceeded_with_invoking_ipv6         |
+    //! | RFC 4443 §3.1 Destination Unreachable | Truncated invoking packet          | parse_dest_unreachable_truncated_invoking       |
+    //! | RFC 4443 §3.1 Destination Unreachable | No invoking packet data            | parse_dest_unreachable_no_invoking             |
+
+    use super::*;
+
+    /// Build an ICMPv6 error message with an invoking IPv6 packet.
+    ///
+    /// `icmpv6_type`: 1 (Dest Unreachable) or 3 (Time Exceeded)
+    /// `invoking`: bytes to append after the 8-byte ICMPv6 header
+    fn build_icmpv6_error(icmpv6_type: u8, code: u8, invoking: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(HEADER_SIZE + invoking.len());
+        pkt.push(icmpv6_type);
+        pkt.push(code);
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // unused / length=0
+        pkt.extend_from_slice(invoking);
+        pkt
+    }
+
+    /// Build a minimal IPv6 header (40 bytes).
+    fn build_ipv6_header(next_header: u8, src: [u8; 16], dst: [u8; 16]) -> Vec<u8> {
+        let mut hdr = vec![0u8; 40];
+        hdr[0] = 0x60; // version=6, traffic class high nibble=0
+        hdr[6] = next_header;
+        hdr[8..24].copy_from_slice(&src);
+        hdr[24..40].copy_from_slice(&dst);
+        hdr
+    }
+
+    #[test]
+    fn parse_dest_unreachable_with_invoking_ipv6() {
+        let src = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let invoking = build_ipv6_header(17, src, dst); // next_header=17 (UDP)
+        let data = build_icmpv6_error(1, 0, &invoking);
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+
+        // Find invoking_packet object
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+
+        // Check children
+        let children = buf.nested_fields(&range);
+        assert_eq!(children.len(), 4);
+        assert_eq!(children[0].value, FieldValue::U8(6)); // version
+        assert_eq!(children[1].value, FieldValue::U8(17)); // next_header
+        assert_eq!(children[2].value, FieldValue::Ipv6Addr(src)); // src
+        assert_eq!(children[3].value, FieldValue::Ipv6Addr(dst)); // dst
+    }
+
+    #[test]
+    fn parse_time_exceeded_with_invoking_ipv6() {
+        let src = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let invoking = build_ipv6_header(6, src, dst); // next_header=6 (TCP)
+        let data = build_icmpv6_error(3, 0, &invoking);
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        assert_eq!(children[0].value, FieldValue::U8(6)); // version
+        assert_eq!(children[1].value, FieldValue::U8(6)); // next_header (TCP)
+    }
+
+    #[test]
+    fn parse_dest_unreachable_truncated_invoking() {
+        // Only 10 bytes of invoking data (< 40 byte IPv6 minimum)
+        let invoking = &[0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x40, 0xfe, 0x80];
+        let data = build_icmpv6_error(1, 3, invoking);
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ip_field = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        // Should be raw bytes, not a structured Object
+        assert!(matches!(ip_field.value, FieldValue::Bytes(_)));
+    }
+
+    #[test]
+    fn parse_dest_unreachable_no_invoking() {
+        // Exactly 8 bytes — no invoking packet data
+        let data = build_icmpv6_error(1, 0, &[]);
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        assert!(
+            fields
+                .iter()
+                .all(|f| f.descriptor.name != "invoking_packet")
+        );
     }
 }
