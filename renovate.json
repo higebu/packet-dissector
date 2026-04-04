@@ -3,11 +3,5 @@
   "extends": [
     "config:recommended"
   ],
-  "labels": ["dependencies"],
-  "cargo": {
-    "enabled": true
-  },
-  "github-actions": {
-    "enabled": true
-  }
+  "labels": ["dependencies"]
 }
