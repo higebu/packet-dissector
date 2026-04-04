@@ -1,13 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    ":conventionalCommits"
   ],
-  "labels": ["dependencies"],
-  "cargo": {
-    "enabled": true
-  },
-  "github-actions": {
-    "enabled": true
-  }
+  "labels": ["dependencies"]
 }
