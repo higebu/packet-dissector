@@ -74,6 +74,9 @@ const IPC_TOTAL_LENGTH: usize = 2;
 const IPC_PROTOCOL: usize = 3;
 const IPC_SRC: usize = 4;
 const IPC_DST: usize = 5;
+const IPC_SRC_PORT: usize = 6;
+const IPC_DST_PORT: usize = 7;
+const IPC_TRANSPORT_DATA: usize = 8;
 
 static INVOKING_PACKET_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
@@ -82,6 +85,9 @@ static INVOKING_PACKET_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("protocol", "Protocol", FieldType::U8),
     FieldDescriptor::new("src", "Source Address", FieldType::Ipv4Addr),
     FieldDescriptor::new("dst", "Destination Address", FieldType::Ipv4Addr),
+    FieldDescriptor::new("src_port", "Source Port", FieldType::U16).optional(),
+    FieldDescriptor::new("dst_port", "Destination Port", FieldType::U16).optional(),
+    FieldDescriptor::new("transport_data", "Transport Data", FieldType::Bytes).optional(),
 ];
 
 const REC_ROUTER_ADDRESS: usize = 0;
@@ -183,6 +189,42 @@ fn push_invoking_packet<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], o
             FieldValue::Ipv4Addr(dst),
             offset + 16..offset + 20,
         );
+
+        // RFC 792 — parse transport layer from the invoking packet.
+        // ICMP error messages include the original IP header + first 8 bytes of
+        // the original datagram, which covers src_port/dst_port for TCP and UDP.
+        let ip_header_len = (ihl as usize) * 4;
+        if ip_header_len >= IPV4_MIN_HEADER && data.len() > ip_header_len {
+            let transport = &data[ip_header_len..];
+            let transport_offset = offset + ip_header_len;
+            match protocol {
+                6 | 17 => {
+                    // TCP/UDP: first 4 bytes are src_port (2) + dst_port (2)
+                    if transport.len() >= 4 {
+                        let src_port = u16::from_be_bytes([transport[0], transport[1]]);
+                        let dst_port = u16::from_be_bytes([transport[2], transport[3]]);
+                        buf.push_field(
+                            &INVOKING_PACKET_CHILDREN[IPC_SRC_PORT],
+                            FieldValue::U16(src_port),
+                            transport_offset..transport_offset + 2,
+                        );
+                        buf.push_field(
+                            &INVOKING_PACKET_CHILDREN[IPC_DST_PORT],
+                            FieldValue::U16(dst_port),
+                            transport_offset + 2..transport_offset + 4,
+                        );
+                    }
+                }
+                _ => {
+                    buf.push_field(
+                        &INVOKING_PACKET_CHILDREN[IPC_TRANSPORT_DATA],
+                        FieldValue::Bytes(transport),
+                        transport_offset..transport_offset + transport.len(),
+                    );
+                }
+            }
+        }
+
         buf.end_container(obj_idx);
     } else {
         buf.push_field(
@@ -585,5 +627,200 @@ impl Dissector for IcmpDissector {
         buf.end_layer();
 
         Ok(DissectResult::new(data.len(), DispatchHint::End))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! # ICMP invoking packet coverage
+    //!
+    //! | RFC Section                     | Description                          | Test                                      |
+    //! |---------------------------------|--------------------------------------|-------------------------------------------|
+    //! | RFC 792 Destination Unreachable  | IPv4 header only (regression)        | parse_invoking_packet_ipv4_only           |
+    //! | RFC 792 Destination Unreachable  | UDP src_port/dst_port extraction     | parse_dest_unreachable_udp_ports          |
+    //! | RFC 792 Destination Unreachable  | TCP src_port/dst_port extraction     | parse_dest_unreachable_tcp_ports          |
+    //! | RFC 792 Destination Unreachable  | Other protocol → raw bytes           | parse_dest_unreachable_other_protocol     |
+    //! | RFC 792 Destination Unreachable  | Truncated transport (no ports)       | parse_dest_unreachable_truncated_transport |
+
+    use super::*;
+
+    /// Build an ICMP Destination Unreachable (type 3) packet with an invoking packet.
+    fn build_dest_unreachable(code: u8, invoking: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(HEADER_SIZE + invoking.len());
+        pkt.push(3); // type = Destination Unreachable
+        pkt.push(code);
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // unused
+        pkt.extend_from_slice(invoking);
+        pkt
+    }
+
+    /// Build a minimal IPv4 header (20 bytes, IHL=5) with the given protocol.
+    fn build_ipv4_header(protocol: u8, src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
+        let mut hdr = vec![0u8; 20];
+        hdr[0] = 0x45; // version=4, ihl=5
+        hdr[2] = 0x00; // total_length high byte
+        hdr[3] = 0x28; // total_length = 40
+        hdr[9] = protocol;
+        hdr[12..16].copy_from_slice(&src);
+        hdr[16..20].copy_from_slice(&dst);
+        hdr
+    }
+
+    #[test]
+    fn parse_invoking_packet_ipv4_only() {
+        let invoking = build_ipv4_header(17, [10, 0, 0, 1], [10, 0, 0, 2]);
+        let data = build_dest_unreachable(0, &invoking);
+
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        assert_eq!(children[IPC_VERSION].value, FieldValue::U8(4));
+        assert_eq!(children[IPC_IHL].value, FieldValue::U8(5));
+        assert_eq!(children[IPC_PROTOCOL].value, FieldValue::U8(17));
+        assert_eq!(children[IPC_SRC].value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
+        assert_eq!(children[IPC_DST].value, FieldValue::Ipv4Addr([10, 0, 0, 2]));
+    }
+
+    #[test]
+    fn parse_dest_unreachable_udp_ports() {
+        let src = [192, 168, 1, 1];
+        let dst = [192, 168, 1, 2];
+        let mut invoking = build_ipv4_header(17, src, dst); // UDP
+        // Append UDP header: src_port(2) + dst_port(2) + length(2) + checksum(2)
+        invoking.extend_from_slice(&[0x1F, 0x90]); // src_port = 8080
+        invoking.extend_from_slice(&[0x00, 0x35]); // dst_port = 53
+        invoking.extend_from_slice(&[0x00, 0x08, 0x00, 0x00]); // length + checksum
+        let data = build_dest_unreachable(3, &invoking); // code 3 = Port Unreachable
+
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        let src_port = children
+            .iter()
+            .find(|f| f.descriptor.name == "src_port")
+            .unwrap();
+        assert_eq!(src_port.value, FieldValue::U16(8080));
+        let dst_port = children
+            .iter()
+            .find(|f| f.descriptor.name == "dst_port")
+            .unwrap();
+        assert_eq!(dst_port.value, FieldValue::U16(53));
+    }
+
+    #[test]
+    fn parse_dest_unreachable_tcp_ports() {
+        let src = [10, 0, 0, 1];
+        let dst = [10, 0, 0, 2];
+        let mut invoking = build_ipv4_header(6, src, dst); // TCP
+        // Append TCP header first 8 bytes: src_port(2) + dst_port(2) + seq(4)
+        invoking.extend_from_slice(&[0x00, 0x50]); // src_port = 80
+        invoking.extend_from_slice(&[0xC0, 0x00]); // dst_port = 49152
+        invoking.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // seq
+        let data = build_dest_unreachable(3, &invoking);
+
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        let src_port = children
+            .iter()
+            .find(|f| f.descriptor.name == "src_port")
+            .unwrap();
+        assert_eq!(src_port.value, FieldValue::U16(80));
+        let dst_port = children
+            .iter()
+            .find(|f| f.descriptor.name == "dst_port")
+            .unwrap();
+        assert_eq!(dst_port.value, FieldValue::U16(49152));
+    }
+
+    #[test]
+    fn parse_dest_unreachable_other_protocol() {
+        let mut invoking = build_ipv4_header(1, [10, 0, 0, 1], [10, 0, 0, 2]); // ICMP
+        invoking.extend_from_slice(&[0x08, 0x00, 0xAB, 0xCD, 0x00, 0x01, 0x00, 0x01]);
+        let data = build_dest_unreachable(0, &invoking);
+
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        let transport = children
+            .iter()
+            .find(|f| f.descriptor.name == "transport_data")
+            .unwrap();
+        assert!(matches!(transport.value, FieldValue::Bytes(_)));
+    }
+
+    #[test]
+    fn parse_dest_unreachable_truncated_transport() {
+        // IPv4 header only, no transport data
+        let invoking = build_ipv4_header(17, [10, 0, 0, 1], [10, 0, 0, 2]);
+        let data = build_dest_unreachable(3, &invoking);
+
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .unwrap();
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        // Should only have the 6 IPv4 header fields, no port fields
+        assert!(children.iter().all(|f| f.descriptor.name != "src_port"));
+        assert!(children.iter().all(|f| f.descriptor.name != "dst_port"));
+        assert!(
+            children
+                .iter()
+                .all(|f| f.descriptor.name != "transport_data")
+        );
     }
 }
