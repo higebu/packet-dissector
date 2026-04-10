@@ -241,10 +241,17 @@ impl Dissector for EspDissector {
 }
 
 impl EspDissector {
-    /// Try to decrypt the ESP payload using the SA database.
+    /// Try to decrypt the ESP payload.
     ///
-    /// Returns `Some(DecryptedPayload)` on success, `None` if no SA found
-    /// or decryption fails (graceful degradation).
+    /// First looks up a configured SA in the database. When no SA is
+    /// present, falls back to a heuristic NULL-encryption decode
+    /// ([`crypto::try_null_decrypt`]) so that unauthenticated plaintext
+    /// ESP flows can still be chained into the inner protocol dissector
+    /// without manual configuration.
+    ///
+    /// Returns `Some(DecryptedPayload)` on success, `None` when no decoding
+    /// was possible (graceful degradation to displaying the raw encrypted
+    /// bytes).
     fn try_decrypt(
         &self,
         spi: u32,
@@ -254,15 +261,19 @@ impl EspDissector {
         total_len: usize,
         buf: &mut DissectBuffer<'_>,
     ) -> Option<DecryptedPayload> {
-        let sa = self.sa_db.get(spi)?;
-
-        let result = crypto::decrypt_esp(&sa, spi, seq, encrypted_data).ok()?;
+        // Determine the decrypted trailer and ICV length based on whether
+        // an SA is configured. Without an SA, the heuristic NULL path
+        // assumes no authentication (ICV length = 0).
+        let (result, icv_len) = match self.sa_db.get(spi) {
+            Some(sa) => {
+                let result = crypto::decrypt_esp(&sa, spi, seq, encrypted_data).ok()?;
+                (result, sa.authentication.icv_len())
+            }
+            None => (crypto::try_null_decrypt(encrypted_data)?, 0),
+        };
 
         // Byte ranges for trailer fields point at the ESP trailer's original
-        // position in the packet (last 2 bytes before ICV). These are inside
-        // the encrypted region so the ranges are approximate, but they avoid
-        // overlapping with the ESP header fields.
-        let icv_len = sa.authentication.icv_len();
+        // position in the packet (last 2 bytes before the ICV, if any).
         if icv_len > total_len {
             return None;
         }
@@ -292,17 +303,21 @@ impl EspDissector {
 mod tests {
     //! # RFC 4303 (ESP) Coverage
     //!
-    //! | RFC Section | Description              | Test                           |
-    //! |-------------|--------------------------|--------------------------------|
-    //! | 2           | Header Format            | parse_esp_basic                |
-    //! | 2.1         | SPI                      | parse_esp_basic                |
-    //! | 2.2         | Sequence Number          | parse_esp_basic                |
-    //! | 2.3-2.8     | Encrypted Data           | parse_esp_with_payload         |
-    //! | —           | Truncated header         | truncated_header               |
-    //! | —           | Header only (no payload) | parse_esp_header_only          |
-    //! | —           | NULL decryption          | decrypt_null_sa                |
-    //! | —           | AES-CBC decryption       | decrypt_aes_128_cbc            |
-    //! | —           | No SA (graceful)         | no_sa_shows_encrypted          |
+    //! | RFC Section | Description                       | Test                            |
+    //! |-------------|-----------------------------------|---------------------------------|
+    //! | 2           | Header Format                     | parse_esp_basic                 |
+    //! | 2.1         | SPI                               | parse_esp_basic                 |
+    //! | 2.2         | Sequence Number                   | parse_esp_basic                 |
+    //! | 2.3-2.8     | Encrypted Data                    | parse_esp_with_payload          |
+    //! | —           | Truncated header                  | truncated_header                |
+    //! | —           | Header only (no payload)          | parse_esp_header_only           |
+    //! | —           | NULL decryption (with SA)         | decrypt_null_sa                 |
+    //! | —           | AES-CBC decryption                | decrypt_aes_128_cbc             |
+    //! | —           | No SA (graceful)                  | no_sa_shows_encrypted           |
+    //! | 2.4-2.6     | NULL heuristic (no SA)            | null_heuristic_decrypts_without_sa |
+    //! | 2.4         | NULL heuristic padding            | null_heuristic_with_padding     |
+    //! | 2.4         | NULL heuristic bad padding        | null_heuristic_fails_bad_padding |
+    //! | —           | SA overrides heuristic            | sa_takes_priority_over_heuristic |
 
     use super::*;
 
@@ -355,7 +370,11 @@ mod tests {
             0xAB, 0xCD, 0xEF, 0x01, // SPI = 0xABCDEF01
             0x00, 0x00, 0x00, 0x64, // Sequence Number = 100
         ];
-        let payload = vec![0x01; 128]; // 128 bytes of encrypted data
+        // 128 bytes of encrypted data. The final byte 0xFF is not a known
+        // IP protocol number, ensuring the NULL-decryption heuristic does
+        // not match and the payload is displayed as opaque encrypted_data.
+        let mut payload = vec![0x01; 127];
+        payload.push(0xFF);
         data.extend_from_slice(&payload);
 
         let mut buf = DissectBuffer::new();
@@ -506,6 +525,9 @@ mod tests {
         let dissector = EspDissector::new();
         // No SA added for this SPI
 
+        // Final byte 0xEF (239) is not a known IP protocol, so the NULL
+        // decryption heuristic returns None and the dissector falls back
+        // to displaying the opaque encrypted_data field.
         let data: &[u8] = &[
             0x00, 0x00, 0x30, 0x03, // SPI = 0x3003
             0x00, 0x00, 0x00, 0x01, // seq
@@ -519,5 +541,114 @@ mod tests {
         let layer = &buf.layers()[0];
         assert!(buf.field_by_name(layer, "encrypted_data").is_some());
         assert!(buf.field_by_name(layer, "next_header").is_none());
+    }
+
+    #[test]
+    fn null_heuristic_decrypts_without_sa() {
+        let dissector = EspDissector::new();
+        // No SA configured.
+
+        // Payload layout: inner=[0x45, 0x00] + pad_length=0 + next_header=6 (TCP)
+        let data: &[u8] = &[
+            0x00, 0x00, 0x40, 0x04, // SPI = 0x4004
+            0x00, 0x00, 0x00, 0x02, // seq = 2
+            0x45, 0x00, 0x00, 0x06, // inner + trailer
+        ];
+        let mut buf = DissectBuffer::new();
+        let result = dissector.dissect(data, &mut buf, 0).unwrap();
+
+        // Heuristic should succeed and expose a decrypted payload.
+        assert!(result.decrypted_payload.is_some());
+        let dp = result.decrypted_payload.unwrap();
+        assert_eq!(dp.next, DispatchHint::ByIpProtocol(6));
+        assert_eq!(dp.data, vec![0x45, 0x00]);
+
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "next_header").unwrap().value,
+            FieldValue::U8(6)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "pad_length").unwrap().value,
+            FieldValue::U8(0)
+        );
+        // encrypted_data must NOT be present when the heuristic succeeded.
+        assert!(buf.field_by_name(layer, "encrypted_data").is_none());
+    }
+
+    #[test]
+    fn null_heuristic_with_padding() {
+        let dissector = EspDissector::new();
+
+        // inner=[0xAA] + padding=[0x01,0x02] + pad_length=2 + next_header=17 (UDP)
+        let data: &[u8] = &[
+            0x00, 0x00, 0x40, 0x05, // SPI
+            0x00, 0x00, 0x00, 0x01, // seq
+            0xAA, 0x01, 0x02, 0x02, 0x11,
+        ];
+        let mut buf = DissectBuffer::new();
+        let result = dissector.dissect(data, &mut buf, 0).unwrap();
+
+        let dp = result.decrypted_payload.unwrap();
+        assert_eq!(dp.next, DispatchHint::ByIpProtocol(17));
+        assert_eq!(dp.data, vec![0xAA]);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "pad_length").unwrap().value,
+            FieldValue::U8(2)
+        );
+    }
+
+    #[test]
+    fn null_heuristic_fails_bad_padding() {
+        let dissector = EspDissector::new();
+
+        // pad_length=2 but padding bytes [0x03, 0x02] don't match [0x01, 0x02].
+        let data: &[u8] = &[
+            0x00, 0x00, 0x40, 0x06, // SPI
+            0x00, 0x00, 0x00, 0x01, // seq
+            0x45, 0x03, 0x02, 0x02, 0x06,
+        ];
+        let mut buf = DissectBuffer::new();
+        let result = dissector.dissect(data, &mut buf, 0).unwrap();
+
+        assert!(result.decrypted_payload.is_none());
+        assert_eq!(result.next, DispatchHint::End);
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "encrypted_data").is_some());
+        assert!(buf.field_by_name(layer, "next_header").is_none());
+    }
+
+    #[test]
+    fn sa_takes_priority_over_heuristic() {
+        // When an SA is configured, the SA path must be used even if the
+        // heuristic would also succeed on the same bytes.
+        let dissector = EspDissector::new();
+        dissector.add_sa(
+            0x5005,
+            EspSa {
+                encryption: EncryptionAlgorithm::Null,
+                enc_key: vec![],
+                authentication: AuthenticationAlgorithm::HmacSha1_96,
+                auth_key: vec![0; 20],
+            },
+        );
+
+        // The SA has a 12-byte ICV, so the dissector strips the last 12 bytes
+        // before extracting the trailer. Plaintext+trailer = [0x45, 0x00, 0x00, 0x04],
+        // followed by a 12-byte ICV.
+        let mut data = vec![
+            0x00, 0x00, 0x50, 0x05, // SPI
+            0x00, 0x00, 0x00, 0x01, // seq
+            0x45, 0x00, 0x00, 0x04, // payload + trailer
+        ];
+        data.extend_from_slice(&[0xAA; 12]); // ICV
+
+        let mut buf = DissectBuffer::new();
+        let result = dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let dp = result.decrypted_payload.unwrap();
+        assert_eq!(dp.next, DispatchHint::ByIpProtocol(4));
+        assert_eq!(dp.data, vec![0x45, 0x00]);
     }
 }

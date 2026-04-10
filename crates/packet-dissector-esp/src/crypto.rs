@@ -12,6 +12,13 @@
 //!   <https://www.rfc-editor.org/rfc/rfc2410>
 
 use packet_dissector_core::error::PacketError;
+use packet_dissector_core::lookup::ip_protocol_name;
+
+/// IP protocol number for HOPOPT (IPv6 Hop-by-Hop Options).
+const IP_PROTO_HOPOPT: u8 = 0;
+
+/// IP protocol number for IPv6 No Next Header (RFC 8200, Section 4.7).
+const IP_PROTO_IPV6_NONXT: u8 = 59;
 
 /// Encryption algorithm for an ESP Security Association.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +155,81 @@ fn decrypt_null(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
     }
     let plaintext = data[..data.len() - icv_len].to_vec();
     extract_trailer(plaintext)
+}
+
+/// Heuristically attempt to decode ESP payload as NULL-encrypted plaintext.
+///
+/// When no Security Association is configured for the packet's SPI, this
+/// function treats the raw payload (everything after the 8-byte ESP header)
+/// as plaintext and tries to extract the ESP trailer. Inspired by passive
+/// capture analysers such as Wireshark, it enables inner packet dissection
+/// of unauthenticated NULL-encrypted ESP flows without pre-configuring an SA.
+///
+/// # Validation
+///
+/// Returns `None` (never allocating) unless ALL of the following hold:
+///
+/// 1. `data.len() >= 2` — room for `pad_length` and `next_header`.
+/// 2. `next_header` (last byte) is a well-known IP protocol number
+///    recognised by [`ip_protocol_name`]. This rejects the vast majority
+///    of random bytes that would otherwise appear as valid trailers.
+/// 3. `next_header` is not in the small set of values that are either
+///    unlikely to appear as an ESP inner protocol or are strongly biased
+///    towards false positives on zero-filled ciphertext: HOPOPT (0),
+///    IPv6_NONXT (59). HOPOPT in particular matches any payload whose
+///    final byte is `0x00`, which is extremely common in random data.
+/// 4. `pad_length + 2 <= data.len()` — the padding field does not
+///    overrun the payload.
+/// 5. Padding bytes match the monotonically increasing sequence
+///    `1, 2, 3, ..., pad_length` mandated by RFC 4303 Section 2.4.
+///    This rule provides strong protection against false positives
+///    when `pad_length > 0`.
+///
+/// Because authentication is never assumed for the heuristic path, this
+/// function does not account for an ICV — NULL encryption with an ICV
+/// requires an explicitly configured SA.
+///
+/// # References
+/// - RFC 2410 (NULL Encryption):
+///   <https://www.rfc-editor.org/rfc/rfc2410>
+/// - RFC 4303, Section 2.4 (Padding):
+///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.4>
+/// - RFC 4303, Section 2.5 (Pad Length):
+///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.5>
+/// - RFC 4303, Section 2.6 (Next Header):
+///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.6>
+pub fn try_null_decrypt(data: &[u8]) -> Option<DecryptedEsp> {
+    if data.len() < 2 {
+        return None;
+    }
+
+    let next_header = data[data.len() - 1];
+    let pad_length = data[data.len() - 2] as usize;
+
+    ip_protocol_name(next_header)?;
+
+    // HOPOPT matches any zero-filled trailer (extremely common in random
+    // ciphertext), and IPv6_NONXT has no dispatch target.
+    if next_header == IP_PROTO_HOPOPT || next_header == IP_PROTO_IPV6_NONXT {
+        return None;
+    }
+
+    if pad_length + 2 > data.len() {
+        return None;
+    }
+
+    let pad_start = data.len() - 2 - pad_length;
+    for (i, &b) in data[pad_start..data.len() - 2].iter().enumerate() {
+        if b as usize != i + 1 {
+            return None;
+        }
+    }
+
+    Some(DecryptedEsp {
+        payload: data[..pad_start].to_vec(),
+        next_header,
+        pad_length: pad_length as u8,
+    })
 }
 
 /// AES-CBC decryption.
@@ -863,5 +945,90 @@ mod tests {
         assert_eq!(AuthenticationAlgorithm::None.icv_len(), 0);
         assert_eq!(AuthenticationAlgorithm::HmacSha1_96.icv_len(), 12);
         assert_eq!(AuthenticationAlgorithm::HmacSha256_128.icv_len(), 16);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_basic() {
+        // payload=[0x45, 0x00], pad_length=0, next_header=6 (TCP)
+        let data = [0x45, 0x00, 0x00, 0x06];
+        let result = try_null_decrypt(&data).unwrap();
+        assert_eq!(result.next_header, 6);
+        assert_eq!(result.pad_length, 0);
+        assert_eq!(result.payload, vec![0x45, 0x00]);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_with_padding() {
+        // payload=[0x45], padding=[0x01, 0x02], pad_length=2, next_header=6 (TCP)
+        let data = [0x45, 0x01, 0x02, 0x02, 0x06];
+        let result = try_null_decrypt(&data).unwrap();
+        assert_eq!(result.next_header, 6);
+        assert_eq!(result.pad_length, 2);
+        assert_eq!(result.payload, vec![0x45]);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_unknown_next_header() {
+        // next_header=0xFF (not in ip_protocol_name lookup)
+        let data = [0x45, 0x00, 0x00, 0xFF];
+        assert!(try_null_decrypt(&data).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_bad_padding_pattern() {
+        // Padding bytes don't follow RFC 4303 pattern: [0x03, 0x02] != [0x01, 0x02]
+        let data = [0x45, 0x03, 0x02, 0x02, 0x06];
+        assert!(try_null_decrypt(&data).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_too_short() {
+        assert!(try_null_decrypt(&[0x06]).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_empty() {
+        assert!(try_null_decrypt(&[]).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_pad_length_exceeds_data() {
+        // pad_length=100 but only 4 bytes total
+        let data = [0x45, 0x00, 100, 0x06];
+        assert!(try_null_decrypt(&data).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_valid_large_padding() {
+        // payload=[0xAA], padding=[0x01, 0x02, 0x03, 0x04], pad_length=4, next_header=17 (UDP)
+        let data = [0xAA, 0x01, 0x02, 0x03, 0x04, 0x04, 0x11];
+        let result = try_null_decrypt(&data).unwrap();
+        assert_eq!(result.next_header, 17);
+        assert_eq!(result.pad_length, 4);
+        assert_eq!(result.payload, vec![0xAA]);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_ipv4_encap() {
+        // next_header=4 (IPv4-in-IPv4, RFC 2003)
+        let data = [0x45, 0x00, 0x00, 0x04];
+        let result = try_null_decrypt(&data).unwrap();
+        assert_eq!(result.next_header, 4);
+        assert_eq!(result.payload, vec![0x45, 0x00]);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_hopopt_excluded() {
+        // next_header=0 (HOPOPT) is intentionally rejected by the heuristic
+        // to prevent false positives on zero-filled ciphertext.
+        let data = [0x00; 16];
+        assert!(try_null_decrypt(&data).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_nonxt_excluded() {
+        // next_header=59 (IPv6_NONXT) is excluded: no dispatch target.
+        let data = [0x45, 0x00, 0x00, 59];
+        assert!(try_null_decrypt(&data).is_none());
     }
 }
