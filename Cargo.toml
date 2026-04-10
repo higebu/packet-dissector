@@ -65,7 +65,7 @@ packet-dissector-radius = { version = "0.2.2", path = "crates/packet-dissector-r
 packet-dissector-stun = { version = "0.2.2", path = "crates/packet-dissector-stun" }
 packet-dissector-test-alloc = { version = "0.2.2", path = "crates/packet-dissector-test-alloc" }
 aes = "0.8"
-cbc = "0.1"
+cbc = "0.2"
 aes-gcm = "0.10"
 thiserror = "2"
 criterion = { version = "0.8", features = ["html_reports"] }
