@@ -80,6 +80,8 @@
 //! | Ethernet → IPv4 → UDP → L2TPv3-UDP (data)                 | integration_ethernet_ipv4_udp_l2tpv3_data            |
 //! | Ethernet → IPv4 → AH → TCP                                 | integration_ethernet_ipv4_ah_tcp                     |
 //! | Ethernet → IPv4 → ESP                                       | integration_ethernet_ipv4_esp                        |
+//! | Ethernet → IPv4 → ESP (NULL tunnel) → IPv4 → UDP             | integration_ethernet_ipv4_esp_null_ipv4_udp          |
+//! | Ethernet → IPv4 → ESP (NULL transport) → UDP                  | integration_ethernet_ipv4_esp_null_transport_udp     |
 //! | Ethernet → IPv4 → UDP(500) → IKEv2 IKE_SA_INIT              | integration_ethernet_ipv4_udp_ike_sa_init            |
 //! | Ethernet → IPv4 → UDP → RTP                                  | integration_ethernet_ipv4_udp_rtp                    |
 //! | Ethernet → IPv4 → UDP → QUIC Initial                          | integration_ethernet_ipv4_udp_quic_initial            |
@@ -5438,6 +5440,9 @@ fn integration_ethernet_ipv4_ah_tcp() {
 /// Ethernet → IPv4 → ESP
 ///
 /// Verifies ESP dissection (SPI + Seq + encrypted data, no further dispatch).
+/// The final byte 0xEE (238) is not a known IP protocol, so the NULL
+/// decryption heuristic does not match and the payload is displayed as
+/// opaque encrypted_data.
 #[test]
 fn integration_ethernet_ipv4_esp() {
     let reg = DissectorRegistry::default();
@@ -5475,6 +5480,137 @@ fn integration_ethernet_ipv4_esp() {
     );
 
     assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → IPv4 → ESP (NULL, tunnel mode) → IPv4 → UDP
+///
+/// Verifies automatic NULL encryption decoding for ESP tunnel mode when no SA
+/// is configured. The ESP trailer's next_header=4 indicates an encapsulated
+/// IPv4 packet, so the heuristic chains into the inner IPv4 and UDP
+/// dissectors.
+#[test]
+fn integration_ethernet_ipv4_esp_null_ipv4_udp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 50, [10, 0, 0, 1], [10, 0, 0, 2]);
+
+    // ESP header
+    pkt.extend_from_slice(&0x0000_2001u32.to_be_bytes()); // SPI
+    pkt.extend_from_slice(&1u32.to_be_bytes()); // Sequence Number
+
+    // Inner IPv4 + UDP packet (plaintext — NULL encryption).
+    // Ports are chosen to avoid any application-layer dispatch so the
+    // dissection chain stops cleanly at UDP.
+    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let inner_udp_start = push_udp(&mut pkt, 12345, 54321);
+    pkt.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // UDP payload
+    fixup_udp_length(&mut pkt, inner_udp_start);
+    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
+
+    // ESP trailer: pad_length=0, next_header=4 (IPv4-in-IPv4)
+    pkt.push(0x00); // pad_length
+    pkt.push(0x04); // next_header = IPv4
+
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    // Ethernet, outer IPv4, ESP, inner IPv4, UDP
+    assert_eq!(buf.layers().len(), 5);
+    assert_eq!(buf.layers()[0].name, "Ethernet");
+    assert_eq!(buf.layers()[1].name, "IPv4");
+    assert_eq!(buf.layers()[2].name, "ESP");
+    assert_eq!(buf.layers()[3].name, "IPv4");
+    assert_eq!(buf.layers()[4].name, "UDP");
+
+    let esp = &buf.layers()[2];
+    assert_eq!(
+        buf.field_by_name(esp, "spi").unwrap().value,
+        FieldValue::U32(0x0000_2001)
+    );
+    assert_eq!(
+        buf.field_by_name(esp, "sequence_number").unwrap().value,
+        FieldValue::U32(1)
+    );
+    assert_eq!(
+        buf.field_by_name(esp, "next_header").unwrap().value,
+        FieldValue::U8(4)
+    );
+    assert_eq!(
+        buf.field_by_name(esp, "pad_length").unwrap().value,
+        FieldValue::U8(0)
+    );
+    // encrypted_data must not be present when the heuristic succeeded.
+    assert!(buf.field_by_name(esp, "encrypted_data").is_none());
+
+    // Inner UDP ports are visible.
+    let udp = &buf.layers()[4];
+    assert_eq!(
+        buf.field_by_name(udp, "src_port").unwrap().value,
+        FieldValue::U16(12345)
+    );
+    assert_eq!(
+        buf.field_by_name(udp, "dst_port").unwrap().value,
+        FieldValue::U16(54321)
+    );
+}
+
+/// Ethernet → IPv4 → ESP (NULL, transport mode) → UDP
+///
+/// Verifies automatic NULL encryption decoding for ESP transport mode when
+/// no SA is configured. Unlike tunnel mode, the ESP payload directly
+/// contains an upper-layer protocol (here UDP) without an inner IP header;
+/// the ESP trailer's next_header=17 indicates the upper-layer protocol.
+#[test]
+fn integration_ethernet_ipv4_esp_null_transport_udp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 50, [10, 0, 0, 1], [10, 0, 0, 2]);
+
+    // ESP header
+    pkt.extend_from_slice(&0x0000_3003u32.to_be_bytes()); // SPI
+    pkt.extend_from_slice(&7u32.to_be_bytes()); // Sequence Number
+
+    // Inner UDP packet directly (transport mode — no inner IP header).
+    let udp_start = push_udp(&mut pkt, 10000, 20000);
+    pkt.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]); // UDP payload
+    fixup_udp_length(&mut pkt, udp_start);
+
+    // ESP trailer: pad_length=0, next_header=17 (UDP)
+    pkt.push(0x00);
+    pkt.push(0x11);
+
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    // Ethernet, IPv4, ESP, UDP (no inner IP layer)
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[2].name, "ESP");
+    assert_eq!(buf.layers()[3].name, "UDP");
+
+    let esp = &buf.layers()[2];
+    assert_eq!(
+        buf.field_by_name(esp, "next_header").unwrap().value,
+        FieldValue::U8(17)
+    );
+    assert!(buf.field_by_name(esp, "encrypted_data").is_none());
+
+    let udp = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(udp, "src_port").unwrap().value,
+        FieldValue::U16(10000)
+    );
+    assert_eq!(
+        buf.field_by_name(udp, "dst_port").unwrap().value,
+        FieldValue::U16(20000)
+    );
 }
 
 /// Ethernet → IPv4 → UDP(500) → IKEv2 IKE_SA_INIT

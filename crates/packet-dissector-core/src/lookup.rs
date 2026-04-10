@@ -11,6 +11,7 @@ pub fn ip_protocol_name(v: u8) -> Option<&'static str> {
         0 => Some("HOPOPT"),
         1 => Some("ICMP"),
         2 => Some("IGMP"),
+        4 => Some("IPv4"),
         6 => Some("TCP"),
         17 => Some("UDP"),
         41 => Some("IPv6_ENCAP"),
@@ -41,6 +42,7 @@ mod tests {
         assert_eq!(ip_protocol_name(0), Some("HOPOPT"));
         assert_eq!(ip_protocol_name(1), Some("ICMP"));
         assert_eq!(ip_protocol_name(2), Some("IGMP"));
+        assert_eq!(ip_protocol_name(4), Some("IPv4"));
         assert_eq!(ip_protocol_name(6), Some("TCP"));
         assert_eq!(ip_protocol_name(17), Some("UDP"));
         assert_eq!(ip_protocol_name(41), Some("IPv6_ENCAP"));
