@@ -14,6 +14,17 @@ pr_labels = ["release"]
 # Publish to crates.io
 publish = true
 
+# Skip `cargo publish`'s local verify step. Workspace crates dev-depend on
+# `packet-dissector-test-alloc` via `workspace = true`, which expands to a
+# versioned requirement. During a fresh workspace release, the first crate
+# published (`packet-dissector-core`) succeeds, but the next crate (e.g.
+# `packet-dissector-ah`) fails verification because `test-alloc` is not yet
+# on crates.io. `--no-verify` skips the local build/resolve so release-plz
+# can publish the remaining crates in dependency order. CI already builds
+# and tests the whole workspace before release, so the verify step is
+# redundant here.
+publish_no_verify = true
+
 # Update Cargo.lock in the release PR
 dependencies_update = true
 
