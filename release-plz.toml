@@ -2,9 +2,19 @@
 # https://release-plz.dev/docs/config
 
 [workspace]
-# Tag and release settings (apply to all packages)
+# Monorepo tag / release strategy.
+# Every package shares `version_group = "workspace"`, so one release produces
+# a single version. If every crate tried to create a `v{{ version }}` tag and
+# GitHub release, the second crate would fail with HTTP 422
+# "Reference already exists" and abort the publish run. Disable tag / release
+# creation at the workspace level and re-enable it only for the
+# `packet-dissector` facade crate below, so the workspace gets exactly one tag
+# and one GitHub release per version.
+git_tag_enable = false
+git_release_enable = false
+
+# Naming templates (applied by the facade override)
 git_tag_name = "v{{ version }}"
-git_release_enable = true
 git_release_name = "v{{ version }}"
 
 # PR title/commit matches the existing convention
@@ -44,6 +54,9 @@ name = "packet-dissector"
 version_group = "workspace"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
+# Facade crate owns the single workspace-level git tag and GitHub release.
+git_tag_enable = true
+git_release_enable = true
 changelog_include = [
   "packet-dissector-ah",
   "packet-dissector-arp",
