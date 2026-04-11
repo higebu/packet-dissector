@@ -63,7 +63,7 @@ packet-dissector-ngap = { version = "0.2.3", path = "crates/packet-dissector-nga
 packet-dissector-quic = { version = "0.2.3", path = "crates/packet-dissector-quic" }
 packet-dissector-radius = { version = "0.2.3", path = "crates/packet-dissector-radius" }
 packet-dissector-stun = { version = "0.2.3", path = "crates/packet-dissector-stun" }
-packet-dissector-test-alloc = { version = "0.2.3", path = "crates/packet-dissector-test-alloc" }
+packet-dissector-test-alloc = { path = "crates/packet-dissector-test-alloc" }
 aes = "0.9"
 cbc = "0.2"
 aes-gcm = "0.10"
