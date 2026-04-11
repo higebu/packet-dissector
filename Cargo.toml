@@ -73,13 +73,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 httparse = "1"
 pcap-file = "2"
-
-# cargo-release configuration
-# https://github.com/crate-ci/cargo-release/blob/master/docs/reference.md
-[workspace.metadata.release]
-shared-version = true
-tag-prefix = "v"
-tag-name = "v{{version}}"
-pre-release-commit-message = "chore(release): v{{version}}"
-publish = false                                             # publish manually in dependency order
-push = false                                                # push manually after review
