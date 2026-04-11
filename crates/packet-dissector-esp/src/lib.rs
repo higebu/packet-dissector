@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn decrypt_aes_128_cbc() {
         use aes::Aes128;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
         let key = [0x01u8; 16];
         let iv = [0x02u8; 16];
@@ -490,7 +490,7 @@ mod tests {
         let mut ciphertext = plaintext.clone();
         cbc::Encryptor::<Aes128>::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
+            .encrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
             .unwrap();
 
         let spi: u32 = 0x2002;

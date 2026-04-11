@@ -241,7 +241,7 @@ fn decrypt_cbc(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
     use aes::Aes128;
     use aes::Aes192;
     use aes::Aes256;
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
 
     let iv_len = sa.encryption.iv_len();
     let icv_len = sa.authentication.icv_len();
@@ -267,19 +267,19 @@ fn decrypt_cbc(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
         16 => {
             cbc::Decryptor::<Aes128>::new_from_slices(&sa.enc_key, iv)
                 .map_err(|_| PacketError::InvalidHeader("ESP CBC key/IV error"))?
-                .decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf)
+                .decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
                 .map_err(|_| PacketError::InvalidHeader("ESP AES-128-CBC decrypt error"))?;
         }
         24 => {
             cbc::Decryptor::<Aes192>::new_from_slices(&sa.enc_key, iv)
                 .map_err(|_| PacketError::InvalidHeader("ESP CBC key/IV error"))?
-                .decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf)
+                .decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
                 .map_err(|_| PacketError::InvalidHeader("ESP AES-192-CBC decrypt error"))?;
         }
         32 => {
             cbc::Decryptor::<Aes256>::new_from_slices(&sa.enc_key, iv)
                 .map_err(|_| PacketError::InvalidHeader("ESP CBC key/IV error"))?
-                .decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf)
+                .decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
                 .map_err(|_| PacketError::InvalidHeader("ESP AES-256-CBC decrypt error"))?;
         }
         _ => {
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn test_cbc_decryption() {
         use aes::Aes128;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
         let key = [0x01u8; 16];
         let iv = [0x02u8; 16];
@@ -581,7 +581,7 @@ mod tests {
         let mut ciphertext = plaintext.clone();
         cbc::Encryptor::<Aes128>::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
+            .encrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
             .unwrap();
 
         // Build data: IV + ciphertext (no ICV since auth=none)
@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn test_cbc_decryption_aes192() {
         use aes::Aes192;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
         let key = [0x01u8; 24];
         let iv = [0x02u8; 16];
@@ -749,7 +749,7 @@ mod tests {
         let mut ciphertext = plaintext.clone();
         cbc::Encryptor::<Aes192>::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
+            .encrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
             .unwrap();
 
         let mut data = iv.to_vec();
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn test_cbc_decryption_aes256() {
         use aes::Aes256;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
         let key = [0x01u8; 32];
         let iv = [0x02u8; 16];
@@ -784,7 +784,7 @@ mod tests {
         let mut ciphertext = plaintext.clone();
         cbc::Encryptor::<Aes256>::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
+            .encrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut ciphertext, 16)
             .unwrap();
 
         let mut data = iv.to_vec();
