@@ -13,7 +13,7 @@
 use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{
-    FieldDescriptor, FieldType, FieldValue, MacAddr, format_utf8_lossy,
+    FieldDescriptor, FieldType, FieldValue, FormatContext, MacAddr, format_utf8_lossy,
 };
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u32};
@@ -347,7 +347,8 @@ const FD_EIR_METRIC: usize = 1;
 
 /// Child fields for Extended IS Reachability entries (TLV 22).
 static EXT_IS_REACH_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor::new("neighbor_id", "Neighbor ID", FieldType::Bytes),
+    FieldDescriptor::new("neighbor_id", "Neighbor ID", FieldType::Bytes)
+        .with_format_fn(format_isis_id),
     FieldDescriptor::new("metric", "Metric", FieldType::U32),
 ];
 
@@ -395,7 +396,7 @@ const FD_LSPE_CHECKSUM: usize = 3;
 
 /// Child fields for LSP Entries (TLV 9).
 static LSP_ENTRY_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor::new("lsp_id", "LSP ID", FieldType::Bytes),
+    FieldDescriptor::new("lsp_id", "LSP ID", FieldType::Bytes).with_format_fn(format_isis_id),
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U32),
     FieldDescriptor::new("remaining_lifetime", "Remaining Lifetime", FieldType::U16),
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
@@ -477,6 +478,55 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("raw", "Raw", FieldType::Bytes).optional(),
 ];
 
+/// Writes an IS-IS identifier as a JSON-quoted string in ISO 10589 dotted notation.
+///
+/// Formats based on byte length:
+/// - 6 bytes (System ID): `"XXXX.XXXX.XXXX"`
+/// - 7 bytes (Node/LAN ID): `"XXXX.XXXX.XXXX.XX"`
+/// - 8 bytes (LSP ID): `"XXXX.XXXX.XXXX.XX-XX"`
+/// - Other lengths: colon-separated hex fallback
+///
+/// ISO/IEC 10589:2002, Section 7.1 — System ID format.
+fn format_isis_id(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    match bytes.len() {
+        6 => write!(
+            w,
+            "\"{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}\"",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+        ),
+        7 => write!(
+            w,
+            "\"{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}.{:02x}\"",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6]
+        ),
+        8 => write!(
+            w,
+            "\"{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}.{:02x}-{:02x}\"",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]
+        ),
+        0 => w.write_all(b"\"\""),
+        _ => {
+            // Fallback: colon-separated hex for unexpected lengths.
+            w.write_all(b"\"")?;
+            for (i, byte) in bytes.iter().enumerate() {
+                if i > 0 {
+                    w.write_all(b":")?;
+                }
+                write!(w, "{byte:02x}")?;
+            }
+            w.write_all(b"\"")
+        }
+    }
+}
+
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // Common header fields
     FieldDescriptor::new("nlpid", "NLPID", FieldType::U8),
@@ -498,21 +548,31 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("max_area_addresses", "Max Area Addresses", FieldType::U8),
     // IIH-specific fields
     FieldDescriptor::new("circuit_type", "Circuit Type", FieldType::U8).optional(),
-    FieldDescriptor::new("source_id", "Source ID", FieldType::Bytes).optional(),
+    FieldDescriptor::new("source_id", "Source ID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_isis_id),
     FieldDescriptor::new("holding_time", "Holding Time", FieldType::U16).optional(),
     FieldDescriptor::new("pdu_length", "PDU Length", FieldType::U16).optional(),
     FieldDescriptor::new("priority", "Priority", FieldType::U8).optional(),
-    FieldDescriptor::new("lan_id", "LAN ID", FieldType::Bytes).optional(),
+    FieldDescriptor::new("lan_id", "LAN ID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_isis_id),
     FieldDescriptor::new("local_circuit_id", "Local Circuit ID", FieldType::U8).optional(),
     // LSP-specific fields
     FieldDescriptor::new("remaining_lifetime", "Remaining Lifetime", FieldType::U16).optional(),
-    FieldDescriptor::new("lsp_id", "LSP ID", FieldType::Bytes).optional(),
+    FieldDescriptor::new("lsp_id", "LSP ID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_isis_id),
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U32).optional(),
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16).optional(),
     FieldDescriptor::new("type_block", "Type Block", FieldType::U8).optional(),
     // CSNP/PSNP-specific fields
-    FieldDescriptor::new("start_lsp_id", "Start LSP ID", FieldType::Bytes).optional(),
-    FieldDescriptor::new("end_lsp_id", "End LSP ID", FieldType::Bytes).optional(),
+    FieldDescriptor::new("start_lsp_id", "Start LSP ID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_isis_id),
+    FieldDescriptor::new("end_lsp_id", "End LSP ID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_isis_id),
     // TLVs
     FieldDescriptor::new("tlvs", "TLVs", FieldType::Array)
         .optional()
@@ -1613,6 +1673,11 @@ mod tests {
     // | ISO 10589                  | Unknown PDU type               | reject_unknown_pdu_type                |
     // | ISO 10589                  | Truncated LAN IIH              | reject_truncated_lan_iih               |
     // | ISO 10589                  | Unknown TLV produces raw       | parse_unknown_tlv_raw                  |
+    // | ISO 10589 §7.1             | System ID format (6 bytes)     | format_isis_system_id                  |
+    // | ISO 10589 §7.1             | Node/LAN ID format (7 bytes)   | format_isis_node_id                    |
+    // | ISO 10589 §7.1             | LSP ID format (8 bytes)        | format_isis_lsp_id                     |
+    // | ISO 10589 §7.1             | ID format edge cases           | format_isis_id_edge_cases              |
+    // | ISO 10589 §7.1             | format_fn descriptor wiring    | format_isis_id_descriptor_attached     |
 
     /// Helper: build a minimal L1 LAN IIH PDU (27 bytes header + TLVs).
     fn build_l1_lan_iih(tlvs: &[u8]) -> Vec<u8> {
@@ -3642,5 +3707,137 @@ mod tests {
                 assert!(nlpid.descriptor.display_fn.unwrap()(&nlpid.value, &[]).is_none());
             }
         }
+    }
+
+    /// Helper: invoke a format_fn and return the output bytes as a String.
+    fn call_format_fn(
+        f: fn(&FieldValue<'_>, &FormatContext<'_>, &mut dyn std::io::Write) -> std::io::Result<()>,
+        value: &FieldValue<'_>,
+    ) -> String {
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        f(value, &ctx, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn format_isis_system_id() {
+        // 6-byte System ID: 0102.0304.0506
+        assert_eq!(
+            call_format_fn(
+                format_isis_id,
+                &FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
+            ),
+            "\"0102.0304.0506\""
+        );
+        // All zeros: 0000.0000.0000
+        assert_eq!(
+            call_format_fn(format_isis_id, &FieldValue::Bytes(&[0x00; 6])),
+            "\"0000.0000.0000\""
+        );
+        // All 0xFF: ffff.ffff.ffff
+        assert_eq!(
+            call_format_fn(format_isis_id, &FieldValue::Bytes(&[0xFF; 6])),
+            "\"ffff.ffff.ffff\""
+        );
+    }
+
+    #[test]
+    fn format_isis_node_id() {
+        // 7-byte Node ID: 0102.0304.0506.07
+        assert_eq!(
+            call_format_fn(
+                format_isis_id,
+                &FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07])
+            ),
+            "\"0102.0304.0506.07\""
+        );
+        // LAN ID with circuit ID 00
+        assert_eq!(
+            call_format_fn(
+                format_isis_id,
+                &FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00])
+            ),
+            "\"0102.0304.0506.00\""
+        );
+    }
+
+    #[test]
+    fn format_isis_lsp_id() {
+        // 8-byte LSP ID: 0102.0304.0506.07-08
+        assert_eq!(
+            call_format_fn(
+                format_isis_id,
+                &FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+            ),
+            "\"0102.0304.0506.07-08\""
+        );
+        // Typical LSP ID with fragment 00: 0102.0304.0506.00-00
+        assert_eq!(
+            call_format_fn(
+                format_isis_id,
+                &FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00])
+            ),
+            "\"0102.0304.0506.00-00\""
+        );
+        // All zeros (start_lsp_id boundary): 0000.0000.0000.00-00
+        assert_eq!(
+            call_format_fn(format_isis_id, &FieldValue::Bytes(&[0x00; 8])),
+            "\"0000.0000.0000.00-00\""
+        );
+        // All 0xFF (end_lsp_id boundary): ffff.ffff.ffff.ff-ff
+        assert_eq!(
+            call_format_fn(format_isis_id, &FieldValue::Bytes(&[0xFF; 8])),
+            "\"ffff.ffff.ffff.ff-ff\""
+        );
+    }
+
+    #[test]
+    fn format_isis_id_edge_cases() {
+        // Non-Bytes variant → empty string
+        assert_eq!(call_format_fn(format_isis_id, &FieldValue::U8(0)), "\"\"");
+        // Empty bytes → fallback (empty string between quotes)
+        assert_eq!(
+            call_format_fn(format_isis_id, &FieldValue::Bytes(&[])),
+            "\"\""
+        );
+        // Unexpected length (5 bytes) → colon-separated hex fallback
+        assert_eq!(
+            call_format_fn(
+                format_isis_id,
+                &FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05])
+            ),
+            "\"01:02:03:04:05\""
+        );
+        // Unexpected length (9 bytes) → colon-separated hex fallback
+        assert_eq!(
+            call_format_fn(
+                format_isis_id,
+                &FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09])
+            ),
+            "\"01:02:03:04:05:06:07:08:09\""
+        );
+    }
+
+    #[test]
+    fn format_isis_id_descriptor_attached() {
+        // Main FIELD_DESCRIPTORS
+        assert!(FIELD_DESCRIPTORS[FD_SOURCE_ID].format_fn.is_some());
+        assert!(FIELD_DESCRIPTORS[FD_LAN_ID].format_fn.is_some());
+        assert!(FIELD_DESCRIPTORS[FD_LSP_ID].format_fn.is_some());
+        assert!(FIELD_DESCRIPTORS[FD_START_LSP_ID].format_fn.is_some());
+        assert!(FIELD_DESCRIPTORS[FD_END_LSP_ID].format_fn.is_some());
+        // Child field descriptors
+        assert!(
+            EXT_IS_REACH_CHILD_FIELDS[FD_EIR_NEIGHBOR_ID]
+                .format_fn
+                .is_some()
+        );
+        assert!(LSP_ENTRY_CHILD_FIELDS[FD_LSPE_LSP_ID].format_fn.is_some());
     }
 }
