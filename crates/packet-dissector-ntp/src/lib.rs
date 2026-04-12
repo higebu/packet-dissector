@@ -271,7 +271,7 @@ impl Dissector for NtpDissector {
         // For stratum 0 (KoD) and stratum 1 (primary), Reference ID is a
         // four-character ASCII string. For stratum 2+, it is implementation-
         // dependent (commonly an IPv4 address — RFC 5905, Section 7.3).
-        // Store raw bytes; formatting is deferred to format_fn.
+        // Store raw bytes; formatted by format_ntp_ref_id via format_fn.
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_REFERENCE_ID],
             FieldValue::Bytes(&data[12..16]),
