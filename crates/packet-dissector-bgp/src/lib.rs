@@ -1129,9 +1129,8 @@ fn parse_attr_value<'pkt>(
         // AGGREGATOR (RFC 4271, Section 5.1.7) — 2-byte AS + 4-byte IP = 6 bytes
         // or 4-byte AS + 4-byte IP = 8 bytes (RFC 6793)
         7 if data.len() == 6 || data.len() == 8 => {
-            // Store raw bytes; formatting deferred to format_fn
             buf.push_field(
-                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+                &FD_AGGREGATOR_VALUE,
                 FieldValue::Bytes(data),
                 offset..offset + data.len(),
             );
@@ -1199,7 +1198,6 @@ fn parse_attr_value<'pkt>(
             let mut pos = 0;
             while pos + 8 <= data.len() {
                 let abs = offset + pos;
-                // Store raw 8 bytes; formatting deferred to format_fn
                 buf.push_field(
                     &EXT_COMMUNITY_ENTRY_DESCRIPTOR,
                     FieldValue::Bytes(&data[pos..pos + 8]),
@@ -1221,9 +1219,8 @@ fn parse_attr_value<'pkt>(
         }
         // AS4_AGGREGATOR (RFC 6793) — 4-byte AS + 4-byte IP = 8 bytes
         18 if data.len() == 8 => {
-            // Store raw bytes; formatting deferred to format_fn
             buf.push_field(
-                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+                &FD_AS4_AGGREGATOR_VALUE,
                 FieldValue::Bytes(data),
                 offset..offset + 8,
             );
@@ -1237,7 +1234,6 @@ fn parse_attr_value<'pkt>(
             );
             let mut pos = 0;
             while pos + 12 <= data.len() {
-                // Store raw 12 bytes; formatting deferred to format_fn
                 buf.push_field(
                     &LARGE_COMMUNITY_ENTRY_DESCRIPTOR,
                     FieldValue::Bytes(&data[pos..pos + 12]),
@@ -1371,7 +1367,6 @@ fn parse_mup_route_type_data<'pkt>(
         return;
     }
 
-    // Store raw RD bytes; formatting deferred to format_fn
     buf.push_field(
         &MUP_NLRI_CHILDREN[FD_MUP_RD],
         FieldValue::Bytes(&data[..8]),
@@ -1451,7 +1446,6 @@ fn parse_mup_route_type_data<'pkt>(
             let arch_offset = rest_offset + arch_start;
             // TEID (4) + QFI (1) + Endpoint Address Length (1) = minimum 6
             if arch_data.len() >= 6 {
-                // Store TEID as raw 4 bytes; formatting deferred to format_fn
                 buf.push_field(
                     &MUP_NLRI_CHILDREN[FD_MUP_TEID],
                     FieldValue::Bytes(&arch_data[..4]),
@@ -1525,7 +1519,6 @@ fn parse_mup_route_type_data<'pkt>(
             }
             let teid_start = 1 + addr_bytes;
             if teid_start + 4 <= rest.len() {
-                // Store TEID as raw 4 bytes; formatting deferred to format_fn
                 buf.push_field(
                     &MUP_NLRI_CHILDREN[FD_MUP_TEID],
                     FieldValue::Bytes(&rest[teid_start..teid_start + 4]),
@@ -1609,6 +1602,176 @@ fn format_address(data: &[u8], ipv6: bool) -> FieldValue<'_> {
     } else {
         FieldValue::Bytes(data)
     }
+}
+
+/// Writes a BGP AGGREGATOR / AS4_AGGREGATOR value as `"<AS> <IPv4>"`.
+///
+/// Accepts 6 bytes (2-byte AS + 4-byte IPv4) or 8 bytes (4-byte AS + 4-byte IPv4).
+///
+/// RFC 4271, Section 5.1.7 — <https://www.rfc-editor.org/rfc/rfc4271#section-5.1.7>
+/// RFC 6793, Section 7 — <https://www.rfc-editor.org/rfc/rfc6793#section-7>
+fn format_aggregator(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    match bytes.len() {
+        6 => {
+            let asn = u16::from_be_bytes([bytes[0], bytes[1]]) as u32;
+            write!(
+                w,
+                "\"{} {}.{}.{}.{}\"",
+                asn, bytes[2], bytes[3], bytes[4], bytes[5]
+            )
+        }
+        8 => {
+            let asn = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            write!(
+                w,
+                "\"{} {}.{}.{}.{}\"",
+                asn, bytes[4], bytes[5], bytes[6], bytes[7]
+            )
+        }
+        _ => w.write_all(b"\"\""),
+    }
+}
+
+/// Writes a BGP Extended Community as a human-readable string.
+///
+/// 8-byte value: Type (1) + Sub-Type (1) + Value (6).
+/// - Type 0x00/0x40: 2-Octet AS — `"<AS>:<value>"`
+/// - Type 0x01/0x41: IPv4 Address — `"<IPv4>:<value>"`
+/// - Type 0x02/0x42: 4-Octet AS — `"<AS>:<value>"`
+/// - Other types: hex representation.
+///
+/// RFC 4360, Section 3 — <https://www.rfc-editor.org/rfc/rfc4360#section-3>
+fn format_ext_community(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) if b.len() == 8 => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    let type_high = bytes[0];
+    match type_high {
+        // 2-Octet AS Specific
+        0x00 | 0x40 => {
+            let asn = u16::from_be_bytes([bytes[2], bytes[3]]) as u32;
+            let val = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            write!(w, "\"{}:{}\"", asn, val)
+        }
+        // IPv4 Address Specific
+        0x01 | 0x41 => {
+            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
+            write!(
+                w,
+                "\"{}.{}.{}.{}:{}\"",
+                bytes[2], bytes[3], bytes[4], bytes[5], val
+            )
+        }
+        // 4-Octet AS Specific
+        0x02 | 0x42 => {
+            let asn = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
+            write!(w, "\"{}:{}\"", asn, val)
+        }
+        _ => {
+            write!(w, "\"0x")?;
+            for b in bytes {
+                write!(w, "{b:02x}")?;
+            }
+            write!(w, "\"")
+        }
+    }
+}
+
+/// Writes a BGP Large Community as `"<global>:<local1>:<local2>"`.
+///
+/// 12-byte value: Global Administrator (u32) : Local Data 1 (u32) : Local Data 2 (u32).
+///
+/// RFC 8092, Section 2 — <https://www.rfc-editor.org/rfc/rfc8092#section-2>
+fn format_large_community(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) if b.len() == 12 => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    let global = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let local1 = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let local2 = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    write!(w, "\"{}:{}:{}\"", global, local1, local2)
+}
+
+/// Writes a Route Distinguisher as `"<type>:<admin>:<assigned>"`.
+///
+/// 8-byte value: Type (u16 BE) + admin/assigned fields.
+/// - Type 0: 2-byte ASN + 4-byte assigned → `"0:<ASN>:<assigned>"`
+/// - Type 1: 4-byte IPv4 + 2-byte assigned → `"1:<IPv4>:<assigned>"`
+/// - Type 2: 4-byte ASN + 2-byte assigned → `"2:<ASN>:<assigned>"`
+///
+/// RFC 4364, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.2>
+fn format_route_distinguisher(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) if b.len() == 8 => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    let rd_type = u16::from_be_bytes([bytes[0], bytes[1]]);
+    match rd_type {
+        0 => {
+            let asn = u16::from_be_bytes([bytes[2], bytes[3]]) as u32;
+            let val = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            write!(w, "\"0:{}:{}\"", asn, val)
+        }
+        1 => {
+            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
+            write!(
+                w,
+                "\"1:{}.{}.{}.{}:{}\"",
+                bytes[2], bytes[3], bytes[4], bytes[5], val
+            )
+        }
+        2 => {
+            let asn = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
+            write!(w, "\"2:{}:{}\"", asn, val)
+        }
+        _ => {
+            write!(w, "\"{rd_type}:0x")?;
+            for b in &bytes[2..] {
+                write!(w, "{b:02x}")?;
+            }
+            write!(w, "\"")
+        }
+    }
+}
+
+/// Writes a GTP TEID as a hex string (e.g., `"0x12345678"`).
+///
+/// 4-byte big-endian unsigned integer.
+fn format_teid(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) if b.len() == 4 => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    let val = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    write!(w, "\"0x{val:08x}\"")
 }
 
 fn parse_mp_reach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
@@ -1914,16 +2077,17 @@ static CLUSTER_ID_DESCRIPTOR: FieldDescriptor =
 
 /// Descriptor for extended community entries (raw 8 bytes).
 static EXT_COMMUNITY_ENTRY_DESCRIPTOR: FieldDescriptor =
-    FieldDescriptor::new("ext_community", "Extended Community", FieldType::Bytes).with_display_fn(
-        |v, _| match v {
+    FieldDescriptor::new("ext_community", "Extended Community", FieldType::Bytes)
+        .with_display_fn(|v, _| match v {
             FieldValue::Bytes(b) if b.len() >= 2 => extended_community_type_name(b[0], b[1]),
             _ => None,
-        },
-    );
+        })
+        .with_format_fn(format_ext_community);
 
 /// Descriptor for large community entries (raw 12 bytes).
 static LARGE_COMMUNITY_ENTRY_DESCRIPTOR: FieldDescriptor =
-    FieldDescriptor::new("large_community", "Large Community", FieldType::Bytes);
+    FieldDescriptor::new("large_community", "Large Community", FieldType::Bytes)
+        .with_format_fn(format_large_community);
 
 /// Object descriptor for MUP NLRI entries.
 static MUP_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -2013,10 +2177,14 @@ static MUP_NLRI_CHILDREN: &[FieldDescriptor] = &[
         format_fn: None,
     },
     FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
-    FieldDescriptor::new("rd", "Route Distinguisher", FieldType::Bytes).optional(),
+    FieldDescriptor::new("rd", "Route Distinguisher", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_route_distinguisher),
     FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes).optional(),
     FieldDescriptor::new("address", "Address", FieldType::Bytes).optional(),
-    FieldDescriptor::new("teid", "TEID", FieldType::Bytes).optional(),
+    FieldDescriptor::new("teid", "TEID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_teid),
     FieldDescriptor::new("qfi", "QFI", FieldType::U8).optional(),
     FieldDescriptor::new("endpoint_address", "Endpoint Address", FieldType::Bytes).optional(),
     FieldDescriptor::new("source_address", "Source Address", FieldType::Bytes).optional(),
@@ -2164,6 +2332,22 @@ static FD_ORIGIN_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value",
         FieldValue::U8(o) => origin_name(*o),
         _ => None,
     });
+
+/// AGGREGATOR "value" field descriptor with format_fn for `"<AS> <IPv4>"`.
+///
+/// RFC 4271, Section 5.1.7 — <https://www.rfc-editor.org/rfc/rfc4271#section-5.1.7>
+static FD_AGGREGATOR_VALUE: FieldDescriptor =
+    FieldDescriptor::new("value", "Value", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_aggregator);
+
+/// AS4_AGGREGATOR "value" field descriptor with format_fn for `"<AS> <IPv4>"`.
+///
+/// RFC 6793, Section 7 — <https://www.rfc-editor.org/rfc/rfc6793#section-7>
+static FD_AS4_AGGREGATOR_VALUE: FieldDescriptor =
+    FieldDescriptor::new("value", "Value", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_aggregator);
 
 /// Child field descriptors for objects inside `path_attributes`.
 static PATH_ATTR_CHILDREN: &[FieldDescriptor] = &[
@@ -3988,5 +4172,220 @@ mod tests {
             call_format_fn(format_nlri_ipv6_prefix, &FieldValue::U8(0)),
             "\"\""
         );
+    }
+
+    #[test]
+    fn format_aggregator_values() {
+        // 6-byte: 2-byte AS 65001 + IPv4 10.0.0.1
+        assert_eq!(
+            call_format_fn(
+                format_aggregator,
+                &FieldValue::Bytes(&[0xFD, 0xE9, 10, 0, 0, 1])
+            ),
+            "\"65001 10.0.0.1\""
+        );
+        // 8-byte: 4-byte AS 65001 + IPv4 10.0.0.1
+        assert_eq!(
+            call_format_fn(
+                format_aggregator,
+                &FieldValue::Bytes(&[0, 0, 0xFD, 0xE9, 10, 0, 0, 1])
+            ),
+            "\"65001 10.0.0.1\""
+        );
+        // Empty bytes → empty string
+        assert_eq!(
+            call_format_fn(format_aggregator, &FieldValue::Bytes(&[])),
+            "\"\""
+        );
+        // Wrong size (7 bytes) → empty string
+        assert_eq!(
+            call_format_fn(
+                format_aggregator,
+                &FieldValue::Bytes(&[0, 0, 0, 0, 0, 0, 0])
+            ),
+            "\"\""
+        );
+        // Non-Bytes variant → empty string
+        assert_eq!(
+            call_format_fn(format_aggregator, &FieldValue::U8(0)),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn format_ext_community_values() {
+        // Type 0x00: 2-Octet AS — AS 65001, value 100
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x00, 0x02, 0xFD, 0xE9, 0, 0, 0, 100])
+            ),
+            "\"65001:100\""
+        );
+        // Type 0x40: transitive 2-Octet AS — same format
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x40, 0x02, 0xFD, 0xE9, 0, 0, 0, 100])
+            ),
+            "\"65001:100\""
+        );
+        // Type 0x01: IPv4 Address — 10.0.0.1:100
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x01, 0x02, 10, 0, 0, 1, 0, 100])
+            ),
+            "\"10.0.0.1:100\""
+        );
+        // Type 0x41: transitive IPv4 Address
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x41, 0x02, 10, 0, 0, 1, 0, 100])
+            ),
+            "\"10.0.0.1:100\""
+        );
+        // Type 0x02: 4-Octet AS — AS 65001, value 100
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x02, 0x02, 0, 0, 0xFD, 0xE9, 0, 100])
+            ),
+            "\"65001:100\""
+        );
+        // Type 0x42: transitive 4-Octet AS
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x42, 0x02, 0, 0, 0xFD, 0xE9, 0, 100])
+            ),
+            "\"65001:100\""
+        );
+        // Unknown type → hex fallback
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x03, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
+            ),
+            "\"0x0300010203040506\""
+        );
+        // Empty bytes → empty string
+        assert_eq!(
+            call_format_fn(format_ext_community, &FieldValue::Bytes(&[])),
+            "\"\""
+        );
+        // Non-Bytes variant → empty string
+        assert_eq!(
+            call_format_fn(format_ext_community, &FieldValue::U8(0)),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn format_large_community_values() {
+        // 65001:100:200
+        assert_eq!(
+            call_format_fn(
+                format_large_community,
+                &FieldValue::Bytes(&[0, 0, 0xFD, 0xE9, 0, 0, 0, 100, 0, 0, 0, 200])
+            ),
+            "\"65001:100:200\""
+        );
+        // 0:0:0
+        assert_eq!(
+            call_format_fn(
+                format_large_community,
+                &FieldValue::Bytes(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            ),
+            "\"0:0:0\""
+        );
+        // Empty bytes → empty string
+        assert_eq!(
+            call_format_fn(format_large_community, &FieldValue::Bytes(&[])),
+            "\"\""
+        );
+        // Wrong size (8 bytes) → empty string
+        assert_eq!(
+            call_format_fn(
+                format_large_community,
+                &FieldValue::Bytes(&[0, 0, 0, 0, 0, 0, 0, 0])
+            ),
+            "\"\""
+        );
+        // Non-Bytes variant → empty string
+        assert_eq!(
+            call_format_fn(format_large_community, &FieldValue::U8(0)),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn format_route_distinguisher_values() {
+        // Type 0: 2-byte ASN 65001 + 4-byte assigned 100
+        assert_eq!(
+            call_format_fn(
+                format_route_distinguisher,
+                &FieldValue::Bytes(&[0, 0, 0xFD, 0xE9, 0, 0, 0, 100])
+            ),
+            "\"0:65001:100\""
+        );
+        // Type 1: IPv4 10.0.0.1 + 2-byte assigned 100
+        assert_eq!(
+            call_format_fn(
+                format_route_distinguisher,
+                &FieldValue::Bytes(&[0, 1, 10, 0, 0, 1, 0, 100])
+            ),
+            "\"1:10.0.0.1:100\""
+        );
+        // Type 2: 4-byte ASN 65001 + 2-byte assigned 100
+        assert_eq!(
+            call_format_fn(
+                format_route_distinguisher,
+                &FieldValue::Bytes(&[0, 2, 0, 0, 0xFD, 0xE9, 0, 100])
+            ),
+            "\"2:65001:100\""
+        );
+        // Unknown type → hex fallback
+        assert_eq!(
+            call_format_fn(
+                format_route_distinguisher,
+                &FieldValue::Bytes(&[0, 3, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
+            ),
+            "\"3:0x010203040506\""
+        );
+        // Empty bytes → empty string
+        assert_eq!(
+            call_format_fn(format_route_distinguisher, &FieldValue::Bytes(&[])),
+            "\"\""
+        );
+        // Non-Bytes variant → empty string
+        assert_eq!(
+            call_format_fn(format_route_distinguisher, &FieldValue::U8(0)),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn format_teid_values() {
+        // 0x12345678
+        assert_eq!(
+            call_format_fn(format_teid, &FieldValue::Bytes(&[0x12, 0x34, 0x56, 0x78])),
+            "\"0x12345678\""
+        );
+        // Zero
+        assert_eq!(
+            call_format_fn(format_teid, &FieldValue::Bytes(&[0, 0, 0, 0])),
+            "\"0x00000000\""
+        );
+        // Empty bytes → empty string
+        assert_eq!(call_format_fn(format_teid, &FieldValue::Bytes(&[])), "\"\"");
+        // Wrong size (3 bytes) → empty string
+        assert_eq!(
+            call_format_fn(format_teid, &FieldValue::Bytes(&[1, 2, 3])),
+            "\"\""
+        );
+        // Non-Bytes variant → empty string
+        assert_eq!(call_format_fn(format_teid, &FieldValue::U8(0)), "\"\"");
     }
 }
