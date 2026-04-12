@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.2.4] - 2026-04-12
+
+### 🚀 Features
+
+- *(srv6)* Add hex format_fn for SID structure fields
+- *(isis)* Add ISO 10589 format functions for system/node/LSP IDs
+- *(bgp)* Format NLRI prefixes as CIDR notation
+- *(bgp)* Add format_fn for aggregator, ext community, large community, RD, and TEID
+
+### 📚 Documentation
+
+- Fix outdated comment on NTP reference_id format_fn
 ## [0.2.3] - 2026-04-11
 
 ### 🚀 Features
