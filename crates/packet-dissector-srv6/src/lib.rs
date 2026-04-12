@@ -11,7 +11,7 @@
 
 use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32, read_ipv6_addr};
 
@@ -735,6 +735,30 @@ static MOBILE_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("limit_rate", "Limit Rate", FieldType::Bytes).optional(),
 ];
 
+/// Writes a SID structure sub-field as a JSON-quoted hex string (e.g., `"20010db8"`).
+///
+/// Handles both [`FieldValue::Scratch`] (bit-extracted sub-byte data stored in the
+/// scratch buffer) and [`FieldValue::Bytes`] (byte-aligned data).
+fn format_sid_hex(
+    value: &FieldValue<'_>,
+    ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes: &[u8] = match value {
+        FieldValue::Scratch(range) => &ctx.scratch[range.start as usize..range.end as usize],
+        FieldValue::Bytes(b) => b,
+        _ => return w.write_all(b"\"\""),
+    };
+    if bytes.is_empty() {
+        return w.write_all(b"\"\"");
+    }
+    w.write_all(b"\"")?;
+    for &b in bytes {
+        write!(w, "{b:02x}")?;
+    }
+    w.write_all(b"\"")
+}
+
 // SID structure sub-field descriptors
 const FD_SID_LOCATOR_BLOCK: usize = 0;
 const FD_SID_LOCATOR_NODE: usize = 1;
@@ -742,10 +766,12 @@ const FD_SID_FUNCTION: usize = 2;
 const FD_SID_ARGUMENT: usize = 3;
 
 static SID_STRUCTURE_DESCRIPTORS: &[FieldDescriptor] = &[
-    FieldDescriptor::new("locator_block", "Locator Block", FieldType::Bytes),
-    FieldDescriptor::new("locator_node", "Locator Node", FieldType::Bytes),
-    FieldDescriptor::new("function", "Function", FieldType::Bytes),
-    FieldDescriptor::new("argument", "Argument", FieldType::Bytes),
+    FieldDescriptor::new("locator_block", "Locator Block", FieldType::Bytes)
+        .with_format_fn(format_sid_hex),
+    FieldDescriptor::new("locator_node", "Locator Node", FieldType::Bytes)
+        .with_format_fn(format_sid_hex),
+    FieldDescriptor::new("function", "Function", FieldType::Bytes).with_format_fn(format_sid_hex),
+    FieldDescriptor::new("argument", "Argument", FieldType::Bytes).with_format_fn(format_sid_hex),
 ];
 
 // Flags sub-field descriptors
@@ -1043,7 +1069,7 @@ impl Dissector for Srv6Dissector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use packet_dissector_core::field::Field;
+    use packet_dissector_core::field::{Field, FormatContext};
     use packet_dissector_core::packet::Layer;
 
     /// Look up a nested field within an Object/Array container by name.
@@ -2416,5 +2442,56 @@ mod tests {
         assert!(nested_field_by_name(&buf, seg0, "embedded_ipv4").is_none());
         assert!(nested_field_by_name(&buf, seg0, "group_id").is_none());
         assert!(nested_field_by_name(&buf, seg0, "limit_rate").is_none());
+    }
+
+    fn call_format_fn(
+        f: fn(&FieldValue<'_>, &FormatContext<'_>, &mut dyn std::io::Write) -> std::io::Result<()>,
+        value: &FieldValue<'_>,
+        scratch: &[u8],
+    ) -> String {
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch,
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        f(value, &ctx, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn format_sid_hex_scratch() {
+        let scratch = [0x20, 0x01, 0x0d, 0xb8];
+        let val = FieldValue::Scratch(0..4);
+        assert_eq!(
+            call_format_fn(format_sid_hex, &val, &scratch),
+            "\"20010db8\""
+        );
+    }
+
+    #[test]
+    fn format_sid_hex_bytes() {
+        let data = [0xab, 0xcd, 0xef];
+        let val = FieldValue::Bytes(&data);
+        assert_eq!(call_format_fn(format_sid_hex, &val, &[]), "\"abcdef\"");
+    }
+
+    #[test]
+    fn format_sid_hex_empty_scratch() {
+        let val = FieldValue::Scratch(0..0);
+        assert_eq!(call_format_fn(format_sid_hex, &val, &[]), "\"\"");
+    }
+
+    #[test]
+    fn format_sid_hex_empty_bytes() {
+        let val = FieldValue::Bytes(&[]);
+        assert_eq!(call_format_fn(format_sid_hex, &val, &[]), "\"\"");
+    }
+
+    #[test]
+    fn format_sid_hex_other_variant() {
+        let val = FieldValue::U8(42);
+        assert_eq!(call_format_fn(format_sid_hex, &val, &[]), "\"\"");
     }
 }
