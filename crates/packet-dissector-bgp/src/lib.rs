@@ -27,6 +27,7 @@
 //! | 4.2 | Truncated OPEN | `parse_bgp_truncated_open` |
 //! | 4.3 | UPDATE Withdrawn Routes | `parse_bgp_update_withdraw` |
 //! | 4.3 | UPDATE Path Attributes + NLRI | `parse_bgp_update_announce` |
+//! | 4.3 | NLRI prefix CIDR formatting | `format_nlri_ipv4_prefix_cidr` |
 //! | 4.5 | NOTIFICATION | `parse_bgp_notification` |
 //! | 5.1.1 | ORIGIN | `parse_bgp_update_origin` |
 //! | 5.1.2 | AS_PATH | `parse_bgp_update_as_path` |
@@ -85,6 +86,7 @@
 //! | 3 | MP_REACH_NLRI (IPv6 link-local NH) | `parse_bgp_update_mp_reach_ipv6_link_local` |
 //! | 4 | MP_UNREACH_NLRI (IPv6) | `parse_bgp_update_mp_unreach_ipv6` |
 //! | 4 | MP_UNREACH_NLRI (IPv4) | `parse_bgp_update_mp_unreach_ipv4` |
+//! | 3 | IPv6 NLRI prefix CIDR formatting | `format_nlri_ipv6_prefix_cidr` |
 //!
 //! # draft-ietf-bess-mup-safi-00 Coverage
 //!
@@ -122,7 +124,7 @@
 
 use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{
     read_be_u16, read_be_u24, read_be_u32, read_ipv4_addr, read_ipv6_addr,
@@ -466,6 +468,11 @@ fn parse_prefixes<'pkt>(
     let mut pos = 0;
 
     let max_bits: usize = if ipv6 { 128 } else { 32 };
+    let descriptor = if ipv6 {
+        &PREFIX_ENTRY_IPV6_DESCRIPTOR
+    } else {
+        &PREFIX_ENTRY_IPV4_DESCRIPTOR
+    };
 
     while pos < data.len() {
         let prefix_bits = data[pos] as usize;
@@ -483,9 +490,8 @@ fn parse_prefixes<'pkt>(
 
         let abs = base_offset + pos;
         let entry_len = 1 + prefix_bytes;
-        // Store raw prefix bytes (prefix_len + prefix data); formatting deferred to format_fn
         buf.push_field(
-            &PREFIX_ENTRY_DESCRIPTOR,
+            descriptor,
             FieldValue::Bytes(&data[pos..pos + entry_len]),
             abs..abs + entry_len,
         );
@@ -1386,9 +1392,13 @@ fn parse_mup_route_type_data<'pkt>(
             if 1 + prefix_bytes > rest.len() {
                 return;
             }
-            // Store raw prefix bytes (prefix_len + data); formatting deferred to format_fn
+            let prefix_descriptor = if ipv6 {
+                &PREFIX_ENTRY_IPV6_DESCRIPTOR
+            } else {
+                &PREFIX_ENTRY_IPV4_DESCRIPTOR
+            };
             buf.push_field(
-                &MUP_NLRI_CHILDREN[FD_MUP_PREFIX],
+                prefix_descriptor,
                 FieldValue::Bytes(&rest[..1 + prefix_bytes]),
                 rest_offset..rest_offset + 1 + prefix_bytes,
             );
@@ -1424,9 +1434,13 @@ fn parse_mup_route_type_data<'pkt>(
             if 1 + prefix_bytes > rest.len() {
                 return;
             }
-            // Store raw prefix bytes; formatting deferred to format_fn
+            let prefix_descriptor = if ipv6 {
+                &PREFIX_ENTRY_IPV6_DESCRIPTOR
+            } else {
+                &PREFIX_ENTRY_IPV4_DESCRIPTOR
+            };
             buf.push_field(
-                &MUP_NLRI_CHILDREN[FD_MUP_PREFIX],
+                prefix_descriptor,
                 FieldValue::Bytes(&rest[..1 + prefix_bytes]),
                 rest_offset..rest_offset + 1 + prefix_bytes,
             );
@@ -1529,6 +1543,61 @@ fn parse_mup_route_type_data<'pkt>(
             }
         }
     }
+}
+
+/// Writes a BGP IPv4 NLRI prefix as a JSON-quoted CIDR string (e.g., `"192.168.1.0/24"`).
+///
+/// The raw bytes are `[prefix_len_bits, prefix_octets...]` per RFC 4271, Section 4.3.
+/// Missing octets are zero-filled to produce a full dotted-quad address.
+///
+/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
+fn format_nlri_ipv4_prefix(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    if bytes.is_empty() {
+        return w.write_all(b"\"\"");
+    }
+    let prefix_len = bytes[0];
+    let mut octets = [0u8; 4];
+    let available = (bytes.len() - 1).min(4);
+    octets[..available].copy_from_slice(&bytes[1..1 + available]);
+    write!(
+        w,
+        "\"{}.{}.{}.{}/{}\"",
+        octets[0], octets[1], octets[2], octets[3], prefix_len
+    )
+}
+
+/// Writes a BGP IPv6 NLRI prefix as a JSON-quoted CIDR string (e.g., `"2001:db8::/32"`).
+///
+/// The raw bytes are `[prefix_len_bits, prefix_octets...]` per RFC 4760, Section 3.
+/// Missing octets are zero-filled and the address is formatted per RFC 5952.
+///
+/// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+fn format_nlri_ipv6_prefix(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) => *b,
+        _ => return w.write_all(b"\"\""),
+    };
+    if bytes.is_empty() {
+        return w.write_all(b"\"\"");
+    }
+    let prefix_len = bytes[0];
+    let mut addr = [0u8; 16];
+    let available = (bytes.len() - 1).min(16);
+    addr[..available].copy_from_slice(&bytes[1..1 + available]);
+    // Use FieldValue::Ipv6Addr Display which formats per RFC 5952.
+    write!(w, "\"{}/{}\"", FieldValue::Ipv6Addr(addr), prefix_len)
 }
 
 /// Formats an address as IPv4 or IPv6 FieldValue.
@@ -1807,9 +1876,19 @@ static PATH_ATTR_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("path_attribute", "Path Attribute", FieldType::Object)
         .with_children(PATH_ATTR_CHILDREN);
 
-/// Descriptor for prefix entries (raw bytes: prefix_len + prefix data).
-static PREFIX_ENTRY_DESCRIPTOR: FieldDescriptor =
-    FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes);
+/// Descriptor for IPv4 prefix entries with CIDR format (e.g., `"192.168.1.0/24"`).
+///
+/// Raw bytes: `[prefix_len_bits, prefix_octets...]` per RFC 4271, Section 4.3.
+static PREFIX_ENTRY_IPV4_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes)
+        .with_format_fn(format_nlri_ipv4_prefix);
+
+/// Descriptor for IPv6 prefix entries with CIDR format (e.g., `"2001:db8::/32"`).
+///
+/// Raw bytes: `[prefix_len_bits, prefix_octets...]` per RFC 4760, Section 3.
+static PREFIX_ENTRY_IPV6_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes)
+        .with_format_fn(format_nlri_ipv6_prefix);
 
 /// Object descriptor for AS_PATH segment entries.
 static AS_PATH_SEG_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -1901,7 +1980,6 @@ const FD_MUP_ARCH_TYPE: usize = 0;
 const FD_MUP_ROUTE_TYPE: usize = 1;
 const FD_MUP_VALUE: usize = 2;
 const FD_MUP_RD: usize = 3;
-const FD_MUP_PREFIX: usize = 4;
 const FD_MUP_ADDRESS: usize = 5;
 const FD_MUP_TEID: usize = 6;
 const FD_MUP_QFI: usize = 7;
@@ -3813,6 +3891,102 @@ mod tests {
         assert_eq!(
             *nested_field_value(&buf, si_range, "endpoint_behavior"),
             FieldValue::U16(0x0014)
+        );
+    }
+
+    /// Helper: invoke a format_fn and return the output bytes as a String.
+    fn call_format_fn(
+        f: fn(&FieldValue<'_>, &FormatContext<'_>, &mut dyn std::io::Write) -> std::io::Result<()>,
+        value: &FieldValue<'_>,
+    ) -> String {
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        f(value, &ctx, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn format_nlri_ipv4_prefix_cidr() {
+        // /24 prefix: 192.168.1.0/24
+        assert_eq!(
+            call_format_fn(
+                format_nlri_ipv4_prefix,
+                &FieldValue::Bytes(&[24, 192, 168, 1])
+            ),
+            "\"192.168.1.0/24\""
+        );
+        // /32 host route: 10.0.0.1/32
+        assert_eq!(
+            call_format_fn(
+                format_nlri_ipv4_prefix,
+                &FieldValue::Bytes(&[32, 10, 0, 0, 1])
+            ),
+            "\"10.0.0.1/32\""
+        );
+        // /0 default route: 0.0.0.0/0
+        assert_eq!(
+            call_format_fn(format_nlri_ipv4_prefix, &FieldValue::Bytes(&[0])),
+            "\"0.0.0.0/0\""
+        );
+        // /8 prefix: 10.0.0.0/8
+        assert_eq!(
+            call_format_fn(format_nlri_ipv4_prefix, &FieldValue::Bytes(&[8, 10])),
+            "\"10.0.0.0/8\""
+        );
+        // Empty bytes → empty string
+        assert_eq!(
+            call_format_fn(format_nlri_ipv4_prefix, &FieldValue::Bytes(&[])),
+            "\"\""
+        );
+        // Non-Bytes variant → empty string
+        assert_eq!(
+            call_format_fn(format_nlri_ipv4_prefix, &FieldValue::U8(0)),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn format_nlri_ipv6_prefix_cidr() {
+        // /48 prefix: 2001:db8:1::/48
+        assert_eq!(
+            call_format_fn(
+                format_nlri_ipv6_prefix,
+                &FieldValue::Bytes(&[48, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01])
+            ),
+            "\"2001:db8:1::/48\""
+        );
+        // /128 host route: 2001:db8::1/128
+        let mut full = vec![128];
+        let mut addr = [0u8; 16];
+        addr[0] = 0x20;
+        addr[1] = 0x01;
+        addr[2] = 0x0d;
+        addr[3] = 0xb8;
+        addr[15] = 0x01;
+        full.extend_from_slice(&addr);
+        assert_eq!(
+            call_format_fn(format_nlri_ipv6_prefix, &FieldValue::Bytes(&full)),
+            "\"2001:db8::1/128\""
+        );
+        // /0 default route: ::/0
+        assert_eq!(
+            call_format_fn(format_nlri_ipv6_prefix, &FieldValue::Bytes(&[0])),
+            "\"::/0\""
+        );
+        // Empty bytes → empty string
+        assert_eq!(
+            call_format_fn(format_nlri_ipv6_prefix, &FieldValue::Bytes(&[])),
+            "\"\""
+        );
+        // Non-Bytes variant → empty string
+        assert_eq!(
+            call_format_fn(format_nlri_ipv6_prefix, &FieldValue::U8(0)),
+            "\"\""
         );
     }
 }
