@@ -740,8 +740,29 @@ mod tests {
     }
 
     #[test]
+    fn ie_type_name_all_assigned_values() {
+        // Exhaustive check: every IE type in 3GPP TS 29.244 Table 8.1.2-1
+        // should resolve to a non-"Unknown" name, and the spare entries
+        // (273, 381) must resolve to "Unknown".
+        //
+        // This test iterates over every assigned type so the coverage
+        // tool exercises every match arm in `ie_type_name`.
+        let spare = [273u16, 381];
+        for ie_type in 1u16..=402 {
+            let name = ie_type_name(ie_type);
+            if spare.contains(&ie_type) {
+                assert_eq!(name, "Unknown", "spare IE type {ie_type} should be Unknown",);
+            } else {
+                assert_ne!(name, "Unknown", "IE type {ie_type} should have a name",);
+                assert!(!name.is_empty(), "IE type {ie_type} returned empty name",);
+            }
+        }
+    }
+
+    #[test]
     fn ie_type_name_extended_types() {
-        // Spot-check IE names across the 118-402 range.
+        // Spot-check the exact name strings for representative entries
+        // across the 118-402 range to catch typos in the mapping.
         assert_eq!(ie_type_name(118), "Aggregated URRs");
         assert_eq!(ie_type_name(120), "Aggregated URR ID");
         assert_eq!(ie_type_name(124), "QFI");
