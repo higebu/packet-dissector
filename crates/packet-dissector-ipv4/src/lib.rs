@@ -92,10 +92,13 @@ impl Dissector for Ipv4Dissector {
         }
 
         // RFC 791, Section 3.1 — Internet Header Format
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         let version = (data[0] >> 4) & 0x0F;
         let ihl = (data[0] & 0x0F) as usize;
 
-        // RFC 791, Section 3.1 — Version must be 4
+        // RFC 791, Section 3.1 — "The Version field indicates the format of the
+        // internet header. This document describes version 4."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         if version != 4 {
             return Err(PacketError::InvalidFieldValue {
                 field: "version",
@@ -103,7 +106,8 @@ impl Dissector for Ipv4Dissector {
             });
         }
 
-        // RFC 791, Section 3.1 — IHL must be at least 5
+        // RFC 791, Section 3.1 — "The minimum value for a correct header is 5."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         if ihl < 5 {
             return Err(PacketError::InvalidFieldValue {
                 field: "ihl",
@@ -119,7 +123,10 @@ impl Dissector for Ipv4Dissector {
             });
         }
 
-        // RFC 791, Section 3.1 — Total Length must be >= header length
+        // RFC 791, Section 3.1 — Total Length is the length of the datagram,
+        // measured in octets, including internet header and data; it must
+        // therefore be at least IHL * 4.
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         let total_length = read_be_u16(data, 2)?;
         if (total_length as usize) < header_len {
             return Err(PacketError::InvalidFieldValue {
@@ -128,7 +135,9 @@ impl Dissector for Ipv4Dissector {
             });
         }
 
-        // RFC 791, Section 3.1 — Data must be large enough for Total Length
+        // RFC 791, Section 3.1 — the buffer must contain at least Total Length
+        // octets; otherwise the datagram is truncated.
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         if data.len() < total_length as usize {
             return Err(PacketError::Truncated {
                 expected: total_length as usize,
@@ -136,13 +145,22 @@ impl Dissector for Ipv4Dissector {
             });
         }
 
-        // RFC 2474 — DSCP (6 bits) + RFC 3168 — ECN (2 bits)
+        // RFC 2474, Section 3 — DSCP occupies bits 0-5 of the DS Field.
+        // https://www.rfc-editor.org/rfc/rfc2474#section-3
+        // RFC 3168, Section 5 — ECN occupies bits 6-7 (formerly CU in RFC 2474).
+        // https://www.rfc-editor.org/rfc/rfc3168#section-5
         let dscp = data[1] >> 2;
         let ecn = data[1] & 0x03;
 
+        // RFC 791, Section 3.1 — Identification (16 bits).
+        // RFC 6864, Section 4 — atomic datagrams (DF=1, MF=0, frag_offset=0) MAY
+        // carry any value; parse verbatim without additional validation.
+        // https://www.rfc-editor.org/rfc/rfc6864#section-4
         let identification = read_be_u16(data, 4)?;
 
-        // RFC 791, Section 3.1 — Flags (3 bits) and Fragment Offset (13 bits)
+        // RFC 791, Section 3.1 — Flags (3 bits, bit 0 Reserved / bit 1 DF / bit 2 MF)
+        // and Fragment Offset (13 bits, in units of 8 octets).
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         let flags_frag = read_be_u16(data, 6)?;
         let flags = ((flags_frag >> 13) & 0x07) as u8;
         let fragment_offset = flags_frag & 0x1FFF;
@@ -189,10 +207,14 @@ impl Dissector for Ipv4Dissector {
             FieldValue::U16(identification),
             offset + 4..offset + 6,
         );
+        // Flags occupies bits 0-2 of byte 6 only, so its highlight range is a
+        // single byte even though Fragment Offset (which shares the same 16-bit
+        // word) spans bytes 6-7. RFC 791, Section 3.1.
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_FLAGS],
             FieldValue::U8(flags),
-            offset + 6..offset + 8,
+            offset + 6..offset + 7,
         );
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_FRAGMENT_OFFSET],
@@ -225,7 +247,8 @@ impl Dissector for Ipv4Dissector {
             offset + 16..offset + 20,
         );
 
-        // RFC 791, Section 3.1 — Options (variable length, if IHL > 5)
+        // RFC 791, Section 3.1 — Options (variable length, present when IHL > 5).
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         if header_len > MIN_HEADER_SIZE {
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_OPTIONS],
