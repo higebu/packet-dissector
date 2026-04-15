@@ -10,10 +10,13 @@
 //! | IEEE 802.3 cl.3.2.6   | Reserved type (1501–1535) rejected   | parse_ethernet_reserved_type_rejected   |
 //! | IEEE 802.3 cl.3.2.3   | Truncated frame                      | parse_ethernet_truncated                |
 //! | IEEE 802.3 cl.3.2.3   | Offset handling                      | parse_ethernet_with_offset              |
-//! | IEEE 802.1Q cl.9.3    | VLAN tag (TPID, PCP, DEI, VID)      | parse_ethernet_with_8021q_vlan_tag      |
-//! | IEEE 802.1Q cl.9.3    | Truncated VLAN tag                   | parse_ethernet_vlan_truncated           |
-//! | IEEE 802.1Q cl.9.3    | VLAN TPID field value                | parse_ethernet_vlan_tpid_field          |
-//! | IEEE 802.1ad cl.9.3   | S-VLAN tag (TPID=0x88A8)            | parse_ethernet_with_8021ad_vlan_tag     |
+//! | IEEE 802.1Q cl.9.6    | VLAN tag (TPID, PCP, DEI, VID)       | parse_ethernet_with_8021q_vlan_tag      |
+//! | IEEE 802.1Q cl.9.6    | Truncated VLAN tag                   | parse_ethernet_vlan_truncated           |
+//! | IEEE 802.1Q cl.9.6    | VLAN TPID field value                | parse_ethernet_vlan_tpid_field          |
+//! | IEEE 802.1ad cl.9.6   | S-VLAN tag (TPID=0x88A8)             | parse_ethernet_with_8021ad_vlan_tag     |
+//! | IEEE 802.1ad cl.9.6   | QinQ double-tagged frame             | parse_ethernet_qinq_double_tag          |
+//! | IEEE 802.1ad cl.9.6   | Truncated inner QinQ tag rejected    | parse_ethernet_qinq_truncated_inner_tag |
+//! | IEEE 802.1Q cl.9.6    | Triple stacked VLAN tags             | parse_ethernet_triple_vlan_tag          |
 //! | IEEE 802.2 §3         | LLC frame parsing (DSAP, SSAP, Ctrl) | parse_ethernet_llc_frame                |
 //! | IEEE 802.2 §3         | LLC frame truncated                  | parse_ethernet_llc_frame_truncated      |
 //! | IEEE 802.2 §3         | LLC SAP dispatch                     | parse_ethernet_llc_dispatch             |
@@ -281,18 +284,18 @@ fn parse_ethernet_vlan_tpid_field() {
     );
 }
 
-// IEEE 802.1ad clause 9.3 (S-VLAN tag): TPID 0x88A8 identifies a Service VLAN tag (QinQ outer tag).
+// IEEE 802.1ad clause 9.6 (S-VLAN tag): TPID 0x88A8 identifies a Service VLAN tag (QinQ outer tag).
 // The dissector must recognise it the same way as 0x8100 and extract PCP, DEI, VID correctly.
 #[test]
 fn parse_ethernet_with_8021ad_vlan_tag() {
     // dst + src + 802.1ad S-VLAN tag (TPID=0x88A8, TCI=0xA064 -> PCP=5, DEI=0, VID=100)
-    // + inner EtherType 0x8100 (C-VLAN, typical QinQ) treated as next dispatch key
+    // + inner EtherType 0x0800 (IPv4)
     let data = [
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // dst MAC
         0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, // src MAC
         0x88, 0xA8, // TPID: 802.1ad S-VLAN
         0xA0, 0x64, // TCI: PCP=5, DEI=0, VID=100  (0xA064 = 1010_0000_0110_0100)
-        0x81, 0x00, // Inner EtherType: 0x8100 (C-VLAN tag in QinQ)
+        0x08, 0x00, // Inner EtherType: IPv4
         0xDE, 0xAD, // payload
     ];
     let mut buf = DissectBuffer::new();
@@ -300,7 +303,7 @@ fn parse_ethernet_with_8021ad_vlan_tag() {
 
     // S-VLAN tagged frame: 14 + 4 = 18 bytes header
     assert_eq!(result.bytes_consumed, 18);
-    assert_eq!(result.next, DispatchHint::ByEtherType(0x8100));
+    assert_eq!(result.next, DispatchHint::ByEtherType(0x0800));
 
     let layer = buf.layer_by_name("Ethernet").unwrap();
     assert_eq!(layer.range, 0..18);
@@ -323,6 +326,125 @@ fn parse_ethernet_with_8021ad_vlan_tag() {
     );
     assert_eq!(
         buf.field_by_name(layer, "ethertype").unwrap().value,
-        FieldValue::U16(0x8100)
+        FieldValue::U16(0x0800)
     );
+}
+
+// IEEE 802.1ad clause 9.6 (QinQ): outer S-Tag (0x88A8) followed by inner C-Tag (0x8100)
+// then the final EtherType. Both tags must be parsed and the dispatch hint uses the
+// final EtherType.
+#[test]
+fn parse_ethernet_qinq_double_tag() {
+    let data = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // dst MAC
+        0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, // src MAC
+        0x88, 0xA8, // outer TPID: 802.1ad S-VLAN
+        0x00, 0x64, // outer TCI: PCP=0, DEI=0, VID=100
+        0x81, 0x00, // inner TPID: 802.1Q C-VLAN
+        0x00, 0xC8, // inner TCI: PCP=0, DEI=0, VID=200
+        0x08, 0x00, // final EtherType: IPv4
+        0xDE, 0xAD, // payload
+    ];
+    let mut buf = DissectBuffer::new();
+    let result = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+
+    // Ethernet (14) + S-Tag (4) + C-Tag (4) = 22 bytes consumed
+    assert_eq!(result.bytes_consumed, 22);
+    assert_eq!(result.next, DispatchHint::ByEtherType(0x0800));
+
+    let layer = buf.layer_by_name("Ethernet").unwrap();
+    assert_eq!(layer.range, 0..22);
+
+    // Both vlan_id fields are present; field_by_name returns the first match.
+    // Iterate over the layer fields to verify both tags were pushed.
+    let fields = buf.layer_fields(layer);
+    let vlan_ids: Vec<u16> = fields
+        .iter()
+        .filter(|f| f.descriptor.name == "vlan_id")
+        .filter_map(|f| match f.value {
+            FieldValue::U16(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(vlan_ids, vec![100, 200]);
+
+    let tpids: Vec<u16> = fields
+        .iter()
+        .filter(|f| f.descriptor.name == "vlan_tpid")
+        .filter_map(|f| match f.value {
+            FieldValue::U16(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tpids, vec![0x88A8, 0x8100]);
+
+    assert_eq!(
+        buf.field_by_name(layer, "ethertype").unwrap().value,
+        FieldValue::U16(0x0800)
+    );
+}
+
+// IEEE 802.1ad clause 9.6 (QinQ): after an outer S-Tag, if the inner TPID indicates
+// another VLAN tag but the frame is truncated before the inner TCI / EtherType,
+// the dissector must reject the frame as Truncated rather than silently treating
+// the inner TPID as a final EtherType.
+#[test]
+fn parse_ethernet_qinq_truncated_inner_tag() {
+    let data = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // dst MAC
+        0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, // src MAC
+        0x88, 0xA8, // outer TPID: 802.1ad S-VLAN
+        0x00, 0x64, // outer TCI: VID=100
+        0x81, 0x00, // inner TPID: 802.1Q C-VLAN
+        0x00, // <-- only 1 byte of the inner TCI; inner tag truncated
+    ];
+    let mut buf = DissectBuffer::new();
+    let err = EthernetDissector.dissect(&data, &mut buf, 0).unwrap_err();
+
+    assert!(matches!(
+        err,
+        packet_dissector::error::PacketError::Truncated {
+            expected: 22,
+            actual: 19
+        }
+    ));
+}
+
+// IEEE 802.1Q clause 9.6: triple-stacked VLAN tags (e.g. S-Tag + S-Tag + C-Tag) are
+// valid constructs in provider networks. The dissector must parse all stacked tags
+// and use the final EtherType as dispatch hint.
+#[test]
+fn parse_ethernet_triple_vlan_tag() {
+    let data = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // dst MAC
+        0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, // src MAC
+        0x88, 0xA8, // outer TPID: S-VLAN
+        0x00, 0x0A, // outer TCI: VID=10
+        0x88, 0xA8, // middle TPID: S-VLAN
+        0x00, 0x14, // middle TCI: VID=20
+        0x81, 0x00, // inner TPID: C-VLAN
+        0x00, 0x1E, // inner TCI: VID=30
+        0x08, 0x00, // final EtherType: IPv4
+        0xDE, 0xAD, // payload
+    ];
+    let mut buf = DissectBuffer::new();
+    let result = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+
+    // Ethernet (14) + 3 tags (12) = 26 bytes consumed
+    assert_eq!(result.bytes_consumed, 26);
+    assert_eq!(result.next, DispatchHint::ByEtherType(0x0800));
+
+    let layer = buf.layer_by_name("Ethernet").unwrap();
+    assert_eq!(layer.range, 0..26);
+
+    let fields = buf.layer_fields(layer);
+    let vlan_ids: Vec<u16> = fields
+        .iter()
+        .filter(|f| f.descriptor.name == "vlan_id")
+        .filter_map(|f| match f.value {
+            FieldValue::U16(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(vlan_ids, vec![10, 20, 30]);
 }

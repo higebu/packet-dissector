@@ -1,14 +1,17 @@
 //! Ethernet II frame dissector.
 //!
-//! ## Limitations
-//! - Only single (802.1Q) and double (802.1ad QinQ) VLAN tags are supported.
-//!   Frames with 3 or more stacked VLAN tags (Triple Tagging) are not parsed
-//!   beyond the second tag.
+//! Parses classic Ethernet II frames (DIX v2) as well as IEEE 802.3 frames
+//! with IEEE 802.2 LLC encapsulation. IEEE 802.1Q (C-Tag) and IEEE 802.1ad
+//! (S-Tag / QinQ) VLAN tags stacked in any number are accepted; each tag
+//! is parsed in a loop until a non-VLAN EtherType or a length value is
+//! reached.
 //!
 //! ## References
-//! - IEEE 802.3-2022: <https://standards.ieee.org/ieee/802.3/10422/>
-//! - IEEE 802.1Q-2022 (VLAN tagging): <https://standards.ieee.org/ieee/802.1Q/10323/>
-//! - IEEE 802.1ad-2005 (Provider Bridges / QinQ, incorporated into IEEE 802.1Q-2011 and later)
+//! - IEEE 802.3-2022 (Ethernet): <https://standards.ieee.org/ieee/802.3/10422/>
+//! - IEEE 802.1Q-2022 (VLAN tagging, incorporates IEEE 802.1ad QinQ):
+//!   <https://standards.ieee.org/ieee/802.1Q/10323/>
+//! - IEEE 802.2-1998 (LLC): <https://standards.ieee.org/ieee/802.2/1048/>
+//! - IANA EtherType registry: <https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml>
 
 #![deny(missing_docs)]
 
@@ -23,11 +26,12 @@ use packet_dissector_core::util::read_be_u16;
 const HEADER_SIZE: usize = 14;
 
 /// 802.1Q Customer VLAN TPID value (C-Tag).
-/// IEEE 802.1Q-2022, clause 9.3.
+/// IEEE 802.1Q-2022, clause 9.6 (VLAN Tag Protocol Identifier).
 const TPID_8021Q: u16 = 0x8100;
 
 /// 802.1ad Service VLAN TPID value (S-Tag / QinQ outer tag).
-/// IEEE 802.1ad-2005 (incorporated into IEEE 802.1Q-2011 and later), clause 9.3.
+/// IEEE 802.1Q-2022, clause 9.6 (originally introduced by IEEE 802.1ad-2005
+/// and rolled into IEEE 802.1Q-2011 and later).
 const TPID_8021AD: u16 = 0x88A8;
 
 /// Minimum value of a valid EtherType field in an Ethernet II frame.
@@ -152,56 +156,50 @@ impl Dissector for EthernetDissector {
         let mut header_len = HEADER_SIZE;
         let mut current_type = ethertype_or_tpid;
 
-        // IEEE 802.1Q-2022, clause 9.3 / IEEE 802.1ad: stacked VLAN tags may
-        // appear back-to-back (e.g. QinQ S-Tag + C-Tag).
-        if current_type == TPID_8021Q || current_type == TPID_8021AD {
-            loop {
-                let vlan_end = header_len + 4;
-                if data.len() < vlan_end {
-                    if header_len == HEADER_SIZE {
-                        return Err(PacketError::Truncated {
-                            expected: vlan_end,
-                            actual: data.len(),
-                        });
-                    }
-                    break;
-                }
-
-                // IEEE 802.1Q-2022, clause 9.5: Tag Control Information (TCI), 2 octets.
-                // Bit layout (MSB first): PCP[3] | DEI[1] | VID[12].
-                let tci = read_be_u16(data, header_len)?;
-                let pcp = (tci >> 13) & 0x07;
-                let dei = (tci >> 12) & 0x01;
-                let vlan_id = tci & 0x0FFF;
-                let inner_type = read_be_u16(data, header_len + 2)?;
-
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_VLAN_TPID],
-                    FieldValue::U16(current_type),
-                    offset + header_len - 2..offset + header_len,
-                );
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_VLAN_PCP],
-                    FieldValue::U8(pcp as u8),
-                    offset + header_len..offset + header_len + 2,
-                );
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_VLAN_DEI],
-                    FieldValue::U8(dei as u8),
-                    offset + header_len..offset + header_len + 2,
-                );
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_VLAN_ID],
-                    FieldValue::U16(vlan_id),
-                    offset + header_len..offset + header_len + 2,
-                );
-
-                header_len = vlan_end;
-                current_type = inner_type;
-                if current_type != TPID_8021Q && current_type != TPID_8021AD {
-                    break;
-                }
+        // IEEE 802.1Q-2022, clause 9.6: stacked VLAN tags may appear back-to-back
+        // (e.g. QinQ S-Tag + C-Tag). Parse tags until `current_type` is no longer
+        // a VLAN TPID. If a VLAN TPID is present but the remaining data cannot
+        // hold the required 4-byte tag, the frame is truncated.
+        while current_type == TPID_8021Q || current_type == TPID_8021AD {
+            let vlan_end = header_len + 4;
+            if data.len() < vlan_end {
+                return Err(PacketError::Truncated {
+                    expected: vlan_end,
+                    actual: data.len(),
+                });
             }
+
+            // IEEE 802.1Q-2022, clause 9.6: Tag Control Information (TCI), 2 octets.
+            // Bit layout (MSB first): PCP[3] | DEI[1] | VID[12].
+            let tci = read_be_u16(data, header_len)?;
+            let pcp = (tci >> 13) & 0x07;
+            let dei = (tci >> 12) & 0x01;
+            let vlan_id = tci & 0x0FFF;
+            let inner_type = read_be_u16(data, header_len + 2)?;
+
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_VLAN_TPID],
+                FieldValue::U16(current_type),
+                offset + header_len - 2..offset + header_len,
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_VLAN_PCP],
+                FieldValue::U8(pcp as u8),
+                offset + header_len..offset + header_len + 2,
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_VLAN_DEI],
+                FieldValue::U8(dei as u8),
+                offset + header_len..offset + header_len + 2,
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_VLAN_ID],
+                FieldValue::U16(vlan_id),
+                offset + header_len..offset + header_len + 2,
+            );
+
+            header_len = vlan_end;
+            current_type = inner_type;
         }
 
         let dispatch_hint = if current_type <= LENGTH_MAX {
