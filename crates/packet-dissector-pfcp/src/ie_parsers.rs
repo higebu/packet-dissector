@@ -59,6 +59,100 @@ static FD_INLINE_TEID: FieldDescriptor =
 static FD_INLINE_CHOOSE_ID: FieldDescriptor =
     FieldDescriptor::new("choose_id", "CHOOSE ID", FieldType::U8).optional();
 
+// Source / Destination Interface — 3GPP TS 29.244, Sections 8.2.2 and 8.2.24.
+
+static FD_INLINE_SOURCE_INTERFACE_VALUE: FieldDescriptor = FieldDescriptor {
+    name: "interface_value",
+    display_name: "Interface Value",
+    field_type: FieldType::U8,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, _siblings| match v {
+        FieldValue::U8(t) => source_interface_name(*t),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
+static FD_INLINE_DESTINATION_INTERFACE_VALUE: FieldDescriptor = FieldDescriptor {
+    name: "interface_value",
+    display_name: "Interface Value",
+    field_type: FieldType::U8,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, _siblings| match v {
+        FieldValue::U8(t) => destination_interface_name(*t),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
+// Scalar IDs — 3GPP TS 29.244, Sections 8.2.49 (PDR ID), 8.2.54 (URR ID),
+// 8.2.73 (FAR ID), 8.2.75 (QER ID), 8.2.77 (BAR ID).
+
+static FD_INLINE_PDR_ID: FieldDescriptor =
+    FieldDescriptor::new("rule_id", "Rule ID", FieldType::U16);
+
+static FD_INLINE_URR_ID: FieldDescriptor =
+    FieldDescriptor::new("urr_id_value", "URR ID Value", FieldType::U32);
+
+static FD_INLINE_FAR_ID: FieldDescriptor =
+    FieldDescriptor::new("far_id_value", "FAR ID Value", FieldType::U32);
+
+static FD_INLINE_QER_ID: FieldDescriptor =
+    FieldDescriptor::new("qer_id_value", "QER ID Value", FieldType::U32);
+
+static FD_INLINE_BAR_ID: FieldDescriptor =
+    FieldDescriptor::new("bar_id_value", "BAR ID Value", FieldType::U8);
+
+// Precedence — 3GPP TS 29.244, Section 8.2.11.
+
+static FD_INLINE_PRECEDENCE: FieldDescriptor =
+    FieldDescriptor::new("precedence_value", "Precedence Value", FieldType::U32);
+
+// Apply Action — 3GPP TS 29.244, Section 8.2.26.
+
+static FD_INLINE_APPLY_DROP: FieldDescriptor = FieldDescriptor::new("drop", "DROP", FieldType::U8);
+static FD_INLINE_APPLY_FORW: FieldDescriptor = FieldDescriptor::new("forw", "FORW", FieldType::U8);
+static FD_INLINE_APPLY_BUFF: FieldDescriptor = FieldDescriptor::new("buff", "BUFF", FieldType::U8);
+static FD_INLINE_APPLY_NOCP: FieldDescriptor = FieldDescriptor::new("nocp", "NOCP", FieldType::U8);
+static FD_INLINE_APPLY_DUPL: FieldDescriptor = FieldDescriptor::new("dupl", "DUPL", FieldType::U8);
+static FD_INLINE_APPLY_IPMA: FieldDescriptor = FieldDescriptor::new("ipma", "IPMA", FieldType::U8);
+static FD_INLINE_APPLY_IPMD: FieldDescriptor = FieldDescriptor::new("ipmd", "IPMD", FieldType::U8);
+static FD_INLINE_APPLY_DFRT: FieldDescriptor = FieldDescriptor::new("dfrt", "DFRT", FieldType::U8);
+static FD_INLINE_APPLY_EDRT: FieldDescriptor =
+    FieldDescriptor::new("edrt", "EDRT", FieldType::U8).optional();
+static FD_INLINE_APPLY_BDPN: FieldDescriptor =
+    FieldDescriptor::new("bdpn", "BDPN", FieldType::U8).optional();
+static FD_INLINE_APPLY_DDPN: FieldDescriptor =
+    FieldDescriptor::new("ddpn", "DDPN", FieldType::U8).optional();
+static FD_INLINE_APPLY_FSSM: FieldDescriptor =
+    FieldDescriptor::new("fssm", "FSSM", FieldType::U8).optional();
+static FD_INLINE_APPLY_MBSU: FieldDescriptor =
+    FieldDescriptor::new("mbsu", "MBSU", FieldType::U8).optional();
+
+// Outer Header Removal — 3GPP TS 29.244, Section 8.2.64.
+
+static FD_INLINE_OUTER_HEADER_REMOVAL_DESC: FieldDescriptor = FieldDescriptor {
+    name: "outer_header_removal_description",
+    display_name: "Outer Header Removal Description",
+    field_type: FieldType::U8,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, _siblings| match v {
+        FieldValue::U8(t) => outer_header_removal_description_name(*t),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
+static FD_INLINE_GTPU_EXT_HDR_DELETION: FieldDescriptor = FieldDescriptor::new(
+    "gtpu_extension_header_deletion",
+    "GTP-U Extension Header Deletion",
+    FieldType::U8,
+)
+.optional();
+
 /// Parse the value portion of a PFCP IE into a structured [`FieldValue`],
 /// pushing fields directly into `buf` for Object and grouped IE values.
 ///
@@ -79,6 +173,26 @@ pub fn parse_ie_value<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
 ) -> FieldValue<'pkt> {
     match ie_type {
+        // 3GPP TS 29.244, Section 8.2.2 — Source Interface
+        20 if !data.is_empty() => parse_interface(data, offset, buf, true),
+        // 3GPP TS 29.244, Section 8.2.11 — Precedence
+        29 if data.len() >= 4 => parse_precedence(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.24 — Destination Interface
+        42 if !data.is_empty() => parse_interface(data, offset, buf, false),
+        // 3GPP TS 29.244, Section 8.2.26 — Apply Action
+        44 if !data.is_empty() => parse_apply_action(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.49 — PDR ID
+        56 if data.len() >= 2 => parse_pdr_id(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.54 — URR ID
+        81 if data.len() >= 4 => parse_scalar_u32_ie(data, offset, buf, &FD_INLINE_URR_ID),
+        // 3GPP TS 29.244, Section 8.2.77 — BAR ID
+        88 if !data.is_empty() => parse_bar_id(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.64 — Outer Header Removal
+        95 if !data.is_empty() => parse_outer_header_removal(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.73 — FAR ID
+        108 if data.len() >= 4 => parse_scalar_u32_ie(data, offset, buf, &FD_INLINE_FAR_ID),
+        // 3GPP TS 29.244, Section 8.2.75 — QER ID
+        109 if data.len() >= 4 => parse_scalar_u32_ie(data, offset, buf, &FD_INLINE_QER_ID),
         // 3GPP TS 29.244, Section 8.2.1 — Cause
         19 if !data.is_empty() => {
             let obj_idx = buf.begin_container(
@@ -152,16 +266,22 @@ pub fn parse_ie_value<'pkt>(
         | 147
         | 165..=169
         | 175..=176
+        | 183
         | 187..=190
         | 195
         | 199..=201
         | 203
         | 205
-        | 214
+        | 211..=214
+        | 216
+        | 218
         | 220..=221
         | 225..=227
         | 233
         | 238..=240
+        | 242
+        | 247
+        | 252
         | 254..=256
         | 261
         | 263..=264
@@ -170,8 +290,10 @@ pub fn parse_ie_value<'pkt>(
         | 276..=277
         | 279
         | 290
+        | 295
         | 300..=304
         | 310..=311
+        | 315
         | 316
         | 323..=324
         | 331
@@ -179,6 +301,7 @@ pub fn parse_ie_value<'pkt>(
         | 340..=341
         | 355..=356
         | 361..=363
+        | 378
         | 383
         | 386
         | 397
@@ -409,6 +532,291 @@ fn parse_node_id<'pkt>(
 
     buf.end_container(obj_idx);
     FieldValue::Object(0..0)
+}
+
+/// Parse a Source or Destination Interface IE value.
+///
+/// 3GPP TS 29.244, Section 8.2.2 (Source) / 8.2.24 (Destination):
+/// - Octet 5, bits 1-4: Interface value (4 bits)
+/// - Octet 5, bits 5-8: Spare
+fn parse_interface<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+    is_source: bool,
+) -> FieldValue<'pkt> {
+    let interface_value = data[0] & 0x0F;
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    let descriptor = if is_source {
+        &FD_INLINE_SOURCE_INTERFACE_VALUE
+    } else {
+        &FD_INLINE_DESTINATION_INTERFACE_VALUE
+    };
+    buf.push_field(
+        descriptor,
+        FieldValue::U8(interface_value),
+        offset..offset + 1,
+    );
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a Precedence IE value (32-bit unsigned integer).
+///
+/// 3GPP TS 29.244, Section 8.2.11.
+fn parse_precedence<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    let val = read_be_u32(data, 0).unwrap_or_default();
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + 4,
+    );
+    buf.push_field(
+        &FD_INLINE_PRECEDENCE,
+        FieldValue::U32(val),
+        offset..offset + 4,
+    );
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a PDR ID IE value (16-bit Rule ID).
+///
+/// 3GPP TS 29.244, Section 8.2.49.
+fn parse_pdr_id<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    let rule_id = packet_dissector_core::util::read_be_u16(data, 0).unwrap_or_default();
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + 2,
+    );
+    buf.push_field(
+        &FD_INLINE_PDR_ID,
+        FieldValue::U16(rule_id),
+        offset..offset + 2,
+    );
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a 32-bit scalar ID IE (URR ID, FAR ID, QER ID).
+///
+/// 3GPP TS 29.244, Sections 8.2.54, 8.2.73, 8.2.75.
+fn parse_scalar_u32_ie<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+    descriptor: &'static FieldDescriptor,
+) -> FieldValue<'pkt> {
+    let val = read_be_u32(data, 0).unwrap_or_default();
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + 4,
+    );
+    buf.push_field(descriptor, FieldValue::U32(val), offset..offset + 4);
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a BAR ID IE value (8-bit).
+///
+/// 3GPP TS 29.244, Section 8.2.77.
+fn parse_bar_id<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_BAR_ID,
+        FieldValue::U8(data[0]),
+        offset..offset + 1,
+    );
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse an Apply Action IE value.
+///
+/// 3GPP TS 29.244, Section 8.2.26:
+/// - Octet 5: DFRT(bit 8) | IPMD(7) | IPMA(6) | DUPL(5) | NOCP(4) | BUFF(3) | FORW(2) | DROP(1)
+/// - Octet 6 (optional): Spare(bit 8-6) | MBSU(5) | FSSM(4) | DDPN(3) | BDPN(2) | EDRT(1)
+fn parse_apply_action<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    let o5 = data[0];
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_DROP,
+        FieldValue::U8(o5 & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_FORW,
+        FieldValue::U8((o5 >> 1) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_BUFF,
+        FieldValue::U8((o5 >> 2) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_NOCP,
+        FieldValue::U8((o5 >> 3) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_DUPL,
+        FieldValue::U8((o5 >> 4) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_IPMA,
+        FieldValue::U8((o5 >> 5) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_IPMD,
+        FieldValue::U8((o5 >> 6) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_APPLY_DFRT,
+        FieldValue::U8((o5 >> 7) & 0x01),
+        offset..offset + 1,
+    );
+    if data.len() >= 2 {
+        let o6 = data[1];
+        buf.push_field(
+            &FD_INLINE_APPLY_EDRT,
+            FieldValue::U8(o6 & 0x01),
+            offset + 1..offset + 2,
+        );
+        buf.push_field(
+            &FD_INLINE_APPLY_BDPN,
+            FieldValue::U8((o6 >> 1) & 0x01),
+            offset + 1..offset + 2,
+        );
+        buf.push_field(
+            &FD_INLINE_APPLY_DDPN,
+            FieldValue::U8((o6 >> 2) & 0x01),
+            offset + 1..offset + 2,
+        );
+        buf.push_field(
+            &FD_INLINE_APPLY_FSSM,
+            FieldValue::U8((o6 >> 3) & 0x01),
+            offset + 1..offset + 2,
+        );
+        buf.push_field(
+            &FD_INLINE_APPLY_MBSU,
+            FieldValue::U8((o6 >> 4) & 0x01),
+            offset + 1..offset + 2,
+        );
+    }
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse an Outer Header Removal IE value.
+///
+/// 3GPP TS 29.244, Section 8.2.64:
+/// - Octet 5: Outer Header Removal Description
+/// - Octet 6 (optional): GTP-U Extension Header Deletion bitmask
+fn parse_outer_header_removal<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &FD_INLINE_OUTER_HEADER_REMOVAL_DESC,
+        FieldValue::U8(data[0]),
+        offset..offset + 1,
+    );
+    if data.len() >= 2 {
+        buf.push_field(
+            &FD_INLINE_GTPU_EXT_HDR_DELETION,
+            FieldValue::U8(data[1]),
+            offset + 1..offset + 2,
+        );
+    }
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Returns the human-readable name for a Source Interface value.
+///
+/// 3GPP TS 29.244, Table 8.2.2-1.
+fn source_interface_name(value: u8) -> Option<&'static str> {
+    match value {
+        0 => Some("Access"),
+        1 => Some("Core"),
+        2 => Some("SGi-LAN/N6-LAN"),
+        3 => Some("CP-function"),
+        4 => Some("5G VN Internal"),
+        _ => None,
+    }
+}
+
+/// Returns the human-readable name for a Destination Interface value.
+///
+/// 3GPP TS 29.244, Table 8.2.24-1.
+fn destination_interface_name(value: u8) -> Option<&'static str> {
+    match value {
+        0 => Some("Access"),
+        1 => Some("Core"),
+        2 => Some("SGi-LAN/N6-LAN"),
+        3 => Some("CP-function"),
+        4 => Some("LI Function"),
+        5 => Some("5G VN Internal"),
+        _ => None,
+    }
+}
+
+/// Returns the human-readable name for an Outer Header Removal Description value.
+///
+/// 3GPP TS 29.244, Table 8.2.64-1.
+fn outer_header_removal_description_name(value: u8) -> Option<&'static str> {
+    match value {
+        0 => Some("GTP-U/UDP/IPv4"),
+        1 => Some("GTP-U/UDP/IPv6"),
+        2 => Some("UDP/IPv4"),
+        3 => Some("UDP/IPv6"),
+        4 => Some("IPv4"),
+        5 => Some("IPv6"),
+        6 => Some("GTP-U/UDP/IP"),
+        7 => Some("VLAN TAG POP"),
+        8 => Some("VLAN TAGs POP-POP"),
+        _ => None,
+    }
 }
 
 /// Returns the human-readable name for a PFCP Cause value.
@@ -756,6 +1164,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_grouped_ie_additional_types() {
+        // Verify types that were previously parsed as raw bytes are now
+        // recognised as grouped IEs (3GPP TS 29.244 Table 8.1.2-1).
+        //
+        // A grouped IE containing a single Cause IE (type 19, length 1) should
+        // produce an Array sentinel, whereas a non-grouped IE would yield Bytes.
+        let inner_cause = [0x00, 0x13, 0x00, 0x01, 0x01];
+
+        // Each value is a grouped IE type that the parser must recognise.
+        for ie_type in [
+            183u16, 211, 212, 213, 216, 218, 242, 247, 252, 295, 315, 378,
+        ] {
+            let mut buf = DissectBuffer::new();
+            let val = parse_ie_value(ie_type, &inner_cause, 0, 0, &mut buf);
+            assert!(
+                matches!(val, FieldValue::Array(_)),
+                "ie_type {ie_type} expected grouped (Array sentinel), got {val:?}",
+            );
+            // A grouped IE must push at least one nested Array container.
+            assert!(
+                !buf.fields().is_empty(),
+                "ie_type {ie_type} did not push any fields",
+            );
+        }
+    }
+
+    #[test]
     fn parse_grouped_ie_depth_limit() {
         let data = [0x00, 0x13, 0x00, 0x01, 0x01]; // Cause IE
         // At MAX_GROUPED_DEPTH, should fall back to bytes
@@ -1058,6 +1493,226 @@ mod tests {
             FieldValue::Object(r) => {
                 let fields = buf.nested_fields(r);
                 assert_eq!(fields[0].range, 100..108);
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_source_interface() {
+        // Interface value = 1 (Core), upper 4 bits spare.
+        let data = [0x01];
+        let (val, buf) = parse_and_buf(20, &data, 0);
+        assert!(matches!(val, FieldValue::Object(_)));
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let iv = obj_field_buf(&buf, r, "interface_value").unwrap();
+                assert_eq!(iv.value, FieldValue::U8(1));
+                assert_eq!(
+                    buf.resolve_nested_display_name(r, "interface_value_name"),
+                    Some("Core"),
+                );
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_destination_interface_li_function() {
+        // Interface value = 4 (LI Function on Destination side).
+        let data = [0x04];
+        let (_val, buf) = parse_and_buf(42, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let iv = obj_field_buf(&buf, r, "interface_value").unwrap();
+                assert_eq!(iv.value, FieldValue::U8(4));
+                assert_eq!(
+                    buf.resolve_nested_display_name(r, "interface_value_name"),
+                    Some("LI Function"),
+                );
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_precedence_ie() {
+        let data = [0x00, 0x00, 0x01, 0x2C]; // 300
+        let (_val, buf) = parse_and_buf(29, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let p = obj_field_buf(&buf, r, "precedence_value").unwrap();
+                assert_eq!(p.value, FieldValue::U32(300));
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_pdr_id_ie() {
+        let data = [0x00, 0x2A]; // 42
+        let (_val, buf) = parse_and_buf(56, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let rid = obj_field_buf(&buf, r, "rule_id").unwrap();
+                assert_eq!(rid.value, FieldValue::U16(42));
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_urr_id_ie() {
+        let data = [0x00, 0x00, 0x00, 0x07];
+        let (_val, buf) = parse_and_buf(81, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let v = obj_field_buf(&buf, r, "urr_id_value").unwrap();
+                assert_eq!(v.value, FieldValue::U32(7));
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_far_id_ie() {
+        let data = [0x00, 0x00, 0x00, 0x03];
+        let (_val, buf) = parse_and_buf(108, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let v = obj_field_buf(&buf, r, "far_id_value").unwrap();
+                assert_eq!(v.value, FieldValue::U32(3));
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_qer_id_ie() {
+        let data = [0x00, 0x00, 0x00, 0x05];
+        let (_val, buf) = parse_and_buf(109, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let v = obj_field_buf(&buf, r, "qer_id_value").unwrap();
+                assert_eq!(v.value, FieldValue::U32(5));
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_bar_id_ie() {
+        let data = [0x09];
+        let (_val, buf) = parse_and_buf(88, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let v = obj_field_buf(&buf, r, "bar_id_value").unwrap();
+                assert_eq!(v.value, FieldValue::U8(9));
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_apply_action_forw_only() {
+        // FORW (bit 2) = 1
+        let data = [0x02];
+        let (_val, buf) = parse_and_buf(44, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                assert_eq!(
+                    obj_field_buf(&buf, r, "drop").unwrap().value,
+                    FieldValue::U8(0)
+                );
+                assert_eq!(
+                    obj_field_buf(&buf, r, "forw").unwrap().value,
+                    FieldValue::U8(1)
+                );
+                assert_eq!(
+                    obj_field_buf(&buf, r, "buff").unwrap().value,
+                    FieldValue::U8(0)
+                );
+                // Octet 6 absent
+                assert!(obj_field_buf(&buf, r, "edrt").is_none());
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_apply_action_with_octet6() {
+        // Octet 5: FORW(bit2)=1, DUPL(bit5)=1 -> 0b0001_0010 = 0x12
+        // Octet 6: BDPN(bit2)=1, MBSU(bit5)=1 -> 0b0001_0010 = 0x12
+        let data = [0x12, 0x12];
+        let (_val, buf) = parse_and_buf(44, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                assert_eq!(
+                    obj_field_buf(&buf, r, "forw").unwrap().value,
+                    FieldValue::U8(1)
+                );
+                assert_eq!(
+                    obj_field_buf(&buf, r, "dupl").unwrap().value,
+                    FieldValue::U8(1)
+                );
+                assert_eq!(
+                    obj_field_buf(&buf, r, "bdpn").unwrap().value,
+                    FieldValue::U8(1)
+                );
+                assert_eq!(
+                    obj_field_buf(&buf, r, "mbsu").unwrap().value,
+                    FieldValue::U8(1)
+                );
+                assert_eq!(
+                    obj_field_buf(&buf, r, "edrt").unwrap().value,
+                    FieldValue::U8(0)
+                );
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_outer_header_removal_gtpu_udp_ipv4() {
+        let data = [0x00];
+        let (_val, buf) = parse_and_buf(95, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let d = obj_field_buf(&buf, r, "outer_header_removal_description").unwrap();
+                assert_eq!(d.value, FieldValue::U8(0));
+                assert_eq!(
+                    buf.resolve_nested_display_name(r, "outer_header_removal_description_name"),
+                    Some("GTP-U/UDP/IPv4"),
+                );
+                assert!(obj_field_buf(&buf, r, "gtpu_extension_header_deletion").is_none());
+            }
+            _ => panic!("expected Object"),
+        }
+    }
+
+    #[test]
+    fn parse_outer_header_removal_with_ext_deletion() {
+        // Description=1 (GTP-U/UDP/IPv6), extension deletion bit 1 = PDU Session Container
+        let data = [0x01, 0x01];
+        let (_val, buf) = parse_and_buf(95, &data, 0);
+        let obj = &buf.fields()[0];
+        match &obj.value {
+            FieldValue::Object(r) => {
+                let d = obj_field_buf(&buf, r, "outer_header_removal_description").unwrap();
+                assert_eq!(d.value, FieldValue::U8(1));
+                let e = obj_field_buf(&buf, r, "gtpu_extension_header_deletion").unwrap();
+                assert_eq!(e.value, FieldValue::U8(1));
             }
             _ => panic!("expected Object"),
         }
