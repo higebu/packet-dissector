@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: taiki-e/install-action@85b24a67ef0c632dfefad70b9d5ce8fddb040754 # v2
+      - uses: taiki-e/install-action@eea29cff9a2b68892c0845ae3e4f45fc47ee9354 # v2
         with:
           tool: taplo-cli@0.9.2
       - run: taplo fmt --check
@@ -64,7 +64,7 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: taiki-e/install-action@f128164502b340d264db5db9ba8ec22695e6e3d5 # cargo-llvm-cov
+      - uses: taiki-e/install-action@c3eaf7ee10cdb81bfddbbe469be30d9cc7bca5f2 # cargo-llvm-cov
       - run: cargo llvm-cov --all-targets --fail-under-lines 90 --lcov --output-path lcov.info
       - uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6
         with:
