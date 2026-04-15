@@ -2,6 +2,8 @@
 //!
 //! ## References
 //! - RFC 8926: <https://www.rfc-editor.org/rfc/rfc8926>
+//!   - §3.4 Tunnel Header Fields: <https://www.rfc-editor.org/rfc/rfc8926#section-3.4>
+//!   - §3.5 Tunnel Options: <https://www.rfc-editor.org/rfc/rfc8926#section-3.5>
 
 #![deny(missing_docs)]
 
@@ -13,7 +15,9 @@ use packet_dissector_core::util::{read_be_u16, read_be_u24};
 
 /// Minimum GENEVE header size (fixed header only, no options).
 ///
-/// RFC 8926, Section 3.4 — The fixed header is 8 octets.
+/// RFC 8926, Section 3.4 — The fixed tunnel header is 8 octets
+/// (Ver/Opt Len/O/C/Rsvd/Protocol Type/VNI/Reserved).
+/// <https://www.rfc-editor.org/rfc/rfc8926#section-3.4>
 const MIN_HEADER_SIZE: usize = 8;
 
 /// Field descriptor indices for [`GeneveDissector::field_descriptors`].
@@ -151,7 +155,9 @@ impl Dissector for GeneveDissector {
             offset + 7..offset + 8,
         );
 
-        // RFC 8926, Section 3.4 — Variable-Length Options
+        // RFC 8926, Section 3.5 — Tunnel Options (variable-length TLVs).
+        // The individual option TLVs are not parsed here; the raw option block
+        // is exposed verbatim for downstream inspection.
         if opt_len > 0 {
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_OPTIONS],
@@ -174,18 +180,21 @@ mod tests {
 
     // # RFC 8926 (GENEVE) Coverage
     //
-    // | RFC Section | Description                | Test                           |
-    // |-------------|----------------------------|--------------------------------|
-    // | 3.4         | Base header format         | parse_geneve_basic             |
-    // | 3.4         | Version validation         | parse_geneve_invalid_version   |
-    // | 3.4         | Options present            | parse_geneve_with_options      |
-    // | 3.4         | OAM flag                   | parse_geneve_oam_flag          |
-    // | 3.4         | Critical flag              | parse_geneve_critical_flag     |
-    // | 3.4         | VNI parsing                | parse_geneve_vni               |
-    // | 3.4         | Protocol Type dispatch     | parse_geneve_dispatch_ipv6     |
-    // | 3.4         | Truncated packet           | parse_geneve_truncated         |
-    // | 3.4         | Truncated options          | parse_geneve_truncated_options |
-    // | 3.4         | Offset handling            | parse_geneve_with_offset       |
+    // | RFC Section | Description                     | Test                              |
+    // |-------------|---------------------------------|-----------------------------------|
+    // | 3.4         | Tunnel header fields            | parse_geneve_basic                |
+    // | 3.4         | Version validation (Ver != 0)   | parse_geneve_invalid_version      |
+    // | 3.4         | All invalid versions rejected   | parse_geneve_all_invalid_versions |
+    // | 3.4         | OAM (O) flag                    | parse_geneve_oam_flag             |
+    // | 3.4         | Critical (C) flag               | parse_geneve_critical_flag        |
+    // | 3.4         | Reserved bits ignored on recv   | parse_geneve_reserved_bits_set    |
+    // | 3.4         | VNI parsing (24 bits)           | parse_geneve_vni                  |
+    // | 3.4         | Protocol Type dispatch          | parse_geneve_dispatch_ipv6        |
+    // | 3.4         | Truncated fixed header          | parse_geneve_truncated            |
+    // | 3.4         | Offset handling                 | parse_geneve_with_offset          |
+    // | 3.5         | Variable-length options present | parse_geneve_with_options         |
+    // | 3.5         | Max Opt Len (63 × 4 bytes)      | parse_geneve_max_opt_len          |
+    // | 3.5         | Truncated options               | parse_geneve_truncated_options    |
 
     /// Helper: dissect raw bytes at offset 0 and return the result.
     fn dissect(data: &[u8]) -> Result<(DissectBuffer<'_>, DissectResult), PacketError> {
@@ -434,6 +443,108 @@ mod tests {
         );
         assert_eq!(buf.field_by_name(layer, "vni").unwrap().range, 104..107);
         assert_eq!(buf.field_by_name(layer, "options").unwrap().range, 108..112);
+    }
+
+    #[test]
+    fn parse_geneve_all_invalid_versions() {
+        // RFC 8926 §3.4: "Packets received by a tunnel endpoint with an unknown
+        // version MUST be dropped." Version is 2 bits — only 0 is defined.
+        for version in [1u8, 2, 3] {
+            let raw: &[u8] = &[
+                version << 6, // Ver in top 2 bits, OptLen=0
+                0x00,
+                0x65,
+                0x58,
+                0x00,
+                0x00,
+                0x01,
+                0x00,
+            ];
+            let err = GeneveDissector
+                .dissect(raw, &mut DissectBuffer::new(), 0)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PacketError::InvalidFieldValue {
+                        field: "version",
+                        value,
+                    } if value == u32::from(version)
+                ),
+                "expected InvalidFieldValue for Ver={version}, got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn parse_geneve_reserved_bits_set() {
+        // RFC 8926 §3.4: Rsvd. (6 bits) and Reserved (8 bits) "MUST be zero on
+        // transmission and MUST be ignored on receipt." A well-behaved dissector
+        // surfaces the bits as parsed values without rejecting the packet.
+        let raw: &[u8] = &[
+            0x00, // Ver=0, OptLen=0
+            0x3F, // O=0, C=0, Rsvd.=0x3F (all reserved bits set)
+            0x65, 0x58, // Protocol Type
+            0x00, 0x00, 0x01, // VNI
+            0xFF, // Reserved (8 bits) all set
+        ];
+        let (buf, _) = dissect(raw).unwrap();
+        let layer = buf.layer_by_name("GENEVE").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "reserved").unwrap().value,
+            FieldValue::U8(0x3F)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "reserved2").unwrap().value,
+            FieldValue::U8(0xFF)
+        );
+        // OAM / Critical must not be affected by the high 2 bits already = 0.
+        assert_eq!(
+            buf.field_by_name(layer, "oam").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "critical").unwrap().value,
+            FieldValue::U8(0)
+        );
+    }
+
+    #[test]
+    fn parse_geneve_max_opt_len() {
+        // RFC 8926 §3.4: "Opt Len (6 bits): The length of the option fields,
+        // expressed in 4-byte multiples, not including the 8-byte fixed tunnel
+        // header." The 6-bit field caps Opt Len at 63 (= 252 bytes of options),
+        // yielding a 260-byte total header.
+        const MAX_OPT_LEN_WORDS: u8 = 0x3F;
+        const OPTIONS_BYTES: usize = MAX_OPT_LEN_WORDS as usize * 4;
+        const TOTAL_HEADER: usize = 8 + OPTIONS_BYTES;
+
+        let mut raw = vec![0u8; TOTAL_HEADER];
+        raw[0] = MAX_OPT_LEN_WORDS; // Ver=0, OptLen=63
+        raw[1] = 0x00; // O=0, C=0
+        raw[2] = 0x65;
+        raw[3] = 0x58; // Protocol Type = TEB
+        raw[4] = 0x00;
+        raw[5] = 0x00;
+        raw[6] = 0x2A; // VNI=42
+        raw[7] = 0x00;
+        for (i, slot) in raw[8..].iter_mut().enumerate() {
+            *slot = (i & 0xFF) as u8;
+        }
+
+        let (buf, result) = dissect(&raw).unwrap();
+        assert_eq!(result.bytes_consumed, TOTAL_HEADER);
+        assert_eq!(result.next, DispatchHint::ByEtherType(0x6558));
+
+        let layer = buf.layer_by_name("GENEVE").unwrap();
+        assert_eq!(layer.range, 0..TOTAL_HEADER);
+        assert_eq!(
+            buf.field_by_name(layer, "opt_len").unwrap().value,
+            FieldValue::U8(MAX_OPT_LEN_WORDS)
+        );
+        let options = buf.field_by_name(layer, "options").unwrap();
+        assert_eq!(options.range, 8..TOTAL_HEADER);
+        assert_eq!(options.value, FieldValue::Bytes(&raw[8..TOTAL_HEADER]));
     }
 
     #[test]
