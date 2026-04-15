@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.2.5] - 2026-04-15
+
+### 🚀 Features
+
+- *(pfcp)* Add IE type names for types 118-402 per TS 29.244
+- *(pfcp)* Add specialized parsers for common leaf IEs
+
+### 🐛 Bug Fixes
+
+- *(pfcp)* Add missing grouped IE types to parser
+
+### 🧪 Testing
+
+- *(pfcp)* Cover every ie_type_name match arm
 ## [0.2.4] - 2026-04-12
 
 ### 🚀 Features
