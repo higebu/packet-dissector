@@ -182,18 +182,22 @@ impl Dissector for AhDissector {
 mod tests {
     //! # RFC 4302 (AH) Coverage
     //!
-    //! | RFC Section | Description              | Test                           |
-    //! |-------------|--------------------------|--------------------------------|
-    //! | 2           | Header Format            | parse_ah_basic                 |
-    //! | 2.1         | Next Header              | parse_ah_basic                 |
-    //! | 2.2         | Payload Length            | parse_ah_basic, payload_len_too_small |
-    //! | 2.3         | Reserved                 | parse_ah_basic                 |
-    //! | 2.4         | SPI                      | parse_ah_basic                 |
-    //! | 2.5         | Sequence Number          | parse_ah_basic                 |
-    //! | 2.6         | ICV                      | parse_ah_with_icv              |
-    //! | —           | Truncated header         | truncated_header               |
-    //! | —           | Truncated after length    | truncated_after_length         |
-    //! | —           | No ICV (min header)      | parse_ah_no_icv                |
+    //! | RFC Section | Description                           | Test                                         |
+    //! |-------------|---------------------------------------|----------------------------------------------|
+    //! | 2           | Header format & dispatch              | parse_ah_basic, offset_applied_correctly     |
+    //! | 2.1         | Next Header (known name)              | parse_ah_basic                               |
+    //! | 2.1         | Next Header (unknown name)            | unknown_next_header_no_name                  |
+    //! | 2.2         | Payload Length (formula, 96-bit ICV)  | parse_ah_basic, parse_ah_with_icv            |
+    //! | 2.2         | Payload Length below fixed header     | payload_len_too_small                        |
+    //! | 2.3         | Reserved MUST be 0, SHOULD be ignored | parse_ah_basic, reserved_nonzero_is_ignored  |
+    //! | 2.4         | SPI (any 32-bit value)                | parse_ah_basic                               |
+    //! | 2.4         | SPI = 0 (reserved, lenient parse)     | spi_zero_parsed_per_postel                   |
+    //! | 2.5         | Sequence Number                       | parse_ah_basic                               |
+    //! | 2.6         | ICV present (96-bit / 12 octets)      | parse_ah_with_icv                            |
+    //! | 2.6         | ICV absent (minimum header only)      | parse_ah_no_icv                              |
+    //! | —           | Truncated below minimum header        | truncated_header                             |
+    //! | —           | Truncated after declared length       | truncated_after_length                       |
+    //! | —           | Field descriptor schema               | field_descriptors_match                      |
 
     use super::*;
 
@@ -338,12 +342,58 @@ mod tests {
 
     #[test]
     fn unknown_next_header_no_name() {
-        // Use a protocol number that has no name mapping
+        // RFC 4302, Section 2.1 — Next Header values come from the IANA
+        // IP protocol-numbers registry. For protocol numbers that have
+        // no registered name, the `next_header_name` virtual display
+        // field resolves to `None` rather than surfacing a placeholder.
+        // <https://www.rfc-editor.org/rfc/rfc4302#section-2.1>
         let data = make_ah_header(255, 1, 0x0000_0001, 1);
         let (buf, _) = dissect(&data).unwrap();
 
         let layer = buf.layer_by_name("AH").unwrap();
-        assert!(buf.resolve_display_name(layer, "next_header").is_none());
+        assert!(
+            buf.resolve_display_name(layer, "next_header_name")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reserved_nonzero_is_ignored() {
+        // RFC 4302, Section 2.3 — "This 16-bit field is reserved for
+        // future use. It MUST be set to zero by the sender, and it
+        // SHOULD be ignored by the recipient." The dissector therefore
+        // accepts a non-zero Reserved value and surfaces it verbatim so
+        // operators can observe protocol violations.
+        // <https://www.rfc-editor.org/rfc/rfc4302#section-2.3>
+        let mut data = make_ah_header(6, 1, 0x1234_5678, 1);
+        data[2] = 0xAB;
+        data[3] = 0xCD;
+        let (buf, _) = dissect(&data).unwrap();
+
+        let layer = buf.layer_by_name("AH").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "reserved").unwrap().value,
+            FieldValue::U16(0xABCD)
+        );
+    }
+
+    #[test]
+    fn spi_zero_parsed_per_postel() {
+        // RFC 4302, Section 2.4 — "The SPI value of zero (0) is
+        // reserved for local, implementation-specific use and MUST NOT
+        // be sent on the wire." Per Postel's Law the dissector still
+        // parses packets carrying the reserved value so observers can
+        // see the malformed SPI instead of discarding the packet.
+        // <https://www.rfc-editor.org/rfc/rfc4302#section-2.4>
+        let data = make_ah_header(6, 1, 0, 1);
+        let (buf, result) = dissect(&data).unwrap();
+
+        assert_eq!(result.bytes_consumed, 12);
+        let layer = buf.layer_by_name("AH").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "spi").unwrap().value,
+            FieldValue::U32(0)
+        );
     }
 
     #[test]
