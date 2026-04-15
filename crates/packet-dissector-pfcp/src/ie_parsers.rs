@@ -152,16 +152,22 @@ pub fn parse_ie_value<'pkt>(
         | 147
         | 165..=169
         | 175..=176
+        | 183
         | 187..=190
         | 195
         | 199..=201
         | 203
         | 205
-        | 214
+        | 211..=214
+        | 216
+        | 218
         | 220..=221
         | 225..=227
         | 233
         | 238..=240
+        | 242
+        | 247
+        | 252
         | 254..=256
         | 261
         | 263..=264
@@ -170,8 +176,10 @@ pub fn parse_ie_value<'pkt>(
         | 276..=277
         | 279
         | 290
+        | 295
         | 300..=304
         | 310..=311
+        | 315
         | 316
         | 323..=324
         | 331
@@ -179,6 +187,7 @@ pub fn parse_ie_value<'pkt>(
         | 340..=341
         | 355..=356
         | 361..=363
+        | 378
         | 383
         | 386
         | 397
@@ -752,6 +761,33 @@ mod tests {
                 }
             }
             _ => panic!("expected Array"),
+        }
+    }
+
+    #[test]
+    fn parse_grouped_ie_additional_types() {
+        // Verify types that were previously parsed as raw bytes are now
+        // recognised as grouped IEs (3GPP TS 29.244 Table 8.1.2-1).
+        //
+        // A grouped IE containing a single Cause IE (type 19, length 1) should
+        // produce an Array sentinel, whereas a non-grouped IE would yield Bytes.
+        let inner_cause = [0x00, 0x13, 0x00, 0x01, 0x01];
+
+        // Each value is a grouped IE type that the parser must recognise.
+        for ie_type in [
+            183u16, 211, 212, 213, 216, 218, 242, 247, 252, 295, 315, 378,
+        ] {
+            let mut buf = DissectBuffer::new();
+            let val = parse_ie_value(ie_type, &inner_cause, 0, 0, &mut buf);
+            assert!(
+                matches!(val, FieldValue::Array(_)),
+                "ie_type {ie_type} expected grouped (Array sentinel), got {val:?}",
+            );
+            // A grouped IE must push at least one nested Array container.
+            assert!(
+                !buf.fields().is_empty(),
+                "ie_type {ie_type} did not push any fields",
+            );
         }
     }
 
