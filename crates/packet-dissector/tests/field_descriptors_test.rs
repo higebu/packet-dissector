@@ -192,7 +192,8 @@ fn arp_field_descriptors() {
     let d = ArpDissector;
     let descs = d.field_descriptors();
 
-    assert_eq!(descs.len(), 9);
+    // 9 RFC 826 fields + optional `kind` for RFC 5227 classification.
+    assert_eq!(descs.len(), 10);
     assert_eq!(
         descs.iter().find(|d| d.name == "sha").unwrap().field_type,
         FieldType::MacAddr
@@ -204,6 +205,15 @@ fn arp_field_descriptors() {
     // oper_name is now handled by display_fn on the "oper" descriptor
     let oper = descs.iter().find(|d| d.name == "oper").unwrap();
     assert!(oper.display_fn.is_some());
+    // htype / ptype also get IANA-derived display names via display_fn.
+    let htype = descs.iter().find(|d| d.name == "htype").unwrap();
+    assert!(htype.display_fn.is_some());
+    let ptype = descs.iter().find(|d| d.name == "ptype").unwrap();
+    assert!(ptype.display_fn.is_some());
+    // RFC 5227 classification is emitted only for matching packets.
+    let kind = descs.iter().find(|d| d.name == "kind").unwrap();
+    assert!(kind.optional);
+    assert_eq!(kind.field_type, FieldType::Str);
     assert_names_unique(&d);
 }
 
