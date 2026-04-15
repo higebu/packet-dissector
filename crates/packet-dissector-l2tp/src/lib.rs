@@ -1,8 +1,17 @@
-//! L2TP (Layer 2 Tunneling Protocol) dissector.
+//! L2TP (Layer 2 Tunneling Protocol, version 2) dissector.
+//!
+//! Implements parsing of the L2TPv2 header defined in RFC 2661,
+//! Section 3.1. Data messages dispatch their payload to PPP; control
+//! messages are terminal (AVPs are not dissected by this crate).
 //!
 //! ## References
-//! - RFC 2661: <https://www.rfc-editor.org/rfc/rfc2661>
-//! - RFC 9601 (ECN extension): <https://www.rfc-editor.org/rfc/rfc9601>
+//! - RFC 2661 (L2TPv2): <https://www.rfc-editor.org/rfc/rfc2661>
+//! - RFC 9601 (ECN propagation across tunnels, updates RFC 2661):
+//!   <https://www.rfc-editor.org/rfc/rfc9601>
+//!
+//! RFC 9601 updates RFC 2661 by adding configuration guidance and an
+//! optional ECN Capability AVP (Attribute Type 103); it does not
+//! modify the L2TPv2 header format.
 
 #![deny(missing_docs)]
 
@@ -102,6 +111,7 @@ impl Dissector for L2tpDissector {
 
         // RFC 2661, Section 3.1 — Bit 0: Type (T)
         // "set to 0 for a data message and 1 for a control message"
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-3.1>
         let t_flag = ((flags_ver >> 15) & 1) as u8;
         // RFC 2661, Section 3.1 — Bit 1: Length (L)
         let l_flag = ((flags_ver >> 14) & 1) as u8;
@@ -111,10 +121,19 @@ impl Dissector for L2tpDissector {
         let o_flag = ((flags_ver >> 9) & 1) as u8;
         // RFC 2661, Section 3.1 — Bit 7: Priority (P)
         let p_flag = ((flags_ver >> 8) & 1) as u8;
+        // RFC 2661, Section 3.1 — Bits 2, 3, 5, 8-11: reserved (x)
+        // "The x bits are reserved for future extensions. All reserved
+        //  bits MUST be set to 0 on outgoing messages and ignored on
+        //  incoming messages."
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-3.1>
+        // This parser ignores the reserved bits as required.
         // RFC 2661, Section 3.1 — Bits 12-15: Version
         let version = (flags_ver & 0x000F) as u8;
 
-        // RFC 2661, Section 3.1 — "Ver MUST be 2"
+        // RFC 2661, Section 3.1 — "Ver MUST be 2, indicating the version
+        // of the L2TP data message header described in this document...
+        // Packets received with an unknown Ver field MUST be discarded."
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-3.1>
         if version != L2TP_VERSION {
             return Err(PacketError::InvalidFieldValue {
                 field: "version",
@@ -190,7 +209,17 @@ impl Dissector for L2tpDissector {
         let session_id = read_be_u16(data, pos)?;
         pos += 2;
 
-        // Ns and Nr (optional, present when S bit is set)
+        // RFC 2661, Section 3.1 — Ns and Nr (optional, present when S bit is set)
+        // "Ns indicates the sequence number for this data or control
+        //  message, beginning at zero and incrementing by one (modulo
+        //  2**16) for each message sent."
+        // "Nr indicates the sequence number expected in the next control
+        //  message to be received... In data messages, Nr is reserved
+        //  and, if present (as indicated by the S-bit), MUST be ignored
+        //  upon receipt."
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-3.1>
+        // For dissection the Nr value is still surfaced; upper-layer
+        // consumers apply the "ignored" semantics.
         let seq = if s_flag != 0 {
             let ns = read_be_u16(data, pos)?;
             pos += 2;
@@ -201,13 +230,18 @@ impl Dissector for L2tpDissector {
             None
         };
 
-        // Offset Size (optional, present when O bit is set)
+        // RFC 2661, Section 3.1 — Offset Size (optional, present when O bit is set)
+        // "The Offset Size field, if present, specifies the number of
+        //  octets past the L2TP header at which the payload data is
+        //  expected to start. Actual data within the offset padding is
+        //  undefined."
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-3.1>
         let offset_size_val = if o_flag != 0 {
             let offset_size = read_be_u16(data, pos)?;
             pos += 2;
 
-            // The Offset Size value indicates bytes of padding before the payload;
-            // validate then skip — padding contents are not dissected.
+            // Skip past the Offset Pad bytes; their contents are undefined
+            // per the quote above.
             let pad = offset_size as usize;
             if data.len() < pos + pad {
                 return Err(PacketError::Truncated {
@@ -398,6 +432,7 @@ mod tests {
     // | §3.1        | Data dispatch (L, bounded)       | parse_l2tp_consumes_payload_with_length |
     // | §3.1        | Length < header (invalid)        | parse_l2tp_length_too_small |
     // | §3.1        | Length > data (truncated)        | parse_l2tp_length_exceeds_data |
+    // | §3.1        | Reserved (x) bits ignored        | parse_l2tp_reserved_bits_ignored |
 
     /// Helper: dissect raw bytes at offset 0 and return the result.
     fn dissect(data: &[u8]) -> Result<(DissectBuffer<'_>, DissectResult), PacketError> {
@@ -966,5 +1001,66 @@ mod tests {
                 actual: 8
             }
         ));
+    }
+
+    #[test]
+    fn parse_l2tp_reserved_bits_ignored() {
+        // RFC 2661, Section 3.1 — "All reserved bits MUST be set to 0 on
+        // outgoing messages and ignored on incoming messages."
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-3.1>
+        //
+        // Build a data message with every reserved bit set to 1:
+        //   bit  2 = 1 (mask 0x2000)
+        //   bit  3 = 1 (mask 0x1000)
+        //   bit  5 = 1 (mask 0x0400)
+        //   bits 8-11 = 1111 (mask 0x00F0)
+        //   Ver       = 2
+        // Byte 0 = 0x34 (00110100 — bits 2, 3, 5 set; T/L/S/O/P clear)
+        // Byte 1 = 0xF2 (11110010 — reserved bits 8-11 set; Ver=2)
+        let raw: &[u8] = &[
+            0x34, 0xF2, // reserved bits set, Ver=2, all flags clear
+            0x00, 0x0A, // Tunnel ID = 10
+            0x00, 0x14, // Session ID = 20
+        ];
+        let (buf, result) = dissect(raw).unwrap();
+        assert_eq!(result.bytes_consumed, 6);
+        assert_eq!(result.next, DispatchHint::ByEtherType(ETHERTYPE_PPP));
+
+        let layer = buf.layer_by_name("L2TP").unwrap();
+        // All five defined flags remain 0; reserved bits must not leak in.
+        assert_eq!(
+            buf.field_by_name(layer, "is_control").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "length_present").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "sequence_present").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "offset_present").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "priority").unwrap().value,
+            FieldValue::U8(0)
+        );
+        // Reserved bits in the upper nibble of the second byte must not
+        // contaminate the 4-bit Version field.
+        assert_eq!(
+            buf.field_by_name(layer, "version").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "tunnel_id").unwrap().value,
+            FieldValue::U16(10)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "session_id").unwrap().value,
+            FieldValue::U16(20)
+        );
     }
 }
