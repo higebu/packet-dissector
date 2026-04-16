@@ -1,7 +1,7 @@
 //! STUN (Session Traversal Utilities for NAT) dissector.
 //!
 //! ## References
-//! - RFC 8489: <https://www.rfc-editor.org/rfc/rfc8489>
+//! - RFC 8489 (Obsoletes RFC 5389): <https://www.rfc-editor.org/rfc/rfc8489>
 
 #![deny(missing_docs)]
 
@@ -11,22 +11,29 @@ use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
-/// STUN header size in bytes (RFC 8489, Section 5).
+/// STUN header size in bytes.
+///
+/// RFC 8489, Section 5 — <https://www.rfc-editor.org/rfc/rfc8489#section-5>.
 const HEADER_SIZE: usize = 20;
 
-/// STUN magic cookie value (RFC 8489, Section 5).
+/// STUN magic cookie value.
+///
+/// RFC 8489, Section 5 — "The Magic Cookie field MUST contain the fixed value
+/// 0x2112A442 in network byte order."
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-5>.
 const MAGIC_COOKIE: u32 = 0x2112_A442;
 
 /// Minimum attribute size: Type(2) + Length(2).
 ///
-/// RFC 8489, Section 15 — "After the STUN header are zero or more attributes.
+/// RFC 8489, Section 14 — "After the STUN header are zero or more attributes.
 /// Each attribute MUST be TLV encoded, with a 16-bit type, 16-bit length, and
-/// value."
+/// value." <https://www.rfc-editor.org/rfc/rfc8489#section-14>.
 const MIN_ATTR_SIZE: usize = 4;
 
 /// Returns a human-readable name for the STUN message class.
 ///
-/// RFC 8489, Section 5 — Message class values.
+/// RFC 8489, Section 5 — Message class values —
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-5>.
 fn class_name(class: u8) -> &'static str {
     match class {
         0b00 => "Request",
@@ -39,7 +46,8 @@ fn class_name(class: u8) -> &'static str {
 
 /// Returns a human-readable name for the STUN method.
 ///
-/// RFC 8489, Section 14.1 — STUN Methods.
+/// RFC 8489, Section 18.2 — STUN Methods Registry —
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-18.2>.
 fn method_name(method: u16) -> Option<&'static str> {
     match method {
         0x001 => Some("Binding"),
@@ -49,9 +57,11 @@ fn method_name(method: u16) -> Option<&'static str> {
 
 /// Returns a human-readable name for a STUN attribute type.
 ///
-/// RFC 8489, Section 14.2 — STUN Attribute Registry.
+/// RFC 8489, Section 18.3 — STUN Attributes Registry —
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-18.3>.
 pub fn attribute_type_name(attr_type: u16) -> Option<&'static str> {
     match attr_type {
+        // Comprehension-required range (0x0000-0x7FFF).
         0x0001 => Some("MAPPED-ADDRESS"),
         0x0006 => Some("USERNAME"),
         0x0008 => Some("MESSAGE-INTEGRITY"),
@@ -63,10 +73,12 @@ pub fn attribute_type_name(attr_type: u16) -> Option<&'static str> {
         0x001D => Some("PASSWORD-ALGORITHM"),
         0x001E => Some("USERHASH"),
         0x0020 => Some("XOR-MAPPED-ADDRESS"),
+        // Comprehension-optional range (0x8000-0xFFFF).
+        0x8002 => Some("PASSWORD-ALGORITHMS"),
+        0x8003 => Some("ALTERNATE-DOMAIN"),
         0x8022 => Some("SOFTWARE"),
         0x8023 => Some("ALTERNATE-SERVER"),
         0x8028 => Some("FINGERPRINT"),
-        0x802B => Some("ALTERNATE-DOMAIN"),
         _ => None,
     }
 }
@@ -87,7 +99,8 @@ const AFD_VALUE: usize = 2;
 
 /// Child field descriptors for attribute Array elements.
 ///
-/// RFC 8489, Section 15 — Each attribute is TLV-encoded.
+/// RFC 8489, Section 14 — Each attribute is TLV-encoded —
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-14>.
 static ATTR_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor {
         name: "type",
@@ -142,23 +155,30 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 
 /// Decode the STUN message type into class and method.
 ///
-/// RFC 8489, Section 14.1 — The message type field uses a non-contiguous bit
-/// layout:
+/// RFC 8489, Section 5, Figure 3 — The message type field uses a non-contiguous
+/// bit layout:
 ///
 /// ```text
 ///         0                 1
 ///         2  3  4 5 6 7 8 9 0 1 2 3 4 5
 ///        +--+--+-+-+-+-+-+-+-+-+-+-+-+-+
-///        |M |M |M|M|M|C|M|M|M|C|M|M|M|
+///        |M |M |M|M|M|C|M|M|M|C|M|M|M|M|
 ///        |11|10|9|8|7|1|6|5|4|0|3|2|1|0|
 ///        +--+--+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
+///
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-5>.
 fn decode_message_type(raw_type: u16) -> (u8, u16) {
-    // RFC 8489, Section 14.1 — https://www.rfc-editor.org/rfc/rfc8489#section-14.1
+    // RFC 8489, Section 5 — https://www.rfc-editor.org/rfc/rfc8489#section-5
+    // C0 is at bit 4, C1 at bit 8 of the 14-bit message type value.
     let c0 = (raw_type >> 4) & 0x1;
     let c1 = (raw_type >> 8) & 0x1;
     let class = ((c1 << 1) | c0) as u8;
 
+    // Method bits:
+    //   M0-M3  → bits 0-3  (mask 0x000F)
+    //   M4-M6  → bits 5-7  (mask 0x00E0, shift right by 1 to skip C0 at bit 4)
+    //   M7-M11 → bits 9-13 (mask 0x3E00, shift right by 2 to skip C0 and C1)
     let method = (raw_type & 0x000F) | ((raw_type & 0x00E0) >> 1) | ((raw_type & 0x3E00) >> 2);
 
     (class, method)
@@ -166,7 +186,8 @@ fn decode_message_type(raw_type: u16) -> (u8, u16) {
 
 /// Push STUN attributes into a [`DissectBuffer`].
 ///
-/// RFC 8489, Section 15 — Each attribute is TLV-encoded with 4-byte alignment.
+/// RFC 8489, Section 14 — Each attribute is TLV-encoded with 4-byte alignment —
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-14>.
 fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectBuffer<'pkt>) {
     let mut pos = 0;
 
@@ -174,8 +195,11 @@ fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectB
         let attr_type = read_be_u16(attr_data, pos).unwrap_or_default();
         let attr_len = read_be_u16(attr_data, pos + 2).unwrap_or_default() as usize;
 
-        // RFC 8489, Section 15 — Length does not include the 4-byte TLV header
-        // or padding.
+        // RFC 8489, Section 14 — "The value in the Length field MUST contain
+        // the length of the Value part of the attribute, prior to padding,
+        // measured in bytes." Length excludes the 4-byte TLV header and any
+        // trailing padding bytes.
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14
         if pos + MIN_ATTR_SIZE + attr_len > attr_data.len() {
             break;
         }
@@ -205,9 +229,12 @@ fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectB
         );
         buf.end_container(obj_idx);
 
-        // RFC 8489, Section 15 — "The total size of the attribute (including
-        // padding) is 4 + length, rounded up to the nearest multiple of 4."
-        let padded_len = MIN_ATTR_SIZE + ((attr_len + 3) & !3);
+        // RFC 8489, Section 14 — "STUN aligns attributes on 32-bit boundaries,
+        // attributes whose content is not a multiple of 4 bytes are padded
+        // with 1, 2, or 3 bytes of padding so that its value contains a
+        // multiple of 4 bytes."
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14
+        let padded_len = MIN_ATTR_SIZE + attr_len.next_multiple_of(4);
         pos += padded_len;
     }
 }
@@ -235,6 +262,7 @@ impl Dissector for StunDissector {
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
         // RFC 8489, Section 5 — STUN header is 20 bytes.
+        // https://www.rfc-editor.org/rfc/rfc8489#section-5
         if data.len() < HEADER_SIZE {
             return Err(PacketError::Truncated {
                 expected: HEADER_SIZE,
@@ -244,17 +272,20 @@ impl Dissector for StunDissector {
 
         // RFC 8489, Section 5 — "The most significant 2 bits of every STUN
         // message MUST be zeroes."
+        // https://www.rfc-editor.org/rfc/rfc8489#section-5
         if data[0] & 0xC0 != 0 {
             return Err(PacketError::InvalidHeader(
                 "top 2 bits of STUN message must be zero",
             ));
         }
 
-        // RFC 8489, Section 5 — Message Type (14 bits, bytes 0-1).
+        // RFC 8489, Section 5 — STUN Message Type (14 bits, bytes 0-1).
+        // https://www.rfc-editor.org/rfc/rfc8489#section-5
         let raw_type = read_be_u16(data, 0)? & 0x3FFF;
         let (class, method) = decode_message_type(raw_type);
 
         // RFC 8489, Section 5 — Message Length (bytes 2-3).
+        // https://www.rfc-editor.org/rfc/rfc8489#section-5
         let msg_len_raw = read_be_u16(data, 2)?;
         let msg_len = msg_len_raw as usize;
 
@@ -262,6 +293,7 @@ impl Dissector for StunDissector {
         // bytes, of the message not including the 20-byte STUN header. Since all
         // STUN attributes are padded to a multiple of 4 bytes, the last 2 bits
         // of this field are always zero."
+        // https://www.rfc-editor.org/rfc/rfc8489#section-5
         if msg_len % 4 != 0 {
             return Err(PacketError::InvalidHeader(
                 "STUN message length must be a multiple of 4",
@@ -269,6 +301,7 @@ impl Dissector for StunDissector {
         }
 
         // RFC 8489, Section 5 — Magic Cookie (bytes 4-7).
+        // https://www.rfc-editor.org/rfc/rfc8489#section-5
         let cookie = read_be_u32(data, 4)?;
         if cookie != MAGIC_COOKIE {
             return Err(PacketError::InvalidFieldValue {
@@ -278,6 +311,7 @@ impl Dissector for StunDissector {
         }
 
         // RFC 8489, Section 5 — Transaction ID (bytes 8-19, 96 bits).
+        // https://www.rfc-editor.org/rfc/rfc8489#section-5
         let transaction_id = &data[8..20];
 
         let total_len = HEADER_SIZE + msg_len;
@@ -327,7 +361,8 @@ impl Dissector for StunDissector {
             offset + 8..offset + 20,
         );
 
-        // RFC 8489, Section 15 — Parse attributes.
+        // RFC 8489, Section 14 — Parse STUN attributes (TLV).
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14
         if msg_len > 0 {
             let attr_data = &data[HEADER_SIZE..total_len];
             let array_idx = buf.begin_container(
@@ -351,24 +386,26 @@ mod tests {
 
     // # RFC 8489 Coverage
     //
-    // | RFC Section | Description                          | Test                                    |
-    // |-------------|--------------------------------------|-----------------------------------------|
-    // | 5           | Header: top 2 bits must be zero      | test_invalid_top_bits                   |
-    // | 5           | Header: Message Type (class+method)  | test_parse_binding_request              |
+    // | RFC Section | Description                           | Test                                    |
+    // |-------------|---------------------------------------|-----------------------------------------|
+    // | 5           | Header: top 2 bits must be zero       | test_invalid_top_bits                   |
+    // | 5           | Header: Message Type (class+method)   | test_parse_binding_request              |
     // | 5           | Header: Message Length                | test_parse_binding_request              |
     // | 5           | Header: Message Length multiple of 4  | test_message_length_not_multiple_of_4   |
-    // | 5           | Header: Magic Cookie                 | test_parse_binding_request              |
-    // | 5           | Header: Magic Cookie validation      | test_invalid_magic_cookie               |
-    // | 5           | Header: Transaction ID               | test_parse_binding_request              |
-    // | 5           | Truncated header                     | test_truncated_header                   |
-    // | 5           | Truncated attributes                 | test_truncated_attributes               |
-    // | 14.1        | Message class: Request               | test_parse_binding_request              |
-    // | 14.1        | Message class: Success Response      | test_parse_binding_response             |
-    // | 14.1        | Message class: Indication            | test_parse_binding_indication           |
-    // | 14.1        | Message class: Error Response        | test_parse_binding_error_response       |
-    // | 14.1        | Method: Binding (0x001)              | test_parse_binding_request              |
-    // | 15          | Attribute parsing                    | test_parse_binding_response             |
-    // | 15          | Multiple attributes                  | test_multiple_attributes                |
+    // | 5           | Header: Magic Cookie                  | test_parse_binding_request              |
+    // | 5           | Header: Magic Cookie validation       | test_invalid_magic_cookie               |
+    // | 5           | Header: Transaction ID                | test_parse_binding_request              |
+    // | 5           | Message class: Request                | test_parse_binding_request              |
+    // | 5           | Message class: Success Response       | test_parse_binding_response             |
+    // | 5           | Message class: Indication             | test_parse_binding_indication           |
+    // | 5           | Message class: Error Response         | test_parse_binding_error_response       |
+    // | 5           | Truncated header                      | test_truncated_header                   |
+    // | 5           | Truncated attributes                  | test_truncated_attributes               |
+    // | 14          | TLV attribute parsing                 | test_parse_binding_response             |
+    // | 14          | Multiple attributes                   | test_multiple_attributes                |
+    // | 14          | 4-byte attribute padding              | test_attribute_with_non_aligned_length  |
+    // | 18.2        | Method: Binding (0x001)               | test_parse_binding_request              |
+    // | 18.3        | Attribute Registry (codes & names)    | test_attribute_type_name_lookup         |
 
     /// Build a STUN message from parts.
     fn build_stun(class: u8, method: u16, attrs: &[u8]) -> Vec<u8> {
@@ -734,10 +771,32 @@ mod tests {
 
     #[test]
     fn test_attribute_type_name_lookup() {
+        // RFC 8489, Section 18.3 — https://www.rfc-editor.org/rfc/rfc8489#section-18.3
+        // Comprehension-required range (0x0000-0x7FFF).
         assert_eq!(attribute_type_name(0x0001), Some("MAPPED-ADDRESS"));
+        assert_eq!(attribute_type_name(0x0006), Some("USERNAME"));
+        assert_eq!(attribute_type_name(0x0008), Some("MESSAGE-INTEGRITY"));
+        assert_eq!(attribute_type_name(0x0009), Some("ERROR-CODE"));
+        assert_eq!(attribute_type_name(0x000A), Some("UNKNOWN-ATTRIBUTES"));
+        assert_eq!(attribute_type_name(0x0014), Some("REALM"));
+        assert_eq!(attribute_type_name(0x0015), Some("NONCE"));
+        assert_eq!(
+            attribute_type_name(0x001C),
+            Some("MESSAGE-INTEGRITY-SHA256")
+        );
+        assert_eq!(attribute_type_name(0x001D), Some("PASSWORD-ALGORITHM"));
+        assert_eq!(attribute_type_name(0x001E), Some("USERHASH"));
         assert_eq!(attribute_type_name(0x0020), Some("XOR-MAPPED-ADDRESS"));
+        // Comprehension-optional range (0x8000-0xFFFF).
+        assert_eq!(attribute_type_name(0x8002), Some("PASSWORD-ALGORITHMS"));
+        assert_eq!(attribute_type_name(0x8003), Some("ALTERNATE-DOMAIN"));
         assert_eq!(attribute_type_name(0x8022), Some("SOFTWARE"));
+        assert_eq!(attribute_type_name(0x8023), Some("ALTERNATE-SERVER"));
         assert_eq!(attribute_type_name(0x8028), Some("FINGERPRINT"));
+        // Reserved or unassigned codepoints return None.
+        assert_eq!(attribute_type_name(0x0000), None);
+        assert_eq!(attribute_type_name(0x0002), None);
+        assert_eq!(attribute_type_name(0x802B), None);
         assert_eq!(attribute_type_name(0xFFFF), None);
     }
 
