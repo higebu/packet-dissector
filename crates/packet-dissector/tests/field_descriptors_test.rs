@@ -261,7 +261,7 @@ fn dns_field_descriptors() {
 
     // questions has child field descriptors
     let q_children = questions.children.expect("questions should have children");
-    assert_eq!(q_children.len(), 3);
+    assert_eq!(q_children.len(), 4);
     assert_eq!(q_children[0].name, "name");
     assert_eq!(q_children[1].name, "type");
     assert!(
@@ -272,6 +272,12 @@ fn dns_field_descriptors() {
     assert!(
         q_children[2].display_fn.is_some(),
         "class should have display_fn"
+    );
+    // mDNS QU bit (RFC 6762 §18.12) — optional, emitted only in mDNS mode
+    assert_eq!(q_children[3].name, "qu");
+    assert!(
+        q_children[3].optional,
+        "qu should be optional (mDNS-only field)"
     );
 
     // answers/authorities/additionals have RR child fields
