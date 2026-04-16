@@ -4,16 +4,24 @@ use packet_dissector_core::field::{FieldDescriptor, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::read_be_u16;
 
-/// LSA header size in bytes (RFC 2328, A.4.1 / RFC 5340, A.4.1).
+/// LSA header size in bytes.
+///
+/// - RFC 2328, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.1>
+/// - RFC 5340, Appendix A.4.2 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.2>
 pub(crate) const LSA_HEADER_SIZE: usize = 20;
 
-/// Link State Request entry size (RFC 2328, A.3.4 / RFC 5340, A.3.4).
+/// Link State Request entry size.
+///
+/// - RFC 2328, Appendix A.3.4 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.4>
+/// - RFC 5340, Appendix A.3.4 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.4>
 pub(crate) const LSR_ENTRY_SIZE: usize = 12;
 
 /// Returns a human-readable name for OSPF message types.
 ///
-/// Message types 1-5 are shared between OSPFv2 (RFC 2328, Section 8, Table 8)
-/// and OSPFv3 (RFC 5340, Section 8).
+/// Message types 1-5 are shared between OSPFv2 and OSPFv3.
+///
+/// - RFC 2328, Appendix A.3.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.1>
+/// - RFC 5340, Appendix A.3.1 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.1>
 pub(crate) fn msg_type_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("Hello"),

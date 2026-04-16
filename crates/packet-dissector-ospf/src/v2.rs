@@ -11,13 +11,19 @@ use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
 use crate::common::{LSR_ENTRY_SIZE, push_lsa_headers, push_lsu_lsas};
 
-/// OSPFv2 common header size in bytes (RFC 2328, A.3.1).
+/// OSPFv2 common header size in bytes.
+///
+/// RFC 2328, Appendix A.3.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.1>
 const HEADER_SIZE: usize = 24;
 
-/// Hello packet body size excluding neighbors (RFC 2328, A.3.2).
+/// Hello packet body size excluding neighbors.
+///
+/// RFC 2328, Appendix A.3.2 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.2>
 const HELLO_BODY_SIZE: usize = 20;
 
-/// Database Description packet body size excluding LSA headers (RFC 2328, A.3.3).
+/// Database Description packet body size excluding LSA headers.
+///
+/// RFC 2328, Appendix A.3.3 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.3>
 const DD_BODY_SIZE: usize = 8;
 
 /// Field descriptor indices for [`LSA_HEADER_CHILD_FIELDS`].
@@ -75,7 +81,7 @@ static LSR_ENTRY_CHILD_FIELDS: &[FieldDescriptor] = &[
 
 /// Returns a human-readable name for LSA types.
 ///
-/// RFC 2328, Section 12.1.
+/// RFC 2328, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.1>
 fn lsa_type_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("Router-LSA"),
@@ -89,7 +95,7 @@ fn lsa_type_name(v: u8) -> Option<&'static str> {
 
 /// Pushes fields for a single LSA header (20 bytes) into the buffer.
 ///
-/// RFC 2328, A.4.1.
+/// RFC 2328, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.1>
 fn push_lsa_header_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -270,7 +276,8 @@ impl Dissector for Ospfv2Dissector {
             });
         }
 
-        // RFC 2328, A.3.1 — Common header
+        // RFC 2328, Appendix A.3.1 — Common header
+        // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.1>
         let version = data[0];
         if version != 2 {
             return Err(PacketError::InvalidHeader("expected OSPFv2 (version 2)"));
@@ -353,7 +360,8 @@ impl Dissector for Ospfv2Dissector {
         let body_offset = offset + HEADER_SIZE;
 
         match ospf_type {
-            // Hello (Type 1) — RFC 2328, A.3.2
+            // Hello (Type 1) — RFC 2328, Appendix A.3.2
+            // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.2>
             1 => {
                 if body.len() < HELLO_BODY_SIZE {
                     return Err(PacketError::InvalidHeader(
@@ -436,7 +444,8 @@ impl Dissector for Ospfv2Dissector {
                 }
                 buf.end_container(array_idx);
             }
-            // Database Description (Type 2) — RFC 2328, A.3.3
+            // Database Description (Type 2) — RFC 2328, Appendix A.3.3
+            // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.3>
             2 => {
                 if body.len() < DD_BODY_SIZE {
                     return Err(PacketError::Truncated {
@@ -488,7 +497,8 @@ impl Dissector for Ospfv2Dissector {
                 );
                 buf.end_container(array_idx);
             }
-            // Link State Request (Type 3) — RFC 2328, A.3.4
+            // Link State Request (Type 3) — RFC 2328, Appendix A.3.4
+            // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.4>
             3 => {
                 let array_idx = buf.begin_container(
                     &FIELD_DESCRIPTORS[FD_REQUESTS],
@@ -529,7 +539,8 @@ impl Dissector for Ospfv2Dissector {
                 }
                 buf.end_container(array_idx);
             }
-            // Link State Update (Type 4) — RFC 2328, A.3.5
+            // Link State Update (Type 4) — RFC 2328, Appendix A.3.5
+            // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.5>
             4 => {
                 if body.len() < 4 {
                     return Err(PacketError::Truncated {
@@ -561,7 +572,8 @@ impl Dissector for Ospfv2Dissector {
                 );
                 buf.end_container(array_idx);
             }
-            // Link State Acknowledgment (Type 5) — RFC 2328, A.3.6
+            // Link State Acknowledgment (Type 5) — RFC 2328, Appendix A.3.6
+            // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.6>
             5 => {
                 let array_idx = buf.begin_container(
                     &FIELD_DESCRIPTORS[FD_LSA_HEADERS],
@@ -593,15 +605,18 @@ mod tests {
 
     // # RFC 2328 (OSPFv2) Coverage
     //
-    // | RFC Section | Description | Test |
-    // |-------------|-------------|------|
-    // | A.3.1 | Common header | parse_hello, parse_common_header |
-    // | A.3.2 | Hello packet | parse_hello, parse_hello_with_neighbors |
-    // | A.3.3 | Database Description | parse_dd |
-    // | A.3.4 | Link State Request | parse_lsr |
-    // | A.3.5 | Link State Update | parse_lsu |
-    // | A.3.6 | Link State Ack | parse_lsack |
-    // | A.4.1 | LSA header | parse_dd, parse_lsu, parse_lsack |
+    // RFC 2328: <https://www.rfc-editor.org/rfc/rfc2328>
+    //
+    // | RFC Section    | Description             | Test                                    |
+    // |----------------|-------------------------|-----------------------------------------|
+    // | Appendix A.3.1 | Common header           | parse_hello, parse_wrong_version,       |
+    // |                |                         | parse_truncated_header, parse_with_offset |
+    // | Appendix A.3.2 | Hello packet            | parse_hello, parse_hello_with_neighbors |
+    // | Appendix A.3.3 | Database Description    | parse_dd                                |
+    // | Appendix A.3.4 | Link State Request      | parse_lsr                               |
+    // | Appendix A.3.5 | Link State Update       | parse_lsu                               |
+    // | Appendix A.3.6 | Link State Ack          | parse_lsack                             |
+    // | Appendix A.4.1 | LSA header              | parse_dd, parse_lsu, parse_lsack        |
 
     /// Build an OSPFv2 common header.
     fn build_header(ospf_type: u8, packet_length: u16, router_id: [u8; 4]) -> Vec<u8> {
