@@ -9,6 +9,7 @@
 //! - RFC 3397 (Domain Search List): <https://www.rfc-editor.org/rfc/rfc3397>
 //! - RFC 3442 (Classless Static Route): <https://www.rfc-editor.org/rfc/rfc3442>
 //! - RFC 6842 (Client Identifier in Responses): <https://www.rfc-editor.org/rfc/rfc6842>
+//! - RFC 1035 (DNS name compression, used by Domain Search List): <https://www.rfc-editor.org/rfc/rfc1035>
 
 #![deny(missing_docs)]
 
@@ -742,8 +743,11 @@ fn push_classless_static_routes<'pkt>(
 /// Parse a Domain Search List (RFC 3397).
 ///
 /// The data contains DNS-encoded domain names (label-length sequences
-/// terminated by a zero-length label).  Compression pointers are not valid
-/// in this option and cause parsing to stop for the current domain.
+/// terminated by a zero-length label or a compression pointer).  Per
+/// RFC 3397, Section 2 — <https://www.rfc-editor.org/rfc/rfc3397#section-2>
+/// — compression pointers following RFC 1035, Section 4.1.4 are permitted;
+/// each name record therefore ends with either the terminating zero label
+/// or a 2-octet compression pointer (top two bits = 11).
 fn push_domain_search_list<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     opt_data: &'pkt [u8],
@@ -759,32 +763,44 @@ fn push_domain_search_list<'pkt>(
     while i < opt_data.len() {
         let domain_start = i;
         let mut has_labels = false;
+        let mut truncated = false;
         loop {
             if i >= opt_data.len() {
+                truncated = has_labels;
                 break;
             }
             let label_len = opt_data[i] as usize;
+            // RFC 1035, Section 4.1.4 — pointer prefix bits are 11xxxxxx.
+            if label_len & 0xC0 == 0xC0 {
+                // Compression pointer is 2 octets; if truncated, stop.
+                if i + 2 > opt_data.len() {
+                    truncated = true;
+                    break;
+                }
+                i += 2;
+                has_labels = true;
+                break;
+            }
             if label_len == 0 {
                 i += 1;
                 break;
             }
-            if label_len >= 0xC0 {
-                i = opt_data.len();
-                break;
-            }
             if i + 1 + label_len > opt_data.len() {
-                i = opt_data.len();
+                truncated = true;
                 break;
             }
             has_labels = true;
             i += 1 + label_len;
         }
-        if has_labels {
+        if has_labels && !truncated {
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_DOMAIN_SEARCH],
                 FieldValue::Bytes(&opt_data[domain_start..i]),
                 (opt_offset + 2 + domain_start)..(opt_offset + 2 + i),
             );
+        }
+        if truncated {
+            break;
         }
     }
     buf.end_container(arr_idx);
@@ -1380,6 +1396,7 @@ mod tests {
     // |-------------|-------------------------------------|---------------------------------------------|
     // | 2           | Domain Search List encoding         | parse_dhcp_domain_search_single             |
     // | 2           | Multiple domains                    | parse_dhcp_domain_search_multiple           |
+    // | 2           | Compression pointers (RFC 1035 4.1.4) | parse_dhcp_domain_search_with_compression_pointer |
     //
     // # RFC 3442 Coverage
     //
@@ -1387,6 +1404,7 @@ mod tests {
     // |-------------|-------------------------------------|---------------------------------------------|
     // | 3           | Classless Static Route              | parse_dhcp_classless_static_route_single     |
     // | 3           | Default + /25 routes                | parse_dhcp_classless_static_route_default_and_prefix |
+    // | 3           | Invalid prefix width rejected       | parse_dhcp_classless_static_route_invalid_prefix_stops_parsing |
 
     /// Build a minimal DHCP fixed header (236 bytes) + magic cookie (4 bytes).
     fn build_dhcp_base(op: u8, xid: u32, chaddr: [u8; 6], yiaddr: [u8; 4]) -> Vec<u8> {
@@ -2763,16 +2781,375 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Option 21: Policy Filter (RFC 2132, Section 4.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_dhcp_policy_filter() {
+        // RFC 2132, Section 4.3 — "Min 8, multiple of 8"; each entry is a
+        // (destination, mask) IPv4 pair.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let entries = [
+            192, 168, 0, 0, 255, 255, 0, 0, // 192.168.0.0/16
+            10, 0, 0, 0, 255, 0, 0, 0, // 10.0.0.0/8
+        ];
+        push_option(&mut pkt, 21, &entries);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "policy_filter")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let pairs: Vec<_> = buf
+            .nested_fields(arr)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(pairs.len(), 2);
+
+        let first = buf.nested_fields(pairs[0].value.as_container_range().unwrap());
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].name(), "address");
+        assert_eq!(first[0].value, FieldValue::Ipv4Addr([192, 168, 0, 0]));
+        assert_eq!(first[1].name(), "mask");
+        assert_eq!(first[1].value, FieldValue::Ipv4Addr([255, 255, 0, 0]));
+
+        let second = buf.nested_fields(pairs[1].value.as_container_range().unwrap());
+        assert_eq!(second[0].value, FieldValue::Ipv4Addr([10, 0, 0, 0]));
+        assert_eq!(second[1].value, FieldValue::Ipv4Addr([255, 0, 0, 0]));
+    }
+
+    // -----------------------------------------------------------------------
+    // Option 33: Static Route (RFC 2132, Section 5.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_dhcp_static_route() {
+        // RFC 2132, Section 5.8 — "Min 8, multiple of 8"; each entry is a
+        // (destination, router) IPv4 pair. Default route (0.0.0.0) MUST NOT
+        // appear here (see RFC); dissector still records whatever is present.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let entries = [
+            10, 0, 0, 0, 192, 168, 1, 1, // 10.0.0.0 via 192.168.1.1
+            172, 16, 0, 0, 192, 168, 1, 2, // 172.16.0.0 via 192.168.1.2
+        ];
+        push_option(&mut pkt, 33, &entries);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "static_route")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let pairs: Vec<_> = buf
+            .nested_fields(arr)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(pairs.len(), 2);
+        let first = buf.nested_fields(pairs[0].value.as_container_range().unwrap());
+        assert_eq!(first[0].name(), "destination");
+        assert_eq!(first[0].value, FieldValue::Ipv4Addr([10, 0, 0, 0]));
+        assert_eq!(first[1].name(), "router");
+        assert_eq!(first[1].value, FieldValue::Ipv4Addr([192, 168, 1, 1]));
+        let second = buf.nested_fields(pairs[1].value.as_container_range().unwrap());
+        assert_eq!(second[0].value, FieldValue::Ipv4Addr([172, 16, 0, 0]));
+        assert_eq!(second[1].value, FieldValue::Ipv4Addr([192, 168, 1, 2]));
+    }
+
+    // -----------------------------------------------------------------------
     // Option 82: Relay Agent Information (RFC 3046)
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_dhcp_relay_agent_info() {
+        // RFC 3046, Section 3 — sub-option TLV encoding. Sub-option 1 is
+        // Agent Circuit ID, sub-option 2 is Agent Remote ID.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let relay_info = [
+            1, 3, b'c', b'i', b'd', // Circuit ID = "cid"
+            2, 4, b'r', b'i', b'd', b'1', // Remote ID = "rid1"
+        ];
+        push_option(&mut pkt, 82, &relay_info);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "relay_agent_info")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let subs: Vec<_> = buf
+            .nested_fields(arr)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(subs.len(), 2);
+
+        // Sub-option 1: Agent Circuit ID
+        let first = buf.nested_fields(subs[0].value.as_container_range().unwrap());
+        assert_eq!(first[0].name(), "sub_option");
+        assert_eq!(first[0].value, FieldValue::U8(1));
+        assert_eq!(first[1].name(), "circuit_id");
+        assert_eq!(first[1].value, FieldValue::Bytes(b"cid"));
+
+        // Sub-option 2: Agent Remote ID
+        let second = buf.nested_fields(subs[1].value.as_container_range().unwrap());
+        assert_eq!(second[0].name(), "sub_option");
+        assert_eq!(second[0].value, FieldValue::U8(2));
+        assert_eq!(second[1].name(), "remote_id");
+        assert_eq!(second[1].value, FieldValue::Bytes(b"rid1"));
+    }
+
+    #[test]
+    fn parse_dhcp_relay_agent_info_unknown_sub_option() {
+        // Unknown sub-option code: surfaced via the generic `data` field.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let relay_info = [9, 2, 0xAA, 0xBB]; // sub-option 9: opaque 2-byte payload
+        push_option(&mut pkt, 82, &relay_info);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "relay_agent_info")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let subs: Vec<_> = buf
+            .nested_fields(arr)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(subs.len(), 1);
+        let fields = buf.nested_fields(subs[0].value.as_container_range().unwrap());
+        assert_eq!(fields[0].value, FieldValue::U8(9));
+        assert_eq!(fields[1].name(), "data");
+        assert_eq!(fields[1].value, FieldValue::Bytes(&[0xAA, 0xBB]));
+    }
 
     // -----------------------------------------------------------------------
     // Option 121: Classless Static Route (RFC 3442)
     // -----------------------------------------------------------------------
 
+    #[test]
+    fn parse_dhcp_classless_static_route_single() {
+        // RFC 3442, Section 3 — one /24 route: 192.168.1.0/24 via 10.0.0.1.
+        // Destination descriptor: width (1) + significant octets (3) + router (4) = 8 bytes.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let route = [24, 192, 168, 1, 10, 0, 0, 1];
+        push_option(&mut pkt, 121, &route);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "classless_static_route")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let routes: Vec<_> = buf
+            .nested_fields(arr)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(routes.len(), 1);
+        let fields = buf.nested_fields(routes[0].value.as_container_range().unwrap());
+        assert_eq!(fields[0].name(), "prefix_length");
+        assert_eq!(fields[0].value, FieldValue::U8(24));
+        assert_eq!(fields[1].name(), "destination");
+        assert_eq!(fields[1].value, FieldValue::Bytes(&[192, 168, 1]));
+        assert_eq!(fields[2].name(), "router");
+        assert_eq!(fields[2].value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
+    }
+
+    #[test]
+    fn parse_dhcp_classless_static_route_default_and_prefix() {
+        // RFC 3442, Section 3 — default route (prefix 0, no subnet octets) plus a /25.
+        // Default: width=0 -> 0 significant octets -> router 1.2.3.4 (5 bytes total).
+        // /25: width=25 -> 4 significant octets -> router 10.0.0.1 (9 bytes total).
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0, 1, 2, 3, 4]); // default via 1.2.3.4
+        data.extend_from_slice(&[25, 10, 0, 1, 0, 10, 0, 0, 2]); // 10.0.1.0/25 via 10.0.0.2
+        push_option(&mut pkt, 121, &data);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "classless_static_route")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let routes: Vec<_> = buf
+            .nested_fields(arr)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(routes.len(), 2);
+
+        // Default route
+        let default_fields = buf.nested_fields(routes[0].value.as_container_range().unwrap());
+        assert_eq!(default_fields[0].value, FieldValue::U8(0));
+        assert_eq!(default_fields[1].value, FieldValue::Bytes(&[]));
+        assert_eq!(default_fields[2].value, FieldValue::Ipv4Addr([1, 2, 3, 4]));
+
+        // /25 route: 4 significant octets
+        let prefix_fields = buf.nested_fields(routes[1].value.as_container_range().unwrap());
+        assert_eq!(prefix_fields[0].value, FieldValue::U8(25));
+        assert_eq!(prefix_fields[1].value, FieldValue::Bytes(&[10, 0, 1, 0]));
+        assert_eq!(prefix_fields[2].value, FieldValue::Ipv4Addr([10, 0, 0, 2]));
+    }
+
+    #[test]
+    fn parse_dhcp_classless_static_route_invalid_prefix_stops_parsing() {
+        // RFC 3442, Section 3 — valid mask widths are 0..=32. Values > 32 are
+        // malformed; the dissector stops consuming further entries but does
+        // not produce a protocol error (Postel's Law).
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let mut data = Vec::new();
+        data.extend_from_slice(&[24, 192, 168, 1, 10, 0, 0, 1]); // valid /24
+        data.extend_from_slice(&[33, 0, 0, 0, 0, 0, 0, 0, 0]); // invalid prefix=33
+        push_option(&mut pkt, 121, &data);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "classless_static_route")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let routes: Vec<_> = buf
+            .nested_fields(arr)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(routes.len(), 1);
+    }
+
     // -----------------------------------------------------------------------
     // Option 119: Domain Search List (RFC 3397)
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_dhcp_domain_search_single() {
+        // RFC 3397, Section 2 — one domain "example.com" using RFC 1035 label
+        // encoding: 7 "example" 3 "com" 0.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let domain = [
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+        ];
+        push_option(&mut pkt, 119, &domain);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "domain_search")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let domains = buf.nested_fields(arr);
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].value, FieldValue::Bytes(&domain));
+    }
+
+    #[test]
+    fn parse_dhcp_domain_search_multiple() {
+        // RFC 3397, Section 2 — two independent domains.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let data = [
+            3, b'a', b'a', b'a', 3, b'c', b'o', b'm', 0, // "aaa.com"
+            3, b'b', b'b', b'b', 3, b'o', b'r', b'g', 0, // "bbb.org"
+        ];
+        push_option(&mut pkt, 119, &data);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "domain_search")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let domains = buf.nested_fields(arr);
+        assert_eq!(domains.len(), 2);
+        assert_eq!(domains[0].value, FieldValue::Bytes(&data[0..9]));
+        assert_eq!(domains[1].value, FieldValue::Bytes(&data[9..18]));
+    }
+
+    #[test]
+    fn parse_dhcp_domain_search_with_compression_pointer() {
+        // RFC 3397, Section 2 — compression pointers per RFC 1035 Section
+        // 4.1.4 are permitted. Encode three names where the middle name ends
+        // with a pointer back into the first name's tail and the third name
+        // appears immediately after the pointer. Buggy parsers that treat a
+        // pointer as an end-of-option marker will lose the third entry.
+        //
+        //   offset 0 : 5 f i r s t          (label "first")
+        //   offset 6 : 7 e x a m p l e      (label "example")
+        //   offset 14: 3 c o m              (label "com")
+        //   offset 18: 0                    (root label, terminates #1)
+        //   offset 19: 6 s e c o n d        (label "second")
+        //   offset 26: 0xC0 0x06            (pointer to offset 6, terminates #2)
+        //   offset 28: 3 n e w 0            (label "new" + root; terminates #3)
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let data = [
+            5, b'f', b'i', b'r', b's', b't', // "first"
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
+            3, b'c', b'o', b'm', // "com"
+            0,    // end of first name
+            6, b's', b'e', b'c', b'o', b'n', b'd', // "second"
+            0xC0, 0x06, // pointer to offset 6 ("example.com")
+            3, b'n', b'e', b'w', 0, // "new"
+        ];
+        push_option(&mut pkt, 119, &data);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let arr = buf
+            .field_by_name(&buf.layers()[0], "domain_search")
+            .unwrap()
+            .value
+            .as_container_range()
+            .unwrap();
+        let domains = buf.nested_fields(arr);
+        assert_eq!(domains.len(), 3);
+        // First name: bytes 0..19 (inclusive of terminating 0).
+        assert_eq!(domains[0].value, FieldValue::Bytes(&data[0..19]));
+        // Second name: "second" label + 2-byte compression pointer (bytes 19..28).
+        assert_eq!(domains[1].value, FieldValue::Bytes(&data[19..28]));
+        // Third name: "new" + root label (bytes 28..33).
+        assert_eq!(domains[2].value, FieldValue::Bytes(&data[28..33]));
+    }
 
     // -----------------------------------------------------------------------
     // Option 52: Option Overload
