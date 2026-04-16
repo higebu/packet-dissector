@@ -991,6 +991,9 @@ impl Dissector for Srv6Dissector {
 
             // RFC 9800 — CSID container decomposition
             let lnfl = ss.locator_node_bits as usize + ss.function_bits as usize;
+            // `lnfl > 0` guards every division below; the lint's `checked_div`
+            // suggestion would only obscure the shared precondition.
+            #[allow(clippy::manual_checked_ops)]
             if lnfl > 0 {
                 match &ss.csid_flavor {
                     CsidFlavor::ReplaceCsid { csid_bits } if *csid_bits > 0 => {

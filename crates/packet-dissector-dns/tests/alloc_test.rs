@@ -34,6 +34,40 @@ fn zero_alloc_dissect_dns_query() {
 }
 
 #[test]
+fn zero_alloc_dissect_dns_naptr() {
+    // DNS response carrying a single NAPTR answer (RFC 3403) — regression
+    // test: NAPTR parsing must not allocate (previously used `Vec::new()` to
+    // collect the three character-string ranges).
+    let raw: &[u8] = &[
+        0xbe, 0xef, // txid
+        0x84, 0x00, // flags: QR=1, AA=1
+        0x00, 0x00, // QDCOUNT = 0
+        0x00, 0x01, // ANCOUNT = 1
+        0x00, 0x00, // NSCOUNT = 0
+        0x00, 0x00, // ARCOUNT = 0
+        // NAME: ex.test
+        0x02, b'e', b'x', 0x04, b't', b'e', b's', b't', 0x00, 0x00, 0x23, // TYPE = NAPTR (35)
+        0x00, 0x01, // CLASS = IN
+        0x00, 0x00, 0x00, 0x00, // TTL
+        0x00, 0x18, // RDLENGTH = 24
+        // RDATA: order(2) + preference(2) + "s"(2) + "SIP+D2U"(8) + ""(1) + "ex.test."(9)
+        0x00, 0x64, // order = 100
+        0x00, 0x0a, // preference = 10
+        0x01, b's', // flags = "s"
+        0x07, b'S', b'I', b'P', b'+', b'D', b'2', b'U', // services = "SIP+D2U"
+        0x00, // regexp = ""
+        0x02, b'e', b'x', 0x04, b't', b'e', b's', b't', 0x00, // replacement
+    ];
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        DnsDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "DNS NAPTR dissect allocated {allocs} times");
+}
+
+#[test]
 fn zero_alloc_dissect_dns_tcp() {
     // DNS over TCP: 2-byte length prefix + DNS query.
     let dns_query: &[u8] = &[

@@ -348,16 +348,16 @@ impl Dissector for PppDissector {
             offset + header_len - 2..offset + header_len,
         );
         match proto {
-            PPP_PROTO_IPCP | PPP_PROTO_LCP | PPP_PROTO_PAP | PPP_PROTO_CHAP => {
-                if !payload.is_empty() {
-                    let obj_idx = buf.begin_container(
-                        &FIELD_DESCRIPTORS[FD_PAYLOAD],
-                        FieldValue::Object(0..0),
-                        offset + pos..offset + data.len(),
-                    );
-                    parse_protocol(proto, payload, offset + pos, buf);
-                    buf.end_container(obj_idx);
-                }
+            PPP_PROTO_IPCP | PPP_PROTO_LCP | PPP_PROTO_PAP | PPP_PROTO_CHAP
+                if !payload.is_empty() =>
+            {
+                let obj_idx = buf.begin_container(
+                    &FIELD_DESCRIPTORS[FD_PAYLOAD],
+                    FieldValue::Object(0..0),
+                    offset + pos..offset + data.len(),
+                );
+                parse_protocol(proto, payload, offset + pos, buf);
+                buf.end_container(obj_idx);
             }
             _ => {}
         }

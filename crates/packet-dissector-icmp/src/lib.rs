@@ -623,24 +623,20 @@ fn push_interface_id<'pkt>(
     c_type: u8,
 ) {
     match c_type {
-        1 => {
-            if !body.is_empty() {
-                buf.push_field(
-                    &EXTENSION_OBJECT_CHILDREN[EOBJ_INTERFACE_NAME],
-                    FieldValue::Bytes(body),
-                    body_offset..body_offset + body.len(),
-                );
-            }
+        1 if !body.is_empty() => {
+            buf.push_field(
+                &EXTENSION_OBJECT_CHILDREN[EOBJ_INTERFACE_NAME],
+                FieldValue::Bytes(body),
+                body_offset..body_offset + body.len(),
+            );
         }
-        2 => {
-            if body.len() >= 4 {
-                let ifindex = read_be_u32(body, 0).unwrap_or_default();
-                buf.push_field(
-                    &EXTENSION_OBJECT_CHILDREN[EOBJ_IF_INDEX],
-                    FieldValue::U32(ifindex),
-                    body_offset..body_offset + 4,
-                );
-            }
+        2 if body.len() >= 4 => {
+            let ifindex = read_be_u32(body, 0).unwrap_or_default();
+            buf.push_field(
+                &EXTENSION_OBJECT_CHILDREN[EOBJ_IF_INDEX],
+                FieldValue::U32(ifindex),
+                body_offset..body_offset + 4,
+            );
         }
         3 => {
             if body.len() < 4 {
@@ -812,10 +808,8 @@ impl Dissector for IcmpDissector {
             }
             // RFC 792 / RFC 6633 — Source Quench (4), deprecated.
             // <https://www.rfc-editor.org/rfc/rfc6633#section-1>
-            4 => {
-                if data.len() > HEADER_SIZE {
-                    push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
-                }
+            4 if data.len() > HEADER_SIZE => {
+                push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
             }
             // RFC 792 — Time Exceeded (11)
             // <https://www.rfc-editor.org/rfc/rfc792#page-6>

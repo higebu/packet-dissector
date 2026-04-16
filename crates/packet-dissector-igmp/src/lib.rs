@@ -435,57 +435,55 @@ impl Dissector for IgmpDissector {
 
         match igmp_type {
             // Membership Query (0x11) — RFC 2236 Section 2 / RFC 3376 Section 4.1
-            0x11 => {
-                // IGMPv3 query: longer than 8 bytes (RFC 3376 Section 4.1)
-                if data.len() >= V3_QUERY_MIN_SIZE {
-                    // Decoded Max Resp Time (RFC 3376 Section 4.1.1)
-                    let decoded_mrt = decode_exp_field(max_resp_time);
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[FD_MAX_RESP_TIME_VALUE],
-                        FieldValue::U32(decoded_mrt),
-                        offset + 1..offset + 2,
-                    );
+            // IGMPv3 query: longer than 8 bytes (RFC 3376 Section 4.1)
+            0x11 if data.len() >= V3_QUERY_MIN_SIZE => {
+                // Decoded Max Resp Time (RFC 3376 Section 4.1.1)
+                let decoded_mrt = decode_exp_field(max_resp_time);
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_MAX_RESP_TIME_VALUE],
+                    FieldValue::U32(decoded_mrt),
+                    offset + 1..offset + 2,
+                );
 
-                    // Byte 8: Resv(4) + S(1) + QRV(3) — RFC 3376 Section 4.1.6–4.1.7
-                    let flags_byte = data[8];
-                    let s_flag = (flags_byte >> 3) & 0x01;
-                    let qrv = flags_byte & 0x07;
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[FD_S_FLAG],
-                        FieldValue::U8(s_flag),
-                        offset + 8..offset + 9,
-                    );
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[FD_QRV],
-                        FieldValue::U8(qrv),
-                        offset + 8..offset + 9,
-                    );
+                // Byte 8: Resv(4) + S(1) + QRV(3) — RFC 3376 Section 4.1.6–4.1.7
+                let flags_byte = data[8];
+                let s_flag = (flags_byte >> 3) & 0x01;
+                let qrv = flags_byte & 0x07;
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_S_FLAG],
+                    FieldValue::U8(s_flag),
+                    offset + 8..offset + 9,
+                );
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_QRV],
+                    FieldValue::U8(qrv),
+                    offset + 8..offset + 9,
+                );
 
-                    // Byte 9: QQIC — RFC 3376 Section 4.1.8
-                    let qqic = data[9];
-                    let decoded_qqic = decode_exp_field(qqic);
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[FD_QQIC],
-                        FieldValue::U8(qqic),
-                        offset + 9..offset + 10,
-                    );
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[FD_QQIC_VALUE],
-                        FieldValue::U32(decoded_qqic),
-                        offset + 9..offset + 10,
-                    );
+                // Byte 9: QQIC — RFC 3376 Section 4.1.8
+                let qqic = data[9];
+                let decoded_qqic = decode_exp_field(qqic);
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_QQIC],
+                    FieldValue::U8(qqic),
+                    offset + 9..offset + 10,
+                );
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_QQIC_VALUE],
+                    FieldValue::U32(decoded_qqic),
+                    offset + 9..offset + 10,
+                );
 
-                    // Bytes 10–11: Number of Sources — RFC 3376 Section 4.1.9
-                    let num_sources = read_be_u16(data, 10)?;
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[FD_NUM_SOURCES],
-                        FieldValue::U16(num_sources),
-                        offset + 10..offset + 12,
-                    );
+                // Bytes 10–11: Number of Sources — RFC 3376 Section 4.1.9
+                let num_sources = read_be_u16(data, 10)?;
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_NUM_SOURCES],
+                    FieldValue::U16(num_sources),
+                    offset + 10..offset + 12,
+                );
 
-                    // Source addresses (graceful truncation per Postel's law)
-                    push_query_sources(buf, data, offset, num_sources)?;
-                }
+                // Source addresses (graceful truncation per Postel's law)
+                push_query_sources(buf, data, offset, num_sources)?;
             }
 
             // IGMPv1 Membership Report (0x12) — RFC 1112 Section 6.2
