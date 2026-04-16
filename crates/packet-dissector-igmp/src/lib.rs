@@ -1,9 +1,10 @@
 //! IGMP (Internet Group Management Protocol) dissector.
 //!
 //! ## References
-//! - RFC 1112: <https://www.rfc-editor.org/rfc/rfc1112> (IGMPv1)
-//! - RFC 2236: <https://www.rfc-editor.org/rfc/rfc2236> (IGMPv2)
-//! - RFC 3376: <https://www.rfc-editor.org/rfc/rfc3376> (IGMPv3)
+//! - RFC 1112: <https://www.rfc-editor.org/rfc/rfc1112> (IGMPv1, updated by RFC 2236)
+//! - RFC 2236: <https://www.rfc-editor.org/rfc/rfc2236> (IGMPv2, updated by RFC 3376 and RFC 9776)
+//! - RFC 9776: <https://www.rfc-editor.org/rfc/rfc9776> (IGMPv3; obsoletes RFC 3376)
+//! - RFC 4604: <https://www.rfc-editor.org/rfc/rfc4604> (SSM semantics for IGMPv3/MLDv2)
 
 #![deny(missing_docs)]
 
@@ -15,7 +16,9 @@ use packet_dissector_core::util::{read_be_u16, read_ipv4_addr};
 
 /// Returns a human-readable name for well-known IGMP type values.
 ///
-/// RFC 1112 Section 6.2, RFC 2236 Section 2, RFC 3376 Section 4.
+/// RFC 1112, Section 6.2 — <https://www.rfc-editor.org/rfc/rfc1112#section-6.2>
+/// RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
+/// RFC 9776, Section 4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4>
 fn igmp_type_name(v: u8) -> Option<&'static str> {
     match v {
         0x11 => Some("Membership Query"),
@@ -29,7 +32,7 @@ fn igmp_type_name(v: u8) -> Option<&'static str> {
 
 /// Returns a human-readable name for IGMPv3 group record type values.
 ///
-/// RFC 3376 Section 4.2.12.
+/// RFC 9776, Section 4.2.12 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2.12>
 fn igmpv3_record_type_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("MODE_IS_INCLUDE"),
@@ -42,11 +45,14 @@ fn igmpv3_record_type_name(v: u8) -> Option<&'static str> {
     }
 }
 
-/// Decodes an IGMPv3 exponential field value.
+/// Decodes an IGMPv3 exponential field value (used by Max Resp Code and QQIC).
 ///
-/// RFC 3376 Section 4.1.1: If `code < 128`, the value equals `code`.
-/// Otherwise, the value is computed as `(mant | 0x10) << (exp + 3)` where
-/// `mant` is bits 0–3 and `exp` is bits 4–6 of the code byte.
+/// RFC 9776, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.1>
+/// RFC 9776, Section 4.1.7 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.7>
+///
+/// If `code < 128`, the value equals `code`. Otherwise, the value is computed
+/// as `(mant | 0x10) << (exp + 3)` where `mant` is bits 0–3 and `exp` is
+/// bits 4–6 of the code byte.
 fn decode_exp_field(code: u8) -> u32 {
     if code < 128 {
         u32::from(code)
@@ -58,15 +64,24 @@ fn decode_exp_field(code: u8) -> u32 {
 }
 
 /// Minimum IGMP header size: Type(1) + Max Resp Time(1) + Checksum(2) + Group Address(4).
+///
+/// RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
 const HEADER_SIZE: usize = 8;
 
-/// Minimum IGMPv3 Membership Query size (RFC 3376 Section 4.1).
+/// Minimum IGMPv3 Membership Query size.
+///
+/// RFC 9776, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1>
 const V3_QUERY_MIN_SIZE: usize = 12;
 
-/// IGMPv3 Membership Report header size before group records (RFC 3376 Section 4.2).
+/// IGMPv3 Membership Report header size before group records.
+///
+/// RFC 9776, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2>
 const V3_REPORT_HEADER_SIZE: usize = 8;
 
-/// Minimum size of a single IGMPv3 group record header (RFC 3376 Section 4.2.4).
+/// Minimum size of a single IGMPv3 group record header:
+/// Record Type(1) + Aux Data Len(1) + Number of Sources(2) + Multicast Address(4).
+///
+/// RFC 9776, Section 4.2.1–4.2.4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2>
 const GROUP_RECORD_HEADER_SIZE: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -83,24 +98,26 @@ const FD_CHECKSUM: usize = 2;
 const FD_GROUP_ADDRESS: usize = 3;
 /// Field descriptor index for `max_resp_time_value` (decoded).
 const FD_MAX_RESP_TIME_VALUE: usize = 4;
+/// Field descriptor index for IGMPv3 Query `flags` (byte 8 bits 0–3; RFC 9776 §4.1.4).
+const FD_QUERY_FLAGS: usize = 5;
 /// Field descriptor index for `suppress_router_processing` (S flag).
-const FD_S_FLAG: usize = 5;
+const FD_S_FLAG: usize = 6;
 /// Field descriptor index for `qrv`.
-const FD_QRV: usize = 6;
+const FD_QRV: usize = 7;
 /// Field descriptor index for `qqic` (raw).
-const FD_QQIC: usize = 7;
+const FD_QQIC: usize = 8;
 /// Field descriptor index for `qqic_value` (decoded).
-const FD_QQIC_VALUE: usize = 8;
+const FD_QQIC_VALUE: usize = 9;
 /// Field descriptor index for `num_sources`.
-const FD_NUM_SOURCES: usize = 9;
+const FD_NUM_SOURCES: usize = 10;
 /// Field descriptor index for `sources`.
-const FD_SOURCES: usize = 10;
-/// Field descriptor index for `reserved`.
-const FD_RESERVED: usize = 11;
+const FD_SOURCES: usize = 11;
+/// Field descriptor index for IGMPv3 Report `flags` (bytes 4–5; RFC 9776 §4.2.3).
+const FD_REPORT_FLAGS: usize = 12;
 /// Field descriptor index for `num_group_records`.
-const FD_NUM_GROUP_RECORDS: usize = 12;
+const FD_NUM_GROUP_RECORDS: usize = 13;
 /// Field descriptor index for `group_records`.
-const FD_GROUP_RECORDS: usize = 13;
+const FD_GROUP_RECORDS: usize = 14;
 
 // ---------------------------------------------------------------------------
 // Child field descriptor indices — source address
@@ -194,6 +211,8 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::U32,
     )
     .optional(),
+    // IGMPv3 Query byte 8, bits 0–3 (RFC 9776 §4.1.4 — IANA "IGMP Type Numbers" registry).
+    FieldDescriptor::new("flags", "Flags", FieldType::U8).optional(),
     FieldDescriptor::new(
         "suppress_router_processing",
         "Suppress Router-Side Processing",
@@ -212,7 +231,9 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("sources", "Source Addresses", FieldType::Array)
         .optional()
         .with_children(SOURCE_CHILDREN),
-    FieldDescriptor::new("reserved", "Reserved", FieldType::U16).optional(),
+    // IGMPv3 Report bytes 4–5 (RFC 9776 §4.2.3 — IANA "IGMP Type Numbers" registry;
+    // formerly "Reserved" in RFC 3376 §4.2).
+    FieldDescriptor::new("flags", "Flags", FieldType::U16).optional(),
     FieldDescriptor::new(
         "num_group_records",
         "Number of Group Records",
@@ -225,7 +246,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 ];
 
 /// IGMP dissector supporting IGMPv1 (RFC 1112), IGMPv2 (RFC 2236), and
-/// IGMPv3 (RFC 3376).
+/// IGMPv3 (RFC 9776, which obsoletes RFC 3376).
 pub struct IgmpDissector;
 
 /// Push a list of IPv4 source addresses into the buffer as Object elements
@@ -402,7 +423,9 @@ impl Dissector for IgmpDissector {
             offset..offset + total_len,
         );
 
-        // Common header fields (RFC 2236 Section 2)
+        // Common header fields.
+        // RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
+        // RFC 9776, Section 4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4>
         let igmp_type = data[0];
         let max_resp_time = data[1];
         let checksum = read_be_u16(data, 2)?;
@@ -434,10 +457,13 @@ impl Dissector for IgmpDissector {
         }
 
         match igmp_type {
-            // Membership Query (0x11) — RFC 2236 Section 2 / RFC 3376 Section 4.1
-            // IGMPv3 query: longer than 8 bytes (RFC 3376 Section 4.1)
+            // Membership Query (0x11)
+            // RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
+            // RFC 9776, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1>
+            // IGMPv3 query: at least 12 bytes.
             0x11 if data.len() >= V3_QUERY_MIN_SIZE => {
-                // Decoded Max Resp Time (RFC 3376 Section 4.1.1)
+                // Decoded Max Resp Time.
+                // RFC 9776, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.1>
                 let decoded_mrt = decode_exp_field(max_resp_time);
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_MAX_RESP_TIME_VALUE],
@@ -445,10 +471,19 @@ impl Dissector for IgmpDissector {
                     offset + 1..offset + 2,
                 );
 
-                // Byte 8: Resv(4) + S(1) + QRV(3) — RFC 3376 Section 4.1.6–4.1.7
+                // Byte 8: Flags(4) + S(1) + QRV(3).
+                // RFC 9776, Section 4.1.4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.4> (Flags)
+                // RFC 9776, Section 4.1.5 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.5> (S Flag)
+                // RFC 9776, Section 4.1.6 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.6> (QRV)
                 let flags_byte = data[8];
+                let flags = (flags_byte >> 4) & 0x0F;
                 let s_flag = (flags_byte >> 3) & 0x01;
                 let qrv = flags_byte & 0x07;
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_QUERY_FLAGS],
+                    FieldValue::U8(flags),
+                    offset + 8..offset + 9,
+                );
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_S_FLAG],
                     FieldValue::U8(s_flag),
@@ -460,7 +495,8 @@ impl Dissector for IgmpDissector {
                     offset + 8..offset + 9,
                 );
 
-                // Byte 9: QQIC — RFC 3376 Section 4.1.8
+                // Byte 9: QQIC.
+                // RFC 9776, Section 4.1.7 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.7>
                 let qqic = data[9];
                 let decoded_qqic = decode_exp_field(qqic);
                 buf.push_field(
@@ -474,7 +510,8 @@ impl Dissector for IgmpDissector {
                     offset + 9..offset + 10,
                 );
 
-                // Bytes 10–11: Number of Sources — RFC 3376 Section 4.1.9
+                // Bytes 10–11: Number of Sources.
+                // RFC 9776, Section 4.1.8 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.8>
                 let num_sources = read_be_u16(data, 10)?;
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_NUM_SOURCES],
@@ -482,26 +519,32 @@ impl Dissector for IgmpDissector {
                     offset + 10..offset + 12,
                 );
 
-                // Source addresses (graceful truncation per Postel's law)
+                // Source addresses (graceful truncation per Postel's law).
+                // RFC 9776, Section 4.1.9 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.9>
                 push_query_sources(buf, data, offset, num_sources)?;
             }
 
-            // IGMPv1 Membership Report (0x12) — RFC 1112 Section 6.2
-            // IGMPv2 Membership Report (0x16) — RFC 2236 Section 3
-            // Leave Group (0x17) — RFC 2236 Section 3
+            // IGMPv1 Membership Report (0x12)
+            // RFC 1112, Section 6.2 — <https://www.rfc-editor.org/rfc/rfc1112#section-6.2>
+            // IGMPv2 Membership Report (0x16) / Leave Group (0x17)
+            // RFC 2236, Section 3 — <https://www.rfc-editor.org/rfc/rfc2236#section-3>
             0x12 | 0x16 | 0x17 => {}
 
-            // IGMPv3 Membership Report (0x22) — RFC 3376 Section 4.2
+            // IGMPv3 Membership Report (0x22).
+            // RFC 9776, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2>
             0x22 => {
-                // Bytes 4–5: Reserved
-                let reserved = read_be_u16(data, 4)?;
+                // Bytes 4–5: Flags (IANA "IGMP Type Numbers" registry;
+                // formerly "Reserved" in RFC 3376 §4.2).
+                // RFC 9776, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2.3>
+                let flags = read_be_u16(data, 4)?;
                 buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_RESERVED],
-                    FieldValue::U16(reserved),
+                    &FIELD_DESCRIPTORS[FD_REPORT_FLAGS],
+                    FieldValue::U16(flags),
                     offset + 4..offset + 6,
                 );
 
-                // Bytes 6–7: Number of Group Records
+                // Bytes 6–7: Number of Group Records.
+                // RFC 9776, Section 4.2.4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2.4>
                 let num_records = read_be_u16(data, 6)?;
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_NUM_GROUP_RECORDS],
@@ -509,7 +552,7 @@ impl Dissector for IgmpDissector {
                     offset + 6..offset + 8,
                 );
 
-                // Group records (graceful truncation per Postel's law)
+                // Group records (graceful truncation per Postel's law).
                 push_group_records(buf, data, offset, num_records)?;
             }
 
@@ -529,31 +572,34 @@ mod tests {
 
     // # RFC Coverage
     //
-    // | RFC Section | Description                          | Test                                         |
-    // |-------------|--------------------------------------|----------------------------------------------|
-    // | RFC 3376 4.1.1 | Exponential field decoding (linear)  | decode_exp_field_linear                  |
-    // | RFC 3376 4.1.1 | Exponential field decoding (exp)     | decode_exp_field_exponential             |
-    // | RFC 2236 2  | Membership Query (general)           | parse_igmpv2_membership_query_general        |
-    // | RFC 2236 2  | Membership Query (group-specific)    | parse_igmpv2_membership_query_group_specific |
-    // | RFC 1112 6.2| IGMPv1 Membership Report             | parse_igmpv1_membership_report               |
-    // | RFC 2236 3  | IGMPv2 Membership Report             | parse_igmpv2_membership_report               |
-    // | RFC 2236 3  | Leave Group                          | parse_igmpv2_leave_group                     |
-    // | RFC 3376 4.1| IGMPv3 Query (no sources)            | parse_igmpv3_query_no_sources                |
-    // | RFC 3376 4.1| IGMPv3 Query (with sources)          | parse_igmpv3_query_with_sources              |
-    // | RFC 3376 4.1.1| IGMPv3 Query (exponential fields)  | parse_igmpv3_query_exponential_fields        |
-    // | RFC 3376 4.2| IGMPv3 Report (single record)        | parse_igmpv3_report_single_record            |
-    // | RFC 3376 4.2| IGMPv3 Report (multiple records)     | parse_igmpv3_report_multiple_records         |
-    // | RFC 3376 4.2| IGMPv3 Report (aux data)             | parse_igmpv3_report_with_aux_data            |
-    // | ---         | Truncated packet                     | parse_truncated                              |
-    // | ---         | IGMPv3 query truncated sources       | parse_igmpv3_query_truncated_sources         |
-    // | ---         | IGMPv3 report truncated record       | parse_igmpv3_report_truncated_record         |
-    // | ---         | Unknown IGMP type                    | parse_unknown_type                           |
-    // | ---         | Offset handling                      | parse_with_offset                            |
-    // | ---         | Dissector metadata                   | dissector_metadata                           |
+    // | RFC Section    | Description                          | Test                                         |
+    // |----------------|--------------------------------------|----------------------------------------------|
+    // | RFC 9776 4.1.1 | Exponential field decoding (linear)  | decode_exp_field_linear                      |
+    // | RFC 9776 4.1.1 | Exponential field decoding (exp)     | decode_exp_field_exponential                 |
+    // | RFC 2236 2     | Membership Query (general)           | parse_igmpv2_membership_query_general        |
+    // | RFC 2236 2     | Membership Query (group-specific)    | parse_igmpv2_membership_query_group_specific |
+    // | RFC 1112 6.2   | IGMPv1 Membership Report             | parse_igmpv1_membership_report               |
+    // | RFC 2236 3     | IGMPv2 Membership Report             | parse_igmpv2_membership_report               |
+    // | RFC 2236 3     | Leave Group                          | parse_igmpv2_leave_group                     |
+    // | RFC 9776 4.1   | IGMPv3 Query (no sources)            | parse_igmpv3_query_no_sources                |
+    // | RFC 9776 4.1   | IGMPv3 Query (with sources)          | parse_igmpv3_query_with_sources              |
+    // | RFC 9776 4.1.1 | IGMPv3 Query (exponential fields)    | parse_igmpv3_query_exponential_fields        |
+    // | RFC 9776 4.1.4 | IGMPv3 Query Flags field             | parse_igmpv3_query_with_flags                |
+    // | RFC 9776 4.2   | IGMPv3 Report (single record)        | parse_igmpv3_report_single_record            |
+    // | RFC 9776 4.2   | IGMPv3 Report (multiple records)     | parse_igmpv3_report_multiple_records         |
+    // | RFC 9776 4.2   | IGMPv3 Report (aux data)             | parse_igmpv3_report_with_aux_data            |
+    // | RFC 9776 4.2.3 | IGMPv3 Report Flags field            | parse_igmpv3_report_with_flags               |
+    // | ---            | Truncated packet                     | parse_truncated                              |
+    // | ---            | IGMPv3 query truncated sources       | parse_igmpv3_query_truncated_sources         |
+    // | ---            | IGMPv3 report truncated record       | parse_igmpv3_report_truncated_record         |
+    // | ---            | Unknown IGMP type                    | parse_unknown_type                           |
+    // | ---            | Offset handling                      | parse_with_offset                            |
+    // | ---            | Dissector metadata                   | dissector_metadata                           |
 
     #[test]
     fn decode_exp_field_linear() {
-        // RFC 3376 Section 4.1.1: values 0–127 are returned as-is.
+        // RFC 9776, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.1>
+        // values 0–127 are returned as-is.
         assert_eq!(decode_exp_field(0), 0);
         assert_eq!(decode_exp_field(1), 1);
         assert_eq!(decode_exp_field(100), 100);
@@ -562,7 +608,8 @@ mod tests {
 
     #[test]
     fn decode_exp_field_exponential() {
-        // RFC 3376 Section 4.1.1: value 128 (0x80) → (0 | 0x10) << (0 + 3) = 128
+        // RFC 9776, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.1>
+        // value 128 (0x80) → (0 | 0x10) << (0 + 3) = 128
         assert_eq!(decode_exp_field(0x80), 128);
         // value 0xFF → (0xF | 0x10) << (0x7 + 3) = 31 << 10 = 31744
         assert_eq!(decode_exp_field(0xFF), 31744);
@@ -748,11 +795,12 @@ mod tests {
 
     #[test]
     fn parse_igmpv3_query_no_sources() {
-        // RFC 3376 Section 4.1: 12-byte query with 0 sources
+        // RFC 9776, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1>
+        // 12-byte query with 0 sources, all Flags/S/QRV bits zero.
         let raw: &[u8] = &[
             0x11, 0x64, 0x00, 0x00, // type, max_resp_code=100, checksum
             0xE0, 0x00, 0x00, 0x01, // group = 224.0.0.1
-            0x00, // Resv=0, S=0, QRV=0
+            0x00, // Flags=0, S=0, QRV=0
             0x7B, // QQIC = 123
             0x00, 0x00, // num_sources = 0
         ];
@@ -765,6 +813,11 @@ mod tests {
                 .unwrap()
                 .value,
             FieldValue::U32(100)
+        );
+        // RFC 9776 §4.1.4: Flags (bits 0–3 of byte 8)
+        assert_eq!(
+            buf.field_by_name(layer, "flags").unwrap().value,
+            FieldValue::U8(0)
         );
         assert_eq!(
             buf.field_by_name(layer, "suppress_router_processing")
@@ -791,12 +844,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_igmpv3_query_with_flags() {
+        // RFC 9776, Section 4.1.4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.4>
+        // Byte 8 = 0xAB = Flags(1010)=0xA, S(1)=1, QRV(011)=3
+        let raw: &[u8] = &[
+            0x11, 0x64, 0x00, 0x00, // type, max_resp_code, checksum
+            0xE0, 0x00, 0x00, 0x01, // group
+            0xAB, // Flags=0xA, S=1, QRV=3
+            0x00, // QQIC
+            0x00, 0x00, // num_sources = 0
+        ];
+        let mut buf = DissectBuffer::new();
+        IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "flags").unwrap().value,
+            FieldValue::U8(0xA)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "suppress_router_processing")
+                .unwrap()
+                .value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "qrv").unwrap().value,
+            FieldValue::U8(3)
+        );
+    }
+
+    #[test]
     fn parse_igmpv3_query_with_sources() {
-        // RFC 3376 Section 4.1: query with 2 sources
+        // RFC 9776, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1>
+        // Query with 2 sources.
         let raw: &[u8] = &[
             0x11, 0x64, 0x00, 0x00, // type, max_resp_code, checksum
             0xEF, 0x01, 0x02, 0x03, // group = 239.1.2.3
-            0x0B, // Resv=0, S=1, QRV=3
+            0x0B, // Flags=0, S=1, QRV=3
             0x0A, // QQIC = 10
             0x00, 0x02, // num_sources = 2
             0x0A, 0x00, 0x00, 0x01, // source 1 = 10.0.0.1
@@ -842,11 +927,12 @@ mod tests {
 
     #[test]
     fn parse_igmpv3_query_exponential_fields() {
-        // RFC 3376 Section 4.1.1: max_resp_code=0x80 (128), QQIC=0xFF (31744)
+        // RFC 9776, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.1>
+        // max_resp_code=0x80 (128), QQIC=0xFF (31744)
         let raw: &[u8] = &[
             0x11, 0x80, 0x00, 0x00, // type, max_resp_code=128
             0x00, 0x00, 0x00, 0x00, // group = 0.0.0.0
-            0x00, // Resv=0, S=0, QRV=0
+            0x00, // Flags=0, S=0, QRV=0
             0xFF, // QQIC = 0xFF
             0x00, 0x00, // num_sources = 0
         ];
@@ -868,10 +954,11 @@ mod tests {
 
     #[test]
     fn parse_igmpv3_report_single_record() {
-        // RFC 3376 Section 4.2: v3 report with 1 group record, 0 sources
+        // RFC 9776, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2>
+        // v3 report with 1 group record, 0 sources.
         let raw: &[u8] = &[
             0x22, 0x00, 0x00, 0x00, // type = 0x22, reserved, checksum
-            0x00, 0x00, // reserved
+            0x00, 0x00, // flags (RFC 9776 §4.2.3)
             0x00, 0x01, // num_group_records = 1
             // Group Record: MODE_IS_INCLUDE, aux=0, num_src=0
             0x01, 0x00, 0x00, 0x00, // record_type=1, aux_data_len=0, num_sources=0
@@ -892,6 +979,11 @@ mod tests {
         // group_address should NOT be present for 0x22
         assert!(buf.field_by_name(layer, "group_address").is_none());
 
+        // RFC 9776 §4.2.3: Flags field (formerly "Reserved" in RFC 3376).
+        assert_eq!(
+            buf.field_by_name(layer, "flags").unwrap().value,
+            FieldValue::U16(0)
+        );
         assert_eq!(
             buf.field_by_name(layer, "num_group_records").unwrap().value,
             FieldValue::U16(1)
@@ -918,10 +1010,11 @@ mod tests {
 
     #[test]
     fn parse_igmpv3_report_multiple_records() {
-        // RFC 3376 Section 4.2: v3 report with 2 group records
+        // RFC 9776, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2>
+        // v3 report with 2 group records.
         let raw: &[u8] = &[
             0x22, 0x00, 0x00, 0x00, // type, reserved, checksum
-            0x00, 0x00, // reserved
+            0x00, 0x00, // flags (RFC 9776 §4.2.3)
             0x00, 0x02, // num_group_records = 2
             // Record 1: MODE_IS_EXCLUDE, aux=0, num_src=0
             0x02, 0x00, 0x00, 0x00, 0xEF, 0x01, 0x01, 0x01,
@@ -967,10 +1060,11 @@ mod tests {
 
     #[test]
     fn parse_igmpv3_report_with_aux_data() {
-        // RFC 3376 Section 4.2: record with aux_data_len=1 (4 bytes)
+        // RFC 9776, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2.2>
+        // Record with aux_data_len=1 (4 bytes).
         let raw: &[u8] = &[
             0x22, 0x00, 0x00, 0x00, // type, reserved, checksum
-            0x00, 0x00, // reserved
+            0x00, 0x00, // flags
             0x00, 0x01, // num_group_records = 1
             // Record: MODE_IS_INCLUDE, aux_data_len=1, num_src=0
             0x01, 0x01, 0x00, 0x00, // record_type=1, aux=1, num_src=0
@@ -992,6 +1086,25 @@ mod tests {
                 FieldValue::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF])
             );
         }
+    }
+
+    #[test]
+    fn parse_igmpv3_report_with_flags() {
+        // RFC 9776, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2.3>
+        // Non-zero Flags field (formerly "Reserved" in RFC 3376 §4.2).
+        let raw: &[u8] = &[
+            0x22, 0x00, 0x00, 0x00, // type, reserved, checksum
+            0xAB, 0xCD, // flags = 0xABCD
+            0x00, 0x00, // num_group_records = 0
+        ];
+        let mut buf = DissectBuffer::new();
+        IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "flags").unwrap().value,
+            FieldValue::U16(0xABCD)
+        );
     }
 
     #[test]
@@ -1032,7 +1145,7 @@ mod tests {
         // Claims 2 records but data ends after 1
         let raw: &[u8] = &[
             0x22, 0x00, 0x00, 0x00, // type, reserved, checksum
-            0x00, 0x00, // reserved
+            0x00, 0x00, // flags
             0x00, 0x02, // num_group_records = 2
             // Only 1 complete record
             0x01, 0x00, 0x00, 0x00, 0xEF, 0x01, 0x01, 0x01,

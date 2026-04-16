@@ -1,6 +1,6 @@
 # packet-dissector-igmp
 
-IGMP (RFC 2236, RFC 3376) dissector for packet-dissector
+IGMP (RFC 1112, RFC 2236, RFC 9776) dissector for packet-dissector
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
 ecosystem. It is used automatically when you enable the `igmp` feature flag

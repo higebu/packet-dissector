@@ -6355,7 +6355,7 @@ fn push_igmp_v3_report(pkt: &mut Vec<u8>, group: [u8; 4]) {
     pkt.push(0x22); // type = IGMPv3 Membership Report
     pkt.push(0x00); // reserved
     pkt.extend_from_slice(&[0x00, 0x00]); // checksum
-    pkt.extend_from_slice(&[0x00, 0x00]); // reserved
+    pkt.extend_from_slice(&[0x00, 0x00]); // flags (RFC 9776 §4.2.3)
     pkt.extend_from_slice(&1u16.to_be_bytes()); // num_group_records = 1
     // Group Record: MODE_IS_INCLUDE, aux=0, num_src=0
     pkt.push(0x01); // record_type

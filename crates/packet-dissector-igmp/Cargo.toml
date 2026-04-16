@@ -8,7 +8,7 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "igmp"]
 categories = ["network-programming", "parser-implementations"]
-description = "IGMP (RFC 2236, RFC 3376) dissector for packet-dissector"
+description = "IGMP (RFC 1112, RFC 2236, RFC 9776) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }
