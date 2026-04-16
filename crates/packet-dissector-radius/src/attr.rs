@@ -1,21 +1,32 @@
 //! RADIUS attribute type system and lookup tables.
 //!
 //! ## References
-//! - RFC 2865, Section 5: <https://www.rfc-editor.org/rfc/rfc2865#section-5>
-//! - RFC 2866, Section 5: <https://www.rfc-editor.org/rfc/rfc2866#section-5>
+//! - RFC 2865, Section 5 (Attributes): <https://www.rfc-editor.org/rfc/rfc2865#section-5>
+//! - RFC 2866, Section 5 (Accounting Attribute Definitions): <https://www.rfc-editor.org/rfc/rfc2866#section-5>
 
-/// RADIUS attribute data type (RFC 2865, Section 5).
+/// RADIUS attribute data type.
+///
+/// RFC 2865, Section 5 — <https://www.rfc-editor.org/rfc/rfc2865#section-5>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadiusAttrType {
-    /// RFC 2865, Section 5 — "1-253 octets containing UTF-8 text".
+    /// RFC 2865, Section 5 — "1-253 octets containing UTF-8 encoded 10646
+    /// [7] characters".
+    /// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
     Text,
-    /// RFC 2865, Section 5 — "1-253 octets containing binary data".
+    /// RFC 2865, Section 5 — "1-253 octets containing binary data (values
+    /// 0 through 255 decimal, inclusive)".
+    /// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
     String,
     /// RFC 2865, Section 5 — "32 bit value, most significant octet first".
+    /// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
     Address,
-    /// RFC 2865, Section 5 — "32 bit unsigned value, most significant octet first".
+    /// RFC 2865, Section 5 — "32 bit unsigned value, most significant octet
+    /// first".
+    /// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
     Integer,
-    /// RFC 2865, Section 5.26 — Vendor-Specific attribute with special format.
+    /// RFC 2865, Section 5.26 — Vendor-Specific attribute with a distinct
+    /// format (Vendor-Id followed by vendor-defined String).
+    /// <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>
     VendorSpecific,
 }
 
@@ -40,6 +51,9 @@ pub fn lookup_attr(code: u8) -> Option<&'static RadiusAttrDef> {
 /// Returns a human-readable name for a RADIUS packet Code value.
 ///
 /// RFC 2865, Section 3 — Code field.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-3>
+/// RFC 2866, Section 3 — adds Accounting-Request (4) and Accounting-Response (5).
+/// <https://www.rfc-editor.org/rfc/rfc2866#section-3>
 pub fn code_name(code: u8) -> &'static str {
     match code {
         1 => "Access-Request",
@@ -76,6 +90,7 @@ pub fn enum_value_name(attr_type: u8, val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2865, Section 5.6 — Service-Type values.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.6>
 fn service_type_name(val: u32) -> Option<&'static str> {
     match val {
         1 => Some("Login"),
@@ -94,6 +109,7 @@ fn service_type_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2865, Section 5.7 — Framed-Protocol values.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.7>
 fn framed_protocol_name(val: u32) -> Option<&'static str> {
     match val {
         1 => Some("PPP"),
@@ -107,6 +123,7 @@ fn framed_protocol_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2865, Section 5.10 — Framed-Routing values.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.10>
 fn framed_routing_name(val: u32) -> Option<&'static str> {
     match val {
         0 => Some("None"),
@@ -118,6 +135,7 @@ fn framed_routing_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2865, Section 5.13 — Framed-Compression values.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.13>
 fn framed_compression_name(val: u32) -> Option<&'static str> {
     match val {
         0 => Some("None"),
@@ -129,6 +147,7 @@ fn framed_compression_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2865, Section 5.15 — Login-Service values.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.15>
 fn login_service_name(val: u32) -> Option<&'static str> {
     match val {
         0 => Some("Telnet"),
@@ -144,6 +163,7 @@ fn login_service_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2865, Section 5.29 — Termination-Action values.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.29>
 fn termination_action_name(val: u32) -> Option<&'static str> {
     match val {
         0 => Some("Default"),
@@ -153,6 +173,7 @@ fn termination_action_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2866, Section 5.1 — Acct-Status-Type values.
+/// <https://www.rfc-editor.org/rfc/rfc2866#section-5.1>
 fn acct_status_type_name(val: u32) -> Option<&'static str> {
     match val {
         1 => Some("Start"),
@@ -165,6 +186,7 @@ fn acct_status_type_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2866, Section 5.6 — Acct-Authentic values.
+/// <https://www.rfc-editor.org/rfc/rfc2866#section-5.6>
 fn acct_authentic_name(val: u32) -> Option<&'static str> {
     match val {
         1 => Some("RADIUS"),
@@ -175,6 +197,7 @@ fn acct_authentic_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2866, Section 5.10 — Acct-Terminate-Cause values.
+/// <https://www.rfc-editor.org/rfc/rfc2866#section-5.10>
 fn acct_terminate_cause_name(val: u32) -> Option<&'static str> {
     match val {
         1 => Some("User Request"),
@@ -200,6 +223,7 @@ fn acct_terminate_cause_name(val: u32) -> Option<&'static str> {
 }
 
 /// RFC 2865, Section 5.41 — NAS-Port-Type values.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.41>
 fn nas_port_type_name(val: u32) -> Option<&'static str> {
     match val {
         0 => Some("Async"),
@@ -228,13 +252,18 @@ fn nas_port_type_name(val: u32) -> Option<&'static str> {
 
 /// Standard RADIUS attributes sorted by type code for binary search.
 ///
-/// RFC 2865, Section 5 (types 1–39, 60–63) and RFC 2866, Section 5 (types 40–51).
+/// - RFC 2865, Section 5 (types 1–39, 60–63):
+///   <https://www.rfc-editor.org/rfc/rfc2865#section-5>
+/// - RFC 2866, Section 5 (types 40–51):
+///   <https://www.rfc-editor.org/rfc/rfc2866#section-5>
 static RADIUS_ATTRS: &[(u8, RadiusAttrDef)] = &[
     (
         1,
         RadiusAttrDef {
             name: "User-Name",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.1 — https://www.rfc-editor.org/rfc/rfc2865#section-5.1
+            // The attribute format diagram labels the value field "String".
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
@@ -353,14 +382,18 @@ static RADIUS_ATTRS: &[(u8, RadiusAttrDef)] = &[
         19,
         RadiusAttrDef {
             name: "Callback-Number",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.19 — https://www.rfc-editor.org/rfc/rfc2865#section-5.19
+            // Value field labelled "String" ("site or application specific").
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
         20,
         RadiusAttrDef {
             name: "Callback-Id",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.20 — https://www.rfc-editor.org/rfc/rfc2865#section-5.20
+            // Value field labelled "String" ("site or application specific").
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
@@ -423,21 +456,27 @@ static RADIUS_ATTRS: &[(u8, RadiusAttrDef)] = &[
         30,
         RadiusAttrDef {
             name: "Called-Station-Id",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.30 — https://www.rfc-editor.org/rfc/rfc2865#section-5.30
+            // Value field labelled "String" (phone number / site-specific format).
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
         31,
         RadiusAttrDef {
             name: "Calling-Station-Id",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.31 — https://www.rfc-editor.org/rfc/rfc2865#section-5.31
+            // Value field labelled "String" (phone number / site-specific format).
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
         32,
         RadiusAttrDef {
             name: "NAS-Identifier",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.32 — https://www.rfc-editor.org/rfc/rfc2865#section-5.32
+            // Value field labelled "String".
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
@@ -451,14 +490,18 @@ static RADIUS_ATTRS: &[(u8, RadiusAttrDef)] = &[
         34,
         RadiusAttrDef {
             name: "Login-LAT-Service",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.34 — https://www.rfc-editor.org/rfc/rfc2865#section-5.34
+            // Value field labelled "String" (LAT service identity).
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
         35,
         RadiusAttrDef {
             name: "Login-LAT-Node",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.35 — https://www.rfc-editor.org/rfc/rfc2865#section-5.35
+            // Value field labelled "String" (LAT node identity).
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
@@ -486,7 +529,9 @@ static RADIUS_ATTRS: &[(u8, RadiusAttrDef)] = &[
         39,
         RadiusAttrDef {
             name: "Framed-AppleTalk-Zone",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.39 — https://www.rfc-editor.org/rfc/rfc2865#section-5.39
+            // Value field labelled "String" (AppleTalk Default Zone name).
+            attr_type: RadiusAttrType::String,
         },
     ),
     // RFC 2866 Accounting attributes (types 40–51)
@@ -564,7 +609,10 @@ static RADIUS_ATTRS: &[(u8, RadiusAttrDef)] = &[
         50,
         RadiusAttrDef {
             name: "Acct-Multi-Session-Id",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2866, Section 5.11 — https://www.rfc-editor.org/rfc/rfc2866#section-5.11
+            // Both the attribute format diagram and the field definition label the
+            // value "String" (although its contents SHOULD be UTF-8).
+            attr_type: RadiusAttrType::String,
         },
     ),
     (
@@ -600,7 +648,9 @@ static RADIUS_ATTRS: &[(u8, RadiusAttrDef)] = &[
         63,
         RadiusAttrDef {
             name: "Login-LAT-Port",
-            attr_type: RadiusAttrType::Text,
+            // RFC 2865, Section 5.43 — https://www.rfc-editor.org/rfc/rfc2865#section-5.43
+            // Value field labelled "String" (LAT port identity).
+            attr_type: RadiusAttrType::String,
         },
     ),
 ];
@@ -611,9 +661,79 @@ mod tests {
 
     #[test]
     fn test_lookup_known_attr() {
+        // RFC 2865, Section 5.1 — https://www.rfc-editor.org/rfc/rfc2865#section-5.1
+        // User-Name is classified by the RFC as a "String" field (not "Text"),
+        // even though its contents are typically UTF-8 readable.
         let def = lookup_attr(1).unwrap();
         assert_eq!(def.name, "User-Name");
-        assert_eq!(def.attr_type, RadiusAttrType::Text);
+        assert_eq!(def.attr_type, RadiusAttrType::String);
+    }
+
+    /// RFC 2865 labels many identifier-like attributes as "String" in their
+    /// per-attribute sections (not as "Text"). The implementation must match
+    /// the RFC's own classification.
+    ///
+    /// - RFC 2865, Section 5.1  — User-Name
+    /// - RFC 2865, Section 5.19 — Callback-Number
+    /// - RFC 2865, Section 5.20 — Callback-Id
+    /// - RFC 2865, Section 5.30 — Called-Station-Id
+    /// - RFC 2865, Section 5.31 — Calling-Station-Id
+    /// - RFC 2865, Section 5.32 — NAS-Identifier
+    /// - RFC 2865, Section 5.34 — Login-LAT-Service
+    /// - RFC 2865, Section 5.35 — Login-LAT-Node
+    /// - RFC 2865, Section 5.39 — Framed-AppleTalk-Zone
+    /// - RFC 2865, Section 5.43 — Login-LAT-Port (attribute type 63)
+    /// - RFC 2866, Section 5.11 — Acct-Multi-Session-Id
+    #[test]
+    fn test_string_typed_attrs_match_rfc_labels() {
+        let string_typed = [
+            (1, "User-Name"),
+            (19, "Callback-Number"),
+            (20, "Callback-Id"),
+            (30, "Called-Station-Id"),
+            (31, "Calling-Station-Id"),
+            (32, "NAS-Identifier"),
+            (34, "Login-LAT-Service"),
+            (35, "Login-LAT-Node"),
+            (39, "Framed-AppleTalk-Zone"),
+            (63, "Login-LAT-Port"),
+            (50, "Acct-Multi-Session-Id"),
+        ];
+        for (code, name) in string_typed {
+            let def = lookup_attr(code).unwrap_or_else(|| panic!("attr {code} missing"));
+            assert_eq!(def.name, name, "name mismatch for attr {code}");
+            assert_eq!(
+                def.attr_type,
+                RadiusAttrType::String,
+                "attr {code} ({name}) must be String per RFC",
+            );
+        }
+    }
+
+    /// RFC 2865/2866 label these attributes as "Text" in their per-attribute
+    /// sections. Keep them as Text to match the RFC.
+    ///
+    /// - RFC 2865, Section 5.11 — Filter-Id
+    /// - RFC 2865, Section 5.18 — Reply-Message
+    /// - RFC 2865, Section 5.22 — Framed-Route
+    /// - RFC 2866, Section 5.5  — Acct-Session-Id (diagram uses "Text ...")
+    #[test]
+    fn test_text_typed_attrs_match_rfc_labels() {
+        let text_typed = [
+            (11, "Filter-Id"),
+            (18, "Reply-Message"),
+            (22, "Framed-Route"),
+            (44, "Acct-Session-Id"),
+        ];
+        for (code, name) in text_typed {
+            let def = lookup_attr(code).unwrap_or_else(|| panic!("attr {code} missing"));
+            assert_eq!(def.name, name, "name mismatch for attr {code}");
+            assert_eq!(
+                def.attr_type,
+                RadiusAttrType::Text,
+                "attr {code} ({name}) must be Text per RFC",
+            );
+        }
     }
 
     #[test]
