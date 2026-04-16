@@ -1,10 +1,14 @@
 //! DHCPv6 (Dynamic Host Configuration Protocol for IPv6) dissector.
 //!
 //! ## References
-//! - RFC 9915 (obsoletes RFC 8415): <https://www.rfc-editor.org/rfc/rfc9915>
-//! - RFC 8415: <https://www.rfc-editor.org/rfc/rfc8415>
-//! - RFC 3646 (DNS Configuration): <https://www.rfc-editor.org/rfc/rfc3646>
-//! - RFC 4704 (Client FQDN): <https://www.rfc-editor.org/rfc/rfc4704>
+//! - RFC 9915 (DHCPv6, obsoletes RFC 8415):
+//!   <https://www.rfc-editor.org/rfc/rfc9915>
+//! - RFC 8415 (retained for historical IA_TA and Server Unicast option definitions):
+//!   <https://www.rfc-editor.org/rfc/rfc8415>
+//! - RFC 3646 (DNS Configuration Options):
+//!   <https://www.rfc-editor.org/rfc/rfc3646>
+//! - RFC 4704 (Client FQDN Option):
+//!   <https://www.rfc-editor.org/rfc/rfc4704>
 
 #![deny(missing_docs)]
 
@@ -164,7 +168,7 @@ const OPTION_HEADER_SIZE: usize = 4;
 
 /// Returns a human-readable name for DHCPv6 message type values.
 ///
-/// RFC 9915 (obsoletes RFC 8415), Section 7.3 — DHCP Message Types.
+/// RFC 9915, Section 7.3 — DHCP Message Types.
 fn dhcpv6_msg_type_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("SOLICIT"),
@@ -215,7 +219,7 @@ impl Dissector for Dhcpv6Dissector {
 
         let msg_type = data[0];
 
-        // RFC 8415, Section 9 — Relay messages have a different header format
+        // RFC 9915, Section 9 — Relay messages have a different header format.
         if msg_type == 12 || msg_type == 13 {
             return dissect_relay(data, buf, offset, 0);
         }
@@ -224,7 +228,7 @@ impl Dissector for Dhcpv6Dissector {
     }
 }
 
-/// Parse a client/server message (RFC 8415, Section 8).
+/// Parse a client/server message (RFC 9915, Section 8).
 ///
 /// ```text
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -246,7 +250,7 @@ fn dissect_client_server<'pkt>(
     }
 
     let msg_type = data[0];
-    // RFC 8415, Section 8 — transaction-id is 3 bytes
+    // RFC 9915, Section 8 — transaction-id is 3 bytes.
     let transaction_id = read_be_u24(data, 1)?;
 
     buf.begin_layer(
@@ -266,7 +270,7 @@ fn dissect_client_server<'pkt>(
         offset + 1..offset + 4,
     );
 
-    // Parse options (RFC 8415, Section 21.1)
+    // Parse options (RFC 9915, Section 21.1).
     let relay_msg = parse_options(buf, data, offset, CLIENT_SERVER_HEADER_SIZE)?;
 
     let total_len = data.len();
@@ -284,7 +288,7 @@ fn dissect_client_server<'pkt>(
     Ok(DissectResult::new(total_len, DispatchHint::End))
 }
 
-/// Parse a relay agent message (RFC 8415, Section 9).
+/// Parse a relay agent message (RFC 9915, Section 9).
 ///
 /// ```text
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -303,9 +307,11 @@ fn dissect_client_server<'pkt>(
 /// ```
 /// Maximum relay nesting depth.
 ///
-/// RFC 8415, Section 19.1 — The hop_count field limits how many relay agents
-/// can relay a message. 32 is the recommended maximum from RFC 8415.
-const MAX_RELAY_DEPTH: usize = 32;
+/// RFC 9915, Section 7.6 — HOP_COUNT_LIMIT = 8. A relay agent discards any
+/// Relay-forward message whose hop-count is greater than or equal to this
+/// value (Section 19.1.2). The dissector uses the same value to bound
+/// recursion through nested Relay Message (9) options.
+const MAX_RELAY_DEPTH: usize = 8;
 
 fn dissect_relay<'pkt>(
     data: &'pkt [u8],
@@ -315,7 +321,7 @@ fn dissect_relay<'pkt>(
 ) -> Result<DissectResult, PacketError> {
     if depth >= MAX_RELAY_DEPTH {
         return Err(PacketError::InvalidHeader(
-            "DHCPv6: relay nesting depth exceeds maximum (32)",
+            "DHCPv6: relay nesting depth exceeds HOP_COUNT_LIMIT (8)",
         ));
     }
     if data.len() < RELAY_HEADER_SIZE {
@@ -361,7 +367,7 @@ fn dissect_relay<'pkt>(
         offset + 18..offset + 34,
     );
 
-    // Parse options (RFC 8415, Section 21.1)
+    // Parse options (RFC 9915, Section 21.1).
     let relay_msg = parse_options(buf, data, offset, RELAY_HEADER_SIZE)?;
 
     let total_len = data.len();
@@ -402,7 +408,7 @@ fn parse_inner_message<'pkt>(
     }
 }
 
-/// Parse DHCPv6 options (RFC 8415, Section 21.1).
+/// Parse DHCPv6 options (RFC 9915, Section 21.1).
 ///
 /// Each option is encoded as:
 /// ```text
@@ -446,7 +452,7 @@ fn parse_options<'pkt>(
         let field_range = offset + cursor..offset + option_data_end;
 
         match option_code {
-            // RFC 8415, Section 21.2 — Client Identifier
+            // RFC 9915, Section 21.2 — Client Identifier Option.
             1 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -465,7 +471,7 @@ fn parse_options<'pkt>(
                 );
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.3 — Server Identifier
+            // RFC 9915, Section 21.3 — Server Identifier Option.
             2 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -484,7 +490,8 @@ fn parse_options<'pkt>(
                 );
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.4 — Identity Association for Non-temporary Addresses
+            // RFC 9915, Section 21.4 — Identity Association for Non-Temporary
+            // Addresses Option (IA_NA).
             3 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -533,7 +540,9 @@ fn parse_options<'pkt>(
                 }
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.5 — Identity Association for Temporary Addresses
+            // RFC 9915, Section 21.5 — Identity Association for Temporary
+            // Addresses Option (IA_TA). Obsoleted by RFC 9915; retained so the
+            // dissector can still decode legacy captures.
             4 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -570,7 +579,7 @@ fn parse_options<'pkt>(
                 }
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.6 — IA Address
+            // RFC 9915, Section 21.6 — IA Address Option.
             5 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -619,7 +628,7 @@ fn parse_options<'pkt>(
                 }
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.7 — Option Request
+            // RFC 9915, Section 21.7 — Option Request Option.
             6 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -649,7 +658,7 @@ fn parse_options<'pkt>(
                 buf.end_container(req_arr_idx);
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.8 — Preference
+            // RFC 9915, Section 21.8 — Preference Option.
             7 => {
                 if !option_data.is_empty() {
                     let obj_idx = buf.begin_container(
@@ -670,7 +679,7 @@ fn parse_options<'pkt>(
                     buf.end_container(obj_idx);
                 }
             }
-            // RFC 8415, Section 21.9 — Elapsed Time
+            // RFC 9915, Section 21.9 — Elapsed Time Option.
             8 => {
                 if option_data.len() >= 2 {
                     let elapsed = read_be_u16(option_data, 0)?;
@@ -692,7 +701,7 @@ fn parse_options<'pkt>(
                     buf.end_container(obj_idx);
                 }
             }
-            // RFC 8415, Section 21.10 — Relay Message
+            // RFC 9915, Section 21.10 — Relay Message Option.
             9 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -712,7 +721,7 @@ fn parse_options<'pkt>(
                 buf.end_container(obj_idx);
                 relay_message_range = Some(option_data_start..option_data_end);
             }
-            // RFC 8415, Section 21.11 — Authentication
+            // RFC 9915, Section 21.11 — Authentication Option.
             11 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -761,7 +770,9 @@ fn parse_options<'pkt>(
                 }
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.12 — Server Unicast
+            // RFC 9915, Section 21.12 — Server Unicast Option. Obsoleted by
+            // RFC 9915; retained so the dissector can still decode legacy
+            // captures.
             12 => {
                 if option_data.len() >= 16 {
                     let addr = read_ipv6_addr(option_data, 0)?;
@@ -783,7 +794,7 @@ fn parse_options<'pkt>(
                     buf.end_container(obj_idx);
                 }
             }
-            // RFC 8415, Section 21.13 — Status Code
+            // RFC 9915, Section 21.13 — Status Code Option.
             13 => {
                 if option_data.len() >= 2 {
                     let status_code = read_be_u16(option_data, 0)?;
@@ -812,7 +823,7 @@ fn parse_options<'pkt>(
                     buf.end_container(obj_idx);
                 }
             }
-            // RFC 8415, Section 21.14 — Rapid Commit
+            // RFC 9915, Section 21.14 — Rapid Commit Option.
             14 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -826,7 +837,7 @@ fn parse_options<'pkt>(
                 );
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.15 — User Class
+            // RFC 9915, Section 21.15 — User Class Option.
             15 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -845,7 +856,7 @@ fn parse_options<'pkt>(
                 );
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.16 — Vendor Class
+            // RFC 9915, Section 21.16 — Vendor Class Option.
             16 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -880,7 +891,7 @@ fn parse_options<'pkt>(
                 }
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.17 — Vendor-specific Information
+            // RFC 9915, Section 21.17 — Vendor-Specific Information Option.
             17 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -915,7 +926,7 @@ fn parse_options<'pkt>(
                 }
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.18 — Interface-Id
+            // RFC 9915, Section 21.18 — Interface-Id Option.
             18 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -934,7 +945,7 @@ fn parse_options<'pkt>(
                 );
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.19 — Reconfigure Message
+            // RFC 9915, Section 21.19 — Reconfigure Message Option.
             19 => {
                 if !option_data.is_empty() {
                     let obj_idx = buf.begin_container(
@@ -955,7 +966,7 @@ fn parse_options<'pkt>(
                     buf.end_container(obj_idx);
                 }
             }
-            // RFC 8415, Section 21.20 — Reconfigure Accept
+            // RFC 9915, Section 21.20 — Reconfigure Accept Option.
             20 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -1054,7 +1065,8 @@ fn parse_options<'pkt>(
                 buf.end_container(search_arr_idx);
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.21 — Identity Association for Prefix Delegation
+            // RFC 9915, Section 21.21 — Identity Association for Prefix
+            // Delegation Option (IA_PD).
             25 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -1103,7 +1115,7 @@ fn parse_options<'pkt>(
                 }
                 buf.end_container(obj_idx);
             }
-            // RFC 8415, Section 21.22 — IA Prefix
+            // RFC 9915, Section 21.22 — IA Prefix Option.
             26 => {
                 let obj_idx = buf.begin_container(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
@@ -1224,43 +1236,44 @@ mod tests {
     use packet_dissector_core::field::FieldValue;
     use packet_dissector_core::packet::DissectBuffer;
 
-    // # RFC 9915 / RFC 8415 (DHCPv6) Coverage
+    // # RFC 9915 (DHCPv6, obsoletes RFC 8415) Coverage
     //
-    // | RFC Section | Description                              | Test                                           |
-    // |-------------|------------------------------------------|-------------------------------------------------|
-    // | 7.3         | Message Type Names                       | dhcpv6_msg_type_display_fn                      |
-    // | 8           | Client/Server Message Format             | parse_solicit_no_options                         |
-    // | 8           | Truncated client/server                  | parse_empty_data, parse_truncated_client_server  |
-    // | 8           | All client/server types                  | parse_all_client_server_msg_types                |
-    // | 8           | Offset handling                          | parse_request_with_offset                        |
-    // | 9           | Relay Message Format                     | parse_relay_forw, parse_relay_repl               |
-    // | 9           | Truncated relay                          | parse_relay_truncated                            |
-    // | 9           | Relay with inner client/server           | parse_relay_with_inner_client_server             |
-    // | 9           | Nested relay                             | parse_relay_with_nested_relay                    |
-    // | 19.1        | Relay Nesting Depth Limit (32)           | parse_relay_max_depth_exceeded                   |
-    // | 21.1        | Option Encoding                          | parse_multiple_options                           |
-    // | 21.1        | Option length overflow                   | parse_option_data_exceeds_packet                 |
-    // | 21.2        | Client Identifier (Option 1)             | parse_option_client_id                           |
-    // | 21.3        | Server Identifier (Option 2)             | parse_option_server_id                           |
-    // | 21.4        | IA_NA (Option 3)                         | parse_option_ia_na_*                             |
-    // | 21.5        | IA_TA (Option 4)                         | parse_option_ia_ta_*                             |
-    // | 21.6        | IA Address (Option 5)                    | parse_option_ia_addr_*                           |
-    // | 21.7        | Option Request (Option 6)                | parse_option_request_*                           |
-    // | 21.8        | Preference (Option 7)                    | parse_option_preference*                         |
-    // | 21.9        | Elapsed Time (Option 8)                  | parse_option_elapsed_time*                       |
-    // | 21.10       | Relay Message (Option 9)                 | parse_option_relay_message                       |
-    // | 21.11       | Authentication (Option 11)               | parse_option_auth_*                              |
-    // | 21.12       | Server Unicast (Option 12)               | parse_option_server_unicast*                     |
-    // | 21.13       | Status Code (Option 13)                  | parse_option_status_code*                        |
-    // | 21.14       | Rapid Commit (Option 14)                 | parse_option_rapid_commit                        |
-    // | 21.15       | User Class (Option 15)                   | parse_option_user_class                          |
-    // | 21.16       | Vendor Class (Option 16)                 | parse_option_vendor_class_*                      |
-    // | 21.17       | Vendor-specific Info (Option 17)         | parse_option_vendor_info_*                       |
-    // | 21.18       | Interface-Id (Option 18)                 | parse_option_interface_id                        |
-    // | 21.19       | Reconfigure Message (Option 19)          | parse_option_reconfigure_msg*                    |
-    // | 21.20       | Reconfigure Accept (Option 20)           | parse_option_reconfigure_accept                  |
-    // | 21.21       | IA_PD (Option 25)                        | parse_option_ia_pd_*                             |
-    // | 21.22       | IA Prefix (Option 26)                    | parse_option_ia_prefix_*                         |
+    // | RFC Section | Description                              | Test                                                |
+    // |-------------|------------------------------------------|-----------------------------------------------------|
+    // | 7.3         | Message Type Names                       | dhcpv6_msg_type_display_fn                          |
+    // | 7.6 / 19.1.2| HOP_COUNT_LIMIT (8) boundary             | parse_relay_at_hop_count_limit                      |
+    // | 7.6 / 19.1.2| HOP_COUNT_LIMIT (8) exceeded             | parse_relay_max_depth_exceeded                      |
+    // | 8           | Client/Server Message Format             | parse_solicit_no_options                            |
+    // | 8           | Truncated client/server                  | parse_empty_data, parse_truncated_client_server     |
+    // | 8           | All client/server types                  | parse_all_client_server_msg_types                   |
+    // | 8           | Offset handling                          | parse_request_with_offset                           |
+    // | 9           | Relay Message Format                     | parse_relay_forw, parse_relay_repl                  |
+    // | 9           | Truncated relay                          | parse_relay_truncated                               |
+    // | 9           | Relay with inner client/server           | parse_relay_with_inner_client_server                |
+    // | 9           | Nested relay                             | parse_relay_with_nested_relay                       |
+    // | 21.1        | Option Encoding                          | parse_multiple_options                              |
+    // | 21.1        | Option length overflow                   | parse_option_data_exceeds_packet                    |
+    // | 21.2        | Client Identifier (Option 1)             | parse_option_client_id                              |
+    // | 21.3        | Server Identifier (Option 2)             | parse_option_server_id                              |
+    // | 21.4        | IA_NA (Option 3)                         | parse_option_ia_na_*                                |
+    // | 21.5        | IA_TA (Option 4, obsoleted by RFC 9915)  | parse_option_ia_ta_*                                |
+    // | 21.6        | IA Address (Option 5)                    | parse_option_ia_addr_*                              |
+    // | 21.7        | Option Request (Option 6)                | parse_option_request_*                              |
+    // | 21.8        | Preference (Option 7)                    | parse_option_preference*                            |
+    // | 21.9        | Elapsed Time (Option 8)                  | parse_option_elapsed_time*                          |
+    // | 21.10       | Relay Message (Option 9)                 | parse_option_relay_message                          |
+    // | 21.11       | Authentication (Option 11)               | parse_option_auth_*                                 |
+    // | 21.12       | Server Unicast (Option 12, obsoleted)    | parse_option_server_unicast*                        |
+    // | 21.13       | Status Code (Option 13)                  | parse_option_status_code*                           |
+    // | 21.14       | Rapid Commit (Option 14)                 | parse_option_rapid_commit                           |
+    // | 21.15       | User Class (Option 15)                   | parse_option_user_class                             |
+    // | 21.16       | Vendor Class (Option 16)                 | parse_option_vendor_class_*                         |
+    // | 21.17       | Vendor-specific Info (Option 17)         | parse_option_vendor_info_*                          |
+    // | 21.18       | Interface-Id (Option 18)                 | parse_option_interface_id                          |
+    // | 21.19       | Reconfigure Message (Option 19)          | parse_option_reconfigure_msg*                       |
+    // | 21.20       | Reconfigure Accept (Option 20)           | parse_option_reconfigure_accept                     |
+    // | 21.21       | IA_PD (Option 25)                        | parse_option_ia_pd_*                                |
+    // | 21.22       | IA Prefix (Option 26)                    | parse_option_ia_prefix_*                            |
     //
     // # RFC 3646 Coverage
     //
@@ -1612,11 +1625,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_relay_max_depth_exceeded() {
-        // Build 33 levels of relay nesting to exceed MAX_RELAY_DEPTH (32)
+    fn parse_relay_at_hop_count_limit() {
+        // RFC 9915, Section 7.6 — HOP_COUNT_LIMIT = 8.
+        // Build exactly HOP_COUNT_LIMIT (8) nested relays around a client/server
+        // message; all should be dissected. Layers = 8 relays + 1 client/server = 9.
         let inner = build_dhcpv6(1, 1, &[]);
         let mut current = inner;
-        for i in 0..33 {
+        for i in 0..MAX_RELAY_DEPTH {
+            let opt = dhcpv6_option(9, &current);
+            current = build_relay(12, i as u8, [0; 16], [0; 16], &opt);
+        }
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&current, &mut buf, 0).unwrap();
+        assert_eq!(buf.layers().len(), MAX_RELAY_DEPTH + 1);
+    }
+
+    #[test]
+    fn parse_relay_max_depth_exceeded() {
+        // RFC 9915, Section 7.6 / Section 19.1.2 — HOP_COUNT_LIMIT = 8.
+        // Build HOP_COUNT_LIMIT + 1 (9) nested relays: the innermost relay is at
+        // depth=8 which hits MAX_RELAY_DEPTH and is rejected. Only the outer 8
+        // relay layers should be produced (client/server never reached).
+        let inner = build_dhcpv6(1, 1, &[]);
+        let mut current = inner;
+        for i in 0..=MAX_RELAY_DEPTH {
             let opt = dhcpv6_option(9, &current);
             current = build_relay(12, i as u8, [0; 16], [0; 16], &opt);
         }
@@ -1624,10 +1658,9 @@ mod tests {
         let d = Dhcpv6Dissector;
         let mut buf = DissectBuffer::new();
         // The outermost relay dissect succeeds, but deep nesting triggers the error
-        // which is silently ignored (let _ = parse_inner_message). So we check that
-        // fewer than 34 layers are produced.
-        let _ = d.dissect(&current, &mut buf, 0);
-        assert!(buf.layers().len() < 34);
+        // which is silently ignored (let _ = parse_inner_message).
+        d.dissect(&current, &mut buf, 0).unwrap();
+        assert_eq!(buf.layers().len(), MAX_RELAY_DEPTH);
     }
 
     #[test]
