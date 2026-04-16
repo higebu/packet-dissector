@@ -4075,7 +4075,7 @@ fn integration_ethernet_ipv4_udp_ntp_client() {
         buf.field_by_name(ntp, "mode").unwrap().value,
         FieldValue::U8(3)
     );
-    assert_eq!(display_name_for(&buf, ntp, "mode"), Some("Client"));
+    assert_eq!(display_name_for(&buf, ntp, "mode"), Some("client"));
     assert_eq!(
         buf.field_by_name(ntp, "transmit_timestamp").unwrap().value,
         FieldValue::U64(0xDEAD_BEEF_CAFE_BABE)
