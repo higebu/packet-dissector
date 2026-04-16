@@ -8,6 +8,16 @@
 //!   <https://www.rfc-editor.org/rfc/rfc2408>
 //! - RFC 7296: Internet Key Exchange Protocol Version 2 (IKEv2):
 //!   <https://www.rfc-editor.org/rfc/rfc7296>
+//! - RFC 3948: UDP Encapsulation of IPsec ESP Packets (NAT Traversal):
+//!   <https://www.rfc-editor.org/rfc/rfc3948>
+//! - RFC 5723: Internet Key Exchange Protocol Version 2 (IKEv2) Session Resumption:
+//!   <https://www.rfc-editor.org/rfc/rfc5723>
+//! - RFC 6467: Secure Password Framework for Internet Key Exchange Version 2 (IKEv2):
+//!   <https://www.rfc-editor.org/rfc/rfc6467>
+//! - RFC 9242: Intermediate Exchange in the Internet Key Exchange Protocol Version 2 (IKEv2):
+//!   <https://www.rfc-editor.org/rfc/rfc9242>
+//! - RFC 9370: Multiple Key Exchanges in the Internet Key Exchange Protocol Version 2 (IKEv2):
+//!   <https://www.rfc-editor.org/rfc/rfc9370>
 
 #![deny(missing_docs)]
 
@@ -30,7 +40,7 @@ const GENERIC_PAYLOAD_HEADER_SIZE: usize = 4;
 
 /// Non-ESP marker size for NAT-T (4 bytes of zeros).
 ///
-/// RFC 3948, Section 2.1: <https://www.rfc-editor.org/rfc/rfc3948#section-2.1>
+/// RFC 3948, Section 2.2: <https://www.rfc-editor.org/rfc/rfc3948#section-2.2>
 const NON_ESP_MARKER_SIZE: usize = 4;
 
 /// Returns a human-readable name for IKE exchange types.
@@ -40,6 +50,11 @@ const NON_ESP_MARKER_SIZE: usize = 4;
 ///
 /// IKEv2 exchange types: RFC 7296, Section 3.1
 /// <https://www.rfc-editor.org/rfc/rfc7296#section-3.1>
+///
+/// Later IKEv2 exchange types are registered with IANA:
+/// - 38: IKE_SESSION_RESUME (RFC 5723, Section 4.3.5)
+/// - 43: IKE_INTERMEDIATE (RFC 9242, Section 2)
+/// - 44: IKE_FOLLOWUP_KE (RFC 9370, Section 2.3)
 fn exchange_type_name(v: u8) -> Option<&'static str> {
     match v {
         // IKEv1 / ISAKMP exchange types (RFC 2408, Section 3.1)
@@ -49,6 +64,7 @@ fn exchange_type_name(v: u8) -> Option<&'static str> {
         3 => Some("Authentication Only"),
         4 => Some("Aggressive"),
         5 => Some("Informational (v1)"),
+        // IKEv1 DOI-specific exchange types (RFC 2409, Appendix A)
         32 => Some("Quick Mode"),
         33 => Some("New Group Mode"),
         // IKEv2 exchange types (RFC 7296, Section 3.1)
@@ -56,6 +72,12 @@ fn exchange_type_name(v: u8) -> Option<&'static str> {
         35 => Some("IKE_AUTH"),
         36 => Some("CREATE_CHILD_SA"),
         37 => Some("INFORMATIONAL"),
+        // RFC 5723, Section 4.3.5 — IKEv2 Session Resumption
+        38 => Some("IKE_SESSION_RESUME"),
+        // RFC 9242, Section 2 — Intermediate Exchange
+        43 => Some("IKE_INTERMEDIATE"),
+        // RFC 9370, Section 2.3 — Multiple Key Exchanges (follow-up)
+        44 => Some("IKE_FOLLOWUP_KE"),
         _ => None,
     }
 }
@@ -98,6 +120,8 @@ fn payload_type_name(v: u8) -> Option<&'static str> {
         46 => Some("Encrypted and Authenticated"),
         47 => Some("Configuration"),
         48 => Some("Extensible Authentication Protocol"),
+        // RFC 6467, Section 4 — Generic Secure Password Method
+        49 => Some("Generic Secure Password Method"),
         _ => None,
     }
 }
@@ -110,12 +134,17 @@ const FD_MAJOR_VERSION: usize = 3;
 const FD_MINOR_VERSION: usize = 4;
 const FD_EXCHANGE_TYPE: usize = 5;
 const FD_FLAGS: usize = 6;
+// IKEv2 flag sub-fields (RFC 7296, Section 3.1)
 const FD_FLAG_INITIATOR: usize = 7;
 const FD_FLAG_RESPONSE: usize = 8;
 const FD_FLAG_VERSION: usize = 9;
-const FD_MESSAGE_ID: usize = 10;
-const FD_LENGTH: usize = 11;
-const FD_PAYLOADS: usize = 12;
+// IKEv1 / ISAKMP flag sub-fields (RFC 2408, Section 3.1)
+const FD_FLAG_ENCRYPTION: usize = 10;
+const FD_FLAG_COMMIT: usize = 11;
+const FD_FLAG_AUTHENTICATION_ONLY: usize = 12;
+const FD_MESSAGE_ID: usize = 13;
+const FD_LENGTH: usize = 14;
+const FD_PAYLOADS: usize = 15;
 
 /// Child field descriptor indices for [`PAYLOAD_CHILDREN`].
 const PFD_PAYLOAD_TYPE: usize = 0;
@@ -124,6 +153,11 @@ const PFD_PAYLOAD_LENGTH: usize = 2;
 const PFD_PAYLOAD_DATA: usize = 3;
 
 /// Payload child field descriptors.
+///
+/// IKEv2 generic payload header has a Critical bit followed by 7 RESERVED bits
+/// (RFC 7296, Section 3.2). IKEv1's generic payload header has the entire second
+/// octet as RESERVED with no Critical bit (RFC 2408, Section 3.2); the
+/// `critical` sub-field is therefore only populated for IKEv2 messages.
 static PAYLOAD_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor {
         name: "payload_type",
@@ -137,7 +171,7 @@ static PAYLOAD_CHILDREN: &[FieldDescriptor] = &[
         }),
         format_fn: None,
     },
-    FieldDescriptor::new("critical", "Critical", FieldType::U8),
+    FieldDescriptor::new("critical", "Critical", FieldType::U8).optional(),
     FieldDescriptor::new("payload_length", "Payload Length", FieldType::U16),
     FieldDescriptor::new("payload_data", "Payload Data", FieldType::Bytes).optional(),
 ];
@@ -180,12 +214,29 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     },
     // RFC 7296, Section 3.1 — Flags
     FieldDescriptor::new("flags", "Flags", FieldType::U8),
-    // RFC 7296, Section 3.1 — Flag: Initiator (bit 3)
-    FieldDescriptor::new("flag_initiator", "Initiator Flag", FieldType::U8),
-    // RFC 7296, Section 3.1 — Flag: Response (bit 5)
-    FieldDescriptor::new("flag_response", "Response Flag", FieldType::U8),
-    // RFC 7296, Section 3.1 — Flag: Version (bit 6)
-    FieldDescriptor::new("flag_version", "Version Flag", FieldType::U8),
+    // RFC 7296, Section 3.1 — Flag: Initiator (bit 3 of the flag octet, mask 0x08)
+    // IKEv2-only; the same bit is RESERVED in IKEv1 (RFC 2408, Section 3.1).
+    FieldDescriptor::new("flag_initiator", "Initiator Flag", FieldType::U8).optional(),
+    // RFC 7296, Section 3.1 — Flag: Response (bit 5 of the flag octet, mask 0x20)
+    // IKEv2-only.
+    FieldDescriptor::new("flag_response", "Response Flag", FieldType::U8).optional(),
+    // RFC 7296, Section 3.1 — Flag: Version (bit 4 of the flag octet, mask 0x10)
+    // IKEv2-only.
+    FieldDescriptor::new("flag_version", "Version Flag", FieldType::U8).optional(),
+    // RFC 2408, Section 3.1 — Flag: Encryption (bit 0 of the flag octet, mask 0x01)
+    // IKEv1/ISAKMP-only.
+    FieldDescriptor::new("flag_encryption", "Encryption Flag", FieldType::U8).optional(),
+    // RFC 2408, Section 3.1 — Flag: Commit (bit 1 of the flag octet, mask 0x02)
+    // IKEv1/ISAKMP-only.
+    FieldDescriptor::new("flag_commit", "Commit Flag", FieldType::U8).optional(),
+    // RFC 2408, Section 3.1 — Flag: Authentication Only (bit 2 of the flag octet, mask 0x04)
+    // IKEv1/ISAKMP-only.
+    FieldDescriptor::new(
+        "flag_authentication_only",
+        "Authentication Only Flag",
+        FieldType::U8,
+    )
+    .optional(),
     // RFC 7296, Section 3.1 — Message ID
     FieldDescriptor::new("message_id", "Message ID", FieldType::U32),
     // RFC 7296, Section 3.1 — Length
@@ -257,15 +308,21 @@ impl Dissector for IkeDissector {
         // RFC 7296, Section 3.1 — Exchange Type (1 byte)
         let exchange_type = hdr_data[18];
 
-        // RFC 7296, Section 3.1 — Flags (1 byte)
+        // Flags (1 byte). The bit layout depends on the IKE major version.
+        //
+        // IKEv2 (RFC 7296, Section 3.1):
         // <https://www.rfc-editor.org/rfc/rfc7296#section-3.1>
         // "  +-+-+-+-+-+-+-+-+
         //    |X|X|R|V|I|X|X|X|
         //    +-+-+-+-+-+-+-+-+"
+        //
+        // IKEv1 / ISAKMP (RFC 2408, Section 3.1):
+        // <https://www.rfc-editor.org/rfc/rfc2408#section-3.1>
+        // "The flags listed below are specified in the Flags field beginning
+        //  with the least significant bit, i.e the Encryption bit is bit 0 of
+        //  the Flags field, the Commit bit is bit 1 of the Flags field, and
+        //  the Authentication Only bit is bit 2 of the Flags field."
         let flags = hdr_data[19];
-        let flag_initiator = (flags >> 3) & 1;
-        let flag_version = (flags >> 4) & 1;
-        let flag_response = (flags >> 5) & 1;
 
         // RFC 7296, Section 3.1 — Message ID (4 bytes)
         let message_id = read_be_u32(hdr_data, 20)?;
@@ -329,21 +386,7 @@ impl Dissector for IkeDissector {
             FieldValue::U8(flags),
             hdr_offset + 19..hdr_offset + 20,
         );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_FLAG_INITIATOR],
-            FieldValue::U8(flag_initiator),
-            hdr_offset + 19..hdr_offset + 20,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_FLAG_RESPONSE],
-            FieldValue::U8(flag_response),
-            hdr_offset + 19..hdr_offset + 20,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_FLAG_VERSION],
-            FieldValue::U8(flag_version),
-            hdr_offset + 19..hdr_offset + 20,
-        );
+        push_flag_bits(buf, major_version, flags, hdr_offset + 19);
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_MESSAGE_ID],
             FieldValue::U32(message_id),
@@ -365,7 +408,13 @@ impl Dissector for IkeDissector {
                 FieldValue::Array(0..0),
                 hdr_offset + HEADER_SIZE..hdr_offset + msg_len,
             );
-            parse_payload_chain(buf, next_payload, payload_area, hdr_offset + HEADER_SIZE);
+            parse_payload_chain(
+                buf,
+                major_version,
+                next_payload,
+                payload_area,
+                hdr_offset + HEADER_SIZE,
+            );
             buf.end_container(array_idx);
         }
 
@@ -375,16 +424,96 @@ impl Dissector for IkeDissector {
     }
 }
 
+/// Push version-specific flag sub-fields.
+///
+/// IKEv2 flag byte layout (RFC 7296, Section 3.1):
+/// <https://www.rfc-editor.org/rfc/rfc7296#section-3.1>
+///
+/// ```text
+///   +-+-+-+-+-+-+-+-+
+///   |X|X|R|V|I|X|X|X|
+///   +-+-+-+-+-+-+-+-+
+/// ```
+///
+/// IKEv1 flag byte layout (RFC 2408, Section 3.1):
+/// <https://www.rfc-editor.org/rfc/rfc2408#section-3.1>
+/// bit 0 (LSB) = Encryption, bit 1 = Commit, bit 2 = Authentication Only.
+fn push_flag_bits<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    major_version: u8,
+    flags: u8,
+    flags_offset: usize,
+) {
+    let range = flags_offset..flags_offset + 1;
+    match major_version {
+        2 => {
+            // RFC 7296, Section 3.1 — bits I (0x08), V (0x10), R (0x20)
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_FLAG_INITIATOR],
+                FieldValue::U8((flags >> 3) & 1),
+                range.clone(),
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_FLAG_RESPONSE],
+                FieldValue::U8((flags >> 5) & 1),
+                range.clone(),
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_FLAG_VERSION],
+                FieldValue::U8((flags >> 4) & 1),
+                range,
+            );
+        }
+        1 => {
+            // RFC 2408, Section 3.1 — bits E (0x01), C (0x02), A (0x04)
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_FLAG_ENCRYPTION],
+                FieldValue::U8(flags & 1),
+                range.clone(),
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_FLAG_COMMIT],
+                FieldValue::U8((flags >> 1) & 1),
+                range.clone(),
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_FLAG_AUTHENTICATION_ONLY],
+                FieldValue::U8((flags >> 2) & 1),
+                range,
+            );
+        }
+        // Unknown major version: leave flag sub-fields unpopulated. The raw
+        // flags octet is still exposed through the `flags` field itself.
+        _ => {}
+    }
+}
+
 /// Parse the chain of generic payload headers.
 ///
-/// RFC 7296, Section 3.2: <https://www.rfc-editor.org/rfc/rfc7296#section-3.2>
+/// IKEv2 generic payload header (RFC 7296, Section 3.2):
+/// <https://www.rfc-editor.org/rfc/rfc7296#section-3.2>
 ///
-/// Each generic payload header has:
-/// - Next Payload (1 byte)
-/// - Critical bit + Reserved (1 byte)
-/// - Payload Length (2 bytes, includes the 4-byte header)
+/// ```text
+///   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///   | Next Payload  |C|  RESERVED   |         Payload Length        |
+///   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+///
+/// IKEv1 / ISAKMP generic payload header (RFC 2408, Section 3.2):
+/// <https://www.rfc-editor.org/rfc/rfc2408#section-3.2>
+///
+/// ```text
+///   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///   | Next Payload  |   RESERVED    |         Payload Length        |
+///   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+///
+/// The second octet differs: IKEv2 carries a 1-bit Critical flag plus a
+/// 7-bit RESERVED field, whereas IKEv1 treats the whole octet as RESERVED.
+/// The `critical` sub-field is therefore only emitted for IKEv2.
 fn parse_payload_chain<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
+    major_version: u8,
     first_payload_type: u8,
     data: &'pkt [u8],
     base_offset: usize,
@@ -392,19 +521,20 @@ fn parse_payload_chain<'pkt>(
     let mut pos = 0;
     let mut current_type = first_payload_type;
 
-    // Type 0 means "No Next Payload"
+    // Type 0 means "No Next Payload" (RFC 7296, Section 3.2 /
+    // RFC 2408, Section 3.2).
     while current_type != 0 && pos + GENERIC_PAYLOAD_HEADER_SIZE <= data.len() {
         let _next_payload = data[pos];
-        // RFC 7296, Section 3.2 — Critical bit is the high bit of the second byte
-        let critical = (data[pos + 1] >> 7) & 1;
+        // Bounds for data[pos + 2..pos + 4] are guaranteed by the loop
+        // condition above, so the u16 read is infallible here.
         let payload_length = read_be_u16(data, pos + 2).unwrap_or_default() as usize;
 
-        // Payload length includes the 4-byte header itself
+        // Payload length includes the 4-byte header itself.
         if payload_length < GENERIC_PAYLOAD_HEADER_SIZE {
             break;
         }
 
-        // If payload extends beyond available data, clamp to what we have
+        // If payload extends beyond available data, clamp to what we have.
         let end = core::cmp::min(pos + payload_length, data.len());
         let payload_offset = base_offset + pos;
 
@@ -419,18 +549,23 @@ fn parse_payload_chain<'pkt>(
             FieldValue::U8(current_type),
             payload_offset..payload_offset + 1,
         );
-        buf.push_field(
-            &PAYLOAD_CHILDREN[PFD_CRITICAL],
-            FieldValue::U8(critical),
-            payload_offset + 1..payload_offset + 2,
-        );
+        // Critical bit only exists in IKEv2; IKEv1 octet 1 is entirely RESERVED.
+        if major_version == 2 {
+            // RFC 7296, Section 3.2 — Critical is the high bit of the second octet.
+            let critical = (data[pos + 1] >> 7) & 1;
+            buf.push_field(
+                &PAYLOAD_CHILDREN[PFD_CRITICAL],
+                FieldValue::U8(critical),
+                payload_offset + 1..payload_offset + 2,
+            );
+        }
         buf.push_field(
             &PAYLOAD_CHILDREN[PFD_PAYLOAD_LENGTH],
             FieldValue::U16(payload_length as u16),
             payload_offset + 2..payload_offset + 4,
         );
 
-        // Payload data (after the 4-byte generic header)
+        // Payload data (after the 4-byte generic header).
         if end > pos + GENERIC_PAYLOAD_HEADER_SIZE {
             buf.push_field(
                 &PAYLOAD_CHILDREN[PFD_PAYLOAD_DATA],
@@ -450,20 +585,29 @@ fn parse_payload_chain<'pkt>(
 mod tests {
     //! # RFC 7296 (IKEv2) / RFC 2408 (ISAKMP) Coverage
     //!
-    //! | RFC Section | Description              | Test                              |
-    //! |-------------|--------------------------|-----------------------------------|
-    //! | 3.1 (7296)  | IKE Header Format        | parse_ikev2_sa_init               |
-    //! | 3.1 (7296)  | Version field            | parse_ikev2_sa_init               |
-    //! | 3.1 (7296)  | Exchange Type            | parse_ikev2_sa_init               |
-    //! | 3.1 (7296)  | Flags                    | parse_ikev2_response_flags        |
-    //! | 3.1 (7296)  | Message ID               | parse_ikev2_sa_init               |
-    //! | 3.1 (7296)  | Length                    | parse_ikev2_sa_init               |
-    //! | 3.2 (7296)  | Generic Payload Header   | parse_ikev2_with_payloads         |
-    //! | 3.1 (2408)  | ISAKMP Header (v1)       | parse_ikev1_header                |
-    //! | —           | NAT-T Non-ESP marker     | parse_nat_t_with_marker           |
-    //! | —           | Truncated header         | truncated_header                  |
-    //! | —           | Invalid length           | invalid_length                    |
-    //! | —           | Header only (no payload) | parse_header_only                 |
+    //! | RFC Section        | Description                          | Test                                        |
+    //! |--------------------|--------------------------------------|---------------------------------------------|
+    //! | 3.1 (7296)         | IKE Header Format                    | parse_ikev2_sa_init                         |
+    //! | 3.1 (7296)         | Version field                        | parse_ikev2_sa_init                         |
+    //! | 3.1 (7296)         | Exchange Type                        | parse_ikev2_sa_init                         |
+    //! | 3.1 (7296)         | Flags R/V/I bits (IKEv2)             | parse_ikev2_response_flags                  |
+    //! | 3.1 (7296)         | Message ID                           | parse_ikev2_sa_init                         |
+    //! | 3.1 (7296)         | Length                               | parse_ikev2_sa_init                         |
+    //! | 3.2 (7296)         | Generic Payload Header               | parse_ikev2_with_payloads                   |
+    //! | 3.2 (7296)         | Critical bit (IKEv2 only)            | parse_ikev1_payload_has_no_critical         |
+    //! | 3.2 (7296) / 6467  | Payload type 49 (GSPM)               | parse_ikev2_payload_gspm_name               |
+    //! | 3.1 (7296) / 5723  | Exchange type 38 (IKE_SESSION_RESUME)| exchange_type_name_session_resume           |
+    //! | 3.1 (7296) / 9242  | Exchange type 43 (IKE_INTERMEDIATE)  | exchange_type_name_intermediate             |
+    //! | 3.1 (7296) / 9370  | Exchange type 44 (IKE_FOLLOWUP_KE)   | exchange_type_name_followup_ke              |
+    //! | 3.1 (2408)         | ISAKMP Header (v1)                   | parse_ikev1_header                          |
+    //! | 3.1 (2408)         | IKEv1 Encryption flag (bit 0)        | parse_ikev1_flag_encryption                 |
+    //! | 3.1 (2408)         | IKEv1 Commit flag (bit 1)            | parse_ikev1_flag_commit                     |
+    //! | 3.1 (2408)         | IKEv1 Authentication Only (bit 2)    | parse_ikev1_flag_authentication_only        |
+    //! | 3.2 (2408)         | IKEv1 Generic Payload Header         | parse_ikev1_payload_has_no_critical         |
+    //! | 2.2 (3948)         | NAT-T Non-ESP marker                 | parse_nat_t_with_marker                     |
+    //! | —                  | Truncated header                     | truncated_header                            |
+    //! | —                  | Invalid length                       | invalid_length                              |
+    //! | —                  | Header only (no payload)             | parse_header_only                           |
 
     use super::*;
 
@@ -775,10 +919,21 @@ mod tests {
     #[test]
     fn field_descriptors_match() {
         let descriptors = IkeDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 13);
+        assert_eq!(descriptors.len(), 16);
         assert_eq!(descriptors[0].name, "initiator_spi");
-        assert_eq!(descriptors[12].name, "payloads");
-        assert!(descriptors[12].children.is_some());
+        assert_eq!(descriptors[FD_FLAG_INITIATOR].name, "flag_initiator");
+        assert_eq!(descriptors[FD_FLAG_RESPONSE].name, "flag_response");
+        assert_eq!(descriptors[FD_FLAG_VERSION].name, "flag_version");
+        assert_eq!(descriptors[FD_FLAG_ENCRYPTION].name, "flag_encryption");
+        assert_eq!(descriptors[FD_FLAG_COMMIT].name, "flag_commit");
+        assert_eq!(
+            descriptors[FD_FLAG_AUTHENTICATION_ONLY].name,
+            "flag_authentication_only"
+        );
+        assert!(descriptors[FD_FLAG_INITIATOR].optional);
+        assert!(descriptors[FD_FLAG_ENCRYPTION].optional);
+        assert_eq!(descriptors[FD_PAYLOADS].name, "payloads");
+        assert!(descriptors[FD_PAYLOADS].children.is_some());
     }
 
     #[test]
@@ -812,5 +967,205 @@ mod tests {
                 assert_eq!(buf.nested_fields(r).len(), 0);
             }
         }
+    }
+
+    /// RFC 2408, Section 3.1 — Encryption bit is bit 0 (LSB) of the Flags octet.
+    #[test]
+    fn parse_ikev1_flag_encryption() {
+        let data = make_ike_header(&[0xAA; 8], &[0xBB; 8], 0, 1, 0, 2, 0x01, 0, 28);
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "flag_encryption").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "flag_commit").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "flag_authentication_only")
+                .unwrap()
+                .value,
+            FieldValue::U8(0)
+        );
+        // IKEv2 flag sub-fields must NOT be present for an IKEv1 message.
+        assert!(buf.field_by_name(layer, "flag_initiator").is_none());
+        assert!(buf.field_by_name(layer, "flag_response").is_none());
+        assert!(buf.field_by_name(layer, "flag_version").is_none());
+    }
+
+    /// RFC 2408, Section 3.1 — Commit bit is bit 1 of the Flags octet.
+    #[test]
+    fn parse_ikev1_flag_commit() {
+        let data = make_ike_header(&[0xAA; 8], &[0xBB; 8], 0, 1, 0, 2, 0x02, 0, 28);
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "flag_commit").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "flag_encryption").unwrap().value,
+            FieldValue::U8(0)
+        );
+    }
+
+    /// RFC 2408, Section 3.1 — Authentication Only bit is bit 2 of the Flags octet.
+    #[test]
+    fn parse_ikev1_flag_authentication_only() {
+        let data = make_ike_header(&[0xAA; 8], &[0xBB; 8], 0, 1, 0, 2, 0x04, 0, 28);
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "flag_authentication_only")
+                .unwrap()
+                .value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "flag_encryption").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "flag_commit").unwrap().value,
+            FieldValue::U8(0)
+        );
+    }
+
+    /// An IKEv2 message must expose only the IKEv2 flag sub-fields, not the
+    /// IKEv1-only flags, and vice versa. This makes the version-gated behaviour
+    /// explicit beyond the individual bit tests.
+    #[test]
+    fn parse_ikev2_has_no_v1_flag_subfields() {
+        let data = make_ike_header(&[0x01; 8], &[0x02; 8], 0, 2, 0, 34, 0x28, 0, 28);
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "flag_encryption").is_none());
+        assert!(buf.field_by_name(layer, "flag_commit").is_none());
+        assert!(
+            buf.field_by_name(layer, "flag_authentication_only")
+                .is_none()
+        );
+    }
+
+    /// RFC 3948, Section 2.2 — The Non-ESP marker is 4 zero-valued bytes. If
+    /// the first SPI byte is non-zero, the prefix must not be stripped.
+    #[test]
+    fn parse_no_marker_when_prefix_nonzero() {
+        // 4-byte prefix that is NOT all zeros: should not be treated as marker.
+        let mut data = vec![0x01, 0x02, 0x03, 0x04];
+        data.extend_from_slice(&make_ike_header(
+            &[0x01; 8], &[0x02; 8], 0, 2, 0, 34, 0x08, 0, 28,
+        ));
+        let mut buf = DissectBuffer::new();
+        // The dissector should treat these 4 bytes as the start of the
+        // initiator SPI and try to parse the full 32 bytes as an IKE header
+        // whose reported Length field will be wrong. Since the first four
+        // bytes form a valid initiator SPI prefix (non-zero), no marker is
+        // stripped; the dissector proceeds with offset 0.
+        let result = IkeDissector.dissect(&data, &mut buf, 0);
+        // Either returns Ok (if parseable) or Err; what we really care about
+        // is that no NAT-T marker was consumed, so offsets remain at 0.
+        if result.is_ok() {
+            let layer = &buf.layers()[0];
+            assert_eq!(
+                buf.field_by_name(layer, "initiator_spi").unwrap().range,
+                0..8
+            );
+        }
+    }
+
+    /// RFC 7296, Section 3.2 — For IKEv2 the generic payload header has a
+    /// Critical bit as the MSB of the second octet. For IKEv1 the whole
+    /// second octet is RESERVED (RFC 2408, Section 3.2), so the dissector
+    /// must not expose a `critical` field for IKEv1 payloads.
+    #[test]
+    fn parse_ikev1_payload_has_no_critical() {
+        // IKEv1 SA payload with RESERVED octet set to a non-zero sentinel
+        // (which would have been mis-reported as critical=1 by the old code).
+        let mut data = make_ike_header(&[0xAA; 8], &[0xBB; 8], 1, 1, 0, 2, 0, 0, 28 + 4);
+        data.extend_from_slice(&[0, 0x80, 0x00, 0x04]); // next=0, RESERVED=0x80, len=4
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let payloads = buf.field_by_name(layer, "payloads").unwrap();
+        if let FieldValue::Array(ref r) = payloads.value {
+            let children = buf.nested_fields(r);
+            let obj = children
+                .iter()
+                .find(|f| matches!(f.value, FieldValue::Object(_)))
+                .expect("expected one payload object");
+            if let FieldValue::Object(ref obj_range) = obj.value {
+                let fields = buf.nested_fields(obj_range);
+                assert!(fields.iter().all(|f| f.name() != "critical"));
+                assert!(fields.iter().any(|f| f.name() == "payload_type"));
+                assert!(fields.iter().any(|f| f.name() == "payload_length"));
+            }
+        } else {
+            panic!("expected Array for payloads");
+        }
+    }
+
+    /// IKEv2 payload type 49 = Generic Secure Password Method (RFC 6467, Section 4).
+    #[test]
+    fn parse_ikev2_payload_gspm_name() {
+        let mut data = make_ike_header(&[0x01; 8], &[0x00; 8], 49, 2, 0, 34, 0x08, 0, 28 + 4);
+        data.extend_from_slice(&[0, 0x00, 0x00, 0x04]); // GSPM payload, header only
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "next_payload_name"),
+            Some("Generic Secure Password Method")
+        );
+    }
+
+    /// RFC 5723 — IKE_SESSION_RESUME has exchange type value 38.
+    #[test]
+    fn exchange_type_name_session_resume() {
+        assert_eq!(exchange_type_name(38), Some("IKE_SESSION_RESUME"));
+    }
+
+    /// RFC 9242 — IKE_INTERMEDIATE has exchange type value 43.
+    #[test]
+    fn exchange_type_name_intermediate() {
+        assert_eq!(exchange_type_name(43), Some("IKE_INTERMEDIATE"));
+    }
+
+    /// RFC 9370 — IKE_FOLLOWUP_KE has exchange type value 44.
+    #[test]
+    fn exchange_type_name_followup_ke() {
+        assert_eq!(exchange_type_name(44), Some("IKE_FOLLOWUP_KE"));
+    }
+
+    /// RFC 7296, Section 3.1 — For an unknown major version, neither IKEv1
+    /// nor IKEv2 flag sub-fields should be exposed because the flag byte
+    /// layout is unspecified.
+    #[test]
+    fn unknown_major_version_omits_flag_subfields() {
+        let data = make_ike_header(&[0x01; 8], &[0x02; 8], 0, 3, 0, 34, 0xFF, 0, 28);
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        // Raw flags byte must still be exposed.
+        assert_eq!(
+            buf.field_by_name(layer, "flags").unwrap().value,
+            FieldValue::U8(0xFF)
+        );
+        // But no version-specific sub-fields.
+        assert!(buf.field_by_name(layer, "flag_initiator").is_none());
+        assert!(buf.field_by_name(layer, "flag_response").is_none());
+        assert!(buf.field_by_name(layer, "flag_version").is_none());
+        assert!(buf.field_by_name(layer, "flag_encryption").is_none());
+        assert!(buf.field_by_name(layer, "flag_commit").is_none());
+        assert!(
+            buf.field_by_name(layer, "flag_authentication_only")
+                .is_none()
+        );
     }
 }
