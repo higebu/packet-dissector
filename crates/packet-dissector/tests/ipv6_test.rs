@@ -18,6 +18,7 @@
 //! | 4.4         | Routing Header (generic)       | parse_ipv6_routing                      |
 //! | 4.4         | Routing truncated (generic)    | parse_ipv6_routing_truncated            |
 //! | 4.5         | Fragment Header                | parse_ipv6_fragment                     |
+//! | 4.5         | Fragment reserved / res fields  | parse_ipv6_fragment                     |
 //! | 4.5         | Fragment truncated             | parse_ipv6_fragment_truncated           |
 //! | 4.6         | Destination Options Header     | parse_ipv6_destination_options          |
 //! | 4.6         | Destination Options truncated  | parse_ipv6_destination_options_truncated|
@@ -51,6 +52,7 @@
 //! |-------------|--------------------------------|-----------------------------------------|
 //! | 6.1         | MH Header Format               | parse_ipv6_mobility_basic               |
 //! | 6.1         | MH with message data           | parse_ipv6_mobility_with_data           |
+//! | 6.1         | MH reserved byte               | parse_ipv6_mobility_basic               |
 //! | 6.1         | MH truncated (fixed)           | parse_ipv6_mobility_truncated           |
 //! | 6.1         | MH truncated (payload)         | parse_ipv6_mobility_truncated_payload   |
 //! | —           | MH dissector metadata          | mobility_dissector_metadata             |
@@ -372,9 +374,19 @@ fn parse_ipv6_fragment() {
         buf.field_by_name(layer, "next_header").unwrap().value,
         FieldValue::U8(6)
     );
+    // RFC 8200, Section 4.5 — Reserved byte (data[1]).
+    assert_eq!(
+        buf.field_by_name(layer, "reserved").unwrap().value,
+        FieldValue::U8(0)
+    );
     assert_eq!(
         buf.field_by_name(layer, "fragment_offset").unwrap().value,
         FieldValue::U16(7)
+    );
+    // RFC 8200, Section 4.5 — Res (2-bit reserved within bytes 2-3).
+    assert_eq!(
+        buf.field_by_name(layer, "res").unwrap().value,
+        FieldValue::U8(0)
     );
     assert_eq!(
         buf.field_by_name(layer, "m_flag").unwrap().value,
@@ -720,6 +732,11 @@ fn parse_ipv6_mobility_basic() {
     assert_eq!(
         buf.field_by_name(layer, "mh_type").unwrap().value,
         FieldValue::U8(1)
+    );
+    // RFC 6275, Section 6.1.1 — Reserved byte.
+    assert_eq!(
+        buf.field_by_name(layer, "reserved").unwrap().value,
+        FieldValue::U8(0)
     );
     assert_eq!(
         buf.field_by_name(layer, "checksum").unwrap().value,
