@@ -1,9 +1,17 @@
 //! BFD (Bidirectional Forwarding Detection) dissector.
 //!
 //! ## References
-//! - RFC 5880: <https://www.rfc-editor.org/rfc/rfc5880>
+//! - RFC 5880 (BFD base specification): <https://www.rfc-editor.org/rfc/rfc5880>
 //! - RFC 5881 (BFD for IPv4/IPv6 single hop): <https://www.rfc-editor.org/rfc/rfc5881>
 //! - RFC 5883 (BFD Multihop): <https://www.rfc-editor.org/rfc/rfc5883>
+//! - RFC 7419 (BFD Common Interval Support; updates RFC 5880):
+//!   <https://www.rfc-editor.org/rfc/rfc7419>
+//! - RFC 7880 (Seamless BFD; updates RFC 5880):
+//!   <https://www.rfc-editor.org/rfc/rfc7880>
+//! - RFC 8562 (BFD for Multipoint Networks; updates RFC 5880, redefines the
+//!   Multipoint (M) bit): <https://www.rfc-editor.org/rfc/rfc8562>
+//! - RFC 9747 (BFD Echo function clarifications; updates RFC 5880):
+//!   <https://www.rfc-editor.org/rfc/rfc9747>
 
 #![deny(missing_docs)]
 
@@ -13,17 +21,43 @@ use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::read_be_u32;
 
-/// Minimum BFD Control packet size without authentication
-/// (RFC 5880, Section 4.1).
+/// BFD protocol version defined by RFC 5880, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.1>
+const BFD_VERSION: u8 = 1;
+
+/// Minimum BFD Control packet size without authentication.
+/// RFC 5880, Section 6.8.6 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6>
 const MIN_HEADER_SIZE: usize = 24;
 
-/// Minimum BFD Control packet size with authentication
-/// (RFC 5880, Section 4.1).
+/// Minimum BFD Control packet size with authentication.
+/// RFC 5880, Section 6.8.6 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6>
 const MIN_HEADER_SIZE_WITH_AUTH: usize = 26;
+
+/// Fixed Auth Len for Keyed MD5 / Meticulous Keyed MD5.
+/// RFC 5880, Section 4.3 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>
+const AUTH_LEN_MD5: usize = 24;
+
+/// Fixed Auth Len for Keyed SHA1 / Meticulous Keyed SHA1.
+/// RFC 5880, Section 4.4 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.4>
+const AUTH_LEN_SHA1: usize = 28;
+
+/// Minimum Auth Len for Simple Password (Type + Len + Key ID + 1-byte
+/// password). RFC 5880, Section 4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>
+const MIN_AUTH_LEN_SIMPLE_PASSWORD: usize = 4;
+
+/// Minimum Auth Len for an unknown authentication type (Type + Len + at
+/// least one byte of authentication data).
+const MIN_AUTH_LEN_UNKNOWN: usize = 3;
 
 /// Returns a human-readable name for the Diagnostic (Diag) field value.
 ///
-/// RFC 5880, Section 4.1 — Diagnostic values:
+/// RFC 5880, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — Diagnostic values:
 ///   "0 -- No Diagnostic
 ///    1 -- Control Detection Time Expired
 ///    2 -- Echo Function Failed
@@ -51,7 +85,8 @@ fn diagnostic_name(diag: u8) -> &'static str {
 
 /// Returns a human-readable name for the State (Sta) field value.
 ///
-/// RFC 5880, Section 4.1 — State values:
+/// RFC 5880, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — State values:
 ///   "0 -- AdminDown
 ///    1 -- Down
 ///    2 -- Init
@@ -69,7 +104,9 @@ fn state_name(state: u8) -> &'static str {
 
 /// Returns a human-readable name for the Authentication Type value.
 ///
-/// RFC 5880, Section 4.2 — Authentication Type values:
+/// RFC 5880, Section 4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.2> — Authentication Type
+/// values:
 ///   "0 - Reserved
 ///    1 - Simple Password
 ///    2 - Keyed MD5
@@ -210,12 +247,26 @@ impl Dissector for BfdDissector {
             });
         }
 
-        // RFC 5880, Section 4.1 — first octet: Vers (3 bits) | Diag (5 bits)
+        // RFC 5880, Section 4.1 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — first octet:
+        // Vers (3 bits) | Diag (5 bits).
         let byte0 = data[0];
         let version = (byte0 >> 5) & 0x07;
         let diagnostic = byte0 & 0x1F;
 
-        // RFC 5880, Section 4.1 — second octet: Sta (2) | P | F | C | A | D | M
+        // RFC 5880, Section 6.8.6 #1 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
+        // version number is not correct (1), the packet MUST be discarded."
+        if version != BFD_VERSION {
+            return Err(PacketError::InvalidFieldValue {
+                field: "version",
+                value: u32::from(version),
+            });
+        }
+
+        // RFC 5880, Section 4.1 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — second octet:
+        // Sta (2) | P | F | C | A | D | M.
         let byte1 = data[1];
         let state = (byte1 >> 6) & 0x03;
         let poll = (byte1 >> 5) & 0x01;
@@ -223,20 +274,43 @@ impl Dissector for BfdDissector {
         let control_plane_independent = (byte1 >> 3) & 0x01;
         let auth_present = (byte1 >> 2) & 0x01;
         let demand = (byte1 >> 1) & 0x01;
+        // RFC 5880 originally reserved the M bit as zero; RFC 8562, Section
+        // 4.2 — <https://www.rfc-editor.org/rfc/rfc8562#section-4.2> — updates
+        // RFC 5880 to set M=1 on MultipointHead sessions, so either value is
+        // accepted here.
         let multipoint = byte1 & 0x01;
 
         let detect_mult = data[2];
+        // RFC 5880, Section 6.8.6 #4 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
+        // Detect Mult field is zero, the packet MUST be discarded."
+        if detect_mult == 0 {
+            return Err(PacketError::InvalidFieldValue {
+                field: "detect_mult",
+                value: 0,
+            });
+        }
 
-        // RFC 5880, Section 4.1 — "The length of the BFD Control packet, in
-        // bytes."
+        // RFC 5880, Section 4.1 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — "The length
+        // of the BFD Control packet, in bytes."
         let length_u8 = data[3];
         let length = length_u8 as usize;
+        // RFC 5880, Section 6.8.6 #2 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — Length
+        // below the minimum (24 without auth, 26 with auth) MUST be
+        // discarded. The auth variant is enforced below once the A bit is
+        // known.
         if length < MIN_HEADER_SIZE {
             return Err(PacketError::InvalidFieldValue {
                 field: "length",
                 value: length_u8 as u32,
             });
         }
+        // RFC 5880, Section 6.8.6 #3 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
+        // Length field is greater than the payload of the encapsulating
+        // protocol, the packet MUST be discarded."
         if data.len() < length {
             return Err(PacketError::Truncated {
                 expected: length,
@@ -245,6 +319,15 @@ impl Dissector for BfdDissector {
         }
 
         let my_discriminator = read_be_u32(data, 4)?;
+        // RFC 5880, Section 6.8.6 #6 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the My
+        // Discriminator field is zero, the packet MUST be discarded."
+        if my_discriminator == 0 {
+            return Err(PacketError::InvalidFieldValue {
+                field: "my_discriminator",
+                value: 0,
+            });
+        }
         let your_discriminator = read_be_u32(data, 8)?;
         let desired_min_tx = read_be_u32(data, 12)?;
         let required_min_rx = read_be_u32(data, 16)?;
@@ -337,8 +420,13 @@ impl Dissector for BfdDissector {
             offset + 20..offset + 24,
         );
 
-        // RFC 5880, Section 4.2 — Optional Authentication Section
+        // RFC 5880, Section 4.2 —
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.2> — Optional
+        // Authentication Section.
         if auth_present == 1 {
+            // RFC 5880, Section 6.8.6 #2 —
+            // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — when
+            // the A bit is set, the minimum correct Length is 26.
             if length < MIN_HEADER_SIZE_WITH_AUTH {
                 return Err(PacketError::InvalidHeader(
                     "BFD auth present but length is less than minimum with auth",
@@ -347,16 +435,25 @@ impl Dissector for BfdDissector {
             let auth_type = data[24];
             let auth_len = data[25] as usize;
 
-            // RFC 5880, Section 4.2 — Optional Authentication Section
-            // Each authentication type has a minimum length including the
-            // Type and Length bytes themselves. Enforce these minima to
-            // avoid accepting malformed auth sections with missing fields
-            // such as the Key ID or fixed MD5/SHA1 fields.
+            // RFC 5880, Sections 4.2–4.4 — each authentication type has a
+            // fixed or minimum Auth Len including the Type and Length bytes
+            // themselves. Enforce these to reject malformed auth sections
+            // with missing fields such as the Key ID or fixed MD5/SHA1
+            // digest/hash.
+            //   - Simple Password (Section 4.2 —
+            //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>):
+            //     Type(1) + Len(1) + Key ID(1) + 1..=16 byte password ⇒ 4..=19
+            //   - Keyed / Meticulous Keyed MD5 (Section 4.3 —
+            //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>):
+            //     Auth Len is fixed at 24.
+            //   - Keyed / Meticulous Keyed SHA1 (Section 4.4 —
+            //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.4>):
+            //     Auth Len is fixed at 28.
             let min_auth_len = match auth_type {
-                1 => 3,      // Simple Password: Type(1) + Length(1) + Password(>=1)
-                2 | 3 => 24, // Keyed MD5 / Meticulous Keyed MD5
-                4 | 5 => 28, // Keyed SHA1 / Meticulous Keyed SHA1
-                _ => 3,      // Unknown types: require at least one auth data byte
+                1 => MIN_AUTH_LEN_SIMPLE_PASSWORD,
+                2 | 3 => AUTH_LEN_MD5,
+                4 | 5 => AUTH_LEN_SHA1,
+                _ => MIN_AUTH_LEN_UNKNOWN,
             };
 
             if auth_len < min_auth_len {
@@ -397,22 +494,32 @@ mod tests {
 
     // # RFC 5880 Coverage
     //
-    // | RFC Section | Description                          | Test                              |
-    // |-------------|--------------------------------------|-----------------------------------|
-    // | 4.1         | Header: Version, Diagnostic          | test_parse_basic_up               |
-    // | 4.1         | Header: State, flags                 | test_parse_all_flags_set          |
-    // | 4.1         | Header: Detect Mult, Length           | test_parse_basic_up               |
-    // | 4.1         | Header: Discriminators               | test_parse_basic_up               |
-    // | 4.1         | Header: Interval fields              | test_parse_basic_up               |
-    // | 4.1         | All diagnostic codes                 | test_diagnostic_codes             |
-    // | 4.1         | All state values                     | test_state_values                 |
-    // | 4.2         | Auth section (Simple Password)       | test_parse_with_auth_simple       |
-    // | 4.2         | Auth section (Keyed SHA1)            | test_parse_with_auth_sha1         |
-    // | ---         | Truncated header (< 24 bytes)        | test_truncated_packet             |
-    // | ---         | Invalid length (< 24)                | test_invalid_length_field         |
-    // | ---         | Auth present but truncated           | test_auth_present_but_truncated   |
-    // | ---         | Offset handling                      | test_dissect_with_offset          |
-    // | ---         | Field descriptors                    | test_field_descriptors            |
+    // | RFC Section | Description                                | Test                              |
+    // |-------------|--------------------------------------------|-----------------------------------|
+    // | 4.1         | Header: Version, Diagnostic                | test_parse_basic_up               |
+    // | 4.1         | Header: State, flags                       | test_parse_all_flags_set          |
+    // | 4.1         | Header: Detect Mult, Length                | test_parse_basic_up               |
+    // | 4.1         | Header: Discriminators                     | test_parse_basic_up               |
+    // | 4.1         | Header: Interval fields                    | test_parse_basic_up               |
+    // | 4.1         | All diagnostic codes                       | test_diagnostic_codes             |
+    // | 4.1         | All state values                           | test_state_values                 |
+    // | 4.1         | Multipoint (M) bit set (RFC 8562 update)   | test_parse_multipoint_bit_set     |
+    // | 4.2         | Auth section (Simple Password)             | test_parse_with_auth_simple       |
+    // | 4.2         | Auth section (Keyed MD5)                   | test_parse_with_auth_md5          |
+    // | 4.2         | Auth section (Keyed SHA1)                  | test_parse_with_auth_sha1         |
+    // | 4.2         | Simple Password too short (< 4) rejected   | test_simple_password_too_short    |
+    // | 4.2         | Keyed MD5 wrong length rejected            | test_md5_wrong_length             |
+    // | 4.2         | Keyed SHA1 wrong length rejected           | test_sha1_wrong_length            |
+    // | 6.8.6 #1    | Version != 1 rejected                      | test_invalid_version              |
+    // | 6.8.6 #2    | Invalid length (< 24)                      | test_invalid_length_field         |
+    // | 6.8.6 #3    | Length > payload                           | test_length_exceeds_data          |
+    // | 6.8.6 #2    | Auth present but length < 26               | test_auth_present_but_truncated   |
+    // | 6.8.6 #4    | Detect Mult == 0 rejected                  | test_detect_mult_zero             |
+    // | 6.8.6 #6    | My Discriminator == 0 rejected             | test_my_discriminator_zero        |
+    // | ---         | Truncated header (< 24 bytes)              | test_truncated_packet             |
+    // | ---         | Auth section exceeds length                | test_auth_section_exceeds_length  |
+    // | ---         | Offset handling                            | test_dissect_with_offset          |
+    // | ---         | Field descriptors                          | test_field_descriptors            |
 
     /// Build a minimal BFD Control packet.
     #[allow(clippy::too_many_arguments)]
@@ -865,6 +972,192 @@ mod tests {
                 assert_eq!(actual, 24);
             }
             other => panic!("Expected Truncated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_version() {
+        // RFC 5880, Section 6.8.6 #1 — "If the version number is not correct
+        // (1), the packet MUST be discarded."
+        let data = build_bfd(
+            0, 0, 3, 0, 0, 0, 0, 0, 0, 3, 24, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&data, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidFieldValue { field, value } => {
+                assert_eq!(field, "version");
+                assert_eq!(value, 0);
+            }
+            other => panic!("Expected InvalidFieldValue, got {other:?}"),
+        }
+
+        // Version 2 must also be rejected.
+        let data = build_bfd(
+            2, 0, 3, 0, 0, 0, 0, 0, 0, 3, 24, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&data, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidFieldValue { field, value } => {
+                assert_eq!(field, "version");
+                assert_eq!(value, 2);
+            }
+            other => panic!("Expected InvalidFieldValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_detect_mult_zero() {
+        // RFC 5880, Section 6.8.6 #4 — "If the Detect Mult field is zero, the
+        // packet MUST be discarded."
+        let data = build_bfd(
+            1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 24, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&data, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidFieldValue { field, value } => {
+                assert_eq!(field, "detect_mult");
+                assert_eq!(value, 0);
+            }
+            other => panic!("Expected InvalidFieldValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_my_discriminator_zero() {
+        // RFC 5880, Section 6.8.6 #6 — "If the My Discriminator field is zero,
+        // the packet MUST be discarded."
+        let data = build_bfd(
+            1, 0, 3, 0, 0, 0, 0, 0, 0, 3, 24, 0, 0, 1_000_000, 1_000_000, 0,
+        );
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&data, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidFieldValue { field, value } => {
+                assert_eq!(field, "my_discriminator");
+                assert_eq!(value, 0);
+            }
+            other => panic!("Expected InvalidFieldValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multipoint_bit_set() {
+        // RFC 5880 originally required M to be zero; RFC 8562, Section 4.2 —
+        // <https://www.rfc-editor.org/rfc/rfc8562#section-4.2> — redefines M=1
+        // for MultipointHead sessions. The dissector therefore accepts M=1.
+        let data = build_bfd(
+            1, 0, 3, 0, 0, 0, 0, 0, 1, 3, 24, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        let mut buf = DissectBuffer::new();
+        BfdDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "multipoint").unwrap().value,
+            FieldValue::U8(1)
+        );
+    }
+
+    #[test]
+    fn test_simple_password_too_short() {
+        // RFC 5880, Section 4.2 — Simple Password Auth Len range is 4-19
+        // (Type + Len + Key ID + 1-16 password bytes). Auth Len == 3 is
+        // malformed (no password bytes).
+        let mut pkt = build_bfd(
+            1, 0, 3, 0, 0, 0, 1, 0, 0, 3, 27, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        pkt.push(1); // auth type: Simple Password
+        pkt.push(3); // auth len: illegal, below minimum 4
+        pkt.push(1); // key id
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&pkt, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidHeader(msg) => {
+                assert!(msg.contains("auth length"), "unexpected message: {msg}");
+            }
+            other => panic!("Expected InvalidHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_auth_md5() {
+        // Keyed MD5: type=2, auth_len=24, key_id=1, reserved=0, 4-byte seq,
+        // 16-byte digest.
+        let mut auth_data = vec![1, 0]; // key_id, reserved
+        auth_data.extend_from_slice(&42u32.to_be_bytes()); // sequence number
+        auth_data.extend_from_slice(&[0xBB; 16]); // MD5 digest
+        let data = build_bfd_with_auth(1, 0, 3, 3, 0x1000, 0x2000, 2, &auth_data);
+        let mut buf = DissectBuffer::new();
+        BfdDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "auth_type").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "auth_type_name"),
+            Some("Keyed MD5")
+        );
+    }
+
+    #[test]
+    fn test_md5_wrong_length() {
+        // Keyed MD5 requires Auth Len == 24. Using 20 must be rejected.
+        let mut pkt = build_bfd(
+            1, 0, 3, 0, 0, 0, 1, 0, 0, 3, 44, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        pkt.push(2); // auth type: Keyed MD5
+        pkt.push(20); // illegal: below required 24
+        pkt.extend_from_slice(&[0u8; 18]); // fill remaining bytes
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&pkt, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidHeader(msg) => {
+                assert!(msg.contains("auth length"), "unexpected message: {msg}");
+            }
+            other => panic!("Expected InvalidHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sha1_wrong_length() {
+        // Keyed SHA1 requires Auth Len == 28. Using 24 must be rejected.
+        let mut pkt = build_bfd(
+            1, 0, 3, 0, 0, 0, 1, 0, 0, 3, 48, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        pkt.push(4); // auth type: Keyed SHA1
+        pkt.push(24); // illegal: below required 28
+        pkt.extend_from_slice(&[0u8; 22]); // fill remaining bytes
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&pkt, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidHeader(msg) => {
+                assert!(msg.contains("auth length"), "unexpected message: {msg}");
+            }
+            other => panic!("Expected InvalidHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_auth_section_exceeds_length() {
+        // Auth Len extends beyond the packet length field.
+        let mut pkt = build_bfd(
+            1, 0, 3, 0, 0, 0, 1, 0, 0, 3, 28, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        pkt.push(1); // auth type: Simple Password
+        pkt.push(10); // auth len: 10, but only 4 bytes available (24..28)
+        pkt.push(1);
+        pkt.push(b'x');
+        let mut buf = DissectBuffer::new();
+        let result = BfdDissector.dissect(&pkt, &mut buf, 0);
+        match result.unwrap_err() {
+            PacketError::InvalidHeader(msg) => {
+                assert!(msg.contains("exceeds"), "unexpected message: {msg}");
+            }
+            other => panic!("Expected InvalidHeader, got {other:?}"),
         }
     }
 }
