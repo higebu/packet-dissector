@@ -1013,7 +1013,8 @@ fn parse_icmp_router_advertisement() {
             .find(|f| f.name() == "preference_level")
             .unwrap()
             .value,
-        FieldValue::U32(0)
+        // RFC 1256 §3.1 — Preference Level is a signed 32-bit twos-complement value.
+        FieldValue::I32(0)
     );
 }
 
@@ -1064,7 +1065,8 @@ fn parse_icmp_router_advertisement_multiple_entries() {
             .find(|f| f.name() == "preference_level")
             .unwrap()
             .value,
-        FieldValue::U32(0xFFFFFFF6)
+        // RFC 1256 §3.1 — signed twos-complement: 0xFFFFFFF6 == -10.
+        FieldValue::I32(-10)
     );
 }
 
@@ -1122,8 +1124,11 @@ fn parse_icmp_photuris_bad_spi() {
         buf.field_by_name(layer, "code").unwrap().value,
         FieldValue::U8(0)
     );
+    // RFC 2521 §2 — Photuris uses a dedicated 16-bit Pointer descriptor
+    // (`photuris_pointer`) distinct from the 8-bit `pointer` shared with
+    // Parameter Problem (Type 12, RFC 792).
     assert_eq!(
-        buf.field_by_name(layer, "pointer").unwrap().value,
+        buf.field_by_name(layer, "photuris_pointer").unwrap().value,
         FieldValue::U16(30)
     );
     assert!(buf.field_by_name(layer, "invoking_packet").is_some());
@@ -1151,8 +1156,9 @@ fn parse_icmp_photuris_need_authentication() {
         buf.field_by_name(layer, "code").unwrap().value,
         FieldValue::U8(4)
     );
+    // RFC 2521 §2 — see note in parse_icmp_photuris_bad_spi.
     assert_eq!(
-        buf.field_by_name(layer, "pointer").unwrap().value,
+        buf.field_by_name(layer, "photuris_pointer").unwrap().value,
         FieldValue::U16(0)
     );
 }
@@ -1246,6 +1252,8 @@ fn parse_icmp_extended_echo_request_local_bit() {
     //   bytes 4-5: Identifier (16-bit)
     //   byte 6:   Sequence Number (8-bit)
     //   byte 7:   Reserved (7 bits) | L (1 bit)
+    //   bytes 8+: ICMP Extension Structure carrying the Interface
+    //             Identification Object (RFC 4884 §7 + RFC 8335 §2.1).
     let data: &[u8] = &[
         0x2a, // Type: Extended Echo Request (42)
         0x00, // Code: 0
@@ -1253,7 +1261,11 @@ fn parse_icmp_extended_echo_request_local_bit() {
         0x00, 0x05, // Identifier: 5 (16-bit, bytes 4-5)
         0x03, // Sequence Number: 3 (byte 6)
         0x01, // Reserved=0, L=1 (byte 7)
-        0xaa, 0xbb, // Extension data
+        // RFC 4884 §7 Extension Header (Version=2, Reserved=0, Checksum=0).
+        0x20, 0x00, 0x00, 0x00,
+        // RFC 4884 §7.1 Object: Length=8, Class-Num=3 (RFC 8335), C-Type=2 (ByIndex).
+        0x00, 0x08, 0x03, 0x02, //
+        0x00, 0x00, 0x00, 0x09, // ifIndex = 9
     ];
 
     let mut buf = DissectBuffer::new();
@@ -1272,9 +1284,41 @@ fn parse_icmp_extended_echo_request_local_bit() {
         buf.field_by_name(layer, "local").unwrap().value,
         FieldValue::U8(1)
     );
+    // The body after the fixed 8-byte header is parsed as an Extension
+    // Structure (RFC 4884 §7 + RFC 8335 §2.1), not an opaque `data` field.
+    assert!(buf.field_by_name(layer, "data").is_none());
+    let ext = buf
+        .field_by_name(layer, "extensions")
+        .expect("extensions field present");
+    let FieldValue::Object(ref ext_range) = ext.value else {
+        panic!("expected Object")
+    };
+    let ext_children = buf.nested_fields(ext_range);
+    let objects = ext_children
+        .iter()
+        .find(|f| f.name() == "objects")
+        .expect("objects array");
+    let FieldValue::Array(ref objs_range) = objects.value else {
+        panic!("expected Array")
+    };
+    let items = buf.nested_fields(objs_range);
+    // First direct child is the Object header; its children follow.
+    let obj_range = match &items[0].value {
+        FieldValue::Object(r) => r.clone(),
+        other => panic!("expected Object, got {other:?}"),
+    };
+    let obj = buf.nested_fields(&obj_range);
     assert_eq!(
-        buf.field_by_name(layer, "data").unwrap().value,
-        FieldValue::Bytes(&[0xaa, 0xbb])
+        obj.iter().find(|f| f.name() == "class_num").unwrap().value,
+        FieldValue::U8(3)
+    );
+    assert_eq!(
+        obj.iter().find(|f| f.name() == "c_type").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert_eq!(
+        obj.iter().find(|f| f.name() == "if_index").unwrap().value,
+        FieldValue::U32(9)
     );
 }
 
