@@ -166,6 +166,10 @@ const FD_ADDITIONALS: usize = 19;
 const QFD_NAME: usize = 0;
 const QFD_TYPE: usize = 1;
 const QFD_CLASS: usize = 2;
+// RFC 6762, Section 18.12 — top bit of qclass in the Question Section is the
+// "QU" (unicast-response) bit, not part of the class. Emitted only in mDNS
+// mode; the DNS dissector leaves this descriptor unused.
+const QFD_QU: usize = 3;
 // NOTE: type/class have display_fn for dns_type_name/dns_class_name; no separate _name fields.
 
 // -- Field descriptor index constants for EDNS_OPTION_CHILD_FIELDS --
@@ -236,6 +240,10 @@ const RRFD_RDATA_CERT_ASSOC_DATA: usize = 55;
 const RRFD_RDATA_TAG: usize = 56;
 const RRFD_RDATA_VALUE: usize = 57;
 const RRFD_RDATA_PARAMS: usize = 58;
+// RFC 6762, Section 18.13 / 10.2 — cache-flush bit (top bit of rrclass).
+// Emitted only in mDNS mode for non-OPT records; the DNS dissector leaves
+// this descriptor unused.
+const RRFD_CACHE_FLUSH: usize = 59;
 
 /// DNS dissector.
 pub struct DnsDissector;
@@ -1069,6 +1077,9 @@ static EDNS_OPTION_CHILD_FIELDS: &[FieldDescriptor] = &[
 ];
 
 /// Child field descriptors for question section entries.
+///
+/// The `qu` descriptor is emitted only by the mDNS parsing path per
+/// RFC 6762, Section 18.12 — <https://www.rfc-editor.org/rfc/rfc6762#section-18.12>.
 static QUESTION_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("name", "Name", FieldType::Bytes).with_format_fn(write_dns_name),
     FieldDescriptor {
@@ -1095,6 +1106,9 @@ static QUESTION_CHILD_FIELDS: &[FieldDescriptor] = &[
         }),
         format_fn: None,
     },
+    // RFC 6762, Section 18.12 / 5.4 — unicast-response bit (top bit of qclass).
+    // <https://www.rfc-editor.org/rfc/rfc6762#section-18.12>
+    FieldDescriptor::new("qu", "Unicast Response", FieldType::U8).optional(),
 ];
 
 /// Child field descriptors for resource record entries (answers, authorities, additionals).
@@ -1226,6 +1240,10 @@ static RR_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("rdata_value", "Value", FieldType::Str).optional(),
     // -- SVCB / HTTPS --
     FieldDescriptor::new("rdata_params", "SvcParams", FieldType::Bytes).optional(),
+    // -- mDNS: cache-flush bit (top bit of rrclass) --
+    // RFC 6762, Section 18.13 / 10.2 — <https://www.rfc-editor.org/rfc/rfc6762#section-10.2>
+    // Emitted by the mDNS parsing path for non-OPT records only.
+    FieldDescriptor::new("cache_flush", "Cache Flush", FieldType::U8).optional(),
 ];
 
 /// Generates the common DNS header + section field descriptors shared by both
@@ -1344,327 +1362,405 @@ impl Dissector for DnsDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        if data.len() < HEADER_SIZE {
+        // DNS (RFC 1035) — standard parsing without mDNS bit reinterpretation.
+        dissect_dns_core(data, buf, offset, self.short_name(), false)
+    }
+}
+
+/// Parse a Multicast DNS (RFC 6762) message.
+///
+/// This is the same DNS message parser used by [`DnsDissector`] but with
+/// RFC 6762 reinterpretation applied to the class fields:
+///
+/// - Each question gets a `qu` child field carrying the top bit of qclass
+///   (the unicast-response bit, RFC 6762, Section 18.12 — <https://www.rfc-editor.org/rfc/rfc6762#section-18.12>);
+///   the `class` field carries only the lower 15 bits.
+/// - Each non-OPT resource record gets a `cache_flush` child field carrying
+///   the top bit of rrclass (RFC 6762, Section 18.13 / 10.2 —
+///   <https://www.rfc-editor.org/rfc/rfc6762#section-10.2>); the `class`
+///   field carries only the lower 15 bits.
+/// - OPT pseudo-RRs (RFC 6891) are left untouched: their rrclass field is
+///   the full 16-bit EDNS0 UDP payload size, as required by RFC 6762,
+///   Section 10.2.
+///
+/// The produced layer is labelled `"mDNS"`. All other fields are identical
+/// to the DNS parsing output.
+pub fn dissect_as_mdns<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+) -> Result<DissectResult, PacketError> {
+    dissect_dns_core(data, buf, offset, "mDNS", true)
+}
+
+/// Shared DNS / mDNS message parser.
+///
+/// `layer_name` is the short name pushed onto the layer (e.g., `"DNS"` or
+/// `"mDNS"`). When `mdns_mode` is true, the top bit of each question's
+/// qclass is emitted as a separate `qu` field, and the top bit of each
+/// non-OPT record's rrclass is emitted as a separate `cache_flush` field,
+/// per RFC 6762, Sections 18.12, 18.13 and 10.2.
+fn dissect_dns_core<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    layer_name: &'static str,
+    mdns_mode: bool,
+) -> Result<DissectResult, PacketError> {
+    if data.len() < HEADER_SIZE {
+        return Err(PacketError::Truncated {
+            expected: HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    // RFC 1035, Section 4.1.1 — Header
+    let id = read_be_u16(data, 0)?;
+    let flags = read_be_u16(data, 2)?;
+
+    let qr = ((flags >> 15) & 1) as u8;
+    let opcode = ((flags >> 11) & 0x0F) as u8;
+    let aa = ((flags >> 10) & 1) as u8;
+    let tc = ((flags >> 9) & 1) as u8;
+    let rd = ((flags >> 8) & 1) as u8;
+    let ra = ((flags >> 7) & 1) as u8;
+    // RFC 1035, Section 4.1.1 — Z reserved bit (must be zero)
+    let z = ((flags >> 6) & 1) as u8;
+    // RFC 4035 — AD and CD flags (formerly Z bits)
+    let ad = ((flags >> 5) & 1) as u8;
+    let cd = ((flags >> 4) & 1) as u8;
+    let rcode = (flags & 0x0F) as u8;
+
+    let qdcount = read_be_u16(data, 4)?;
+    let ancount = read_be_u16(data, 6)?;
+    let nscount = read_be_u16(data, 8)?;
+    let arcount = read_be_u16(data, 10)?;
+
+    buf.begin_layer(
+        layer_name,
+        None,
+        DNS_FIELD_DESCRIPTORS,
+        offset..offset + data.len(),
+    );
+
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_ID],
+        FieldValue::U16(id),
+        offset..offset + 2,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_QR],
+        FieldValue::U8(qr),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_OPCODE],
+        FieldValue::U8(opcode),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_AA],
+        FieldValue::U8(aa),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_TC],
+        FieldValue::U8(tc),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_RD],
+        FieldValue::U8(rd),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_RA],
+        FieldValue::U8(ra),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_Z],
+        FieldValue::U8(z),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_AD],
+        FieldValue::U8(ad),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_CD],
+        FieldValue::U8(cd),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_RCODE],
+        FieldValue::U8(rcode),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_QDCOUNT],
+        FieldValue::U16(qdcount),
+        offset + 4..offset + 6,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_ANCOUNT],
+        FieldValue::U16(ancount),
+        offset + 6..offset + 8,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_NSCOUNT],
+        FieldValue::U16(nscount),
+        offset + 8..offset + 10,
+    );
+    buf.push_field(
+        &DNS_FIELD_DESCRIPTORS[FD_ARCOUNT],
+        FieldValue::U16(arcount),
+        offset + 10..offset + 12,
+    );
+
+    let mut pos = HEADER_SIZE;
+
+    // RFC 1035, Section 4.1.2 — Question Section
+    let questions_start = pos;
+    let questions_count = qdcount as usize;
+    let questions_array_idx = if questions_count > 0 {
+        Some(buf.begin_container(
+            &DNS_FIELD_DESCRIPTORS[FD_QUESTIONS],
+            FieldValue::Array(0..0),
+            offset + questions_start..offset + questions_start,
+        ))
+    } else {
+        None
+    };
+    for _i in 0..questions_count {
+        let name_len = parse_name(data, pos)?;
+        let name_start = pos;
+        pos += name_len;
+
+        if pos + 4 > data.len() {
             return Err(PacketError::Truncated {
-                expected: HEADER_SIZE,
+                expected: pos + 4,
                 actual: data.len(),
             });
         }
 
-        // RFC 1035, Section 4.1.1 — Header
-        let id = read_be_u16(data, 0)?;
-        let flags = read_be_u16(data, 2)?;
+        let qtype = read_be_u16(data, pos)?;
+        let qclass_raw = read_be_u16(data, pos + 2)?;
+        // RFC 6762, Section 18.12 / 5.4 — in mDNS the top bit of qclass is the
+        // unicast-response ("QU") bit, not part of the class value.
+        // <https://www.rfc-editor.org/rfc/rfc6762#section-18.12>
+        let (qclass, qu_bit) = if mdns_mode {
+            (qclass_raw & 0x7FFF, ((qclass_raw >> 15) & 1) as u8)
+        } else {
+            (qclass_raw, 0)
+        };
 
-        let qr = ((flags >> 15) & 1) as u8;
-        let opcode = ((flags >> 11) & 0x0F) as u8;
-        let aa = ((flags >> 10) & 1) as u8;
-        let tc = ((flags >> 9) & 1) as u8;
-        let rd = ((flags >> 8) & 1) as u8;
-        let ra = ((flags >> 7) & 1) as u8;
-        // RFC 1035, Section 4.1.1 — Z reserved bit (must be zero)
-        let z = ((flags >> 6) & 1) as u8;
-        // RFC 4035 — AD and CD flags (formerly Z bits)
-        let ad = ((flags >> 5) & 1) as u8;
-        let cd = ((flags >> 4) & 1) as u8;
-        let rcode = (flags & 0x0F) as u8;
+        let obj_idx = buf.begin_container(
+            &QUESTION_CHILD_FIELDS[QFD_NAME],
+            FieldValue::Object(0..0),
+            offset + name_start..offset + pos + 4,
+        );
+        buf.push_field(
+            &QUESTION_CHILD_FIELDS[QFD_NAME],
+            FieldValue::Bytes(&data[name_start..pos]),
+            offset + name_start..offset + pos,
+        );
+        buf.push_field(
+            &QUESTION_CHILD_FIELDS[QFD_TYPE],
+            FieldValue::U16(qtype),
+            offset + pos..offset + pos + 2,
+        );
+        buf.push_field(
+            &QUESTION_CHILD_FIELDS[QFD_CLASS],
+            FieldValue::U16(qclass),
+            offset + pos + 2..offset + pos + 4,
+        );
+        if mdns_mode {
+            buf.push_field(
+                &QUESTION_CHILD_FIELDS[QFD_QU],
+                FieldValue::U8(qu_bit),
+                offset + pos + 2..offset + pos + 4,
+            );
+        }
+        buf.end_container(obj_idx);
+        pos += 4;
+    }
+    if let Some(idx) = questions_array_idx {
+        // Update the range on the array container
+        if let Some(field) = buf.field_mut(idx as usize) {
+            field.range = offset + questions_start..offset + pos;
+        }
+        buf.end_container(idx);
+    }
 
-        let qdcount = read_be_u16(data, 4)?;
-        let ancount = read_be_u16(data, 6)?;
-        let nscount = read_be_u16(data, 8)?;
-        let arcount = read_be_u16(data, 10)?;
+    // RFC 1035, Section 4.1.3 — Resource Records (Answer, Authority, Additional)
+    let sections: &[(usize, u16)] = &[
+        (FD_ANSWERS, ancount),
+        (FD_AUTHORITIES, nscount),
+        (FD_ADDITIONALS, arcount),
+    ];
 
-        buf.begin_layer(
-            self.short_name(),
-            None,
-            DNS_FIELD_DESCRIPTORS,
-            offset..offset + data.len(),
-        );
-
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_ID],
-            FieldValue::U16(id),
-            offset..offset + 2,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_QR],
-            FieldValue::U8(qr),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_OPCODE],
-            FieldValue::U8(opcode),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_AA],
-            FieldValue::U8(aa),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_TC],
-            FieldValue::U8(tc),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_RD],
-            FieldValue::U8(rd),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_RA],
-            FieldValue::U8(ra),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_Z],
-            FieldValue::U8(z),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_AD],
-            FieldValue::U8(ad),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_CD],
-            FieldValue::U8(cd),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_RCODE],
-            FieldValue::U8(rcode),
-            offset + 2..offset + 4,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_QDCOUNT],
-            FieldValue::U16(qdcount),
-            offset + 4..offset + 6,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_ANCOUNT],
-            FieldValue::U16(ancount),
-            offset + 6..offset + 8,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_NSCOUNT],
-            FieldValue::U16(nscount),
-            offset + 8..offset + 10,
-        );
-        buf.push_field(
-            &DNS_FIELD_DESCRIPTORS[FD_ARCOUNT],
-            FieldValue::U16(arcount),
-            offset + 10..offset + 12,
-        );
-
-        let mut pos = HEADER_SIZE;
-
-        // RFC 1035, Section 4.1.2 — Question Section
-        let questions_start = pos;
-        let questions_count = qdcount as usize;
-        let questions_array_idx = if questions_count > 0 {
+    for &(section_fd, count) in sections {
+        let section_start = pos;
+        let count = count as usize;
+        let array_idx = if count > 0 {
             Some(buf.begin_container(
-                &DNS_FIELD_DESCRIPTORS[FD_QUESTIONS],
+                &DNS_FIELD_DESCRIPTORS[section_fd],
                 FieldValue::Array(0..0),
-                offset + questions_start..offset + questions_start,
+                offset + section_start..offset + section_start,
             ))
         } else {
             None
         };
-        for _i in 0..questions_count {
+        for _i in 0..count {
             let name_len = parse_name(data, pos)?;
             let name_start = pos;
             pos += name_len;
 
-            if pos + 4 > data.len() {
+            // TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes
+            if pos + 10 > data.len() {
                 return Err(PacketError::Truncated {
-                    expected: pos + 4,
+                    expected: pos + 10,
                     actual: data.len(),
                 });
             }
 
-            let qtype = read_be_u16(data, pos)?;
-            let qclass = read_be_u16(data, pos + 2)?;
+            let rtype = read_be_u16(data, pos)?;
+            let rclass_raw = read_be_u16(data, pos + 2)?;
+            let ttl = read_be_u32(data, pos + 4)?;
+            let rdlength = read_be_u16(data, pos + 8)? as usize;
+
+            if pos + 10 + rdlength > data.len() {
+                return Err(PacketError::Truncated {
+                    expected: pos + 10 + rdlength,
+                    actual: data.len(),
+                });
+            }
+
+            let rdata = &data[pos + 10..pos + 10 + rdlength];
+            let record_end = pos + 10 + rdlength;
 
             let obj_idx = buf.begin_container(
-                &QUESTION_CHILD_FIELDS[QFD_NAME],
+                &RR_CHILD_FIELDS[RRFD_NAME],
                 FieldValue::Object(0..0),
-                offset + name_start..offset + pos + 4,
+                offset + name_start..offset + record_end,
             );
-            buf.push_field(
-                &QUESTION_CHILD_FIELDS[QFD_NAME],
-                FieldValue::Bytes(&data[name_start..pos]),
-                offset + name_start..offset + pos,
-            );
-            buf.push_field(
-                &QUESTION_CHILD_FIELDS[QFD_TYPE],
-                FieldValue::U16(qtype),
-                offset + pos..offset + pos + 2,
-            );
-            buf.push_field(
-                &QUESTION_CHILD_FIELDS[QFD_CLASS],
-                FieldValue::U16(qclass),
-                offset + pos + 2..offset + pos + 4,
-            );
+
+            // RFC 6891 — OPT pseudo-record has different field semantics.
+            // RFC 6762, Section 10.2 also specifies that the cache-flush bit
+            // reuse does NOT apply to pseudo-RRs like OPT — the rrclass field
+            // remains the full 16-bit UDP payload size.
+            // <https://www.rfc-editor.org/rfc/rfc6762#section-10.2>
+            if rtype == TYPE_OPT {
+                let extended_rcode = ((ttl >> 24) & 0xFF) as u8;
+                let edns_version = ((ttl >> 16) & 0xFF) as u8;
+                let do_bit = ((ttl >> 15) & 1) as u8;
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_NAME],
+                    FieldValue::Bytes(&data[name_start..pos]),
+                    offset + name_start..offset + pos,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_TYPE],
+                    FieldValue::U16(rtype),
+                    offset + pos..offset + pos + 2,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_UDP_PAYLOAD_SIZE],
+                    FieldValue::U16(rclass_raw),
+                    offset + pos + 2..offset + pos + 4,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_EXTENDED_RCODE],
+                    FieldValue::U8(extended_rcode),
+                    offset + pos + 4..offset + pos + 8,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_EDNS_VERSION],
+                    FieldValue::U8(edns_version),
+                    offset + pos + 4..offset + pos + 8,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_DO_BIT],
+                    FieldValue::U8(do_bit),
+                    offset + pos + 4..offset + pos + 8,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDLENGTH],
+                    FieldValue::U16(rdlength as u16),
+                    offset + pos + 8..offset + pos + 10,
+                );
+                let edns_arr_idx = buf.begin_container(
+                    &RR_CHILD_FIELDS[RRFD_EDNS_OPTIONS],
+                    FieldValue::Array(0..0),
+                    offset + pos + 10..offset + pos + 10 + rdlength,
+                );
+                parse_edns_options(buf, rdata, offset + pos + 10);
+                buf.end_container(edns_arr_idx);
+            } else {
+                // RFC 6762, Section 18.13 / 10.2 — in mDNS the top bit of
+                // rrclass is the cache-flush bit on non-OPT records.
+                // <https://www.rfc-editor.org/rfc/rfc6762#section-18.13>
+                let (rclass, cache_flush_bit) = if mdns_mode {
+                    (rclass_raw & 0x7FFF, ((rclass_raw >> 15) & 1) as u8)
+                } else {
+                    (rclass_raw, 0)
+                };
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_NAME],
+                    FieldValue::Bytes(&data[name_start..pos]),
+                    offset + name_start..offset + pos,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_TYPE],
+                    FieldValue::U16(rtype),
+                    offset + pos..offset + pos + 2,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_CLASS],
+                    FieldValue::U16(rclass),
+                    offset + pos + 2..offset + pos + 4,
+                );
+                if mdns_mode {
+                    buf.push_field(
+                        &RR_CHILD_FIELDS[RRFD_CACHE_FLUSH],
+                        FieldValue::U8(cache_flush_bit),
+                        offset + pos + 2..offset + pos + 4,
+                    );
+                }
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_TTL],
+                    FieldValue::U32(ttl),
+                    offset + pos + 4..offset + pos + 8,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDLENGTH],
+                    FieldValue::U16(rdlength as u16),
+                    offset + pos + 8..offset + pos + 10,
+                );
+                // RFC 1035, Section 3.2 — Parse RDATA based on record type
+                parse_rdata(buf, data, pos + 10, rdata, rtype, offset + pos + 10);
+            }
+
             buf.end_container(obj_idx);
-            pos += 4;
+            pos += 10 + rdlength;
         }
-        if let Some(idx) = questions_array_idx {
-            // Update the range on the array container
+        if let Some(idx) = array_idx {
             if let Some(field) = buf.field_mut(idx as usize) {
-                field.range = offset + questions_start..offset + pos;
+                field.range = offset + section_start..offset + pos;
             }
             buf.end_container(idx);
         }
-
-        // RFC 1035, Section 4.1.3 — Resource Records (Answer, Authority, Additional)
-        let sections: &[(usize, u16)] = &[
-            (FD_ANSWERS, ancount),
-            (FD_AUTHORITIES, nscount),
-            (FD_ADDITIONALS, arcount),
-        ];
-
-        for &(section_fd, count) in sections {
-            let section_start = pos;
-            let count = count as usize;
-            let array_idx = if count > 0 {
-                Some(buf.begin_container(
-                    &DNS_FIELD_DESCRIPTORS[section_fd],
-                    FieldValue::Array(0..0),
-                    offset + section_start..offset + section_start,
-                ))
-            } else {
-                None
-            };
-            for _i in 0..count {
-                let name_len = parse_name(data, pos)?;
-                let name_start = pos;
-                pos += name_len;
-
-                // TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes
-                if pos + 10 > data.len() {
-                    return Err(PacketError::Truncated {
-                        expected: pos + 10,
-                        actual: data.len(),
-                    });
-                }
-
-                let rtype = read_be_u16(data, pos)?;
-                let rclass = read_be_u16(data, pos + 2)?;
-                let ttl = read_be_u32(data, pos + 4)?;
-                let rdlength = read_be_u16(data, pos + 8)? as usize;
-
-                if pos + 10 + rdlength > data.len() {
-                    return Err(PacketError::Truncated {
-                        expected: pos + 10 + rdlength,
-                        actual: data.len(),
-                    });
-                }
-
-                let rdata = &data[pos + 10..pos + 10 + rdlength];
-                let record_end = pos + 10 + rdlength;
-
-                let obj_idx = buf.begin_container(
-                    &RR_CHILD_FIELDS[RRFD_NAME],
-                    FieldValue::Object(0..0),
-                    offset + name_start..offset + record_end,
-                );
-
-                // RFC 6891 — OPT pseudo-record has different field semantics
-                if rtype == TYPE_OPT {
-                    let extended_rcode = ((ttl >> 24) & 0xFF) as u8;
-                    let edns_version = ((ttl >> 16) & 0xFF) as u8;
-                    let do_bit = ((ttl >> 15) & 1) as u8;
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_NAME],
-                        FieldValue::Bytes(&data[name_start..pos]),
-                        offset + name_start..offset + pos,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_TYPE],
-                        FieldValue::U16(rtype),
-                        offset + pos..offset + pos + 2,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_UDP_PAYLOAD_SIZE],
-                        FieldValue::U16(rclass),
-                        offset + pos + 2..offset + pos + 4,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_EXTENDED_RCODE],
-                        FieldValue::U8(extended_rcode),
-                        offset + pos + 4..offset + pos + 8,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_EDNS_VERSION],
-                        FieldValue::U8(edns_version),
-                        offset + pos + 4..offset + pos + 8,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_DO_BIT],
-                        FieldValue::U8(do_bit),
-                        offset + pos + 4..offset + pos + 8,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDLENGTH],
-                        FieldValue::U16(rdlength as u16),
-                        offset + pos + 8..offset + pos + 10,
-                    );
-                    let edns_arr_idx = buf.begin_container(
-                        &RR_CHILD_FIELDS[RRFD_EDNS_OPTIONS],
-                        FieldValue::Array(0..0),
-                        offset + pos + 10..offset + pos + 10 + rdlength,
-                    );
-                    parse_edns_options(buf, rdata, offset + pos + 10);
-                    buf.end_container(edns_arr_idx);
-                } else {
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_NAME],
-                        FieldValue::Bytes(&data[name_start..pos]),
-                        offset + name_start..offset + pos,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_TYPE],
-                        FieldValue::U16(rtype),
-                        offset + pos..offset + pos + 2,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_CLASS],
-                        FieldValue::U16(rclass),
-                        offset + pos + 2..offset + pos + 4,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_TTL],
-                        FieldValue::U32(ttl),
-                        offset + pos + 4..offset + pos + 8,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDLENGTH],
-                        FieldValue::U16(rdlength as u16),
-                        offset + pos + 8..offset + pos + 10,
-                    );
-                    // RFC 1035, Section 3.2 — Parse RDATA based on record type
-                    parse_rdata(buf, data, pos + 10, rdata, rtype, offset + pos + 10);
-                }
-
-                buf.end_container(obj_idx);
-                pos += 10 + rdlength;
-            }
-            if let Some(idx) = array_idx {
-                if let Some(field) = buf.field_mut(idx as usize) {
-                    field.range = offset + section_start..offset + pos;
-                }
-                buf.end_container(idx);
-            }
-        }
-
-        // Update layer range to actual consumed bytes
-        if let Some(layer) = buf.last_layer_mut() {
-            layer.range = offset..offset + pos;
-        }
-        buf.end_layer();
-
-        Ok(DissectResult::new(pos, DispatchHint::End))
     }
+
+    // Update layer range to actual consumed bytes
+    if let Some(layer) = buf.last_layer_mut() {
+        layer.range = offset..offset + pos;
+    }
+    buf.end_layer();
+
+    Ok(DissectResult::new(pos, DispatchHint::End))
 }
 
 /// Dissect a complete DNS-over-TCP message (length prefix + DNS payload).
