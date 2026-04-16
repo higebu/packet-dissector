@@ -7,10 +7,10 @@
 //! - RFC 1256 (Router Discovery): <https://www.rfc-editor.org/rfc/rfc1256>
 //! - RFC 2521 (ICMP Security Failures / Photuris): <https://www.rfc-editor.org/rfc/rfc2521>
 //! - RFC 4065 (Seamoby Experimental Mobility): <https://www.rfc-editor.org/rfc/rfc4065>
-//! - RFC 4884 (Extended ICMP): <https://www.rfc-editor.org/rfc/rfc4884>
+//! - RFC 4884 (Extended ICMP — adds Length at offset 5 for Types 3/11/12): <https://www.rfc-editor.org/rfc/rfc4884>
 //! - RFC 6633 (Deprecation of Source Quench): <https://www.rfc-editor.org/rfc/rfc6633>
-//! - RFC 6918 (Deprecation of Type 0-related Query Messages): <https://www.rfc-editor.org/rfc/rfc6918>
-//! - RFC 8335 (PROBE — Extended Echo): <https://www.rfc-editor.org/rfc/rfc8335>
+//! - RFC 6918 (Formally Deprecating Types 6, 15–18, 30–39): <https://www.rfc-editor.org/rfc/rfc6918>
+//! - RFC 8335 (PROBE — Extended Echo Request/Reply, Types 42/43): <https://www.rfc-editor.org/rfc/rfc8335>
 
 #![deny(missing_docs)]
 
@@ -67,6 +67,8 @@ const FD_STATE: usize = 21;
 const FD_ACTIVE: usize = 22;
 const FD_IPV4: usize = 23;
 const FD_IPV6: usize = 24;
+const FD_PHOTURIS_RESERVED: usize = 25;
+const FD_PHOTURIS_POINTER: usize = 26;
 
 const IPC_VERSION: usize = 0;
 const IPC_IHL: usize = 1;
@@ -95,7 +97,11 @@ const REC_PREFERENCE_LEVEL: usize = 1;
 
 static ROUTER_ENTRY_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("router_address", "Router Address", FieldType::Ipv4Addr),
-    FieldDescriptor::new("preference_level", "Preference Level", FieldType::U32),
+    // RFC 1256, Section 3.1 — Preference Level is "A signed, twos-complement value;
+    // higher values mean more preferable." The minimum value (0x80000000 = i32::MIN)
+    // signals that the address MUST NOT be used as a default router.
+    // <https://www.rfc-editor.org/rfc/rfc1256#section-3.1>
+    FieldDescriptor::new("preference_level", "Preference Level", FieldType::I32),
 ];
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -139,6 +145,12 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("active", "Active", FieldType::U8).optional(),
     FieldDescriptor::new("ipv4", "IPv4", FieldType::U8).optional(),
     FieldDescriptor::new("ipv6", "IPv6", FieldType::U8).optional(),
+    // RFC 2521, Section 2 — Photuris (Type 40) Reserved is 16 bits, Pointer is 16 bits.
+    // These distinct descriptors coexist with the 8-bit `pointer` used by Parameter
+    // Problem (Type 12, RFC 792) so each field carries the correct declared width.
+    // <https://www.rfc-editor.org/rfc/rfc2521#section-2>
+    FieldDescriptor::new("photuris_reserved", "Reserved", FieldType::U16).optional(),
+    FieldDescriptor::new("photuris_pointer", "Pointer", FieldType::U16).optional(),
 ];
 
 /// ICMP dissector.
@@ -286,7 +298,8 @@ impl Dissector for IcmpDissector {
         );
 
         match icmp_type {
-            // Echo Reply (0) / Echo Request (8)
+            // RFC 792 — Echo Reply (0) / Echo Request (8)
+            // <https://www.rfc-editor.org/rfc/rfc792#page-14>
             0 | 8 => {
                 let identifier = read_be_u16(data, 4)?;
                 let sequence_number = read_be_u16(data, 6)?;
@@ -308,9 +321,12 @@ impl Dissector for IcmpDissector {
                     );
                 }
             }
-            // Destination Unreachable (3)
+            // RFC 792 — Destination Unreachable (3)
+            // <https://www.rfc-editor.org/rfc/rfc792#page-4>
             // Safe: HEADER_SIZE check (8 bytes) guarantees indices 0..7
             3 => {
+                // RFC 4884, Section 4.5 — Length field (offset 5) in 32-bit words.
+                // <https://www.rfc-editor.org/rfc/rfc4884#section-4.5>
                 let length = data[5];
                 if length > 0 {
                     buf.push_field(
@@ -320,6 +336,8 @@ impl Dissector for IcmpDissector {
                     );
                 }
                 if code == 4 {
+                    // RFC 1191, Section 4 — Next-Hop MTU (u16 at offset 6).
+                    // <https://www.rfc-editor.org/rfc/rfc1191#section-4>
                     let next_hop_mtu = read_be_u16(data, 6)?;
                     buf.push_field(
                         &FIELD_DESCRIPTORS[FD_NEXT_HOP_MTU],
@@ -331,15 +349,19 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
             }
-            // Source Quench (4)
+            // RFC 792 / RFC 6633 — Source Quench (4), deprecated.
+            // <https://www.rfc-editor.org/rfc/rfc6633#section-1>
             4 => {
                 if data.len() > HEADER_SIZE {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
             }
-            // Time Exceeded (11)
+            // RFC 792 — Time Exceeded (11)
+            // <https://www.rfc-editor.org/rfc/rfc792#page-6>
             // Safe: HEADER_SIZE check (8 bytes) guarantees indices 0..7
             11 => {
+                // RFC 4884, Section 4.5 — Length field (offset 5) in 32-bit words.
+                // <https://www.rfc-editor.org/rfc/rfc4884#section-4.5>
                 let length = data[5];
                 if length > 0 {
                     buf.push_field(
@@ -352,7 +374,8 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
             }
-            // Redirect (5)
+            // RFC 792 — Redirect (5)
+            // <https://www.rfc-editor.org/rfc/rfc792#page-12>
             5 => {
                 let gateway = [data[4], data[5], data[6], data[7]];
                 buf.push_field(
@@ -364,14 +387,18 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
             }
-            // Parameter Problem (12)
+            // RFC 792 — Parameter Problem (12)
+            // <https://www.rfc-editor.org/rfc/rfc792#page-8>
             12 => {
+                // RFC 792 — Pointer (u8 at offset 4), identifies the octet in error.
                 let pointer = data[4];
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_POINTER],
                     FieldValue::U8(pointer),
                     offset + 4..offset + 5,
                 );
+                // RFC 4884, Section 4.5 — Length field (offset 5) in 32-bit words.
+                // <https://www.rfc-editor.org/rfc/rfc4884#section-4.5>
                 let length = data[5];
                 if length > 0 {
                     buf.push_field(
@@ -384,7 +411,8 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
             }
-            // Router Advertisement (9) — RFC 1256
+            // RFC 1256 — Router Advertisement (9)
+            // <https://www.rfc-editor.org/rfc/rfc1256>
             9 => {
                 let num_addrs = data[4];
                 let addr_entry_size = data[5];
@@ -417,7 +445,9 @@ impl Dissector for IcmpDissector {
                         break;
                     }
                     let router_addr = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
-                    let pref = read_be_u32(data, pos + 4)?;
+                    // RFC 1256, Section 3.1 — Preference Level is a signed 32-bit
+                    // twos-complement value. <https://www.rfc-editor.org/rfc/rfc1256#section-3.1>
+                    let pref = read_be_u32(data, pos + 4)? as i32;
                     let obj_idx = buf.begin_container(
                         &ROUTER_ENTRY_CHILDREN[REC_ROUTER_ADDRESS], // reuse descriptor for object marker
                         FieldValue::Object(0..0),
@@ -430,7 +460,7 @@ impl Dissector for IcmpDissector {
                     );
                     buf.push_field(
                         &ROUTER_ENTRY_CHILDREN[REC_PREFERENCE_LEVEL],
-                        FieldValue::U32(pref),
+                        FieldValue::I32(pref),
                         offset + pos + 4..offset + pos + 8,
                     );
                     buf.end_container(obj_idx);
@@ -438,9 +468,11 @@ impl Dissector for IcmpDissector {
                 }
                 buf.end_container(array_idx);
             }
-            // Router Solicitation (10) — no type-specific fields
+            // RFC 1256 — Router Solicitation (10), no type-specific fields
+            // <https://www.rfc-editor.org/rfc/rfc1256>
             10 => {}
-            // Timestamp (13) / Timestamp Reply (14)
+            // RFC 792 — Timestamp (13) / Timestamp Reply (14)
+            // <https://www.rfc-editor.org/rfc/rfc792#page-16>
             13 | 14 => {
                 if data.len() < TIMESTAMP_SIZE {
                     return Err(PacketError::Truncated {
@@ -479,7 +511,8 @@ impl Dissector for IcmpDissector {
                     offset + 16..offset + 20,
                 );
             }
-            // Information Request (15) / Information Reply (16)
+            // RFC 792 / RFC 6918 — Information Request (15) / Reply (16), deprecated.
+            // <https://www.rfc-editor.org/rfc/rfc6918#section-3>
             15 | 16 => {
                 let identifier = read_be_u16(data, 4)?;
                 let sequence_number = read_be_u16(data, 6)?;
@@ -494,7 +527,8 @@ impl Dissector for IcmpDissector {
                     offset + 6..offset + 8,
                 );
             }
-            // Address Mask Request (17) / Address Mask Reply (18)
+            // RFC 950 / RFC 6918 — Address Mask Request (17) / Reply (18), deprecated.
+            // <https://www.rfc-editor.org/rfc/rfc950>
             17 | 18 => {
                 if data.len() < ADDRESS_MASK_SIZE {
                     return Err(PacketError::Truncated {
@@ -521,11 +555,20 @@ impl Dissector for IcmpDissector {
                     offset + 8..offset + 12,
                 );
             }
-            // Photuris (40)
+            // ICMP Security Failures / Photuris (Type 40) — RFC 2521, Section 2.
+            // Layout: Reserved (u16 at offset 4), Pointer (u16 at offset 6), then
+            // the Original Internet Headers + 64 bits of the offending payload.
+            // <https://www.rfc-editor.org/rfc/rfc2521#section-2>
             40 => {
+                let reserved = read_be_u16(data, 4)?;
                 let pointer = read_be_u16(data, 6)?;
                 buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_POINTER],
+                    &FIELD_DESCRIPTORS[FD_PHOTURIS_RESERVED],
+                    FieldValue::U16(reserved),
+                    offset + 4..offset + 6,
+                );
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_PHOTURIS_POINTER],
                     FieldValue::U16(pointer),
                     offset + 6..offset + 8,
                 );
@@ -533,7 +576,8 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
             }
-            // Experimental Mobility (41)
+            // RFC 4065, Section 8 — Experimental Mobility (41)
+            // <https://www.rfc-editor.org/rfc/rfc4065#section-8>
             41 => {
                 let subtype = data[4];
                 buf.push_field(
@@ -549,7 +593,8 @@ impl Dissector for IcmpDissector {
                     );
                 }
             }
-            // Extended Echo Request (42) — RFC 8335, Section 2
+            // RFC 8335, Section 2 — Extended Echo Request (42)
+            // <https://www.rfc-editor.org/rfc/rfc8335#section-2>
             42 => {
                 let identifier = read_be_u16(data, 4)?;
                 // RFC 8335: Sequence Number is 1 byte, promoted to U16
@@ -579,7 +624,8 @@ impl Dissector for IcmpDissector {
                     );
                 }
             }
-            // Extended Echo Reply (43) — RFC 8335, Section 2
+            // RFC 8335, Section 3 — Extended Echo Reply (43)
+            // <https://www.rfc-editor.org/rfc/rfc8335#section-3>
             43 => {
                 let identifier = read_be_u16(data, 4)?;
                 // RFC 8335: Sequence Number is 1 byte, promoted to U16
@@ -632,15 +678,29 @@ impl Dissector for IcmpDissector {
 
 #[cfg(test)]
 mod tests {
-    //! # ICMP invoking packet coverage
+    //! # RFC Coverage
     //!
-    //! | RFC Section                     | Description                          | Test                                      |
-    //! |---------------------------------|--------------------------------------|-------------------------------------------|
-    //! | RFC 792 Destination Unreachable  | IPv4 header only (regression)        | parse_invoking_packet_ipv4_only           |
-    //! | RFC 792 Destination Unreachable  | UDP src_port/dst_port extraction     | parse_dest_unreachable_udp_ports          |
-    //! | RFC 792 Destination Unreachable  | TCP src_port/dst_port extraction     | parse_dest_unreachable_tcp_ports          |
-    //! | RFC 792 Destination Unreachable  | Other protocol → raw bytes           | parse_dest_unreachable_other_protocol     |
-    //! | RFC 792 Destination Unreachable  | Truncated transport (no ports)       | parse_dest_unreachable_truncated_transport |
+    //! | RFC Section                        | Description                            | Test                                           |
+    //! |------------------------------------|----------------------------------------|------------------------------------------------|
+    //! | RFC 792 Echo Request/Reply         | Echo Request basic fields              | parse_echo_request                             |
+    //! | RFC 792 Destination Unreachable    | Code 4 Next-Hop MTU (RFC 1191)         | parse_dest_unreachable_fragmentation_needed     |
+    //! | RFC 4884 §4.5                      | Length field (offset 5)                | parse_dest_unreachable_with_rfc4884_length      |
+    //! | RFC 792 Destination Unreachable    | IPv4 header only (regression)          | parse_invoking_packet_ipv4_only                |
+    //! | RFC 792 Destination Unreachable    | UDP src_port/dst_port extraction       | parse_dest_unreachable_udp_ports               |
+    //! | RFC 792 Destination Unreachable    | TCP src_port/dst_port extraction       | parse_dest_unreachable_tcp_ports               |
+    //! | RFC 792 Destination Unreachable    | Other protocol → raw bytes             | parse_dest_unreachable_other_protocol          |
+    //! | RFC 792 Destination Unreachable    | Truncated transport (no ports)         | parse_dest_unreachable_truncated_transport      |
+    //! | RFC 792 Redirect                   | Gateway address                        | parse_redirect                                 |
+    //! | RFC 792 Parameter Problem          | Pointer + RFC 4884 Length              | parse_parameter_problem                        |
+    //! | RFC 792 Timestamp                  | 20-byte timestamp fields               | parse_timestamp_request                        |
+    //! | RFC 792 Timestamp                  | Truncated timestamp → error            | parse_timestamp_truncated                      |
+    //! | RFC 950 Address Mask               | Identifier + Seq + Mask                | parse_address_mask_reply                       |
+    //! | RFC 1256 Router Advertisement      | Signed preference level                | parse_router_advertisement_signed_preference   |
+    //! | RFC 1256 Router Advertisement      | Do-not-use preference (0x80000000)     | parse_router_advertisement_do_not_use          |
+    //! | RFC 2521 Photuris (Type 40)        | Reserved(u16) + Pointer(u16)           | parse_photuris                                 |
+    //! | RFC 8335 §2 Extended Echo Request  | Identifier, Seq(u8), L-bit             | parse_extended_echo_request                    |
+    //! | RFC 8335 §3 Extended Echo Reply    | State, Active, IPv4, IPv6 flags        | parse_extended_echo_reply                      |
+    //! | RFC 792                            | Header < 8 bytes → Truncated error     | parse_truncated_header                         |
 
     use super::*;
 
@@ -822,5 +882,382 @@ mod tests {
                 .iter()
                 .all(|f| f.descriptor.name != "transport_data")
         );
+    }
+
+    // ---- Basic type coverage tests ----
+
+    #[test]
+    fn parse_truncated_header() {
+        let data = [0x08, 0x00, 0x00, 0x00]; // only 4 bytes, need 8
+        let mut buf = DissectBuffer::new();
+        let err = IcmpDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PacketError::Truncated {
+                    expected: 8,
+                    actual: 4
+                }
+            ),
+            "expected Truncated(8,4), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_echo_request() {
+        // RFC 792 Echo Request: type=8, code=0, checksum, id=0x1234, seq=0x0001, data
+        let data: &[u8] = &[
+            0x08, 0x00, 0xAB, 0xCD, // type=8, code=0, checksum=0xABCD
+            0x12, 0x34, 0x00, 0x01, // id=0x1234, seq=1
+            0xDE, 0xAD, // 2 bytes payload
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        assert_eq!(fields[FD_TYPE].value, FieldValue::U8(8));
+        assert_eq!(fields[FD_CODE].value, FieldValue::U8(0));
+        assert_eq!(fields[FD_CHECKSUM].value, FieldValue::U16(0xABCD));
+        let id = fields
+            .iter()
+            .find(|f| f.descriptor.name == "identifier")
+            .unwrap();
+        assert_eq!(id.value, FieldValue::U16(0x1234));
+        let seq = fields
+            .iter()
+            .find(|f| f.descriptor.name == "sequence_number")
+            .unwrap();
+        assert_eq!(seq.value, FieldValue::U16(1));
+        let payload = fields.iter().find(|f| f.descriptor.name == "data").unwrap();
+        assert_eq!(payload.value, FieldValue::Bytes(&[0xDE, 0xAD]));
+    }
+
+    #[test]
+    fn parse_dest_unreachable_fragmentation_needed() {
+        // RFC 1191 — Type 3, Code 4: Next-Hop MTU at offset 6.
+        let data: &[u8] = &[
+            0x03, 0x04, 0x00, 0x00, // type=3, code=4, checksum
+            0x00, 0x00, 0x05, 0xDC, // unused=0, next_hop_mtu=1500
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let mtu = fields
+            .iter()
+            .find(|f| f.descriptor.name == "next_hop_mtu")
+            .unwrap();
+        assert_eq!(mtu.value, FieldValue::U16(1500));
+    }
+
+    #[test]
+    fn parse_dest_unreachable_with_rfc4884_length() {
+        // RFC 4884 — Length field at offset 5 (non-zero → exposed).
+        let mut data = vec![
+            0x03, 0x01, 0x00, 0x00, // type=3, code=1, checksum
+            0x00, 0x07, 0x00, 0x00, // unused, length=7 (28 bytes), unused
+        ];
+        // Append 28 bytes of invoking data (7 * 4)
+        data.extend_from_slice(&[0u8; 28]);
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let len = fields
+            .iter()
+            .find(|f| f.descriptor.name == "length")
+            .unwrap();
+        assert_eq!(len.value, FieldValue::U8(7));
+    }
+
+    #[test]
+    fn parse_redirect() {
+        // RFC 792 Redirect — Type 5, Code 1, Gateway at offset 4–7.
+        let data: &[u8] = &[
+            0x05, 0x01, 0x00, 0x00, // type=5, code=1, checksum
+            0xC0, 0xA8, 0x01, 0x01, // gateway=192.168.1.1
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let gw = fields
+            .iter()
+            .find(|f| f.descriptor.name == "gateway")
+            .unwrap();
+        assert_eq!(gw.value, FieldValue::Ipv4Addr([192, 168, 1, 1]));
+    }
+
+    #[test]
+    fn parse_parameter_problem() {
+        // RFC 792 — Type 12: Pointer at offset 4 (u8), RFC 4884 Length at offset 5.
+        let data: &[u8] = &[
+            0x0C, 0x00, 0x00, 0x00, // type=12, code=0, checksum
+            0x08, 0x03, 0x00, 0x00, // pointer=8, length=3, unused
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let ptr = fields
+            .iter()
+            .find(|f| f.descriptor.name == "pointer")
+            .unwrap();
+        assert_eq!(ptr.value, FieldValue::U8(8));
+        assert_eq!(ptr.descriptor.field_type, FieldType::U8);
+        let len = fields
+            .iter()
+            .find(|f| f.descriptor.name == "length")
+            .unwrap();
+        assert_eq!(len.value, FieldValue::U8(3));
+    }
+
+    #[test]
+    fn parse_timestamp_request() {
+        // RFC 792 Timestamp Request — 20 bytes total.
+        let data: &[u8] = &[
+            0x0D, 0x00, 0x00, 0x00, // type=13, code=0, checksum
+            0x00, 0x01, 0x00, 0x02, // id=1, seq=2
+            0x00, 0x01, 0x51, 0x80, // originate=86400 (ms)
+            0x00, 0x02, 0xA3, 0x00, // receive=172800
+            0x00, 0x03, 0xF4, 0x80, // transmit=259200
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let orig = fields
+            .iter()
+            .find(|f| f.descriptor.name == "originate_timestamp")
+            .unwrap();
+        assert_eq!(orig.value, FieldValue::U32(86400));
+        let recv = fields
+            .iter()
+            .find(|f| f.descriptor.name == "receive_timestamp")
+            .unwrap();
+        assert_eq!(recv.value, FieldValue::U32(172800));
+        let xmit = fields
+            .iter()
+            .find(|f| f.descriptor.name == "transmit_timestamp")
+            .unwrap();
+        assert_eq!(xmit.value, FieldValue::U32(259200));
+    }
+
+    #[test]
+    fn parse_timestamp_truncated() {
+        // Timestamp requires 20 bytes; supply only 16.
+        let data: &[u8] = &[
+            0x0D, 0x00, 0x00, 0x00, // type=13
+            0x00, 0x01, 0x00, 0x02, // id, seq
+            0x00, 0x00, 0x00, 0x00, // originate
+            0x00, 0x00, 0x00, 0x00, // receive (no transmit)
+        ];
+        let mut buf = DissectBuffer::new();
+        let err = IcmpDissector.dissect(data, &mut buf, 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PacketError::Truncated {
+                    expected: 20,
+                    actual: 16
+                }
+            ),
+            "expected Truncated(20,16), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_address_mask_reply() {
+        // RFC 950 — Type 18, Address Mask Reply.
+        let data: &[u8] = &[
+            0x12, 0x00, 0x00, 0x00, // type=18, code=0, checksum
+            0x00, 0x0A, 0x00, 0x05, // id=10, seq=5
+            0xFF, 0xFF, 0xFF, 0x00, // mask=255.255.255.0
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let mask = fields
+            .iter()
+            .find(|f| f.descriptor.name == "address_mask")
+            .unwrap();
+        assert_eq!(mask.value, FieldValue::Ipv4Addr([255, 255, 255, 0]));
+    }
+
+    // ---- Bug-regression tests (previously incorrect behavior) ----
+
+    #[test]
+    fn parse_router_advertisement_signed_preference() {
+        // RFC 1256, Section 3.1 — Preference Level is signed twos-complement.
+        // Positive preference 0x00000064 = 100.
+        let data: &[u8] = &[
+            0x09, 0x00, 0x00, 0x00, // type=9, code=0, checksum
+            0x01, 0x02, 0x00, 0x1E, // num_addrs=1, addr_entry_size=2, lifetime=30
+            0xC0, 0xA8, 0x01, 0x01, // router_address=192.168.1.1
+            0x00, 0x00, 0x00, 0x64, // preference_level=+100
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let entries = fields
+            .iter()
+            .find(|f| f.descriptor.name == "entries")
+            .unwrap();
+        let range = match &entries.value {
+            FieldValue::Array(r) => r.clone(),
+            other => panic!("expected Array, got {other:?}"),
+        };
+        let items = buf.nested_fields(&range);
+        let obj = items.iter().find(|f| f.value.is_object()).unwrap();
+        let obj_range = match &obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&obj_range);
+        let pref = children
+            .iter()
+            .find(|f| f.descriptor.name == "preference_level")
+            .unwrap();
+        // Must be I32, not U32
+        assert_eq!(pref.descriptor.field_type, FieldType::I32);
+        assert_eq!(pref.value, FieldValue::I32(100));
+    }
+
+    #[test]
+    fn parse_router_advertisement_do_not_use() {
+        // RFC 1256 — 0x80000000 (i32::MIN) signals "do not use as default router".
+        let data: &[u8] = &[
+            0x09, 0x00, 0x00, 0x00, // type=9, code=0, checksum
+            0x01, 0x02, 0x00, 0x1E, // num_addrs=1, addr_entry_size=2, lifetime=30
+            0x0A, 0x00, 0x00, 0x01, // router_address=10.0.0.1
+            0x80, 0x00, 0x00, 0x00, // preference_level=0x80000000 = i32::MIN
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let entries = fields
+            .iter()
+            .find(|f| f.descriptor.name == "entries")
+            .unwrap();
+        let range = match &entries.value {
+            FieldValue::Array(r) => r.clone(),
+            other => panic!("expected Array, got {other:?}"),
+        };
+        let items = buf.nested_fields(&range);
+        let obj = items.iter().find(|f| f.value.is_object()).unwrap();
+        let obj_range = match &obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&obj_range);
+        let pref = children
+            .iter()
+            .find(|f| f.descriptor.name == "preference_level")
+            .unwrap();
+        assert_eq!(pref.value, FieldValue::I32(i32::MIN));
+    }
+
+    #[test]
+    fn parse_photuris() {
+        // RFC 2521, Section 2 — Type 40: Reserved (u16 at 4–5), Pointer (u16 at 6–7).
+        let data: &[u8] = &[
+            0x28, 0x01, 0x00, 0x00, // type=40, code=1 (Auth Failed), checksum
+            0x00, 0x00, 0x00, 0x14, // reserved=0, pointer=20
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+
+        // Verify Reserved field is U16
+        let reserved = fields
+            .iter()
+            .find(|f| f.descriptor.name == "photuris_reserved")
+            .unwrap();
+        assert_eq!(reserved.value, FieldValue::U16(0));
+        assert_eq!(reserved.descriptor.field_type, FieldType::U16);
+
+        // Verify Pointer field is U16 (not U8 as it was before the fix)
+        let ptr = fields
+            .iter()
+            .find(|f| f.descriptor.name == "photuris_pointer")
+            .unwrap();
+        assert_eq!(ptr.value, FieldValue::U16(20));
+        assert_eq!(ptr.descriptor.field_type, FieldType::U16);
+    }
+
+    // ---- RFC 8335 Extended Echo ----
+
+    #[test]
+    fn parse_extended_echo_request() {
+        // RFC 8335, Section 2 — Type 42, Seq=u8 at offset 6, L-bit at offset 7 bit 0.
+        let data: &[u8] = &[
+            0x2A, 0x00, 0x00, 0x00, // type=42, code=0, checksum
+            0xAB, 0xCD, 0x07, 0x01, // id=0xABCD, seq=7, Reserved|L=1 (L-bit set)
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let id = fields
+            .iter()
+            .find(|f| f.descriptor.name == "identifier")
+            .unwrap();
+        assert_eq!(id.value, FieldValue::U16(0xABCD));
+        let seq = fields
+            .iter()
+            .find(|f| f.descriptor.name == "sequence_number")
+            .unwrap();
+        // Sequence Number is 1 byte (value=7) promoted to U16.
+        assert_eq!(seq.value, FieldValue::U16(7));
+        let local = fields
+            .iter()
+            .find(|f| f.descriptor.name == "local")
+            .unwrap();
+        assert_eq!(local.value, FieldValue::U8(1)); // L-bit set
+    }
+
+    #[test]
+    fn parse_extended_echo_reply() {
+        // RFC 8335, Section 3 — Type 43, flags in offset 7:
+        // State(3 bits)=2 (Reachable), Res(2)=0, A(1)=1, 4(1)=1, 6(1)=0
+        // Byte 7 = 0b010_00_1_1_0 = 0x46
+        let data: &[u8] = &[
+            0x2B, 0x00, 0x00, 0x00, // type=43, code=0, checksum
+            0x00, 0x01, 0x03, 0x46, // id=1, seq=3, flags=0x46
+        ];
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let state = fields
+            .iter()
+            .find(|f| f.descriptor.name == "state")
+            .unwrap();
+        assert_eq!(state.value, FieldValue::U8(2)); // Reachable
+        let active = fields
+            .iter()
+            .find(|f| f.descriptor.name == "active")
+            .unwrap();
+        assert_eq!(active.value, FieldValue::U8(1));
+        let ipv4 = fields.iter().find(|f| f.descriptor.name == "ipv4").unwrap();
+        assert_eq!(ipv4.value, FieldValue::U8(1));
+        let ipv6 = fields.iter().find(|f| f.descriptor.name == "ipv6").unwrap();
+        assert_eq!(ipv6.value, FieldValue::U8(0));
     }
 }
