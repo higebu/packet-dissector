@@ -4,8 +4,13 @@
 //! Each attribute is represented as an element in an Array of Objects.
 //!
 //! ## References
-//! - RFC 2865: <https://www.rfc-editor.org/rfc/rfc2865>
-//! - RFC 2866: <https://www.rfc-editor.org/rfc/rfc2866>
+//! - RFC 2865 (RADIUS base protocol): <https://www.rfc-editor.org/rfc/rfc2865>
+//! - RFC 2866 (RADIUS Accounting): <https://www.rfc-editor.org/rfc/rfc2866>
+//!
+//! RFC 2865 is also updated by the following RFCs. They do not alter the
+//! wire format parsed here, but are recorded for completeness:
+//! - RFC 3575 (IANA Considerations for RADIUS): <https://www.rfc-editor.org/rfc/rfc3575>
+//! - RFC 5997 (Use of Status-Server Packets): <https://www.rfc-editor.org/rfc/rfc5997>
 
 #![deny(missing_docs)]
 
@@ -23,21 +28,34 @@ use attr::{RadiusAttrType, code_name, enum_value_name, lookup_attr};
 ///
 /// RFC 2865, Section 3 — "A RADIUS packet is a minimum of 20 and maximum of
 /// 4096 octets."
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-3>
 const HEADER_SIZE: usize = 20;
 
 /// Minimum attribute size: Type(1) + Length(1).
 ///
 /// RFC 2865, Section 5 — "The Length field is one octet, and indicates the
 /// length of this Attribute including the Type, Length and Value fields."
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
 const MIN_ATTR_SIZE: usize = 2;
 
-/// Maximum RADIUS packet length (RFC 2865, Section 3).
+/// Maximum RADIUS packet length.
+///
+/// RFC 2865, Section 3 — "minimum of 20 and maximum of 4096 octets".
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-3>
 const MAX_PACKET_LENGTH: usize = 4096;
 
-/// Vendor-Specific attribute type code (RFC 2865, Section 5.26).
+/// Vendor-Specific attribute type code.
+///
+/// RFC 2865, Section 5.26 — <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>
 const ATTR_VENDOR_SPECIFIC: u8 = 26;
 
 /// Minimum Vendor-Specific value size: Vendor-Id(4).
+///
+/// The RFC mandates Length >= 7 (i.e. value_data.len() >= 5), but we
+/// intentionally accept an empty String portion (value_data.len() == 4) so
+/// the Vendor-Id can still be surfaced for minimally malformed inputs
+/// (Postel's Law). See RFC 2865, Section 5.26 —
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>.
 const MIN_VSA_VALUE_SIZE: usize = 4;
 
 /// Field descriptor indices for [`ATTR_CHILD_FIELDS`].
@@ -118,17 +136,26 @@ fn attr_name_str(attr_type_code: u8) -> &'static str {
 /// Parse attribute value according to its type.
 ///
 /// RFC 2865, Section 5 — attribute data types.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
 fn parse_attr_value<'pkt>(attr_type: RadiusAttrType, data: &'pkt [u8]) -> FieldValue<'pkt> {
     match attr_type {
-        // RFC 2865, Section 5 — "1-253 octets containing UTF-8 text".
+        // RFC 2865, Section 5 — "1-253 octets containing UTF-8 encoded
+        // 10646 [7] characters".
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
         RadiusAttrType::Text => FieldValue::Bytes(data),
-        // RFC 2865, Section 5 — "1-253 octets containing binary data".
+        // RFC 2865, Section 5 — "1-253 octets containing binary data
+        // (values 0 through 255 decimal, inclusive)".
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
         RadiusAttrType::String => FieldValue::Bytes(data),
-        // RFC 2865, Section 5 — "32 bit value, most significant octet first".
+        // RFC 2865, Section 5 — "32 bit value, most significant octet
+        // first".
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
         RadiusAttrType::Address if data.len() == 4 => {
             FieldValue::Ipv4Addr(read_ipv4_addr(data, 0).unwrap_or_default())
         }
-        // RFC 2865, Section 5 — "32 bit unsigned value".
+        // RFC 2865, Section 5 — "32 bit unsigned value, most significant
+        // octet first".
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
         RadiusAttrType::Integer if data.len() == 4 => {
             FieldValue::U32(read_be_u32(data, 0).unwrap_or_default())
         }
@@ -149,8 +176,10 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
         let attr_type_code = attr_data[pos];
         let attr_len = attr_data[pos + 1] as usize;
 
-        // RFC 2865, Section 5 — Length includes Type and Length fields,
-        // so minimum valid length is 2.
+        // RFC 2865, Section 5 — "The Length field is one octet, and
+        // indicates the length of this Attribute including the Type, Length
+        // and Value fields." Stop parsing on malformed lengths.
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
         if attr_len < MIN_ATTR_SIZE || pos + attr_len > attr_data.len() {
             break;
         }
@@ -186,6 +215,7 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
 
         if attr_type_code == ATTR_VENDOR_SPECIFIC && value_data.len() >= MIN_VSA_VALUE_SIZE {
             // RFC 2865, Section 5.26 — Vendor-Specific: Vendor-Id(4) + String.
+            // <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>
             let vendor_id = read_be_u32(value_data, 0).unwrap_or_default();
             // Emit raw value bytes for consistent filtering across all attribute types.
             buf.push_field(
@@ -241,6 +271,7 @@ impl Dissector for RadiusDissector {
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
         // RFC 2865, Section 3 — Minimum header is 20 bytes.
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-3>
         if data.len() < HEADER_SIZE {
             return Err(PacketError::Truncated {
                 expected: HEADER_SIZE,
@@ -253,12 +284,17 @@ impl Dissector for RadiusDissector {
         let length = read_be_u16(data, 2)? as usize;
 
         // RFC 2865, Section 3 — "minimum of 20 and maximum of 4096 octets".
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-3>
         if !(HEADER_SIZE..=MAX_PACKET_LENGTH).contains(&length) {
             return Err(PacketError::InvalidHeader(
                 "RADIUS length out of valid range",
             ));
         }
 
+        // RFC 2865, Section 3 — "If the packet is shorter than the Length
+        // field indicates, it MUST be silently discarded." As a dissector
+        // we instead surface this as a Truncated error.
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-3>
         if length > data.len() {
             return Err(PacketError::Truncated {
                 expected: length,
@@ -289,6 +325,7 @@ impl Dissector for RadiusDissector {
             offset + 2..offset + 4,
         );
         // RFC 2865, Section 3 — 16-octet Authenticator field.
+        // <https://www.rfc-editor.org/rfc/rfc2865#section-3>
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_AUTHENTICATOR],
             FieldValue::Bytes(&data[4..20]),
@@ -327,23 +364,25 @@ mod tests {
     // | 2865 § 3      | Code: Access-Accept (2)              | test_parse_access_accept               |
     // | 2865 § 3      | Code: Access-Reject (3)              | test_parse_access_reject               |
     // | 2865 § 3      | Code: Access-Challenge (11)          | test_parse_access_challenge            |
-    // | 2865 § 3      | Length validation: < 20               | test_invalid_length_too_small          |
-    // | 2865 § 3      | Length validation: > 4096             | test_invalid_length_too_large          |
-    // | 2865 § 3      | Length > data.len()                   | test_truncated_by_length_field         |
+    // | 2865 § 3      | Length validation: < 20              | test_invalid_length_too_small          |
+    // | 2865 § 3      | Length validation: > 4096            | test_invalid_length_too_large          |
+    // | 2865 § 3      | Length > data.len()                  | test_truncated_by_length_field         |
     // | 2865 § 5      | Attribute TLV parsing                | test_parse_access_request              |
-    // | 2865 § 5.1    | User-Name (Text)                     | test_parse_access_request              |
+    // | 2865 § 5.1    | User-Name (String)                   | test_parse_access_request              |
     // | 2865 § 5.4    | NAS-IP-Address (Address)             | test_parse_address_attribute           |
     // | 2865 § 5.6    | Service-Type (Integer/Enum)          | test_parse_access_accept               |
     // | 2865 § 5.18   | Reply-Message (Text)                 | test_parse_access_reject               |
     // | 2865 § 5.26   | Vendor-Specific (type 26)            | test_parse_vendor_specific             |
+    // | 2865 § 5      | String-typed attrs match RFC labels  | attr::test_string_typed_attrs_match_rfc_labels |
+    // | 2865 § 5      | Text-typed attrs match RFC labels    | attr::test_text_typed_attrs_match_rfc_labels   |
     // | 2866 § 3      | Code: Accounting-Request (4)         | test_parse_accounting_request          |
     // | 2866 § 3      | Code: Accounting-Response (5)        | test_parse_accounting_response         |
     // | 2866 § 5.1    | Acct-Status-Type (Integer/Enum)      | test_parse_accounting_request          |
     // | ---           | Multiple attributes                  | test_parse_multiple_attributes         |
     // | ---           | Truncated header                     | test_truncated_header                  |
     // | ---           | Malformed attribute                  | test_malformed_attribute_stops_parsing |
-    // | ---           | No attributes (Length=20)             | test_no_attributes                     |
-    // | ---           | Unknown attribute type                | test_unknown_attribute_type             |
+    // | ---           | No attributes (Length=20)            | test_no_attributes                     |
+    // | ---           | Unknown attribute type               | test_unknown_attribute_type            |
     // | ---           | Field descriptors                    | test_field_descriptors                 |
     // | ---           | Byte ranges with offset              | test_dissect_with_offset               |
     // | ---           | All known code values                | test_code_values                       |
