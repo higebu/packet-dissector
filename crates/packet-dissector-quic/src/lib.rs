@@ -5,6 +5,7 @@
 //! dissector terminates the chain and does not dispatch to further dissectors.
 //!
 //! ## References
+//! - RFC 8999 (QUIC Invariants): <https://www.rfc-editor.org/rfc/rfc8999>
 //! - RFC 9000 (QUIC v1): <https://www.rfc-editor.org/rfc/rfc9000>
 //! - RFC 9001 (QUIC-TLS): <https://www.rfc-editor.org/rfc/rfc9001>
 //! - RFC 9369 (QUIC v2): <https://www.rfc-editor.org/rfc/rfc9369>
@@ -34,29 +35,73 @@ const VERSION_2: u32 = 0x6b33_43cf;
 /// Version Negotiation pseudo-version (RFC 9000, Section 17.2.1).
 const VERSION_NEGOTIATION: u32 = 0x0000_0000;
 
-/// Returns a human-readable name for the QUIC Long Header packet type.
+/// Retry Integrity Tag size in bytes.
 ///
-/// RFC 9000, Section 17.2 — <https://www.rfc-editor.org/rfc/rfc9000#section-17.2>
-fn packet_type_name(pt: u8) -> &'static str {
-    match pt {
-        0 => "Initial",
-        1 => "0-RTT",
-        2 => "Handshake",
-        3 => "Retry",
-        _ => "Unknown",
+/// RFC 9000, Section 17.2.5 — <https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5>
+/// RFC 9001, Section 5.8 — <https://www.rfc-editor.org/rfc/rfc9001#section-5.8>
+const RETRY_INTEGRITY_TAG_SIZE: usize = 16;
+
+/// Logical Long Header packet kind, independent of the on-wire type bits.
+///
+/// QUIC v1 and v2 use different type bits for the same logical packet kind;
+/// see [`packet_kind`] for the mapping.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum PacketKind {
+    /// Initial packet (carries the first CRYPTO frames and ACKs).
+    Initial,
+    /// 0-RTT packet (early application data before handshake completion).
+    ZeroRtt,
+    /// Handshake packet (carries cryptographic handshake messages).
+    Handshake,
+    /// Retry packet (server address-validation token).
+    Retry,
+}
+
+/// Resolve the logical [`PacketKind`] from a QUIC version and the two
+/// "Long Packet Type" bits from byte 0.
+///
+/// QUIC v1: RFC 9000, Section 17.2, Table 5 —
+/// <https://www.rfc-editor.org/rfc/rfc9000#section-17.2>
+///
+/// QUIC v2: RFC 9369, Section 3.2 —
+/// <https://www.rfc-editor.org/rfc/rfc9369#section-3.2>
+fn packet_kind(version: u32, type_bits: u8) -> Option<PacketKind> {
+    match version {
+        VERSION_1 => match type_bits {
+            0 => Some(PacketKind::Initial),
+            1 => Some(PacketKind::ZeroRtt),
+            2 => Some(PacketKind::Handshake),
+            3 => Some(PacketKind::Retry),
+            _ => None,
+        },
+        VERSION_2 => match type_bits {
+            1 => Some(PacketKind::Initial),
+            2 => Some(PacketKind::ZeroRtt),
+            3 => Some(PacketKind::Handshake),
+            0 => Some(PacketKind::Retry),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
-/// Returns a display name for the QUIC layer based on packet type.
-///
-/// Used as layer display_name to distinguish packet types in the UI.
-fn packet_type_display_name(pt: u8) -> Option<&'static str> {
-    match pt {
-        0 => Some("QUIC Initial"),
-        1 => Some("QUIC 0-RTT"),
-        2 => Some("QUIC Handshake"),
-        3 => Some("QUIC Retry"),
-        _ => None,
+/// Human-readable name for a logical packet kind (used for `packet_type_name`).
+fn packet_kind_short(kind: PacketKind) -> &'static str {
+    match kind {
+        PacketKind::Initial => "Initial",
+        PacketKind::ZeroRtt => "0-RTT",
+        PacketKind::Handshake => "Handshake",
+        PacketKind::Retry => "Retry",
+    }
+}
+
+/// Display name for a logical packet kind (used as layer display_name).
+fn packet_kind_display(kind: PacketKind) -> &'static str {
+    match kind {
+        PacketKind::Initial => "QUIC Initial",
+        PacketKind::ZeroRtt => "QUIC 0-RTT",
+        PacketKind::Handshake => "QUIC Handshake",
+        PacketKind::Retry => "QUIC Retry",
     }
 }
 
@@ -123,8 +168,10 @@ const FD_TOKEN_LENGTH: usize = 8;
 const FD_TOKEN: usize = 9;
 const FD_LENGTH: usize = 10;
 const FD_SUPPORTED_VERSIONS: usize = 11;
-const FD_SPIN_BIT: usize = 12;
-const FD_KEY_PHASE: usize = 13;
+const FD_RETRY_TOKEN: usize = 12;
+const FD_RETRY_INTEGRITY_TAG: usize = 13;
+const FD_SPIN_BIT: usize = 14;
+const FD_KEY_PHASE: usize = 15;
 
 /// Field descriptors for the QUIC dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -145,14 +192,29 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // 1: fixed_bit
     FieldDescriptor::new("fixed_bit", "Fixed Bit", FieldType::U8),
     // 2: packet_type (long header only)
+    //
+    // The display name depends on the QUIC version because v1 and v2 use
+    // different Long Packet Type bit values for the same logical packet kind.
+    // RFC 9000, Section 17.2, Table 5 — <https://www.rfc-editor.org/rfc/rfc9000#section-17.2>
+    // RFC 9369, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc9369#section-3.2>
     FieldDescriptor {
         name: "packet_type",
         display_name: "Packet Type",
         field_type: FieldType::U8,
         optional: true,
         children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(pt) => Some(packet_type_name(*pt)),
+        display_fn: Some(|v, siblings| match v {
+            FieldValue::U8(pt) => {
+                let version =
+                    siblings
+                        .iter()
+                        .find(|f| f.name() == "version")
+                        .and_then(|f| match &f.value {
+                            FieldValue::U32(ver) => Some(*ver),
+                            _ => None,
+                        })?;
+                packet_kind(version, *pt).map(packet_kind_short)
+            }
             _ => None,
         }),
         format_fn: None,
@@ -191,9 +253,18 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("length", "Length", FieldType::U64).optional(),
     // 11: supported_versions (Version Negotiation only)
     FieldDescriptor::new("supported_versions", "Supported Versions", FieldType::Array).optional(),
-    // 12: spin_bit (short header only)
+    // 12: retry_token (Retry only) — RFC 9000, Section 17.2.5
+    FieldDescriptor::new("retry_token", "Retry Token", FieldType::Bytes).optional(),
+    // 13: retry_integrity_tag (Retry only) — RFC 9001, Section 5.8
+    FieldDescriptor::new(
+        "retry_integrity_tag",
+        "Retry Integrity Tag",
+        FieldType::Bytes,
+    )
+    .optional(),
+    // 14: spin_bit (short header only)
     FieldDescriptor::new("spin_bit", "Spin Bit", FieldType::U8).optional(),
-    // 13: key_phase (short header only)
+    // 15: key_phase (short header only)
     FieldDescriptor::new("key_phase", "Key Phase", FieldType::U8).optional(),
 ];
 
@@ -383,8 +454,12 @@ impl QuicDissector {
             }
             buf.end_container(array_idx);
         } else {
+            // RFC 9000, Section 17.2 — Long Packet Type is bits 5..=4 of byte 0.
+            // Table 5 (v1) and RFC 9369, Section 3.2 (v2) give version-specific
+            // mappings from these bits to the logical packet kind.
             let packet_type = (first_byte >> 4) & 0x03;
-            display_name = packet_type_display_name(packet_type);
+            let kind = packet_kind(version, packet_type);
+            display_name = kind.map(packet_kind_display);
 
             buf.begin_layer(
                 self.short_name(),
@@ -420,8 +495,10 @@ impl QuicDissector {
                 offset,
             );
 
-            // Initial packets have a Token Length + Token before the Length field
-            if packet_type == 0 {
+            // RFC 9000, Section 17.2.2 — Initial packets carry Token Length + Token
+            // before the Length field. Other long-header kinds (0-RTT, Handshake)
+            // omit the token fields; Retry has no Token Length either.
+            if matches!(kind, Some(PacketKind::Initial)) {
                 if cursor >= data.len() {
                     return Err(PacketError::Truncated {
                         expected: cursor + 1,
@@ -456,24 +533,58 @@ impl QuicDissector {
                 cursor += token_len_usize;
             }
 
-            // RFC 9000, Section 17.2 — Retry has no Length or Packet Number
-            if packet_type != 3 {
-                if cursor >= data.len() {
-                    return Err(PacketError::Truncated {
-                        expected: cursor + 1,
-                        actual: data.len(),
-                    });
+            match kind {
+                Some(PacketKind::Retry) => {
+                    // RFC 9000, Section 17.2.5 — Retry has a variable-length
+                    // Retry Token followed by a 128-bit Retry Integrity Tag
+                    // (RFC 9001, Section 5.8). No Length or Packet Number.
+                    if data.len() < cursor + RETRY_INTEGRITY_TAG_SIZE {
+                        return Err(PacketError::Truncated {
+                            expected: cursor + RETRY_INTEGRITY_TAG_SIZE,
+                            actual: data.len(),
+                        });
+                    }
+                    let token_end = data.len() - RETRY_INTEGRITY_TAG_SIZE;
+                    let retry_token = &data[cursor..token_end];
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_RETRY_TOKEN],
+                        FieldValue::Bytes(retry_token),
+                        offset + cursor..offset + token_end,
+                    );
+                    let integrity_tag = &data[token_end..];
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_RETRY_INTEGRITY_TAG],
+                        FieldValue::Bytes(integrity_tag),
+                        offset + token_end..offset + data.len(),
+                    );
                 }
-                let (length, length_vi_size) =
-                    decode_varint(&data[cursor..]).ok_or(PacketError::Truncated {
-                        expected: cursor + 1,
-                        actual: data.len(),
-                    })?;
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_LENGTH],
-                    FieldValue::U64(length),
-                    offset + cursor..offset + cursor + length_vi_size,
-                );
+                Some(PacketKind::Initial | PacketKind::ZeroRtt | PacketKind::Handshake) => {
+                    // RFC 9000, Section 17.2 — Length field is a variable-length
+                    // integer giving the combined length of Packet Number and
+                    // Packet Payload. Both are header-protected and therefore
+                    // opaque without decryption keys.
+                    if cursor >= data.len() {
+                        return Err(PacketError::Truncated {
+                            expected: cursor + 1,
+                            actual: data.len(),
+                        });
+                    }
+                    let (length, length_vi_size) =
+                        decode_varint(&data[cursor..]).ok_or(PacketError::Truncated {
+                            expected: cursor + 1,
+                            actual: data.len(),
+                        })?;
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_LENGTH],
+                        FieldValue::U64(length),
+                        offset + cursor..offset + cursor + length_vi_size,
+                    );
+                }
+                None => {
+                    // Unknown version: the type-specific layout of the first
+                    // byte is not defined. Emit only the version-invariant
+                    // fields per RFC 8999, Section 5.1.
+                }
             }
         }
 
@@ -536,29 +647,37 @@ impl QuicDissector {
 mod tests {
     use super::*;
 
-    // # RFC 9000 / RFC 9369 Coverage
+    // # RFC 9000 / RFC 9001 / RFC 9369 Coverage
     //
-    // | RFC Section | Description                        | Test                              |
-    // |-------------|------------------------------------|-----------------------------------|
-    // | 17.2        | Long Header Format                 | test_parse_initial                |
-    // | 17.2        | Long Header: DCID/SCID             | test_parse_initial                |
-    // | 17.2.1      | Version Negotiation                | test_parse_version_negotiation    |
-    // | 17.2.2      | Initial Packet                     | test_parse_initial                |
-    // | 17.2.2      | Initial Packet (with token)        | test_parse_initial_with_token     |
-    // | 17.2.3      | 0-RTT Packet                       | test_parse_zero_rtt               |
-    // | 17.2.4      | Handshake Packet                   | test_parse_handshake              |
-    // | 17.2.5      | Retry Packet                       | test_parse_retry                  |
-    // | 17.3        | Short Header Format                | test_parse_short_header           |
-    // | 16          | Variable-Length Integer (1 byte)    | test_decode_varint_1byte          |
-    // | 16          | Variable-Length Integer (2 bytes)   | test_decode_varint_2byte          |
-    // | 16          | Variable-Length Integer (4 bytes)   | test_decode_varint_4byte          |
-    // | 16          | Variable-Length Integer (8 bytes)   | test_decode_varint_8byte          |
-    // | 16          | Variable-Length Integer truncated   | test_decode_varint_truncated      |
-    // | ---         | Truncated (empty)                  | test_truncated_empty              |
-    // | ---         | Truncated long header              | test_truncated_long_header        |
-    // | ---         | Truncated DCID                     | test_truncated_dcid               |
-    // | ---         | Truncated SCID                     | test_truncated_scid               |
-    // | RFC 9369    | QUIC v2 version                    | test_parse_quic_v2                |
+    // | RFC Section         | Description                        | Test                                 |
+    // |---------------------|------------------------------------|--------------------------------------|
+    // | 9000 §17.2          | Long Header Format                 | test_parse_initial                   |
+    // | 9000 §17.2          | Long Header: DCID/SCID             | test_parse_initial                   |
+    // | 9000 §17.2.1        | Version Negotiation                | test_parse_version_negotiation       |
+    // | 9000 §17.2.2        | Initial Packet                     | test_parse_initial                   |
+    // | 9000 §17.2.2        | Initial Packet (with token)        | test_parse_initial_with_token        |
+    // | 9000 §17.2.3        | 0-RTT Packet                       | test_parse_zero_rtt                  |
+    // | 9000 §17.2.4        | Handshake Packet                   | test_parse_handshake                 |
+    // | 9000 §17.2.5        | Retry Packet (token + integrity)   | test_parse_retry                     |
+    // | 9000 §17.2.5        | Retry Packet (non-empty token)     | test_parse_retry_with_token          |
+    // | 9001 §5.8           | Retry Integrity Tag (16 bytes)     | test_parse_retry                     |
+    // | 9001 §5.8           | Retry truncated below 16-byte tag  | test_truncated_retry_integrity_tag   |
+    // | 9000 §17.3, §17.3.1 | Short Header (1-RTT)               | test_parse_short_header              |
+    // | 9000 §16            | Variable-Length Integer (1 byte)   | test_decode_varint_1byte             |
+    // | 9000 §16            | Variable-Length Integer (2 bytes)  | test_decode_varint_2byte             |
+    // | 9000 §16            | Variable-Length Integer (4 bytes)  | test_decode_varint_4byte             |
+    // | 9000 §16            | Variable-Length Integer (8 bytes)  | test_decode_varint_8byte             |
+    // | 9000 §16            | Variable-Length Integer truncated  | test_decode_varint_truncated         |
+    // | 9369 §3.1           | QUIC v2 version field (0x6b3343cf) | test_parse_quic_v2_handshake         |
+    // | 9369 §3.2           | QUIC v2 Initial (type=0b01)        | test_parse_quic_v2_initial           |
+    // | 9369 §3.2           | QUIC v2 0-RTT (type=0b10)          | test_parse_quic_v2_zero_rtt          |
+    // | 9369 §3.2           | QUIC v2 Handshake (type=0b11)      | test_parse_quic_v2_handshake         |
+    // | 9369 §3.2           | QUIC v2 Retry (type=0b00)          | test_parse_quic_v2_retry             |
+    // | 8999 §5.1           | Unknown version: invariant fields  | test_parse_unknown_version           |
+    // | ---                 | Truncated (empty)                  | test_truncated_empty                 |
+    // | ---                 | Truncated long header              | test_truncated_long_header           |
+    // | ---                 | Truncated DCID                     | test_truncated_dcid                  |
+    // | ---                 | Truncated SCID                     | test_truncated_scid                  |
 
     /// Encode a variable-length integer per RFC 9000, Section 16.
     fn encode_varint(value: u64) -> Vec<u8> {
@@ -576,31 +695,68 @@ mod tests {
         }
     }
 
-    /// Build a QUIC Long Header packet.
+    /// Map a logical `PacketKind` to the on-wire Long Packet Type bits for a
+    /// given QUIC version.
+    ///
+    /// RFC 9000 §17.2 Table 5 (v1); RFC 9369 §3.2 (v2).
+    fn kind_to_type_bits(version: u32, kind: PacketKind) -> u8 {
+        match (version, kind) {
+            (VERSION_1, PacketKind::Initial) => 0,
+            (VERSION_1, PacketKind::ZeroRtt) => 1,
+            (VERSION_1, PacketKind::Handshake) => 2,
+            (VERSION_1, PacketKind::Retry) => 3,
+            (VERSION_2, PacketKind::Initial) => 1,
+            (VERSION_2, PacketKind::ZeroRtt) => 2,
+            (VERSION_2, PacketKind::Handshake) => 3,
+            (VERSION_2, PacketKind::Retry) => 0,
+            _ => 0,
+        }
+    }
+
+    /// Build a QUIC Long Header packet for the given version and logical kind.
+    ///
+    /// * For `Initial`, `token` is the Token field (empty slice if absent) and
+    ///   `payload` is the post-Length bytes (Packet Number + Packet Payload).
+    /// * For `ZeroRtt` / `Handshake`, `token` is ignored; `payload` is
+    ///   post-Length bytes.
+    /// * For `Retry`, `token` is the Retry Token and `payload` must be exactly
+    ///   the 16-byte Retry Integrity Tag (RFC 9001 §5.8).
     fn build_long_header(
-        packet_type: u8,
         version: u32,
+        kind: PacketKind,
         dcid: &[u8],
         scid: &[u8],
         token: Option<&[u8]>,
         payload: &[u8],
     ) -> Vec<u8> {
-        let first_byte = 0xc0 | (packet_type << 4);
+        let type_bits = kind_to_type_bits(version, kind);
+        let first_byte = 0xc0 | (type_bits << 4);
         let mut pkt = vec![first_byte];
         pkt.extend_from_slice(&version.to_be_bytes());
         pkt.push(dcid.len() as u8);
         pkt.extend_from_slice(dcid);
         pkt.push(scid.len() as u8);
         pkt.extend_from_slice(scid);
-        if let Some(token_data) = token {
-            pkt.extend_from_slice(&encode_varint(token_data.len() as u64));
-            pkt.extend_from_slice(token_data);
+        match kind {
+            PacketKind::Initial => {
+                let token = token.unwrap_or(&[]);
+                pkt.extend_from_slice(&encode_varint(token.len() as u64));
+                pkt.extend_from_slice(token);
+                pkt.extend_from_slice(&encode_varint(payload.len() as u64));
+                pkt.extend_from_slice(payload);
+            }
+            PacketKind::ZeroRtt | PacketKind::Handshake => {
+                pkt.extend_from_slice(&encode_varint(payload.len() as u64));
+                pkt.extend_from_slice(payload);
+            }
+            PacketKind::Retry => {
+                if let Some(t) = token {
+                    pkt.extend_from_slice(t);
+                }
+                // Payload must be the 16-byte Retry Integrity Tag.
+                pkt.extend_from_slice(payload);
+            }
         }
-        // For non-Retry: add length varint
-        if packet_type != 3 {
-            pkt.extend_from_slice(&encode_varint(payload.len() as u64));
-        }
-        pkt.extend_from_slice(payload);
         pkt
     }
 
@@ -680,7 +836,7 @@ mod tests {
         let scid = [0x05, 0x06];
         let payload = [0xAA; 10];
         // Initial with empty token
-        let data = build_long_header(0, VERSION_1, &dcid, &scid, Some(&[]), &payload);
+        let data = build_long_header(VERSION_1, PacketKind::Initial, &dcid, &scid, None, &payload);
 
         let mut buf = DissectBuffer::new();
         let result = QuicDissector.dissect(&data, &mut buf, 0).unwrap();
@@ -747,7 +903,14 @@ mod tests {
         let scid = [0x02];
         let token = [0xDE, 0xAD, 0xBE, 0xEF];
         let payload = [0xBB; 5];
-        let data = build_long_header(0, VERSION_1, &dcid, &scid, Some(&token), &payload);
+        let data = build_long_header(
+            VERSION_1,
+            PacketKind::Initial,
+            &dcid,
+            &scid,
+            Some(&token),
+            &payload,
+        );
 
         let mut buf = DissectBuffer::new();
         QuicDissector.dissect(&data, &mut buf, 0).unwrap();
@@ -770,7 +933,7 @@ mod tests {
         let dcid = [0x10, 0x20];
         let scid = [0x30];
         let payload = [0xCC; 8];
-        let data = build_long_header(1, VERSION_1, &dcid, &scid, None, &payload);
+        let data = build_long_header(VERSION_1, PacketKind::ZeroRtt, &dcid, &scid, None, &payload);
 
         let mut buf = DissectBuffer::new();
         QuicDissector.dissect(&data, &mut buf, 0).unwrap();
@@ -797,7 +960,14 @@ mod tests {
         let dcid = [0x01, 0x02, 0x03];
         let scid = [0x04, 0x05, 0x06];
         let payload = [0xDD; 12];
-        let data = build_long_header(2, VERSION_1, &dcid, &scid, None, &payload);
+        let data = build_long_header(
+            VERSION_1,
+            PacketKind::Handshake,
+            &dcid,
+            &scid,
+            None,
+            &payload,
+        );
 
         let mut buf = DissectBuffer::new();
         QuicDissector.dissect(&data, &mut buf, 0).unwrap();
@@ -821,8 +991,17 @@ mod tests {
     fn test_parse_retry() {
         let dcid = [0xAA];
         let scid = [0xBB];
-        let payload = [0xFF; 16]; // Retry Token + Integrity Tag
-        let data = build_long_header(3, VERSION_1, &dcid, &scid, None, &payload);
+        let integrity_tag = [0xFF; 16];
+        // RFC 9000 §17.2.5: empty Retry Token is permitted by the wire format
+        // (clients MUST discard them per §17.2.5.2, but that is policy, not parse).
+        let data = build_long_header(
+            VERSION_1,
+            PacketKind::Retry,
+            &dcid,
+            &scid,
+            None,
+            &integrity_tag,
+        );
 
         let mut buf = DissectBuffer::new();
         QuicDissector.dissect(&data, &mut buf, 0).unwrap();
@@ -837,10 +1016,73 @@ mod tests {
             buf.resolve_display_name(layer, "packet_type_name"),
             Some("Retry")
         );
-        // Retry has no Length field
+        // RFC 9000 §17.2 — Retry has no Length or Packet Number.
         assert!(buf.field_by_name(layer, "length").is_none());
-        // Retry has no Token Length/Token fields
+        // RFC 9000 §17.2.5 — Retry has no Token Length (the token fills the
+        // packet up to the Integrity Tag), only Retry Token + Integrity Tag.
         assert!(buf.field_by_name(layer, "token_length").is_none());
+        assert!(buf.field_by_name(layer, "token").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "retry_token").unwrap().value,
+            FieldValue::Bytes(&[])
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "retry_integrity_tag")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&integrity_tag)
+        );
+    }
+
+    #[test]
+    fn test_parse_retry_with_token() {
+        let dcid = [0xAA, 0xBB];
+        let scid = [0xCC];
+        let token = [0x01, 0x02, 0x03, 0x04, 0x05];
+        let integrity_tag = [0xA5; 16];
+        let data = build_long_header(
+            VERSION_1,
+            PacketKind::Retry,
+            &dcid,
+            &scid,
+            Some(&token),
+            &integrity_tag,
+        );
+
+        let mut buf = DissectBuffer::new();
+        QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("QUIC").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "retry_token").unwrap().value,
+            FieldValue::Bytes(&token)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "retry_integrity_tag")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&integrity_tag)
+        );
+    }
+
+    #[test]
+    fn test_truncated_retry_integrity_tag() {
+        // RFC 9001 §5.8 — Retry Integrity Tag is 128 bits.  A packet that has
+        // the Retry type but fewer than 16 bytes after the SCID cannot contain
+        // a tag and must be reported as Truncated.
+        let mut data = vec![0xf0]; // header_form=1, fixed=1, type=0b11 (v1 Retry)
+        data.extend_from_slice(&VERSION_1.to_be_bytes());
+        data.push(0); // DCID length = 0
+        data.push(0); // SCID length = 0
+        // Only 3 bytes where 16 are required for the Integrity Tag.
+        data.extend_from_slice(&[0x00; 3]);
+        let mut buf = DissectBuffer::new();
+        let err = QuicDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        let PacketError::Truncated { expected, actual } = err else {
+            panic!("expected Truncated, got {err:?}");
+        };
+        assert_eq!(actual, data.len());
+        assert_eq!(expected, data.len() - 3 + RETRY_INTEGRITY_TAG_SIZE);
     }
 
     // --- Version Negotiation ---
@@ -933,27 +1175,205 @@ mod tests {
         );
     }
 
-    // --- QUIC v2 ---
+    // --- QUIC v2 (RFC 9369 §3.2) ---
+    //
+    // Type bit values differ from v1:
+    //   Initial = 0b01, 0-RTT = 0b10, Handshake = 0b11, Retry = 0b00.
 
     #[test]
-    fn test_parse_quic_v2() {
+    fn test_parse_quic_v2_initial() {
         let dcid = [0x01];
         let scid = [0x02];
+        let token = [0xDE, 0xAD];
         let payload = [0xEE; 6];
-        let data = build_long_header(2, VERSION_2, &dcid, &scid, None, &payload);
+        let data = build_long_header(
+            VERSION_2,
+            PacketKind::Initial,
+            &dcid,
+            &scid,
+            Some(&token),
+            &payload,
+        );
 
         let mut buf = DissectBuffer::new();
         QuicDissector.dissect(&data, &mut buf, 0).unwrap();
 
         let layer = buf.layer_by_name("QUIC").unwrap();
+        assert_eq!(layer.display_name, Some("QUIC Initial"));
+        // RFC 9369 §3.2 — Initial in v2 is 0b01.
         assert_eq!(
-            buf.field_by_name(layer, "version").unwrap().value,
-            FieldValue::U32(VERSION_2)
+            buf.field_by_name(layer, "packet_type").unwrap().value,
+            FieldValue::U8(0b01)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "packet_type_name"),
+            Some("Initial")
         );
         assert_eq!(
             buf.resolve_display_name(layer, "version_name"),
             Some("QUIC v2")
         );
+        assert_eq!(
+            buf.field_by_name(layer, "token_length").unwrap().value,
+            FieldValue::U64(2)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "token").unwrap().value,
+            FieldValue::Bytes(&token)
+        );
+        assert!(buf.field_by_name(layer, "length").is_some());
+    }
+
+    #[test]
+    fn test_parse_quic_v2_zero_rtt() {
+        let dcid = [0x10];
+        let scid = [0x20];
+        let payload = [0xCC; 8];
+        let data = build_long_header(VERSION_2, PacketKind::ZeroRtt, &dcid, &scid, None, &payload);
+
+        let mut buf = DissectBuffer::new();
+        QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("QUIC").unwrap();
+        assert_eq!(layer.display_name, Some("QUIC 0-RTT"));
+        // RFC 9369 §3.2 — 0-RTT in v2 is 0b10.
+        assert_eq!(
+            buf.field_by_name(layer, "packet_type").unwrap().value,
+            FieldValue::U8(0b10)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "packet_type_name"),
+            Some("0-RTT")
+        );
+        assert!(buf.field_by_name(layer, "token_length").is_none());
+        assert!(buf.field_by_name(layer, "token").is_none());
+        assert!(buf.field_by_name(layer, "length").is_some());
+    }
+
+    #[test]
+    fn test_parse_quic_v2_handshake() {
+        let dcid = [0x01, 0x02];
+        let scid = [0x03];
+        let payload = [0xDD; 12];
+        let data = build_long_header(
+            VERSION_2,
+            PacketKind::Handshake,
+            &dcid,
+            &scid,
+            None,
+            &payload,
+        );
+
+        let mut buf = DissectBuffer::new();
+        QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("QUIC").unwrap();
+        assert_eq!(layer.display_name, Some("QUIC Handshake"));
+        // RFC 9369 §3.2 — Handshake in v2 is 0b11.
+        assert_eq!(
+            buf.field_by_name(layer, "packet_type").unwrap().value,
+            FieldValue::U8(0b11)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "packet_type_name"),
+            Some("Handshake")
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "version").unwrap().value,
+            FieldValue::U32(VERSION_2)
+        );
+        assert!(buf.field_by_name(layer, "token_length").is_none());
+        assert!(buf.field_by_name(layer, "length").is_some());
+    }
+
+    #[test]
+    fn test_parse_quic_v2_retry() {
+        let dcid = [0xAA];
+        let scid = [0xBB];
+        let token = [0x11, 0x22, 0x33];
+        let integrity_tag = [0x7E; 16];
+        let data = build_long_header(
+            VERSION_2,
+            PacketKind::Retry,
+            &dcid,
+            &scid,
+            Some(&token),
+            &integrity_tag,
+        );
+
+        let mut buf = DissectBuffer::new();
+        QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("QUIC").unwrap();
+        assert_eq!(layer.display_name, Some("QUIC Retry"));
+        // RFC 9369 §3.2 — Retry in v2 is 0b00 (the value that meant Initial in v1).
+        assert_eq!(
+            buf.field_by_name(layer, "packet_type").unwrap().value,
+            FieldValue::U8(0b00)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "packet_type_name"),
+            Some("Retry")
+        );
+        // Retry: no length, token/length fields are absent.
+        assert!(buf.field_by_name(layer, "length").is_none());
+        assert!(buf.field_by_name(layer, "token_length").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "retry_token").unwrap().value,
+            FieldValue::Bytes(&token)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "retry_integrity_tag")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&integrity_tag)
+        );
+    }
+
+    #[test]
+    fn test_parse_unknown_version() {
+        // RFC 8999 §5.1 — For unknown versions, only the version-invariant
+        // fields (header form, version, DCID, SCID) have defined semantics.
+        let dcid = [0x01, 0x02];
+        let scid = [0x03];
+        let mut data = vec![0xc0];
+        data.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        data.push(dcid.len() as u8);
+        data.extend_from_slice(&dcid);
+        data.push(scid.len() as u8);
+        data.extend_from_slice(&scid);
+        // Some trailing bytes that are meaningless without version-specific rules.
+        data.extend_from_slice(&[0x00, 0x00]);
+
+        let mut buf = DissectBuffer::new();
+        QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("QUIC").unwrap();
+        // Unknown version: no layer-level display_name override.
+        assert_eq!(layer.display_name, None);
+        assert_eq!(
+            buf.field_by_name(layer, "version").unwrap().value,
+            FieldValue::U32(0xDEAD_BEEF)
+        );
+        assert!(buf.resolve_display_name(layer, "version_name").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "dcid").unwrap().value,
+            FieldValue::Bytes(&dcid)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "scid").unwrap().value,
+            FieldValue::Bytes(&scid)
+        );
+        // packet_type bits are recorded but have no version-defined name.
+        assert!(buf.field_by_name(layer, "packet_type").is_some());
+        assert!(
+            buf.resolve_display_name(layer, "packet_type_name")
+                .is_none()
+        );
+        // Neither token, length, nor retry fields should be emitted.
+        assert!(buf.field_by_name(layer, "token_length").is_none());
+        assert!(buf.field_by_name(layer, "length").is_none());
+        assert!(buf.field_by_name(layer, "retry_token").is_none());
     }
 
     // --- Truncation errors ---
@@ -1018,9 +1438,14 @@ mod tests {
     #[test]
     fn test_field_descriptors() {
         let descriptors = QuicDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 14);
-        assert_eq!(descriptors[0].name, "header_form");
-        assert_eq!(descriptors[13].name, "key_phase");
+        assert_eq!(descriptors.len(), 16);
+        assert_eq!(descriptors[FD_HEADER_FORM].name, "header_form");
+        assert_eq!(descriptors[FD_RETRY_TOKEN].name, "retry_token");
+        assert_eq!(
+            descriptors[FD_RETRY_INTEGRITY_TAG].name,
+            "retry_integrity_tag"
+        );
+        assert_eq!(descriptors[FD_KEY_PHASE].name, "key_phase");
     }
 
     #[test]
@@ -1028,7 +1453,14 @@ mod tests {
         let dcid = [0x01];
         let scid = [0x02];
         let payload = [0xAA; 5];
-        let data = build_long_header(2, VERSION_1, &dcid, &scid, None, &payload);
+        let data = build_long_header(
+            VERSION_1,
+            PacketKind::Handshake,
+            &dcid,
+            &scid,
+            None,
+            &payload,
+        );
         let offset = 42;
 
         let mut buf = DissectBuffer::new();
@@ -1065,7 +1497,14 @@ mod tests {
     #[test]
     fn test_display_name_header_form() {
         // Long header
-        let data = build_long_header(2, VERSION_1, &[0x01], &[0x02], None, &[0xAA; 5]);
+        let data = build_long_header(
+            VERSION_1,
+            PacketKind::Handshake,
+            &[0x01],
+            &[0x02],
+            None,
+            &[0xAA; 5],
+        );
         let mut buf = DissectBuffer::new();
         QuicDissector.dissect(&data, &mut buf, 0).unwrap();
         let layer = buf.layer_by_name("QUIC").unwrap();
