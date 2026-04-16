@@ -18,28 +18,47 @@ use packet_dissector_core::util::read_be_u16;
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_SUBTYPE: usize = 0;
 const FD_VERSION: usize = 1;
-const FD_ACTOR_SYSTEM_PRIORITY: usize = 2;
-const FD_ACTOR_SYSTEM: usize = 3;
-const FD_ACTOR_KEY: usize = 4;
-const FD_ACTOR_PORT_PRIORITY: usize = 5;
-const FD_ACTOR_PORT: usize = 6;
-const FD_ACTOR_STATE: usize = 7;
-/// Base index of the 8 actor state flag descriptors (indices 8..=15).
-const FD_ACTOR_STATE_FLAGS_BASE: usize = 8;
-const FD_PARTNER_SYSTEM_PRIORITY: usize = 16;
-const FD_PARTNER_SYSTEM: usize = 17;
-const FD_PARTNER_KEY: usize = 18;
-const FD_PARTNER_PORT_PRIORITY: usize = 19;
-const FD_PARTNER_PORT: usize = 20;
-const FD_PARTNER_STATE: usize = 21;
-/// Base index of the 8 partner state flag descriptors (indices 22..=29).
-const FD_PARTNER_STATE_FLAGS_BASE: usize = 22;
-const FD_COLLECTOR_MAX_DELAY: usize = 30;
+const FD_ACTOR_TLV_TYPE: usize = 2;
+const FD_ACTOR_TLV_LENGTH: usize = 3;
+const FD_ACTOR_SYSTEM_PRIORITY: usize = 4;
+const FD_ACTOR_SYSTEM: usize = 5;
+const FD_ACTOR_KEY: usize = 6;
+const FD_ACTOR_PORT_PRIORITY: usize = 7;
+const FD_ACTOR_PORT: usize = 8;
+const FD_ACTOR_STATE: usize = 9;
+/// Base index of the 8 actor state flag descriptors (indices 10..=17).
+const FD_ACTOR_STATE_FLAGS_BASE: usize = 10;
+const FD_PARTNER_TLV_TYPE: usize = 18;
+const FD_PARTNER_TLV_LENGTH: usize = 19;
+const FD_PARTNER_SYSTEM_PRIORITY: usize = 20;
+const FD_PARTNER_SYSTEM: usize = 21;
+const FD_PARTNER_KEY: usize = 22;
+const FD_PARTNER_PORT_PRIORITY: usize = 23;
+const FD_PARTNER_PORT: usize = 24;
+const FD_PARTNER_STATE: usize = 25;
+/// Base index of the 8 partner state flag descriptors (indices 26..=33).
+const FD_PARTNER_STATE_FLAGS_BASE: usize = 26;
+const FD_COLLECTOR_TLV_TYPE: usize = 34;
+const FD_COLLECTOR_TLV_LENGTH: usize = 35;
+const FD_COLLECTOR_MAX_DELAY: usize = 36;
+const FD_TERMINATOR_TLV_TYPE: usize = 37;
+const FD_TERMINATOR_TLV_LENGTH: usize = 38;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("subtype", "Subtype", FieldType::U8),
     FieldDescriptor::new("version", "Version Number", FieldType::U8),
     // --- Actor Information ---
+    FieldDescriptor::new("actor_tlv_type", "Actor TLV Type", FieldType::U8).with_display_fn(
+        |v, _| match v {
+            FieldValue::U8(t) => tlv_type_name(*t),
+            _ => None,
+        },
+    ),
+    FieldDescriptor::new(
+        "actor_tlv_length",
+        "Actor Information Length",
+        FieldType::U8,
+    ),
     FieldDescriptor::new(
         "actor_system_priority",
         "Actor System Priority",
@@ -83,6 +102,17 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     ),
     FieldDescriptor::new("actor_state_expired", "Actor State Expired", FieldType::U8),
     // --- Partner Information ---
+    FieldDescriptor::new("partner_tlv_type", "Partner TLV Type", FieldType::U8).with_display_fn(
+        |v, _| match v {
+            FieldValue::U8(t) => tlv_type_name(*t),
+            _ => None,
+        },
+    ),
+    FieldDescriptor::new(
+        "partner_tlv_length",
+        "Partner Information Length",
+        FieldType::U8,
+    ),
     FieldDescriptor::new(
         "partner_system_priority",
         "Partner System Priority",
@@ -138,7 +168,24 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::U8,
     ),
     // --- Collector Information ---
+    FieldDescriptor::new("collector_tlv_type", "Collector TLV Type", FieldType::U8)
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(t) => tlv_type_name(*t),
+            _ => None,
+        }),
+    FieldDescriptor::new(
+        "collector_tlv_length",
+        "Collector Information Length",
+        FieldType::U8,
+    ),
     FieldDescriptor::new("collector_max_delay", "Collector Max Delay", FieldType::U16),
+    // --- Terminator ---
+    FieldDescriptor::new("terminator_tlv_type", "Terminator TLV Type", FieldType::U8)
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(t) => tlv_type_name(*t),
+            _ => None,
+        }),
+    FieldDescriptor::new("terminator_tlv_length", "Terminator Length", FieldType::U8),
 ];
 
 /// Slow Protocols subtype for LACP (IEEE 802.1AX-2020, Section 6.4.2.2).
@@ -147,6 +194,35 @@ const SUBTYPE_LACP: u8 = 0x01;
 /// Total size of a LACPDU in bytes, from Subtype through the final Reserved
 /// field (IEEE 802.1AX-2020, Section 6.4.2.3, Figure 6-6).
 const LACPDU_SIZE: usize = 110;
+
+/// TLV_type value for the Actor Information TLV.
+/// IEEE 802.1AX-2020, Section 6.4.2.3.1, Figure 6-6.
+const TLV_TYPE_ACTOR_INFORMATION: u8 = 0x01;
+
+/// TLV_type value for the Partner Information TLV.
+/// IEEE 802.1AX-2020, Section 6.4.2.3.2, Figure 6-6.
+const TLV_TYPE_PARTNER_INFORMATION: u8 = 0x02;
+
+/// TLV_type value for the Collector Information TLV.
+/// IEEE 802.1AX-2020, Section 6.4.2.3.3, Figure 6-6.
+const TLV_TYPE_COLLECTOR_INFORMATION: u8 = 0x03;
+
+/// TLV_type value for the Terminator TLV.
+/// IEEE 802.1AX-2020, Section 6.4.2.3.4, Figure 6-6.
+const TLV_TYPE_TERMINATOR: u8 = 0x00;
+
+/// Returns a human-readable name for an LACPDU TLV_type value.
+///
+/// IEEE 802.1AX-2020, Section 6.4.2.3, Figure 6-6 — defined TLV types.
+fn tlv_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        TLV_TYPE_TERMINATOR => Some("Terminator"),
+        TLV_TYPE_ACTOR_INFORMATION => Some("Actor Information"),
+        TLV_TYPE_PARTNER_INFORMATION => Some("Partner Information"),
+        TLV_TYPE_COLLECTOR_INFORMATION => Some("Collector Information"),
+        _ => None,
+    }
+}
 
 /// Parse LACP state flags from a single byte into individual fields.
 ///
@@ -221,6 +297,11 @@ impl Dissector for LacpDissector {
 
         // --- Actor Information TLV (offset 2..22) ---
         // IEEE 802.1AX-2020, Section 6.4.2.3.1
+        // Per Section 6.4.3 the receive machine must not reject LACPDUs with
+        // unexpected TLV_type or Length values; we report them verbatim so
+        // forward-compatible LACPDUs (including V2 variants) still parse.
+        let actor_tlv_type = data[2];
+        let actor_tlv_length = data[3];
         let actor_system_priority = read_be_u16(data, 4)?;
         let actor_system = MacAddr([data[6], data[7], data[8], data[9], data[10], data[11]]);
         let actor_key = read_be_u16(data, 12)?;
@@ -230,6 +311,8 @@ impl Dissector for LacpDissector {
 
         // --- Partner Information TLV (offset 22..42) ---
         // IEEE 802.1AX-2020, Section 6.4.2.3.2
+        let partner_tlv_type = data[22];
+        let partner_tlv_length = data[23];
         let partner_system_priority = read_be_u16(data, 24)?;
         let partner_system = MacAddr([data[26], data[27], data[28], data[29], data[30], data[31]]);
         let partner_key = read_be_u16(data, 32)?;
@@ -239,7 +322,14 @@ impl Dissector for LacpDissector {
 
         // --- Collector Information TLV (offset 42..58) ---
         // IEEE 802.1AX-2020, Section 6.4.2.3.3
+        let collector_tlv_type = data[42];
+        let collector_tlv_length = data[43];
         let collector_max_delay = read_be_u16(data, 44)?;
+
+        // --- Terminator TLV (offset 58..60) ---
+        // IEEE 802.1AX-2020, Section 6.4.2.3.4
+        let terminator_tlv_type = data[58];
+        let terminator_tlv_length = data[59];
 
         buf.begin_layer(
             self.short_name(),
@@ -257,6 +347,16 @@ impl Dissector for LacpDissector {
             &FIELD_DESCRIPTORS[FD_VERSION],
             FieldValue::U8(version),
             offset + 1..offset + 2,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_ACTOR_TLV_TYPE],
+            FieldValue::U8(actor_tlv_type),
+            offset + 2..offset + 3,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_ACTOR_TLV_LENGTH],
+            FieldValue::U8(actor_tlv_length),
+            offset + 3..offset + 4,
         );
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_ACTOR_SYSTEM_PRIORITY],
@@ -298,6 +398,16 @@ impl Dissector for LacpDissector {
         );
 
         buf.push_field(
+            &FIELD_DESCRIPTORS[FD_PARTNER_TLV_TYPE],
+            FieldValue::U8(partner_tlv_type),
+            offset + 22..offset + 23,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_PARTNER_TLV_LENGTH],
+            FieldValue::U8(partner_tlv_length),
+            offset + 23..offset + 24,
+        );
+        buf.push_field(
             &FIELD_DESCRIPTORS[FD_PARTNER_SYSTEM_PRIORITY],
             FieldValue::U16(partner_system_priority),
             offset + 24..offset + 26,
@@ -337,9 +447,30 @@ impl Dissector for LacpDissector {
         );
 
         buf.push_field(
+            &FIELD_DESCRIPTORS[FD_COLLECTOR_TLV_TYPE],
+            FieldValue::U8(collector_tlv_type),
+            offset + 42..offset + 43,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_COLLECTOR_TLV_LENGTH],
+            FieldValue::U8(collector_tlv_length),
+            offset + 43..offset + 44,
+        );
+        buf.push_field(
             &FIELD_DESCRIPTORS[FD_COLLECTOR_MAX_DELAY],
             FieldValue::U16(collector_max_delay),
             offset + 44..offset + 46,
+        );
+
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_TERMINATOR_TLV_TYPE],
+            FieldValue::U8(terminator_tlv_type),
+            offset + 58..offset + 59,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_TERMINATOR_TLV_LENGTH],
+            FieldValue::U8(terminator_tlv_length),
+            offset + 59..offset + 60,
         );
 
         buf.end_layer();
@@ -357,15 +488,35 @@ mod tests {
     //! | 6.4.2.2   | Slow Protocol Subtype    | parse_lacp_invalid_subtype  |
     //! | 6.4.2.3   | LACPDU Structure         | parse_lacp_basic            |
     //! | 6.4.2.3   | LACPDU Minimum Size      | parse_lacp_truncated        |
-    //! | 6.4.2.3.1 | Actor Information        | parse_lacp_basic            |
-    //! | 6.4.2.3.2 | Partner Information      | parse_lacp_basic            |
-    //! | 6.4.2.3.3 | Collector Information    | parse_lacp_basic            |
+    //! | 6.4.2.3.1 | Actor Information TLV    | parse_lacp_basic            |
+    //! | 6.4.2.3.1 | Actor TLV type/length    | parse_lacp_tlv_headers      |
+    //! | 6.4.2.3.2 | Partner Information TLV  | parse_lacp_basic            |
+    //! | 6.4.2.3.2 | Partner TLV type/length  | parse_lacp_tlv_headers      |
+    //! | 6.4.2.3.3 | Collector Information TLV| parse_lacp_basic            |
+    //! | 6.4.2.3.3 | Collector TLV type/length| parse_lacp_tlv_headers      |
+    //! | 6.4.2.3.4 | Terminator TLV           | parse_lacp_tlv_headers      |
     //! | 6.4.2.3   | Actor State flags        | parse_lacp_state_flags      |
     //! | 6.4.2.3   | Version Number           | parse_lacp_version          |
 
     use super::*;
     use packet_dissector_core::field::FieldValue;
     use packet_dissector_core::packet::DissectBuffer;
+
+    /// Expected value of the Actor_Information_Length field (20 octets).
+    /// IEEE 802.1AX-2020, Section 6.4.2.3.1, Figure 6-6.
+    const ACTOR_TLV_LENGTH: u8 = 20;
+
+    /// Expected value of the Partner_Information_Length field (20 octets).
+    /// IEEE 802.1AX-2020, Section 6.4.2.3.2, Figure 6-6.
+    const PARTNER_TLV_LENGTH: u8 = 20;
+
+    /// Expected value of the Collector_Information_Length field (16 octets).
+    /// IEEE 802.1AX-2020, Section 6.4.2.3.3, Figure 6-6.
+    const COLLECTOR_TLV_LENGTH: u8 = 16;
+
+    /// Expected value of the Terminator_Length field (0 octets).
+    /// IEEE 802.1AX-2020, Section 6.4.2.3.4, Figure 6-6.
+    const TERMINATOR_TLV_LENGTH: u8 = 0;
 
     /// Build a valid LACPDU (110 bytes).
     ///
@@ -380,8 +531,8 @@ mod tests {
 
         // --- Actor Information TLV ---
         // IEEE 802.1AX-2020, Section 6.4.2.3.1
-        pdu[2] = 0x01; // TLV Type = Actor Information
-        pdu[3] = 0x14; // Information Length = 20
+        pdu[2] = TLV_TYPE_ACTOR_INFORMATION;
+        pdu[3] = ACTOR_TLV_LENGTH;
         // Actor System Priority = 32768 (0x8000)
         pdu[4] = 0x80;
         pdu[5] = 0x00;
@@ -407,8 +558,8 @@ mod tests {
 
         // --- Partner Information TLV ---
         // IEEE 802.1AX-2020, Section 6.4.2.3.2
-        pdu[22] = 0x02; // TLV Type = Partner Information
-        pdu[23] = 0x14; // Information Length = 20
+        pdu[22] = TLV_TYPE_PARTNER_INFORMATION;
+        pdu[23] = PARTNER_TLV_LENGTH;
         // Partner System Priority = 32768 (0x8000)
         pdu[24] = 0x80;
         pdu[25] = 0x00;
@@ -434,16 +585,16 @@ mod tests {
 
         // --- Collector Information TLV ---
         // IEEE 802.1AX-2020, Section 6.4.2.3.3
-        pdu[42] = 0x03; // TLV Type = Collector Information
-        pdu[43] = 0x10; // Information Length = 16
+        pdu[42] = TLV_TYPE_COLLECTOR_INFORMATION;
+        pdu[43] = COLLECTOR_TLV_LENGTH;
         // Collector Max Delay = 50000 (0xC350)
         pdu[44] = 0xC3;
         pdu[45] = 0x50;
 
         // --- Terminator TLV ---
         // IEEE 802.1AX-2020, Section 6.4.2.3.4
-        pdu[58] = 0x00; // TLV Type = Terminator
-        pdu[59] = 0x00; // Terminator Length = 0
+        pdu[58] = TLV_TYPE_TERMINATOR;
+        pdu[59] = TERMINATOR_TLV_LENGTH;
 
         pdu
     }
@@ -611,6 +762,133 @@ mod tests {
         assert_eq!(
             *field_value(&buf, "partner_state_expired"),
             FieldValue::U8(0)
+        );
+    }
+
+    #[test]
+    fn parse_lacp_tlv_headers() {
+        // IEEE 802.1AX-2020, Section 6.4.2.3 — each TLV has a Type and Length
+        // byte at the start. These fields must be exposed by the dissector so
+        // that non-conforming peers (e.g., V2 LACPDUs with unexpected TLVs)
+        // can be diagnosed without rejecting the packet.
+        let data = build_lacpdu();
+        let mut buf = DissectBuffer::new();
+        LacpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        // Actor Information TLV — IEEE 802.1AX-2020, Section 6.4.2.3.1
+        assert_eq!(
+            *field_value(&buf, "actor_tlv_type"),
+            FieldValue::U8(TLV_TYPE_ACTOR_INFORMATION)
+        );
+        assert_eq!(
+            *field_value(&buf, "actor_tlv_length"),
+            FieldValue::U8(ACTOR_TLV_LENGTH)
+        );
+
+        // Partner Information TLV — IEEE 802.1AX-2020, Section 6.4.2.3.2
+        assert_eq!(
+            *field_value(&buf, "partner_tlv_type"),
+            FieldValue::U8(TLV_TYPE_PARTNER_INFORMATION)
+        );
+        assert_eq!(
+            *field_value(&buf, "partner_tlv_length"),
+            FieldValue::U8(PARTNER_TLV_LENGTH)
+        );
+
+        // Collector Information TLV — IEEE 802.1AX-2020, Section 6.4.2.3.3
+        assert_eq!(
+            *field_value(&buf, "collector_tlv_type"),
+            FieldValue::U8(TLV_TYPE_COLLECTOR_INFORMATION)
+        );
+        assert_eq!(
+            *field_value(&buf, "collector_tlv_length"),
+            FieldValue::U8(COLLECTOR_TLV_LENGTH)
+        );
+
+        // Terminator TLV — IEEE 802.1AX-2020, Section 6.4.2.3.4
+        assert_eq!(
+            *field_value(&buf, "terminator_tlv_type"),
+            FieldValue::U8(TLV_TYPE_TERMINATOR)
+        );
+        assert_eq!(
+            *field_value(&buf, "terminator_tlv_length"),
+            FieldValue::U8(TERMINATOR_TLV_LENGTH)
+        );
+
+        // Field byte ranges must reflect the on-wire positions.
+        let layer = buf.layer_by_name("LACP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "actor_tlv_type").unwrap().range,
+            2..3
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "actor_tlv_length").unwrap().range,
+            3..4
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "partner_tlv_type").unwrap().range,
+            22..23
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "partner_tlv_length")
+                .unwrap()
+                .range,
+            23..24
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "collector_tlv_type")
+                .unwrap()
+                .range,
+            42..43
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "collector_tlv_length")
+                .unwrap()
+                .range,
+            43..44
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "terminator_tlv_type")
+                .unwrap()
+                .range,
+            58..59
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "terminator_tlv_length")
+                .unwrap()
+                .range,
+            59..60
+        );
+    }
+
+    #[test]
+    fn parse_lacp_accepts_non_conforming_tlv_headers() {
+        // IEEE 802.1AX-2020, Section 6.4.3 — the receive machine must accept
+        // LACPDUs even when TLV_type or Length do not match the expected V1
+        // values, to preserve forward compatibility with future versions.
+        let mut data = build_lacpdu();
+        data[2] = 0xAA; // Unexpected Actor TLV type
+        data[3] = 0x7F; // Unexpected Actor TLV length
+        data[22] = 0xBB; // Unexpected Partner TLV type
+        data[42] = 0xCC; // Unexpected Collector TLV type
+        data[58] = 0xDD; // Unexpected Terminator TLV type
+
+        let mut buf = DissectBuffer::new();
+        LacpDissector
+            .dissect(&data, &mut buf, 0)
+            .expect("non-conforming TLV headers must not be rejected");
+
+        // The values are reported verbatim so operators can diagnose the peer.
+        assert_eq!(*field_value(&buf, "actor_tlv_type"), FieldValue::U8(0xAA));
+        assert_eq!(*field_value(&buf, "actor_tlv_length"), FieldValue::U8(0x7F));
+        assert_eq!(*field_value(&buf, "partner_tlv_type"), FieldValue::U8(0xBB));
+        assert_eq!(
+            *field_value(&buf, "collector_tlv_type"),
+            FieldValue::U8(0xCC)
+        );
+        assert_eq!(
+            *field_value(&buf, "terminator_tlv_type"),
+            FieldValue::U8(0xDD)
         );
     }
 
