@@ -35,10 +35,11 @@ const FD_SEQUENCE_NUMBER: usize = 6;
 const FD_TIMESTAMP: usize = 7;
 const FD_SSRC: usize = 8;
 const FD_CSRC_LIST: usize = 9;
-const FD_PADDING_LENGTH: usize = 10;
-const FD_EXT_PROFILE: usize = 11;
-const FD_EXT_LENGTH: usize = 12;
-const FD_EXT_DATA: usize = 13;
+const FD_PAYLOAD: usize = 10;
+const FD_PADDING_LENGTH: usize = 11;
+const FD_EXT_PROFILE: usize = 12;
+const FD_EXT_LENGTH: usize = 13;
+const FD_EXT_DATA: usize = 14;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
@@ -51,6 +52,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("timestamp", "Timestamp", FieldType::U32),
     FieldDescriptor::new("ssrc", "SSRC", FieldType::U32),
     FieldDescriptor::new("csrc_list", "CSRC List", FieldType::Array).optional(),
+    FieldDescriptor::new("payload", "Payload", FieldType::Bytes).optional(),
     FieldDescriptor::new("padding_length", "Padding Length", FieldType::U8).optional(),
     FieldDescriptor::new("ext_profile", "Extension Profile", FieldType::U16).optional(),
     FieldDescriptor::new("ext_length", "Extension Length", FieldType::U16).optional(),
@@ -193,11 +195,16 @@ impl Dissector for RtpDissector {
             None
         };
 
+        // RFC 3550, Section 5.1 — the RTP packet is [fixed header | CSRC list |
+        // optional extension | payload | optional padding]. Because the
+        // payload is opaque to the dissector and no next layer follows
+        // (DispatchHint::End), the RTP layer claims the entire packet.
+        // https://www.rfc-editor.org/rfc/rfc3550#section-5.1
         buf.begin_layer(
             self.short_name(),
             None,
             FIELD_DESCRIPTORS,
-            offset..offset + header_end,
+            offset..offset + data.len(),
         );
 
         buf.push_field(
@@ -288,6 +295,19 @@ impl Dissector for RtpDissector {
             }
         }
 
+        // RFC 3550, Section 5.1 — payload follows the fixed header, CSRC list
+        // and optional extension, and precedes any padding at the end of the
+        // packet. Treat the payload as opaque bytes.
+        // https://www.rfc-editor.org/rfc/rfc3550#section-5.1
+        let payload_end = data.len() - pad_count.map(|pc| pc as usize).unwrap_or(0);
+        if payload_end > header_end {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_PAYLOAD],
+                FieldValue::Bytes(&data[header_end..payload_end]),
+                (offset + header_end)..(offset + payload_end),
+            );
+        }
+
         if let Some(pc) = pad_count {
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_PADDING_LENGTH],
@@ -299,7 +319,8 @@ impl Dissector for RtpDissector {
         buf.end_layer();
 
         // RTP payload is audio/video data — no further protocol dissection.
-        Ok(DissectResult::new(header_end, DispatchHint::End))
+        // The whole RTP packet (header + payload + padding) is consumed.
+        Ok(DissectResult::new(data.len(), DispatchHint::End))
     }
 }
 
@@ -313,12 +334,15 @@ mod tests {
     // |-------------|----------------------------|----------------------------------------|
     // | 5.1         | Fixed Header Fields        | parse_rtp_basic                        |
     // | 5.1         | Version validation         | parse_rtp_invalid_version              |
+    // | 5.1         | Payload extraction         | parse_rtp_with_payload                 |
     // | 5.1         | Padding bit                | parse_rtp_with_padding                 |
     // | 5.1         | Padding — no payload       | parse_rtp_padding_no_payload           |
     // | 5.1         | Padding — count zero       | parse_rtp_padding_count_zero           |
     // | 5.1         | Padding — count overflow   | parse_rtp_padding_count_exceeds_payload|
+    // | 5.1         | Padding — only padding     | parse_rtp_padding_only_no_payload_data |
     // | 5.1         | Marker bit                 | parse_rtp_marker_set                   |
     // | 5.1         | CSRC list                  | parse_rtp_with_csrc                    |
+    // | 5.1         | CSRC max (15)              | parse_rtp_with_max_csrc                |
     // | 5.1         | Truncated header           | parse_rtp_truncated                    |
     // | 5.1         | Truncated CSRC             | parse_rtp_truncated_csrc               |
     // | 5.3.1       | Header Extension           | parse_rtp_with_extension               |
@@ -346,12 +370,15 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let result = RtpDissector.dissect(&data, &mut buf, 0).unwrap();
 
+        // RFC 3550, Section 5.1 — the RTP layer claims the full packet (no
+        // payload here, so bytes_consumed equals the fixed header size).
         assert_eq!(result.bytes_consumed, 12);
         assert_eq!(result.next, DispatchHint::End);
         assert_eq!(buf.layers().len(), 1);
 
         let layer = &buf.layers()[0];
         assert_eq!(layer.name, "RTP");
+        assert_eq!(layer.range, 0..12);
         assert_eq!(
             buf.field_by_name(layer, "version").unwrap().value,
             FieldValue::U8(2)
@@ -403,12 +430,67 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let result = RtpDissector.dissect(&data, &mut buf, 0).unwrap();
 
-        assert_eq!(result.bytes_consumed, 12);
+        // RFC 3550, Section 5.1 — layer covers the entire RTP packet (header,
+        // payload, and padding). The padding_length field sits inside it.
+        assert_eq!(result.bytes_consumed, 20);
         let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..20);
         assert_eq!(
             buf.field_by_name(layer, "padding").unwrap().value,
             FieldValue::U8(1)
         );
+        assert_eq!(
+            buf.field_by_name(layer, "payload").unwrap().value,
+            FieldValue::Bytes(&[0xAA, 0xBB, 0xCC, 0xDD])
+        );
+        assert_eq!(buf.field_by_name(layer, "payload").unwrap().range, 12..16);
+        assert_eq!(
+            buf.field_by_name(layer, "padding_length").unwrap().value,
+            FieldValue::U8(4)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "padding_length").unwrap().range,
+            19..20
+        );
+    }
+
+    #[test]
+    fn parse_rtp_with_payload() {
+        // Fixed header + payload (no padding, no CSRC, no extension).
+        let mut data = minimal_rtp_header(96, 1, 100, 0xDEADBEEF);
+        data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+
+        let mut buf = DissectBuffer::new();
+        let result = RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        // RFC 3550, Section 5.1 — the RTP packet comprises header + payload;
+        // the dissector consumes the whole packet.
+        assert_eq!(result.bytes_consumed, 17);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..17);
+        assert_eq!(
+            buf.field_by_name(layer, "payload").unwrap().value,
+            FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05])
+        );
+        assert_eq!(buf.field_by_name(layer, "payload").unwrap().range, 12..17);
+        assert!(buf.field_by_name(layer, "padding_length").is_none());
+    }
+
+    #[test]
+    fn parse_rtp_padding_only_no_payload_data() {
+        // P=1 with padding bytes only (no real payload). Valid per RFC 3550.
+        let mut data = minimal_rtp_header(0, 1, 100, 0xAABBCCDD);
+        data[0] |= 0x20;
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x04]); // 4-byte padding, count=4
+
+        let mut buf = DissectBuffer::new();
+        let result = RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(result.bytes_consumed, 16);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..16);
+        // No payload bytes between the header and the padding.
+        assert!(buf.field_by_name(layer, "payload").is_none());
         assert_eq!(
             buf.field_by_name(layer, "padding_length").unwrap().value,
             FieldValue::U8(4)
@@ -489,6 +571,7 @@ mod tests {
 
         assert_eq!(result.bytes_consumed, 20); // 12 + 2*4
         let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..20);
         assert_eq!(
             buf.field_by_name(layer, "csrc_count").unwrap().value,
             FieldValue::U8(2)
@@ -521,6 +604,7 @@ mod tests {
 
         assert_eq!(result.bytes_consumed, 20); // 12 + 4 (ext header) + 4 (ext data)
         let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..20);
         assert_eq!(
             buf.field_by_name(layer, "extension").unwrap().value,
             FieldValue::U8(1)
@@ -584,6 +668,7 @@ mod tests {
         assert_eq!(result.bytes_consumed, 28);
 
         let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..28);
         assert_eq!(
             buf.field_by_name(layer, "csrc_count").unwrap().value,
             FieldValue::U8(1)
@@ -724,16 +809,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_rtp_with_max_csrc() {
+        // RFC 3550, Section 5.1 — CC is 4 bits, max 15 contributing sources.
+        let mut data = minimal_rtp_header(0, 1, 100, 0xAABBCCDD);
+        data[0] = (data[0] & 0xF0) | 0x0F; // CC=15
+        for i in 0..15u32 {
+            data.extend_from_slice(&(0x10_00_00_00 + i).to_be_bytes());
+        }
+
+        let mut buf = DissectBuffer::new();
+        let result = RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 12 + 15 * 4);
+
+        let layer = &buf.layers()[0];
+        let csrc_list = buf.field_by_name(layer, "csrc_list").unwrap();
+        let range = match &csrc_list.value {
+            FieldValue::Array(r) => r.clone(),
+            _ => panic!("expected Array"),
+        };
+        assert_eq!(buf.nested_fields(&range).len(), 15);
+    }
+
+    #[test]
     fn field_descriptors_complete() {
         let descriptors = RtpDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 14);
+        assert_eq!(descriptors.len(), 15);
         assert_eq!(descriptors[0].name, "version");
         assert_eq!(descriptors[9].name, "csrc_list");
         assert!(descriptors[9].optional);
-        assert_eq!(descriptors[10].name, "padding_length");
+        assert_eq!(descriptors[10].name, "payload");
         assert!(descriptors[10].optional);
-        assert_eq!(descriptors[11].name, "ext_profile");
+        assert_eq!(descriptors[11].name, "padding_length");
         assert!(descriptors[11].optional);
+        assert_eq!(descriptors[12].name, "ext_profile");
+        assert!(descriptors[12].optional);
     }
 
     #[test]
