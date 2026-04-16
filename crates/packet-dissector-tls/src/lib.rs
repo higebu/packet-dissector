@@ -184,7 +184,9 @@ fn alert_description_name(desc: u8) -> &'static str {
 
 /// Returns a human-readable name for a TLS `ExtensionType` value.
 ///
-/// Based on the IANA TLS ExtensionType Values registry:
+/// Based on the canonical TLS 1.3 ExtensionType enum (RFC 8446, Section 4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc8446#section-4.2>) and the IANA TLS
+/// ExtensionType Values registry:
 /// <https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml>
 fn extension_type_name(ext_type: u16) -> &'static str {
     match ext_type {
@@ -198,6 +200,10 @@ fn extension_type_name(ext_type: u16) -> &'static str {
         15 => "heartbeat",
         16 => "application_layer_protocol_negotiation",
         18 => "signed_certificate_timestamp",
+        // RFC 8446, Section 4.2 — https://www.rfc-editor.org/rfc/rfc8446#section-4.2
+        // (originally RFC 7250 — https://www.rfc-editor.org/rfc/rfc7250)
+        19 => "client_certificate_type",
+        20 => "server_certificate_type",
         21 => "padding",
         23 => "extended_master_secret",
         35 => "session_ticket",
@@ -207,6 +213,8 @@ fn extension_type_name(ext_type: u16) -> &'static str {
         44 => "cookie",
         45 => "psk_key_exchange_modes",
         47 => "certificate_authorities",
+        // RFC 8446, Section 4.2.5 — https://www.rfc-editor.org/rfc/rfc8446#section-4.2.5
+        48 => "oid_filters",
         49 => "post_handshake_auth",
         50 => "signature_algorithms_cert",
         51 => "key_share",
@@ -828,6 +836,7 @@ mod tests {
     //! | 6066 §3       | SNI extension          | parse_client_hello_with_extensions       |
     //! | 5246 §7.4.1.2 | ClientHello truncated  | parse_client_hello_truncated_body        |
     //! | 5246 §7.4.1.3 | ServerHello truncated  | parse_server_hello_truncated_body        |
+    //! | 8446 §4.2     | TLS 1.3 ExtensionType  | parse_tls_extension_type_names           |
 
     use super::*;
 
@@ -1555,7 +1564,12 @@ mod tests {
             (10, "supported_groups"),
             (13, "signature_algorithms"),
             (16, "application_layer_protocol_negotiation"),
+            // RFC 8446 §4.2 — https://www.rfc-editor.org/rfc/rfc8446#section-4.2
+            (19, "client_certificate_type"),
+            (20, "server_certificate_type"),
             (43, "supported_versions"),
+            // RFC 8446 §4.2.5 — https://www.rfc-editor.org/rfc/rfc8446#section-4.2.5
+            (48, "oid_filters"),
             (51, "key_share"),
             (0xff01, "renegotiation_info"),
             (9999, "unknown"),
