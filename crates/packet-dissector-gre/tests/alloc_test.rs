@@ -33,9 +33,9 @@ fn zero_alloc_dissect_gre_basic() {
     assert_eq!(buf.layers().len(), 1);
     assert_eq!(buf.layers()[0].name, "GRE");
     let fields = buf.layer_fields(&buf.layers()[0]);
-    assert_eq!(fields.len(), 5);
+    assert_eq!(fields.len(), 6);
     assert_eq!(fields[0].value, FieldValue::U8(0)); // checksum_present
-    assert_eq!(fields[4].value, FieldValue::U16(0x0800)); // protocol_type
+    assert_eq!(fields[5].value, FieldValue::U16(0x0800)); // protocol_type
 }
 
 #[test]
@@ -63,5 +63,5 @@ fn zero_alloc_dissect_gre_all_options() {
 
     assert_eq!(buf.layers().len(), 1);
     let fields = buf.layer_fields(&buf.layers()[0]);
-    assert_eq!(fields.len(), 9);
+    assert_eq!(fields.len(), 10);
 }
