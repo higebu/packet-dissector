@@ -12,17 +12,24 @@
 //!
 //! | Section | Description | Test |
 //! |---------|-------------|------|
-//! | 8.5.2 | LLDPDU format / TLV structure | `parse_lldp_mandatory_tlvs` |
-//! | 8.5.3 | Chassis ID TLV | `parse_lldp_mandatory_tlvs` |
-//! | 8.5.4 | Port ID TLV | `parse_lldp_mandatory_tlvs` |
-//! | 8.5.5 | Time To Live TLV | `parse_lldp_mandatory_tlvs` |
-//! | 8.5.6 | End Of LLDPDU TLV | `parse_lldp_mandatory_tlvs` |
-//! | 8.5.7 | Port Description TLV | `parse_lldp_optional_tlvs` |
-//! | 8.5.8 | System Name TLV | `parse_lldp_optional_tlvs` |
-//! | 8.5.9 | System Description TLV | `parse_lldp_optional_tlvs` |
-//! | 8.5.10 | System Capabilities TLV | `parse_lldp_system_capabilities` |
-//! | 8.5.11 | Management Address TLV | `parse_lldp_management_address` |
-//! | 9.6.1 | Organizationally Specific TLV | `parse_lldp_org_specific` |
+//! | 8.5 | LLDPDU format / TLV structure | `parse_lldp_mandatory_tlvs` |
+//! | 8.5.1 | End Of LLDPDU TLV | `parse_lldp_mandatory_tlvs` |
+//! | 8.5.1 | End Of LLDPDU length != 0 | `parse_lldp_end_invalid_length` |
+//! | 8.5.2 | Chassis ID TLV | `parse_lldp_mandatory_tlvs` |
+//! | 8.5.3 | Port ID TLV | `parse_lldp_mandatory_tlvs` |
+//! | 8.5.4 | Time To Live TLV | `parse_lldp_mandatory_tlvs` |
+//! | 8.5.4 | TTL length != 2 | `parse_lldp_ttl_invalid_length` |
+//! | 8.5.5 | Port Description TLV | `parse_lldp_optional_tlvs` |
+//! | 8.5.6 | System Name TLV | `parse_lldp_optional_tlvs` |
+//! | 8.5.7 | System Description TLV | `parse_lldp_optional_tlvs` |
+//! | 8.5.8 | System Capabilities TLV | `parse_lldp_system_capabilities` |
+//! | 8.5.8 | System Capabilities length != 4 | `parse_lldp_system_capabilities_invalid_length` |
+//! | 8.5.9 | Management Address TLV (IPv4) | `parse_lldp_management_address` |
+//! | 8.5.9 | Management Address TLV (IPv6) | `parse_lldp_management_address_ipv6` |
+//! | 8.5.9 | Management Address TLV with OID | `parse_lldp_management_address_with_oid` |
+//! | 8.5.9 | Management Address length < 9 | `parse_lldp_management_address_too_short` |
+//! | 8.5.9 | Management Address length > 167 | `parse_lldp_management_address_too_long` |
+//! | 8.6 | Organizationally Specific TLV | `parse_lldp_org_specific` |
 //! | — | Truncated LLDPDU | `parse_lldp_truncated` |
 //! | — | Empty LLDPDU | `parse_lldp_empty_data` |
 
@@ -34,11 +41,27 @@ use packet_dissector_core::field::{
     FieldDescriptor, FieldType, FieldValue, MacAddr, format_utf8_lossy,
 };
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::read_be_u16;
+use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
 /// Minimum TLV header size (type + length encoded in 2 bytes).
-/// IEEE 802.1AB-2016, Section 8.5.2 — LLDPDU format.
+/// IEEE 802.1AB-2016, Section 8.5 — LLDPDU format.
 const TLV_HEADER_SIZE: usize = 2;
+
+/// Minimum Management Address TLV value length (8.5.9): 1B S + 2 (subtype + 1 addr byte) +
+/// 1B iface subtype + 4B iface number + 1B OID length + 0B OID.
+const MGMT_ADDR_MIN_LENGTH: usize = 9;
+
+/// Maximum Management Address TLV value length (8.5.9): 1B S + 32 (subtype + 31 addr bytes) +
+/// 1B iface subtype + 4B iface number + 1B OID length + 128B OID.
+const MGMT_ADDR_MAX_LENGTH: usize = 167;
+
+/// Maximum OID string length in the Management Address TLV (8.5.9.6).
+const MGMT_ADDR_OID_MAX_LENGTH: usize = 128;
+
+/// IANA Address Family Number for IPv4. Used as Management Address subtype (8.5.9.3).
+const ADDR_FAMILY_IPV4: u8 = 1;
+/// IANA Address Family Number for IPv6. Used as Management Address subtype (8.5.9.3).
+const ADDR_FAMILY_IPV6: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // TLV type constants — IEEE 802.1AB-2016, Table 8-1
@@ -74,7 +97,7 @@ const TLV_TYPE_ORG_SPECIFIC: u8 = 127;
 const CHASSIS_ID_SUBTYPE_MAC: u8 = 4;
 /// Returns a human-readable name for a Chassis ID subtype.
 ///
-/// IEEE 802.1AB-2016, Section 8.5.3.2 — chassis ID subtype.
+/// IEEE 802.1AB-2016, Section 8.5.2.2 — chassis ID subtype.
 fn chassis_id_subtype_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("Chassis component"),
@@ -98,7 +121,7 @@ const PORT_ID_SUBTYPE_MAC: u8 = 3;
 
 /// Returns a human-readable name for a Port ID subtype.
 ///
-/// IEEE 802.1AB-2016, Section 8.5.4.2 — port ID subtype.
+/// IEEE 802.1AB-2016, Section 8.5.3.2 — port ID subtype.
 fn port_id_subtype_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("Interface alias"),
@@ -159,6 +182,14 @@ const FD_TLV_OUI: usize = 8;
 const FD_TLV_ORG_SUBTYPE: usize = 9;
 const FD_TLV_INFO: usize = 10;
 const FD_TLV_RAW: usize = 11;
+// Management Address TLV subfields (IEEE 802.1AB-2016, Section 8.5.9).
+const FD_TLV_MGMT_ADDR_STRING_LENGTH: usize = 12;
+const FD_TLV_MGMT_ADDR_SUBTYPE: usize = 13;
+const FD_TLV_MGMT_ADDRESS: usize = 14;
+const FD_TLV_IFACE_NUMBERING_SUBTYPE: usize = 15;
+const FD_TLV_IFACE_NUMBER: usize = 16;
+const FD_TLV_OID_LENGTH: usize = 17;
+const FD_TLV_OID: usize = 18;
 
 /// Child field descriptors for each TLV entry within the `tlvs` array.
 static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
@@ -175,7 +206,27 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
         format_fn: None,
     },
     FieldDescriptor::new("length", "TLV Length", FieldType::U16),
-    FieldDescriptor::new("subtype", "Subtype", FieldType::U8).optional(),
+    FieldDescriptor {
+        name: "subtype",
+        display_name: "Subtype",
+        field_type: FieldType::U8,
+        optional: true,
+        children: None,
+        display_fn: Some(|v, siblings| match v {
+            FieldValue::U8(sub) => {
+                siblings
+                    .iter()
+                    .find(|f| f.name() == "type")
+                    .and_then(|f| match &f.value {
+                        FieldValue::U8(TLV_TYPE_CHASSIS_ID) => chassis_id_subtype_name(*sub),
+                        FieldValue::U8(TLV_TYPE_PORT_ID) => port_id_subtype_name(*sub),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }),
+        format_fn: None,
+    },
     FieldDescriptor::new("id", "ID", FieldType::MacAddr).optional(),
     FieldDescriptor::new("ttl", "TTL", FieldType::U16).optional(),
     FieldDescriptor::new("value", "Value", FieldType::Bytes)
@@ -197,6 +248,24 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("org_subtype", "Organization Subtype", FieldType::U8).optional(),
     FieldDescriptor::new("info", "Information", FieldType::Bytes).optional(),
     FieldDescriptor::new("raw", "Raw Value", FieldType::Bytes).optional(),
+    // Management Address TLV subfields — IEEE 802.1AB-2016, Section 8.5.9.
+    FieldDescriptor::new(
+        "addr_string_length",
+        "Mgmt Address String Length",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("addr_subtype", "Mgmt Address Subtype", FieldType::U8).optional(),
+    FieldDescriptor::new("address", "Management Address", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "iface_numbering_subtype",
+        "Interface Numbering Subtype",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("iface_number", "Interface Number", FieldType::U32).optional(),
+    FieldDescriptor::new("oid_length", "OID String Length", FieldType::U8).optional(),
+    FieldDescriptor::new("oid", "Object Identifier", FieldType::Bytes).optional(),
 ];
 
 /// LLDP dissector.
@@ -233,7 +302,7 @@ impl Dissector for LldpDissector {
         );
 
         loop {
-            // IEEE 802.1AB-2016, Section 8.5.2 — each TLV header is 2 bytes.
+            // IEEE 802.1AB-2016, Section 8.5 — each TLV header is 2 bytes.
             if pos + TLV_HEADER_SIZE > data.len() {
                 return Err(PacketError::Truncated {
                     expected: pos + TLV_HEADER_SIZE,
@@ -241,7 +310,7 @@ impl Dissector for LldpDissector {
                 });
             }
 
-            // IEEE 802.1AB-2016, Section 8.5.2 — TLV header encoding:
+            // IEEE 802.1AB-2016, Section 8.5 — TLV header encoding:
             // Bits 15..9 = TLV type (7 bits), Bits 8..0 = information string length (9 bits)
             let tlv_header = read_be_u16(data, pos)?;
             let tlv_type = (tlv_header >> 9) as u8;
@@ -280,31 +349,29 @@ impl Dissector for LldpDissector {
             );
 
             match tlv_type {
-                // IEEE 802.1AB-2016, Section 8.5.3 — Chassis ID TLV
+                // IEEE 802.1AB-2016, Section 8.5.2 — Chassis ID TLV
                 TLV_TYPE_CHASSIS_ID => {
                     parse_id_tlv(
                         buf,
                         tlv_value,
                         offset + tlv_value_start,
-                        chassis_id_subtype_name,
                         CHASSIS_ID_SUBTYPE_MAC,
                     )?;
                 }
-                // IEEE 802.1AB-2016, Section 8.5.4 — Port ID TLV
+                // IEEE 802.1AB-2016, Section 8.5.3 — Port ID TLV
                 TLV_TYPE_PORT_ID => {
                     parse_id_tlv(
                         buf,
                         tlv_value,
                         offset + tlv_value_start,
-                        port_id_subtype_name,
                         PORT_ID_SUBTYPE_MAC,
                     )?;
                 }
-                // IEEE 802.1AB-2016, Section 8.5.5 — Time To Live TLV
+                // IEEE 802.1AB-2016, Section 8.5.4 — Time To Live TLV (length = 2).
                 TLV_TYPE_TTL => {
-                    if tlv_length < 2 {
+                    if tlv_length != 2 {
                         return Err(PacketError::InvalidHeader(
-                            "TTL TLV value must be at least 2 bytes",
+                            "TTL TLV value must be exactly 2 bytes",
                         ));
                     }
                     let ttl = read_be_u16(tlv_value, 0)?;
@@ -314,7 +381,7 @@ impl Dissector for LldpDissector {
                         offset + tlv_value_start..offset + tlv_value_start + 2,
                     );
                 }
-                // IEEE 802.1AB-2016, Section 8.5.7/8.5.8/8.5.9 — String TLVs
+                // IEEE 802.1AB-2016, Sections 8.5.5 / 8.5.6 / 8.5.7 — string TLVs.
                 TLV_TYPE_PORT_DESCRIPTION | TLV_TYPE_SYSTEM_NAME | TLV_TYPE_SYSTEM_DESCRIPTION => {
                     buf.push_field(
                         &TLV_CHILD_FIELDS[FD_TLV_VALUE],
@@ -322,11 +389,11 @@ impl Dissector for LldpDissector {
                         offset + tlv_value_start..offset + tlv_value_start + tlv_length,
                     );
                 }
-                // IEEE 802.1AB-2016, Section 8.5.10 — System Capabilities TLV
+                // IEEE 802.1AB-2016, Section 8.5.8 — System Capabilities TLV (length = 4).
                 TLV_TYPE_SYSTEM_CAPABILITIES => {
-                    if tlv_length < 4 {
+                    if tlv_length != 4 {
                         return Err(PacketError::InvalidHeader(
-                            "System Capabilities TLV must be at least 4 bytes",
+                            "System Capabilities TLV must be exactly 4 bytes",
                         ));
                     }
                     let available = read_be_u16(tlv_value, 0)?;
@@ -342,7 +409,11 @@ impl Dissector for LldpDissector {
                         offset + tlv_value_start + 2..offset + tlv_value_start + 4,
                     );
                 }
-                // IEEE 802.1AB-2016, Section 9.6.1 — Organizationally Specific TLV
+                // IEEE 802.1AB-2016, Section 8.5.9 — Management Address TLV.
+                TLV_TYPE_MANAGEMENT_ADDRESS => {
+                    parse_management_address_tlv(buf, tlv_value, offset + tlv_value_start)?;
+                }
+                // IEEE 802.1AB-2016, Section 8.6 — Organizationally Specific TLV (type 127).
                 TLV_TYPE_ORG_SPECIFIC => {
                     if tlv_length < 4 {
                         return Err(PacketError::InvalidHeader(
@@ -367,10 +438,15 @@ impl Dissector for LldpDissector {
                         );
                     }
                 }
-                // End Of LLDPDU — no additional fields
-                TLV_TYPE_END => {}
-                // IEEE 802.1AB-2016, Section 8.5.11 — Management Address TLV and
-                // unknown/reserved TLV types: store value as raw bytes.
+                // IEEE 802.1AB-2016, Section 8.5.1 — End Of LLDPDU TLV (length = 0).
+                TLV_TYPE_END => {
+                    if tlv_length != 0 {
+                        return Err(PacketError::InvalidHeader(
+                            "End Of LLDPDU TLV length must be 0",
+                        ));
+                    }
+                }
+                // Reserved TLV types (8..=126): store value as raw bytes.
                 _ => {
                     if !tlv_value.is_empty() {
                         buf.push_field(
@@ -385,7 +461,7 @@ impl Dissector for LldpDissector {
             buf.end_container(obj_idx);
             pos += tlv_total;
 
-            // IEEE 802.1AB-2016, Section 8.5.6 — End Of LLDPDU terminates the PDU
+            // IEEE 802.1AB-2016, Section 8.5.1 — End Of LLDPDU terminates the PDU.
             if tlv_type == TLV_TYPE_END {
                 break;
             }
@@ -411,14 +487,14 @@ impl Dissector for LldpDissector {
 /// Parse a Chassis ID or Port ID TLV value and push fields into the buffer.
 ///
 /// Both TLV types share the same structure: 1-byte subtype followed by the ID value.
-/// IEEE 802.1AB-2016, Sections 8.5.3 and 8.5.4.
+/// IEEE 802.1AB-2016, Sections 8.5.2 and 8.5.3.
 ///
-/// `mac_subtype` encodes the subtype number for MAC address IDs.
+/// `mac_subtype` encodes the subtype number for MAC address IDs
+/// (Chassis ID: 4, Port ID: 3).
 fn parse_id_tlv<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     abs_offset: usize,
-    subtype_name_fn: fn(u8) -> Option<&'static str>,
     mac_subtype: u8,
 ) -> Result<(), PacketError> {
     if value.is_empty() {
@@ -428,8 +504,6 @@ fn parse_id_tlv<'pkt>(
     }
 
     let subtype = value[0];
-    // Call once and reuse for both the display field and value-type classification.
-    let subtype_name = subtype_name_fn(subtype);
 
     buf.push_field(
         &TLV_CHILD_FIELDS[FD_TLV_SUBTYPE],
@@ -437,15 +511,10 @@ fn parse_id_tlv<'pkt>(
         abs_offset..abs_offset + 1,
     );
 
-    let _ = subtype_name;
-
     let id_data = &value[1..];
     let id_offset = abs_offset + 1;
 
-    // Dispatch on the numeric subtype to choose the field value type:
-    // - mac_subtype (Chassis ID: 4, Port ID: 3) with a 6-byte value → MacAddr
-    // - string_subtypes (Interface alias/name, Locally assigned) → Bytes (deferred formatting)
-    // - all other subtypes → raw Bytes
+    // Subtype 4 (Chassis) / 3 (Port) with a 6-byte value → MacAddr; otherwise raw bytes.
     let id_value = if id_data.len() == 6 && subtype == mac_subtype {
         FieldValue::MacAddr(MacAddr([
             id_data[0], id_data[1], id_data[2], id_data[3], id_data[4], id_data[5],
@@ -459,6 +528,134 @@ fn parse_id_tlv<'pkt>(
         id_value,
         id_offset..id_offset + id_data.len(),
     );
+
+    Ok(())
+}
+
+/// Parse a Management Address TLV value (IEEE 802.1AB-2016, Section 8.5.9).
+///
+/// Value layout:
+/// - 1 byte: management address string length `S` (range 2..=32)
+/// - 1 byte: management address subtype (IANA address family number)
+/// - `S - 1` bytes: management address (range 1..=31)
+/// - 1 byte: interface numbering subtype
+/// - 4 bytes: interface number
+/// - 1 byte: OID string length `O` (range 0..=128)
+/// - `O` bytes: object identifier
+///
+/// Total value length is 9..=167 octets.
+fn parse_management_address_tlv<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    abs_offset: usize,
+) -> Result<(), PacketError> {
+    if value.len() < MGMT_ADDR_MIN_LENGTH || value.len() > MGMT_ADDR_MAX_LENGTH {
+        return Err(PacketError::InvalidHeader(
+            "Management Address TLV value length must be 9..=167 bytes",
+        ));
+    }
+
+    let addr_string_length = value[0] as usize;
+    // Per 8.5.9.2, `S` counts the subtype byte plus the address bytes (1..=31),
+    // giving a valid range of 2..=32.
+    if !(2..=32).contains(&addr_string_length) {
+        return Err(PacketError::InvalidHeader(
+            "Management Address string length must be 2..=32",
+        ));
+    }
+
+    // Offsets within the TLV value:
+    //   [0]                   S
+    //   [1]                   addr subtype
+    //   [2 .. 1+S]            address  (S-1 bytes)
+    //   [1+S]                 iface numbering subtype
+    //   [2+S .. 6+S]          iface number (u32)
+    //   [6+S]                 OID length O
+    //   [7+S .. 7+S+O]        OID
+    let iface_subtype_off = 1 + addr_string_length;
+    let iface_number_off = iface_subtype_off + 1;
+    let oid_length_off = iface_number_off + 4;
+    let oid_off = oid_length_off + 1;
+
+    // Bounds already covered by MGMT_ADDR_MAX_LENGTH / addr_string_length range,
+    // but verify once more to keep slice access tight.
+    if oid_off > value.len() {
+        return Err(PacketError::InvalidHeader(
+            "Management Address TLV truncated before OID length",
+        ));
+    }
+
+    let oid_length = value[oid_length_off] as usize;
+    if oid_length > MGMT_ADDR_OID_MAX_LENGTH {
+        return Err(PacketError::InvalidHeader(
+            "Management Address OID length must be 0..=128",
+        ));
+    }
+    if oid_off + oid_length != value.len() {
+        return Err(PacketError::InvalidHeader(
+            "Management Address TLV length mismatch",
+        ));
+    }
+
+    let addr_subtype = value[1];
+    let addr_bytes = &value[2..iface_subtype_off];
+    let iface_subtype = value[iface_subtype_off];
+    let iface_number = read_be_u32(value, iface_number_off)?;
+
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_MGMT_ADDR_STRING_LENGTH],
+        FieldValue::U8(addr_string_length as u8),
+        abs_offset..abs_offset + 1,
+    );
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_MGMT_ADDR_SUBTYPE],
+        FieldValue::U8(addr_subtype),
+        abs_offset + 1..abs_offset + 2,
+    );
+
+    // IEEE 802.1AB-2016, Section 8.5.9.3 — address subtype values use IANA
+    // Address Family Numbers. Surface IPv4/IPv6 as typed addresses when the
+    // address-bytes length matches, otherwise keep raw bytes.
+    let addr_range = abs_offset + 2..abs_offset + iface_subtype_off;
+    let addr_value = match (addr_subtype, addr_bytes.len()) {
+        (ADDR_FAMILY_IPV4, 4) => {
+            FieldValue::Ipv4Addr([addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]])
+        }
+        (ADDR_FAMILY_IPV6, 16) => {
+            let mut buf16 = [0u8; 16];
+            buf16.copy_from_slice(addr_bytes);
+            FieldValue::Ipv6Addr(buf16)
+        }
+        _ => FieldValue::Bytes(addr_bytes),
+    };
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_MGMT_ADDRESS],
+        addr_value,
+        addr_range,
+    );
+
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_IFACE_NUMBERING_SUBTYPE],
+        FieldValue::U8(iface_subtype),
+        abs_offset + iface_subtype_off..abs_offset + iface_number_off,
+    );
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_IFACE_NUMBER],
+        FieldValue::U32(iface_number),
+        abs_offset + iface_number_off..abs_offset + oid_length_off,
+    );
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_OID_LENGTH],
+        FieldValue::U8(oid_length as u8),
+        abs_offset + oid_length_off..abs_offset + oid_off,
+    );
+    if oid_length > 0 {
+        buf.push_field(
+            &TLV_CHILD_FIELDS[FD_TLV_OID],
+            FieldValue::Bytes(&value[oid_off..oid_off + oid_length]),
+            abs_offset + oid_off..abs_offset + oid_off + oid_length,
+        );
+    }
 
     Ok(())
 }
@@ -704,11 +901,129 @@ mod tests {
             let display = base.descriptor.display_fn.unwrap()(&base.value, &[]);
             assert_eq!(display, Some("Management Address"));
         }
-        // Raw value contains the full management address structure
         assert_eq!(
-            *obj_field_value(&buf, &mgmt_range, "raw"),
-            FieldValue::Bytes(mgmt_value)
+            *obj_field_value(&buf, &mgmt_range, "addr_string_length"),
+            FieldValue::U8(5)
         );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "addr_subtype"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "address"),
+            FieldValue::Ipv4Addr([192, 168, 1, 1])
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "iface_numbering_subtype"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "iface_number"),
+            FieldValue::U32(1)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "oid_length"),
+            FieldValue::U8(0)
+        );
+    }
+
+    #[test]
+    fn parse_lldp_management_address_ipv6() {
+        // Management Address TLV with IPv6 address (subtype=2, 16-byte address).
+        let ipv6 = [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
+        ];
+        let mut mgmt_value = Vec::new();
+        mgmt_value.push(17); // addr string length = 1 (subtype) + 16 (address)
+        mgmt_value.push(2); // addr subtype: IPv6
+        mgmt_value.extend_from_slice(&ipv6);
+        mgmt_value.push(2); // iface numbering subtype
+        mgmt_value.extend_from_slice(&42u32.to_be_bytes());
+        mgmt_value.push(0); // OID length = 0
+
+        let hdr = (8u16 << 9) | mgmt_value.len() as u16;
+        let data = build_lldp_with_optional(hdr, &mgmt_value);
+
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let array_range = tlvs_array_range(&buf);
+        let mgmt_range = tlv_object_range(&buf, &array_range, 3);
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "addr_subtype"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "address"),
+            FieldValue::Ipv6Addr(ipv6)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "iface_number"),
+            FieldValue::U32(42)
+        );
+    }
+
+    #[test]
+    fn parse_lldp_management_address_with_oid() {
+        // Management Address TLV with a non-empty OID trailer.
+        let oid = [0x2b, 0x06, 0x01, 0x04, 0x01]; // iso.org.dod.internet.private
+        let mut mgmt_value = Vec::new();
+        mgmt_value.push(5); // addr string length
+        mgmt_value.push(1); // IPv4 subtype
+        mgmt_value.extend_from_slice(&[10, 0, 0, 1]);
+        mgmt_value.push(2); // iface numbering subtype
+        mgmt_value.extend_from_slice(&7u32.to_be_bytes());
+        mgmt_value.push(oid.len() as u8);
+        mgmt_value.extend_from_slice(&oid);
+
+        let hdr = (8u16 << 9) | mgmt_value.len() as u16;
+        let data = build_lldp_with_optional(hdr, &mgmt_value);
+
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let array_range = tlvs_array_range(&buf);
+        let mgmt_range = tlv_object_range(&buf, &array_range, 3);
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "oid_length"),
+            FieldValue::U8(oid.len() as u8)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &mgmt_range, "oid"),
+            FieldValue::Bytes(&oid)
+        );
+    }
+
+    #[test]
+    fn parse_lldp_management_address_too_short() {
+        // Mgmt Address TLV value only 8 bytes (below 9-byte minimum from 8.5.9).
+        let mgmt_value: &[u8] = &[2, 1, 127, 0, 0, 1, 2, 0];
+        let hdr = (8u16 << 9) | mgmt_value.len() as u16;
+        let data = build_lldp_with_optional(hdr, mgmt_value);
+
+        let mut buf = DissectBuffer::new();
+        assert!(LldpDissector.dissect(&data, &mut buf, 0).is_err());
+    }
+
+    #[test]
+    fn parse_lldp_management_address_too_long() {
+        // Mgmt Address TLV value 168 bytes (above 167-byte maximum from 8.5.9).
+        let mut mgmt_value = Vec::new();
+        mgmt_value.push(32); // max addr string length
+        mgmt_value.push(0); // addr subtype = other (falls back to Bytes)
+        mgmt_value.extend_from_slice(&[0u8; 31]); // 31 address bytes
+        mgmt_value.push(2); // iface numbering subtype
+        mgmt_value.extend_from_slice(&0u32.to_be_bytes());
+        mgmt_value.push(129); // OID length claim = 129 (one over max)
+        mgmt_value.extend_from_slice(&[0u8; 129]);
+        assert_eq!(mgmt_value.len(), 168);
+
+        let hdr = (8u16 << 9) | mgmt_value.len() as u16;
+        let data = build_lldp_with_optional(hdr, &mgmt_value);
+
+        let mut buf = DissectBuffer::new();
+        assert!(LldpDissector.dissect(&data, &mut buf, 0).is_err());
     }
 
     #[test]
@@ -777,5 +1092,83 @@ mod tests {
         let layer = buf.layer_by_name("LLDP").unwrap();
         assert_eq!(layer.range.start, offset);
         assert_eq!(layer.range.end, offset + result.bytes_consumed);
+    }
+
+    #[test]
+    fn chassis_and_port_subtype_display_names() {
+        // Verify the subtype display_fn resolves the correct table based on
+        // the sibling "type" field (Chassis ID vs Port ID).
+        let data = build_mandatory_lldp();
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let array_range = tlvs_array_range(&buf);
+
+        let chassis_range = tlv_object_range(&buf, &array_range, 0);
+        let chassis_fields = buf.nested_fields(&chassis_range);
+        let chassis_subtype = chassis_fields
+            .iter()
+            .find(|f| f.name() == "subtype")
+            .unwrap();
+        let display =
+            chassis_subtype.descriptor.display_fn.unwrap()(&chassis_subtype.value, chassis_fields);
+        assert_eq!(display, Some("MAC address"));
+
+        let port_range = tlv_object_range(&buf, &array_range, 1);
+        let port_fields = buf.nested_fields(&port_range);
+        let port_subtype = port_fields.iter().find(|f| f.name() == "subtype").unwrap();
+        let display = port_subtype.descriptor.display_fn.unwrap()(&port_subtype.value, port_fields);
+        assert_eq!(display, Some("Locally assigned"));
+    }
+
+    #[test]
+    fn parse_lldp_ttl_invalid_length() {
+        // IEEE 802.1AB-2016, Section 8.5.4: TTL TLV length must be exactly 2.
+        // Build a frame whose TTL TLV has length=3 instead of 2.
+        let mut data = Vec::new();
+        data.extend_from_slice(&0x0207u16.to_be_bytes()); // Chassis ID, length=7
+        data.push(4);
+        data.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        data.extend_from_slice(&0x0404u16.to_be_bytes()); // Port ID, length=4
+        data.push(7);
+        data.extend_from_slice(b"ge0");
+        data.extend_from_slice(&0x0603u16.to_be_bytes()); // TTL, length=3 (invalid)
+        data.extend_from_slice(&[0x00, 0x00, 0x78]);
+        data.extend_from_slice(&0x0000u16.to_be_bytes()); // End
+
+        let mut buf = DissectBuffer::new();
+        assert!(LldpDissector.dissect(&data, &mut buf, 0).is_err());
+    }
+
+    #[test]
+    fn parse_lldp_system_capabilities_invalid_length() {
+        // IEEE 802.1AB-2016, Section 8.5.8: System Capabilities length must be 4.
+        // Append a System Capabilities TLV with length=3 to the mandatory prefix.
+        let caps_value = [0x00u8, 0x14, 0x00];
+        let hdr = (7u16 << 9) | caps_value.len() as u16;
+        let data = build_lldp_with_optional(hdr, &caps_value);
+
+        let mut buf = DissectBuffer::new();
+        assert!(LldpDissector.dissect(&data, &mut buf, 0).is_err());
+    }
+
+    #[test]
+    fn parse_lldp_end_invalid_length() {
+        // IEEE 802.1AB-2016, Section 8.5.1: End Of LLDPDU length must be 0.
+        // Construct an End Of LLDPDU TLV with length=1.
+        let mut data = Vec::new();
+        data.extend_from_slice(&0x0207u16.to_be_bytes()); // Chassis ID, length=7
+        data.push(4);
+        data.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        data.extend_from_slice(&0x0404u16.to_be_bytes()); // Port ID, length=4
+        data.push(7);
+        data.extend_from_slice(b"ge0");
+        data.extend_from_slice(&0x0602u16.to_be_bytes()); // TTL, length=2
+        data.extend_from_slice(&120u16.to_be_bytes());
+        data.extend_from_slice(&0x0001u16.to_be_bytes()); // End with length=1 (invalid)
+        data.push(0xff);
+
+        let mut buf = DissectBuffer::new();
+        assert!(LldpDissector.dissect(&data, &mut buf, 0).is_err());
     }
 }
