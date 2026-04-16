@@ -394,6 +394,7 @@ fn strip_padding<'pkt>(
     Ok(&payload[1..payload.len() - pad_length])
 }
 
+// RFC 9113, Section 6.1 — DATA frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.1>
 fn parse_data<'pkt>(
     flags: u8,
     payload: &'pkt [u8],
@@ -404,15 +405,22 @@ fn parse_data<'pkt>(
     Ok(())
 }
 
+// RFC 9113, Section 6.2 — HEADERS frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.2>
 fn parse_headers<'pkt>(
     flags: u8,
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<(), PacketError> {
+    // When PADDED is set, `strip_padding` consumes the leading 1-octet Pad
+    // Length field. Content (priority fields / header block fragment) begins
+    // at `payload[1]`; trailing padding lives at the END of the payload. The
+    // offset of `unpadded[0]` in the full packet is therefore
+    // `payload_offset + unpadded_start` where `unpadded_start` is 1 if PADDED
+    // is set, otherwise 0 — independent of pad length.
     let unpadded = strip_padding(flags, payload, payload_offset, buf)?;
-    let pad_overhead = payload.len() - unpadded.len();
-    let mut inner_pos = pad_overhead;
+    let unpadded_start = if flags & FLAG_PADDED != 0 { 1 } else { 0 };
+    let mut inner_pos = unpadded_start;
 
     if flags & FLAG_PRIORITY != 0 {
         if unpadded.len() < 5 {
@@ -422,7 +430,7 @@ fn parse_headers<'pkt>(
             });
         }
         let dep_offset = payload_offset + inner_pos;
-        push_priority_fields(unpadded, dep_offset, buf);
+        push_priority_fields(unpadded, dep_offset, buf)?;
         inner_pos += 5;
 
         let fragment = &unpadded[5..];
@@ -531,8 +539,15 @@ fn push_decoded_headers<'pkt>(
 
 /// Push PRIORITY-specific fields (exclusive flag, stream dependency, weight).
 /// Used by both PRIORITY frames and HEADERS frames with the PRIORITY flag.
-fn push_priority_fields<'pkt>(data: &'pkt [u8], base_offset: usize, buf: &mut DissectBuffer<'pkt>) {
-    let dep_word = read_be_u32(data, 0).unwrap_or_default();
+/// RFC 9113, Section 6.3 — <https://www.rfc-editor.org/rfc/rfc9113#section-6.3>
+///
+/// Callers MUST ensure `data.len() >= 5` before invoking this helper.
+fn push_priority_fields<'pkt>(
+    data: &'pkt [u8],
+    base_offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> Result<(), PacketError> {
+    let dep_word = read_be_u32(data, 0)?;
     let exclusive = (dep_word >> 31) as u8;
     let stream_dep = dep_word & 0x7FFF_FFFF;
     let weight = data[4];
@@ -552,33 +567,37 @@ fn push_priority_fields<'pkt>(data: &'pkt [u8], base_offset: usize, buf: &mut Di
         FieldValue::U8(weight),
         base_offset + 4..base_offset + 5,
     );
+    Ok(())
 }
 
+// RFC 9113, Section 6.3 — PRIORITY frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.3>
+// "A PRIORITY frame with a length other than 5 octets MUST be treated as a
+// stream error (Section 5.4.2) of type FRAME_SIZE_ERROR."
 fn parse_priority<'pkt>(
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<(), PacketError> {
-    if payload.len() < 5 {
-        return Err(PacketError::Truncated {
-            expected: 5,
-            actual: payload.len(),
-        });
+    if payload.len() != 5 {
+        return Err(PacketError::InvalidHeader(
+            "PRIORITY frame length must be exactly 5 octets",
+        ));
     }
-    push_priority_fields(payload, payload_offset, buf);
-    Ok(())
+    push_priority_fields(payload, payload_offset, buf)
 }
 
+// RFC 9113, Section 6.4 — RST_STREAM frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.4>
+// "A RST_STREAM frame with a length other than 4 octets MUST be treated as a
+// connection error (Section 5.4.1) of type FRAME_SIZE_ERROR."
 fn parse_rst_stream<'pkt>(
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<(), PacketError> {
-    if payload.len() < 4 {
-        return Err(PacketError::Truncated {
-            expected: 4,
-            actual: payload.len(),
-        });
+    if payload.len() != 4 {
+        return Err(PacketError::InvalidHeader(
+            "RST_STREAM frame length must be exactly 4 octets",
+        ));
     }
     let error_code = read_be_u32(payload, 0)?;
     buf.push_field(
@@ -589,14 +608,23 @@ fn parse_rst_stream<'pkt>(
     Ok(())
 }
 
+// RFC 9113, Section 6.5 — SETTINGS frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.5>
+// "A SETTINGS frame with a length other than a multiple of 6 octets MUST be
+// treated as a connection error (Section 5.4.1) of type FRAME_SIZE_ERROR."
+// A SETTINGS frame with the ACK flag set MUST have a length of 0; non-empty
+// ACKs MUST be treated as FRAME_SIZE_ERROR.
 fn parse_settings<'pkt>(
     flags: u8,
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<(), PacketError> {
-    // ACK flag means empty SETTINGS acknowledgment
     if flags & FLAG_ACK != 0 {
+        if !payload.is_empty() {
+            return Err(PacketError::InvalidHeader(
+                "SETTINGS ACK frame must have empty payload",
+            ));
+        }
         return Ok(());
     }
     if payload.len() % 6 != 0 {
@@ -650,14 +678,18 @@ fn parse_settings<'pkt>(
     Ok(())
 }
 
+// RFC 9113, Section 6.6 — PUSH_PROMISE frame.
+// <https://www.rfc-editor.org/rfc/rfc9113#section-6.6>
 fn parse_push_promise<'pkt>(
     flags: u8,
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<(), PacketError> {
+    // See `parse_headers` for the unpadded-offset rationale: content begins
+    // at `payload[1]` when PADDED is set, not past the trailing padding.
     let unpadded = strip_padding(flags, payload, payload_offset, buf)?;
-    let pad_overhead = payload.len() - unpadded.len();
+    let unpadded_start = if flags & FLAG_PADDED != 0 { 1 } else { 0 };
 
     if unpadded.len() < 4 {
         return Err(PacketError::Truncated {
@@ -666,7 +698,7 @@ fn parse_push_promise<'pkt>(
         });
     }
     let promised_id = read_be_u32(unpadded, 0)? & 0x7FFF_FFFF;
-    let id_offset = payload_offset + pad_overhead;
+    let id_offset = payload_offset + unpadded_start;
     buf.push_field(
         &FIELD_DESCRIPTORS[FD_PROMISED_STREAM_ID],
         FieldValue::U32(promised_id),
@@ -687,16 +719,18 @@ fn parse_push_promise<'pkt>(
     Ok(())
 }
 
+// RFC 9113, Section 6.7 — PING frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.7>
+// "Receipt of a PING frame with a length field value other than 8 MUST be
+// treated as a connection error (Section 5.4.1) of type FRAME_SIZE_ERROR."
 fn parse_ping<'pkt>(
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<(), PacketError> {
-    if payload.len() < 8 {
-        return Err(PacketError::Truncated {
-            expected: 8,
-            actual: payload.len(),
-        });
+    if payload.len() != 8 {
+        return Err(PacketError::InvalidHeader(
+            "PING frame length must be exactly 8 octets",
+        ));
     }
     buf.push_field(
         &FIELD_DESCRIPTORS[FD_OPAQUE_DATA],
@@ -706,6 +740,11 @@ fn parse_ping<'pkt>(
     Ok(())
 }
 
+// RFC 9113, Section 6.8 — GOAWAY frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.8>
+// "The GOAWAY frame applies to the connection, not a specific stream. An
+// endpoint MUST treat a GOAWAY frame with a stream identifier other than
+// 0x00 as a connection error (Section 5.4.1) of type PROTOCOL_ERROR."
+// Payload has an 8-octet fixed portion followed by optional debug data.
 fn parse_goaway<'pkt>(
     payload: &'pkt [u8],
     payload_offset: usize,
@@ -743,16 +782,19 @@ fn parse_goaway<'pkt>(
     Ok(())
 }
 
+// RFC 9113, Section 6.9 — WINDOW_UPDATE frame.
+// <https://www.rfc-editor.org/rfc/rfc9113#section-6.9>
+// "A WINDOW_UPDATE frame with a length other than 4 octets MUST be treated
+// as a connection error (Section 5.4.1) of type FRAME_SIZE_ERROR."
 fn parse_window_update<'pkt>(
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<(), PacketError> {
-    if payload.len() < 4 {
-        return Err(PacketError::Truncated {
-            expected: 4,
-            actual: payload.len(),
-        });
+    if payload.len() != 4 {
+        return Err(PacketError::InvalidHeader(
+            "WINDOW_UPDATE frame length must be exactly 4 octets",
+        ));
     }
     let increment = read_be_u32(payload, 0)? & 0x7FFF_FFFF;
     buf.push_field(
@@ -763,6 +805,8 @@ fn parse_window_update<'pkt>(
     Ok(())
 }
 
+// RFC 9113, Section 6.10 — CONTINUATION frame.
+// <https://www.rfc-editor.org/rfc/rfc9113#section-6.10>
 fn parse_continuation<'pkt>(
     payload: &'pkt [u8],
     payload_offset: usize,
@@ -781,39 +825,52 @@ fn parse_continuation<'pkt>(
 
 #[cfg(test)]
 mod tests {
+    //! # RFC 9113 (HTTP/2) and RFC 7541 (HPACK) Coverage
+    //!
+    //! | RFC Section       | Description                         | Test                                                  |
+    //! |-------------------|-------------------------------------|-------------------------------------------------------|
+    //! | 9113 §3.4         | Connection Preface                  | parse_connection_preface                              |
+    //! | 9113 §4.1         | Frame Format                        | parse_settings_frame, parse_frame_with_offset         |
+    //! | 9113 §6.1         | DATA                                | parse_data_frame, parse_data_frame_empty              |
+    //! | 9113 §6.1         | DATA w/ padding                     | parse_data_frame_padded                               |
+    //! | 9113 §6.1         | DATA invalid padding                | parse_data_frame_invalid_padding                      |
+    //! | 9113 §6.2         | HEADERS                             | parse_headers_frame, parse_headers_frame_with_literal |
+    //! | 9113 §6.2         | HEADERS w/ priority                 | parse_headers_frame_with_priority                     |
+    //! | 9113 §6.2         | HEADERS w/ padding                  | parse_headers_frame_padded                            |
+    //! | 9113 §6.2         | HEADERS padded byte ranges          | parse_headers_frame_padded_offsets_correct            |
+    //! | 9113 §6.2         | HEADERS padded+priority ranges      | parse_headers_frame_padded_with_priority_offsets_correct |
+    //! | 9113 §6.3         | PRIORITY                            | parse_priority_frame                                  |
+    //! | 9113 §6.3         | PRIORITY length != 5 is FRAME_SIZE  | parse_priority_frame_invalid_length                   |
+    //! | 9113 §6.4         | RST_STREAM                          | parse_rst_stream_frame                                |
+    //! | 9113 §6.4         | RST_STREAM length != 4 is FRAME_SIZE| parse_rst_stream_frame_invalid_length                 |
+    //! | 9113 §6.5         | SETTINGS                            | parse_settings_frame                                  |
+    //! | 9113 §6.5         | SETTINGS ACK (empty)                | parse_settings_ack_frame                              |
+    //! | 9113 §6.5         | SETTINGS length %6                  | parse_settings_invalid_length                         |
+    //! | 9113 §6.5         | SETTINGS ACK with payload           | parse_settings_ack_with_payload_invalid               |
+    //! | 9113 §6.6         | PUSH_PROMISE                        | parse_push_promise_frame                              |
+    //! | 9113 §6.6         | PUSH_PROMISE padded byte ranges     | parse_push_promise_frame_padded_offsets_correct       |
+    //! | 9113 §6.7         | PING                                | parse_ping_frame                                      |
+    //! | 9113 §6.7         | PING length != 8 is FRAME_SIZE      | parse_ping_frame_invalid_length                       |
+    //! | 9113 §6.8         | GOAWAY                              | parse_goaway_frame                                    |
+    //! | 9113 §6.8         | GOAWAY w/ debug data                | parse_goaway_frame_with_debug                         |
+    //! | 9113 §6.9         | WINDOW_UPDATE                       | parse_window_update_frame                             |
+    //! | 9113 §6.9         | WINDOW_UPDATE length != 4           | parse_window_update_frame_invalid_length              |
+    //! | 9113 §6.10        | CONTINUATION                        | parse_continuation_frame, parse_continuation_frame_with_hpack |
+    //! | 9113 §7           | Error code display names            | display_fn_error_code                                 |
+    //! | 7541 §5.1         | Integer encoding (HPACK module)     | hpack::integer::tests                                 |
+    //! | 7541 §5.2         | String literal / Huffman            | hpack::huffman::tests                                 |
+    //! | 7541 §6.1–6.3     | HPACK representations               | hpack::tests                                          |
+    //! | -                 | Unknown frame type                  | parse_unknown_frame_type                              |
+    //! | -                 | Truncated frame header              | parse_truncated_frame_header                          |
+    //! | -                 | Truncated frame payload             | parse_truncated_frame_payload                         |
+    //! | -                 | Dissector metadata                  | dissector_metadata                                    |
+
     use super::*;
 
     /// END_STREAM flag (DATA, HEADERS).
     const FLAG_END_STREAM: u8 = 0x01;
     /// END_HEADERS flag (HEADERS, PUSH_PROMISE, CONTINUATION).
     const FLAG_END_HEADERS: u8 = 0x04;
-
-    // # RFC 9113 (HTTP/2) Coverage
-    //
-    // | RFC Section | Description               | Test                                      |
-    // |-------------|---------------------------|-------------------------------------------|
-    // | 3.4         | Connection Preface        | parse_connection_preface                  |
-    // | 4.1         | Frame Format              | parse_settings_frame                      |
-    // | 6.1         | DATA                      | parse_data_frame                          |
-    // | 6.1         | DATA w/ padding           | parse_data_frame_padded                   |
-    // | 6.2         | HEADERS                   | parse_headers_frame                       |
-    // | 6.2         | HEADERS w/ priority       | parse_headers_frame_with_priority         |
-    // | 6.2         | HEADERS w/ padding        | parse_headers_frame_padded                |
-    // | 6.3         | PRIORITY                  | parse_priority_frame                      |
-    // | 6.4         | RST_STREAM                | parse_rst_stream_frame                    |
-    // | 6.5         | SETTINGS                  | parse_settings_frame                      |
-    // | 6.5         | SETTINGS ACK              | parse_settings_ack_frame                  |
-    // | 6.6         | PUSH_PROMISE              | parse_push_promise_frame                  |
-    // | 6.7         | PING                      | parse_ping_frame                          |
-    // | 6.8         | GOAWAY                    | parse_goaway_frame                        |
-    // | 6.8         | GOAWAY w/ debug data      | parse_goaway_frame_with_debug             |
-    // | 6.9         | WINDOW_UPDATE             | parse_window_update_frame                 |
-    // | 6.10        | CONTINUATION              | parse_continuation_frame                  |
-    // | -           | Unknown frame type        | parse_unknown_frame_type                  |
-    // | -           | Truncated frame header    | parse_truncated_frame_header              |
-    // | -           | Truncated frame payload   | parse_truncated_frame_payload             |
-    // | -           | Dissector metadata        | dissector_metadata                        |
-    // | -           | With offset               | parse_frame_with_offset                   |
 
     fn dissect(data: &[u8]) -> Result<DissectBuffer<'_>, PacketError> {
         let dissector = Http2Dissector;
@@ -964,6 +1021,15 @@ mod tests {
     #[test]
     fn parse_settings_invalid_length() {
         let data = build_frame(FRAME_TYPE_SETTINGS, 0x00, 0, &[0; 7]);
+        assert!(matches!(dissect_err(&data), PacketError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn parse_settings_ack_with_payload_invalid() {
+        // RFC 9113, Section 6.5 — "Receipt of a SETTINGS frame with the ACK
+        // flag set and a length field value other than 0 MUST be treated as
+        // a connection error ... of type FRAME_SIZE_ERROR."
+        let data = build_frame(FRAME_TYPE_SETTINGS, FLAG_ACK, 0, &[0; 6]);
         assert!(matches!(dissect_err(&data), PacketError::InvalidHeader(_)));
     }
 
@@ -1412,5 +1478,135 @@ mod tests {
         let f = error_code_name;
         assert_eq!(f(&FieldValue::U32(0x00), &[]), Some("NO_ERROR"));
         assert_eq!(f(&FieldValue::U32(0xFF), &[]), None);
+    }
+
+    // -------------------------------------------------------------------
+    // Strict length validation per RFC 9113.
+    // Frames with fixed-length payloads MUST be rejected when the length
+    // field is wrong (FRAME_SIZE_ERROR).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_priority_frame_invalid_length() {
+        // RFC 9113, Section 6.3 — PRIORITY length MUST be 5.
+        let payload = [0u8; 6];
+        let data = build_frame(FRAME_TYPE_PRIORITY, 0x00, 5, &payload);
+        assert!(matches!(dissect_err(&data), PacketError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn parse_rst_stream_frame_invalid_length() {
+        // RFC 9113, Section 6.4 — RST_STREAM length MUST be 4.
+        let payload = [0u8; 5];
+        let data = build_frame(FRAME_TYPE_RST_STREAM, 0x00, 1, &payload);
+        assert!(matches!(dissect_err(&data), PacketError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn parse_window_update_frame_invalid_length() {
+        // RFC 9113, Section 6.9 — WINDOW_UPDATE length MUST be 4.
+        let payload = [0u8; 5];
+        let data = build_frame(FRAME_TYPE_WINDOW_UPDATE, 0x00, 0, &payload);
+        assert!(matches!(dissect_err(&data), PacketError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn parse_ping_frame_invalid_length() {
+        // RFC 9113, Section 6.7 — PING length MUST be 8.
+        let payload = [0u8; 9];
+        let data = build_frame(FRAME_TYPE_PING, 0x00, 0, &payload);
+        assert!(matches!(dissect_err(&data), PacketError::InvalidHeader(_)));
+    }
+
+    // -------------------------------------------------------------------
+    // Byte range (offset) correctness for padded HEADERS / PUSH_PROMISE
+    // frames. Content starts immediately after the 1-octet Pad Length
+    // field, with padding at the END of the payload.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_headers_frame_padded_offsets_correct() {
+        // RFC 9113, Section 6.2 — HEADERS w/ PADDED flag.
+        // Payload layout: [PadLen=2, 0x82, 0x86, pad, pad]
+        let mut payload = Vec::new();
+        payload.push(2);
+        payload.extend_from_slice(&[0x82, 0x86]);
+        payload.extend_from_slice(&[0x00, 0x00]);
+
+        let data = build_frame(
+            FRAME_TYPE_HEADERS,
+            FLAG_END_HEADERS | FLAG_PADDED,
+            1,
+            &payload,
+        );
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+
+        // Fragment bytes are at packet offset 9 (frame header) + 1 (pad len).
+        let frag_field = buf.field_by_name(layer, "header_block_fragment").unwrap();
+        assert_eq!(
+            frag_field.range,
+            (FRAME_HEADER_LEN + 1)..(FRAME_HEADER_LEN + 3)
+        );
+    }
+
+    #[test]
+    fn parse_headers_frame_padded_with_priority_offsets_correct() {
+        // RFC 9113, Section 6.2 — HEADERS w/ PADDED + PRIORITY.
+        // Payload: [PadLen=2, E|StreamDep(4), Weight(1), frag(2), pad(2)]
+        let mut payload = Vec::new();
+        payload.push(2); // pad length
+        payload.extend_from_slice(&0x8000_0000u32.to_be_bytes()); // E=1, dep=0
+        payload.push(15); // weight
+        payload.extend_from_slice(&[0x82, 0x86]); // fragment
+        payload.extend_from_slice(&[0x00, 0x00]); // padding
+
+        let data = build_frame(
+            FRAME_TYPE_HEADERS,
+            FLAG_END_HEADERS | FLAG_PADDED | FLAG_PRIORITY,
+            1,
+            &payload,
+        );
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+
+        let dep_base = FRAME_HEADER_LEN + 1; // after the 1-octet pad length
+        let dep_field = buf
+            .field_by_name(layer, "priority_stream_dependency")
+            .unwrap();
+        assert_eq!(dep_field.range, dep_base..(dep_base + 4));
+
+        let weight_field = buf.field_by_name(layer, "priority_weight").unwrap();
+        assert_eq!(weight_field.range, (dep_base + 4)..(dep_base + 5));
+
+        let frag_field = buf.field_by_name(layer, "header_block_fragment").unwrap();
+        assert_eq!(frag_field.range, (dep_base + 5)..(dep_base + 7));
+    }
+
+    #[test]
+    fn parse_push_promise_frame_padded_offsets_correct() {
+        // RFC 9113, Section 6.6 — PUSH_PROMISE w/ PADDED.
+        // Payload: [PadLen=2, PromisedID(4), frag(2), pad(2)]
+        let mut payload = Vec::new();
+        payload.push(2);
+        payload.extend_from_slice(&2u32.to_be_bytes());
+        payload.extend_from_slice(&[0x82, 0x86]);
+        payload.extend_from_slice(&[0x00, 0x00]);
+
+        let data = build_frame(
+            FRAME_TYPE_PUSH_PROMISE,
+            FLAG_END_HEADERS | FLAG_PADDED,
+            1,
+            &payload,
+        );
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+
+        let id_base = FRAME_HEADER_LEN + 1; // right after pad length byte
+        let id_field = buf.field_by_name(layer, "promised_stream_id").unwrap();
+        assert_eq!(id_field.range, id_base..(id_base + 4));
+
+        let frag_field = buf.field_by_name(layer, "header_block_fragment").unwrap();
+        assert_eq!(frag_field.range, (id_base + 4)..(id_base + 6));
     }
 }
