@@ -652,55 +652,46 @@ fn push_user_location_information<'pkt>(
     );
 
     match choice_index {
-        0 => {
-            // userLocationInformationEUTRA
+        // userLocationInformationEUTRA
+        0 if data.len() >= 17 => {
+            let eutra_cgi_offset = offset + 2;
+            buf.push_field(
+                &FD_PLMN_IDENTITY,
+                FieldValue::Bytes(&data[3..6]),
+                eutra_cgi_offset + 1..eutra_cgi_offset + 4,
+            );
+            let eci = packet_dissector_core::util::read_be_u32(data, 6).unwrap_or_default() >> 4;
+            buf.push_field(
+                &FD_EUTRA_CELL_IDENTITY,
+                FieldValue::U32(eci),
+                offset + 6..offset + 10,
+            );
             if data.len() >= 17 {
-                let eutra_cgi_offset = offset + 2;
-                buf.push_field(
-                    &FD_PLMN_IDENTITY,
-                    FieldValue::Bytes(&data[3..6]),
-                    eutra_cgi_offset + 1..eutra_cgi_offset + 4,
-                );
-                let eci =
-                    packet_dissector_core::util::read_be_u32(data, 6).unwrap_or_default() >> 4;
-                buf.push_field(
-                    &FD_EUTRA_CELL_IDENTITY,
-                    FieldValue::U32(eci),
-                    offset + 6..offset + 10,
-                );
-                if data.len() >= 17 {
-                    let tac = (u32::from(data[14]) << 16)
-                        | (u32::from(data[15]) << 8)
-                        | u32::from(data[16]);
-                    buf.push_field(&FD_TAC, FieldValue::U32(tac), offset + 14..offset + 17);
-                }
+                let tac =
+                    (u32::from(data[14]) << 16) | (u32::from(data[15]) << 8) | u32::from(data[16]);
+                buf.push_field(&FD_TAC, FieldValue::U32(tac), offset + 14..offset + 17);
             }
         }
-        1 => {
-            // userLocationInformationNR
+        // userLocationInformationNR
+        1 if data.len() >= 18 => {
+            let nr_cgi_offset = offset + 2;
+            buf.push_field(
+                &FD_PLMN_IDENTITY,
+                FieldValue::Bytes(&data[3..6]),
+                nr_cgi_offset + 1..nr_cgi_offset + 4,
+            );
+            let nci = ((u64::from(data[6]) << 32)
+                | u64::from(packet_dissector_core::util::read_be_u32(data, 7).unwrap_or_default()))
+                >> 4;
+            buf.push_field(
+                &FD_NR_CELL_IDENTITY,
+                FieldValue::U64(nci),
+                offset + 6..offset + 11,
+            );
             if data.len() >= 18 {
-                let nr_cgi_offset = offset + 2;
-                buf.push_field(
-                    &FD_PLMN_IDENTITY,
-                    FieldValue::Bytes(&data[3..6]),
-                    nr_cgi_offset + 1..nr_cgi_offset + 4,
-                );
-                let nci = ((u64::from(data[6]) << 32)
-                    | u64::from(
-                        packet_dissector_core::util::read_be_u32(data, 7).unwrap_or_default(),
-                    ))
-                    >> 4;
-                buf.push_field(
-                    &FD_NR_CELL_IDENTITY,
-                    FieldValue::U64(nci),
-                    offset + 6..offset + 11,
-                );
-                if data.len() >= 18 {
-                    let tac = (u32::from(data[15]) << 16)
-                        | (u32::from(data[16]) << 8)
-                        | u32::from(data[17]);
-                    buf.push_field(&FD_TAC, FieldValue::U32(tac), offset + 15..offset + 18);
-                }
+                let tac =
+                    (u32::from(data[15]) << 16) | (u32::from(data[16]) << 8) | u32::from(data[17]);
+                buf.push_field(&FD_TAC, FieldValue::U32(tac), offset + 15..offset + 18);
             }
         }
         _ => {

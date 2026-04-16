@@ -417,31 +417,27 @@ fn parse_rdata<'pkt>(
 
     match rtype {
         // RFC 1035, Section 3.4.1 — A record: 4-byte IPv4 address
-        TYPE_A => {
-            if rdata.len() == 4 {
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA],
-                    FieldValue::Ipv4Addr([rdata[0], rdata[1], rdata[2], rdata[3]]),
-                    rdata_range,
-                );
-                return;
-            }
+        TYPE_A if rdata.len() == 4 => {
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA],
+                FieldValue::Ipv4Addr([rdata[0], rdata[1], rdata[2], rdata[3]]),
+                rdata_range,
+            );
+            return;
         }
         // RFC 3596 — AAAA record: 16-byte IPv6 address
-        TYPE_AAAA => {
-            if rdata.len() == 16 {
-                let addr: [u8; 16] = [
-                    rdata[0], rdata[1], rdata[2], rdata[3], rdata[4], rdata[5], rdata[6], rdata[7],
-                    rdata[8], rdata[9], rdata[10], rdata[11], rdata[12], rdata[13], rdata[14],
-                    rdata[15],
-                ];
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA],
-                    FieldValue::Ipv6Addr(addr),
-                    rdata_range,
-                );
-                return;
-            }
+        TYPE_AAAA if rdata.len() == 16 => {
+            let addr: [u8; 16] = [
+                rdata[0], rdata[1], rdata[2], rdata[3], rdata[4], rdata[5], rdata[6], rdata[7],
+                rdata[8], rdata[9], rdata[10], rdata[11], rdata[12], rdata[13], rdata[14],
+                rdata[15],
+            ];
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA],
+                FieldValue::Ipv6Addr(addr),
+                rdata_range,
+            );
+            return;
         }
         // RFC 1035, Section 3.3.1/3.3.11/3.3.12 — CNAME/NS/PTR
         // RFC 6672 — DNAME: a single domain name
@@ -457,22 +453,20 @@ fn parse_rdata<'pkt>(
             }
         }
         // RFC 1035, Section 3.3.9 — MX: preference (U16) + exchange (domain name)
-        TYPE_MX => {
-            if rdata.len() >= 3 {
-                let preference = read_be_u16(rdata, 0).unwrap_or_default();
-                if parse_name(msg, rdata_offset + 2).is_ok() {
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_PREFERENCE],
-                        FieldValue::U16(preference),
-                        abs_offset..abs_offset + 2,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_EXCHANGE],
-                        FieldValue::Bytes(&msg[rdata_offset + 2..rdata_offset + rdata.len()]),
-                        abs_offset + 2..abs_offset + rdata.len(),
-                    );
-                    return;
-                }
+        TYPE_MX if rdata.len() >= 3 => {
+            let preference = read_be_u16(rdata, 0).unwrap_or_default();
+            if parse_name(msg, rdata_offset + 2).is_ok() {
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_PREFERENCE],
+                    FieldValue::U16(preference),
+                    abs_offset..abs_offset + 2,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_EXCHANGE],
+                    FieldValue::Bytes(&msg[rdata_offset + 2..rdata_offset + rdata.len()]),
+                    abs_offset + 2..abs_offset + rdata.len(),
+                );
+                return;
             }
         }
         // RFC 1035, Section 3.3.14 — TXT: one or more character-strings
@@ -541,226 +535,217 @@ fn parse_rdata<'pkt>(
             }
         }
         // RFC 2782 — SRV: priority(2) + weight(2) + port(2) + target(name)
-        TYPE_SRV => {
-            if rdata.len() >= 7 {
-                let priority = read_be_u16(rdata, 0).unwrap_or_default();
-                let weight = read_be_u16(rdata, 2).unwrap_or_default();
-                let port = read_be_u16(rdata, 4).unwrap_or_default();
-                if parse_name(msg, rdata_offset + 6).is_ok() {
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_PRIORITY],
-                        FieldValue::U16(priority),
-                        abs_offset..abs_offset + 2,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_WEIGHT],
-                        FieldValue::U16(weight),
-                        abs_offset + 2..abs_offset + 4,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_PORT],
-                        FieldValue::U16(port),
-                        abs_offset + 4..abs_offset + 6,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_TARGET],
-                        FieldValue::Bytes(&msg[rdata_offset + 6..rdata_offset + rdata.len()]),
-                        abs_offset + 6..abs_offset + rdata.len(),
-                    );
-                    return;
-                }
+        TYPE_SRV if rdata.len() >= 7 => {
+            let priority = read_be_u16(rdata, 0).unwrap_or_default();
+            let weight = read_be_u16(rdata, 2).unwrap_or_default();
+            let port = read_be_u16(rdata, 4).unwrap_or_default();
+            if parse_name(msg, rdata_offset + 6).is_ok() {
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_PRIORITY],
+                    FieldValue::U16(priority),
+                    abs_offset..abs_offset + 2,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_WEIGHT],
+                    FieldValue::U16(weight),
+                    abs_offset + 2..abs_offset + 4,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_PORT],
+                    FieldValue::U16(port),
+                    abs_offset + 4..abs_offset + 6,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_TARGET],
+                    FieldValue::Bytes(&msg[rdata_offset + 6..rdata_offset + rdata.len()]),
+                    abs_offset + 6..abs_offset + rdata.len(),
+                );
+                return;
             }
         }
         // RFC 3403 — NAPTR: order(2) + preference(2) + flags(charstr) + services(charstr) + regexp(charstr) + replacement(name)
-        TYPE_NAPTR => {
-            if rdata.len() >= 7 {
-                let order = read_be_u16(rdata, 0).unwrap_or_default();
-                let preference = read_be_u16(rdata, 2).unwrap_or_default();
-                let mut pos = 4;
-                // Parse three character-strings: flags, services, regexp.
-                let mut byte_ranges: Vec<(usize, usize)> = Vec::new();
-                for _ in 0..3 {
-                    if pos >= rdata.len() {
-                        break;
-                    }
-                    let str_len = rdata[pos] as usize;
-                    let str_start = pos;
-                    pos += 1;
-                    if pos + str_len > rdata.len() {
-                        break;
-                    }
-                    byte_ranges.push((str_start, pos + str_len));
-                    pos += str_len;
+        TYPE_NAPTR if rdata.len() >= 7 => {
+            let order = read_be_u16(rdata, 0).unwrap_or_default();
+            let preference = read_be_u16(rdata, 2).unwrap_or_default();
+            let mut pos = 4;
+            // Parse three character-strings: flags, services, regexp.
+            // Fixed-size array to keep dissection zero-allocation.
+            let mut byte_ranges: [(usize, usize); 3] = [(0, 0); 3];
+            let mut n = 0usize;
+            for _ in 0..3 {
+                if pos >= rdata.len() {
+                    break;
                 }
-                if byte_ranges.len() == 3 && parse_name(msg, rdata_offset + pos).is_ok() {
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_ORDER],
-                        FieldValue::U16(order),
-                        abs_offset..abs_offset + 2,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_PREFERENCE],
-                        FieldValue::U16(preference),
-                        abs_offset + 2..abs_offset + 4,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
-                        FieldValue::Bytes(&rdata[byte_ranges[0].0..byte_ranges[0].1]),
-                        abs_offset + byte_ranges[0].0..abs_offset + byte_ranges[0].1,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_SERVICES],
-                        FieldValue::Bytes(&rdata[byte_ranges[1].0..byte_ranges[1].1]),
-                        abs_offset + byte_ranges[1].0..abs_offset + byte_ranges[1].1,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_REGEXP],
-                        FieldValue::Bytes(&rdata[byte_ranges[2].0..byte_ranges[2].1]),
-                        abs_offset + byte_ranges[2].0..abs_offset + byte_ranges[2].1,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_REPLACEMENT],
-                        FieldValue::Bytes(&msg[rdata_offset + pos..rdata_offset + rdata.len()]),
-                        abs_offset + pos..abs_offset + rdata.len(),
-                    );
-                    return;
+                let str_len = rdata[pos] as usize;
+                let str_start = pos;
+                pos += 1;
+                if pos + str_len > rdata.len() {
+                    break;
                 }
+                byte_ranges[n] = (str_start, pos + str_len);
+                n += 1;
+                pos += str_len;
+            }
+            if n == 3 && parse_name(msg, rdata_offset + pos).is_ok() {
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_ORDER],
+                    FieldValue::U16(order),
+                    abs_offset..abs_offset + 2,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_PREFERENCE],
+                    FieldValue::U16(preference),
+                    abs_offset + 2..abs_offset + 4,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
+                    FieldValue::Bytes(&rdata[byte_ranges[0].0..byte_ranges[0].1]),
+                    abs_offset + byte_ranges[0].0..abs_offset + byte_ranges[0].1,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SERVICES],
+                    FieldValue::Bytes(&rdata[byte_ranges[1].0..byte_ranges[1].1]),
+                    abs_offset + byte_ranges[1].0..abs_offset + byte_ranges[1].1,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_REGEXP],
+                    FieldValue::Bytes(&rdata[byte_ranges[2].0..byte_ranges[2].1]),
+                    abs_offset + byte_ranges[2].0..abs_offset + byte_ranges[2].1,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_REPLACEMENT],
+                    FieldValue::Bytes(&msg[rdata_offset + pos..rdata_offset + rdata.len()]),
+                    abs_offset + pos..abs_offset + rdata.len(),
+                );
+                return;
             }
         }
         // RFC 4255 — SSHFP: algorithm(1) + fingerprint_type(1) + fingerprint(rest)
-        TYPE_SSHFP => {
-            if rdata.len() >= 2 {
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_ALGORITHM],
-                    FieldValue::U8(rdata[0]),
-                    abs_offset..abs_offset + 1,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_FINGERPRINT_TYPE],
-                    FieldValue::U8(rdata[1]),
-                    abs_offset + 1..abs_offset + 2,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_FINGERPRINT],
-                    FieldValue::Bytes(&rdata[2..]),
-                    abs_offset + 2..abs_offset + rdata.len(),
-                );
-                return;
-            }
+        TYPE_SSHFP if rdata.len() >= 2 => {
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_ALGORITHM],
+                FieldValue::U8(rdata[0]),
+                abs_offset..abs_offset + 1,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_FINGERPRINT_TYPE],
+                FieldValue::U8(rdata[1]),
+                abs_offset + 1..abs_offset + 2,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_FINGERPRINT],
+                FieldValue::Bytes(&rdata[2..]),
+                abs_offset + 2..abs_offset + rdata.len(),
+            );
+            return;
         }
         // RFC 6698 — TLSA: cert_usage(1) + selector(1) + matching_type(1) + cert_assoc_data(rest)
-        TYPE_TLSA => {
-            if rdata.len() >= 3 {
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_CERT_USAGE],
-                    FieldValue::U8(rdata[0]),
-                    abs_offset..abs_offset + 1,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_SELECTOR],
-                    FieldValue::U8(rdata[1]),
-                    abs_offset + 1..abs_offset + 2,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_MATCHING_TYPE],
-                    FieldValue::U8(rdata[2]),
-                    abs_offset + 2..abs_offset + 3,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_CERT_ASSOC_DATA],
-                    FieldValue::Bytes(&rdata[3..]),
-                    abs_offset + 3..abs_offset + rdata.len(),
-                );
-                return;
-            }
+        TYPE_TLSA if rdata.len() >= 3 => {
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_CERT_USAGE],
+                FieldValue::U8(rdata[0]),
+                abs_offset..abs_offset + 1,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_SELECTOR],
+                FieldValue::U8(rdata[1]),
+                abs_offset + 1..abs_offset + 2,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_MATCHING_TYPE],
+                FieldValue::U8(rdata[2]),
+                abs_offset + 2..abs_offset + 3,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_CERT_ASSOC_DATA],
+                FieldValue::Bytes(&rdata[3..]),
+                abs_offset + 3..abs_offset + rdata.len(),
+            );
+            return;
         }
         // RFC 4035 — DS / RFC 7344 — CDS: key_tag(2) + algorithm(1) + digest_type(1) + digest(rest)
-        TYPE_DS | TYPE_CDS => {
-            if rdata.len() >= 4 {
-                let key_tag = read_be_u16(rdata, 0).unwrap_or_default();
+        TYPE_DS | TYPE_CDS if rdata.len() >= 4 => {
+            let key_tag = read_be_u16(rdata, 0).unwrap_or_default();
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_KEY_TAG],
+                FieldValue::U16(key_tag),
+                abs_offset..abs_offset + 2,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_ALGORITHM],
+                FieldValue::U8(rdata[2]),
+                abs_offset + 2..abs_offset + 3,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_DIGEST_TYPE],
+                FieldValue::U8(rdata[3]),
+                abs_offset + 3..abs_offset + 4,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_DIGEST],
+                FieldValue::Bytes(&rdata[4..]),
+                abs_offset + 4..abs_offset + rdata.len(),
+            );
+            return;
+        }
+        // RFC 4035 — RRSIG: type_covered(2) + algorithm(1) + labels(1) + original_ttl(4)
+        //   + sig_expiration(4) + sig_inception(4) + key_tag(2) + signer_name + signature
+        TYPE_RRSIG if rdata.len() >= 18 => {
+            let type_covered = read_be_u16(rdata, 0).unwrap_or_default();
+            let algorithm = rdata[2];
+            let labels = rdata[3];
+            let original_ttl = read_be_u32(rdata, 4).unwrap_or_default();
+            let sig_expiration = read_be_u32(rdata, 8).unwrap_or_default();
+            let sig_inception = read_be_u32(rdata, 12).unwrap_or_default();
+            let key_tag = read_be_u16(rdata, 16).unwrap_or_default();
+            if let Ok(signer_name_len) = parse_name(msg, rdata_offset + 18) {
+                let sig_start = 18 + signer_name_len;
                 buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_KEY_TAG],
-                    FieldValue::U16(key_tag),
+                    &RR_CHILD_FIELDS[RRFD_RDATA_TYPE_COVERED],
+                    FieldValue::U16(type_covered),
                     abs_offset..abs_offset + 2,
                 );
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_ALGORITHM],
-                    FieldValue::U8(rdata[2]),
+                    FieldValue::U8(algorithm),
                     abs_offset + 2..abs_offset + 3,
                 );
                 buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_DIGEST_TYPE],
-                    FieldValue::U8(rdata[3]),
+                    &RR_CHILD_FIELDS[RRFD_RDATA_LABELS],
+                    FieldValue::U8(labels),
                     abs_offset + 3..abs_offset + 4,
                 );
                 buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_DIGEST],
-                    FieldValue::Bytes(&rdata[4..]),
-                    abs_offset + 4..abs_offset + rdata.len(),
+                    &RR_CHILD_FIELDS[RRFD_RDATA_ORIGINAL_TTL],
+                    FieldValue::U32(original_ttl),
+                    abs_offset + 4..abs_offset + 8,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SIGNATURE_EXPIRATION],
+                    FieldValue::U32(sig_expiration),
+                    abs_offset + 8..abs_offset + 12,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SIGNATURE_INCEPTION],
+                    FieldValue::U32(sig_inception),
+                    abs_offset + 12..abs_offset + 16,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_KEY_TAG],
+                    FieldValue::U16(key_tag),
+                    abs_offset + 16..abs_offset + 18,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SIGNER_NAME],
+                    FieldValue::Bytes(&msg[rdata_offset + 18..rdata_offset + sig_start]),
+                    abs_offset + 18..abs_offset + sig_start,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SIGNATURE],
+                    FieldValue::Bytes(&rdata[sig_start..]),
+                    abs_offset + sig_start..abs_offset + rdata.len(),
                 );
                 return;
-            }
-        }
-        // RFC 4035 — RRSIG: type_covered(2) + algorithm(1) + labels(1) + original_ttl(4)
-        //   + sig_expiration(4) + sig_inception(4) + key_tag(2) + signer_name + signature
-        TYPE_RRSIG => {
-            if rdata.len() >= 18 {
-                let type_covered = read_be_u16(rdata, 0).unwrap_or_default();
-                let algorithm = rdata[2];
-                let labels = rdata[3];
-                let original_ttl = read_be_u32(rdata, 4).unwrap_or_default();
-                let sig_expiration = read_be_u32(rdata, 8).unwrap_or_default();
-                let sig_inception = read_be_u32(rdata, 12).unwrap_or_default();
-                let key_tag = read_be_u16(rdata, 16).unwrap_or_default();
-                if let Ok(signer_name_len) = parse_name(msg, rdata_offset + 18) {
-                    let sig_start = 18 + signer_name_len;
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_TYPE_COVERED],
-                        FieldValue::U16(type_covered),
-                        abs_offset..abs_offset + 2,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_ALGORITHM],
-                        FieldValue::U8(algorithm),
-                        abs_offset + 2..abs_offset + 3,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_LABELS],
-                        FieldValue::U8(labels),
-                        abs_offset + 3..abs_offset + 4,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_ORIGINAL_TTL],
-                        FieldValue::U32(original_ttl),
-                        abs_offset + 4..abs_offset + 8,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_SIGNATURE_EXPIRATION],
-                        FieldValue::U32(sig_expiration),
-                        abs_offset + 8..abs_offset + 12,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_SIGNATURE_INCEPTION],
-                        FieldValue::U32(sig_inception),
-                        abs_offset + 12..abs_offset + 16,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_KEY_TAG],
-                        FieldValue::U16(key_tag),
-                        abs_offset + 16..abs_offset + 18,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_SIGNER_NAME],
-                        FieldValue::Bytes(&msg[rdata_offset + 18..rdata_offset + sig_start]),
-                        abs_offset + 18..abs_offset + sig_start,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_SIGNATURE],
-                        FieldValue::Bytes(&rdata[sig_start..]),
-                        abs_offset + sig_start..abs_offset + rdata.len(),
-                    );
-                    return;
-                }
             }
         }
         // RFC 4035 — NSEC: next_domain_name + type_bitmaps
@@ -780,99 +765,43 @@ fn parse_rdata<'pkt>(
             }
         }
         // RFC 4035 — DNSKEY / RFC 7344 — CDNSKEY: flags(2) + protocol(1) + algorithm(1) + public_key(rest)
-        TYPE_DNSKEY | TYPE_CDNSKEY => {
-            if rdata.len() >= 4 {
-                let flags = read_be_u16(rdata, 0).unwrap_or_default();
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
-                    FieldValue::U16(flags),
-                    abs_offset..abs_offset + 2,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_PROTOCOL],
-                    FieldValue::U8(rdata[2]),
-                    abs_offset + 2..abs_offset + 3,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_ALGORITHM],
-                    FieldValue::U8(rdata[3]),
-                    abs_offset + 3..abs_offset + 4,
-                );
-                buf.push_field(
-                    &RR_CHILD_FIELDS[RRFD_RDATA_PUBLIC_KEY],
-                    FieldValue::Bytes(&rdata[4..]),
-                    abs_offset + 4..abs_offset + rdata.len(),
-                );
-                return;
-            }
+        TYPE_DNSKEY | TYPE_CDNSKEY if rdata.len() >= 4 => {
+            let flags = read_be_u16(rdata, 0).unwrap_or_default();
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
+                FieldValue::U16(flags),
+                abs_offset..abs_offset + 2,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_PROTOCOL],
+                FieldValue::U8(rdata[2]),
+                abs_offset + 2..abs_offset + 3,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_ALGORITHM],
+                FieldValue::U8(rdata[3]),
+                abs_offset + 3..abs_offset + 4,
+            );
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA_PUBLIC_KEY],
+                FieldValue::Bytes(&rdata[4..]),
+                abs_offset + 4..abs_offset + rdata.len(),
+            );
+            return;
         }
         // RFC 5155 — NSEC3: hash_alg(1) + flags(1) + iterations(2) + salt_len(1) + salt
         //   + hash_len(1) + next_hashed_owner + type_bitmaps
-        TYPE_NSEC3 => {
-            if rdata.len() >= 5 {
-                let hash_algorithm = rdata[0];
-                let flags = rdata[1];
-                let iterations = read_be_u16(rdata, 2).unwrap_or_default();
-                let salt_length = rdata[4] as usize;
-                let salt_end = 5 + salt_length;
-                if salt_end < rdata.len() {
-                    let hash_length = rdata[salt_end] as usize;
-                    let hash_start = salt_end + 1;
-                    let hash_end = hash_start + hash_length;
-                    if hash_end <= rdata.len() {
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_HASH_ALGORITHM],
-                            FieldValue::U8(hash_algorithm),
-                            abs_offset..abs_offset + 1,
-                        );
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
-                            FieldValue::U8(flags),
-                            abs_offset + 1..abs_offset + 2,
-                        );
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_ITERATIONS],
-                            FieldValue::U16(iterations),
-                            abs_offset + 2..abs_offset + 4,
-                        );
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_SALT_LENGTH],
-                            FieldValue::U8(salt_length as u8),
-                            abs_offset + 4..abs_offset + 5,
-                        );
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_SALT],
-                            FieldValue::Bytes(&rdata[5..salt_end]),
-                            abs_offset + 5..abs_offset + salt_end,
-                        );
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_HASH_LENGTH],
-                            FieldValue::U8(hash_length as u8),
-                            abs_offset + salt_end..abs_offset + hash_start,
-                        );
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_NEXT_HASHED_OWNER],
-                            FieldValue::Bytes(&rdata[hash_start..hash_end]),
-                            abs_offset + hash_start..abs_offset + hash_end,
-                        );
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_TYPE_BITMAPS],
-                            FieldValue::Bytes(&rdata[hash_end..]),
-                            abs_offset + hash_end..abs_offset + rdata.len(),
-                        );
-                        return;
-                    }
-                }
-            }
-        }
-        // RFC 5155 §4.2 — NSEC3PARAM: hash_alg(1) + flags(1) + iterations(2) + salt_len(1) + salt
-        TYPE_NSEC3PARAM => {
-            if rdata.len() >= 5 {
-                let hash_algorithm = rdata[0];
-                let flags = rdata[1];
-                let iterations = read_be_u16(rdata, 2).unwrap_or_default();
-                let salt_length = rdata[4] as usize;
-                if 5 + salt_length <= rdata.len() {
+        TYPE_NSEC3 if rdata.len() >= 5 => {
+            let hash_algorithm = rdata[0];
+            let flags = rdata[1];
+            let iterations = read_be_u16(rdata, 2).unwrap_or_default();
+            let salt_length = rdata[4] as usize;
+            let salt_end = 5 + salt_length;
+            if salt_end < rdata.len() {
+                let hash_length = rdata[salt_end] as usize;
+                let hash_start = salt_end + 1;
+                let hash_end = hash_start + hash_length;
+                if hash_end <= rdata.len() {
                     buf.push_field(
                         &RR_CHILD_FIELDS[RRFD_RDATA_HASH_ALGORITHM],
                         FieldValue::U8(hash_algorithm),
@@ -895,63 +824,109 @@ fn parse_rdata<'pkt>(
                     );
                     buf.push_field(
                         &RR_CHILD_FIELDS[RRFD_RDATA_SALT],
-                        FieldValue::Bytes(&rdata[5..5 + salt_length]),
-                        abs_offset + 5..abs_offset + 5 + salt_length,
+                        FieldValue::Bytes(&rdata[5..salt_end]),
+                        abs_offset + 5..abs_offset + salt_end,
+                    );
+                    buf.push_field(
+                        &RR_CHILD_FIELDS[RRFD_RDATA_HASH_LENGTH],
+                        FieldValue::U8(hash_length as u8),
+                        abs_offset + salt_end..abs_offset + hash_start,
+                    );
+                    buf.push_field(
+                        &RR_CHILD_FIELDS[RRFD_RDATA_NEXT_HASHED_OWNER],
+                        FieldValue::Bytes(&rdata[hash_start..hash_end]),
+                        abs_offset + hash_start..abs_offset + hash_end,
+                    );
+                    buf.push_field(
+                        &RR_CHILD_FIELDS[RRFD_RDATA_TYPE_BITMAPS],
+                        FieldValue::Bytes(&rdata[hash_end..]),
+                        abs_offset + hash_end..abs_offset + rdata.len(),
                     );
                     return;
                 }
+            }
+        }
+        // RFC 5155 §4.2 — NSEC3PARAM: hash_alg(1) + flags(1) + iterations(2) + salt_len(1) + salt
+        TYPE_NSEC3PARAM if rdata.len() >= 5 => {
+            let hash_algorithm = rdata[0];
+            let flags = rdata[1];
+            let iterations = read_be_u16(rdata, 2).unwrap_or_default();
+            let salt_length = rdata[4] as usize;
+            if 5 + salt_length <= rdata.len() {
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_HASH_ALGORITHM],
+                    FieldValue::U8(hash_algorithm),
+                    abs_offset..abs_offset + 1,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
+                    FieldValue::U8(flags),
+                    abs_offset + 1..abs_offset + 2,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_ITERATIONS],
+                    FieldValue::U16(iterations),
+                    abs_offset + 2..abs_offset + 4,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SALT_LENGTH],
+                    FieldValue::U8(salt_length as u8),
+                    abs_offset + 4..abs_offset + 5,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SALT],
+                    FieldValue::Bytes(&rdata[5..5 + salt_length]),
+                    abs_offset + 5..abs_offset + 5 + salt_length,
+                );
+                return;
             }
         }
         // RFC 9460 — SVCB/HTTPS: SvcPriority(2) + TargetName(name) + SvcParams(rest)
-        TYPE_SVCB | TYPE_HTTPS => {
-            if rdata.len() >= 3 {
-                let priority = read_be_u16(rdata, 0).unwrap_or_default();
-                if let Ok(target_len) = parse_name(msg, rdata_offset + 2) {
-                    let params_start = 2 + target_len;
+        TYPE_SVCB | TYPE_HTTPS if rdata.len() >= 3 => {
+            let priority = read_be_u16(rdata, 0).unwrap_or_default();
+            if let Ok(target_len) = parse_name(msg, rdata_offset + 2) {
+                let params_start = 2 + target_len;
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_PRIORITY],
+                    FieldValue::U16(priority),
+                    abs_offset..abs_offset + 2,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_TARGET],
+                    FieldValue::Bytes(&msg[rdata_offset + 2..rdata_offset + params_start]),
+                    abs_offset + 2..abs_offset + params_start,
+                );
+                if params_start <= rdata.len() {
                     buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_PRIORITY],
-                        FieldValue::U16(priority),
-                        abs_offset..abs_offset + 2,
+                        &RR_CHILD_FIELDS[RRFD_RDATA_PARAMS],
+                        FieldValue::Bytes(&rdata[params_start..]),
+                        abs_offset + params_start..abs_offset + rdata.len(),
                     );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_TARGET],
-                        FieldValue::Bytes(&msg[rdata_offset + 2..rdata_offset + params_start]),
-                        abs_offset + 2..abs_offset + params_start,
-                    );
-                    if params_start <= rdata.len() {
-                        buf.push_field(
-                            &RR_CHILD_FIELDS[RRFD_RDATA_PARAMS],
-                            FieldValue::Bytes(&rdata[params_start..]),
-                            abs_offset + params_start..abs_offset + rdata.len(),
-                        );
-                    }
-                    return;
                 }
+                return;
             }
         }
         // RFC 8659 — CAA: flags(1) + tag_length(1) + tag + value
-        TYPE_CAA => {
-            if rdata.len() >= 2 {
-                let flags = rdata[0];
-                let tag_len = rdata[1] as usize;
-                if 2 + tag_len <= rdata.len() {
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
-                        FieldValue::U8(flags),
-                        abs_offset..abs_offset + 1,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_TAG],
-                        FieldValue::Bytes(&rdata[2..2 + tag_len]),
-                        abs_offset + 1..abs_offset + 2 + tag_len,
-                    );
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_VALUE],
-                        FieldValue::Bytes(&rdata[2 + tag_len..]),
-                        abs_offset + 2 + tag_len..abs_offset + rdata.len(),
-                    );
-                    return;
-                }
+        TYPE_CAA if rdata.len() >= 2 => {
+            let flags = rdata[0];
+            let tag_len = rdata[1] as usize;
+            if 2 + tag_len <= rdata.len() {
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_FLAGS],
+                    FieldValue::U8(flags),
+                    abs_offset..abs_offset + 1,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_TAG],
+                    FieldValue::Bytes(&rdata[2..2 + tag_len]),
+                    abs_offset + 2..abs_offset + 2 + tag_len,
+                );
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_VALUE],
+                    FieldValue::Bytes(&rdata[2 + tag_len..]),
+                    abs_offset + 2 + tag_len..abs_offset + rdata.len(),
+                );
+                return;
             }
         }
         _ => {}
@@ -1756,5 +1731,1203 @@ impl Dissector for DnsTcpDissector {
         }
 
         dissect_dns_tcp_message(&data[..total_len], buf, offset)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use packet_dissector_core::field::Field;
+
+    // # RFC Coverage (DNS dissector)
+    //
+    // | RFC / Section          | Description                         | Test                              |
+    // |------------------------|-------------------------------------|-----------------------------------|
+    // | RFC 1035 §4.1.1        | Header layout & flag extraction     | parse_header_flags                |
+    // | RFC 1035 §4.1.1        | Truncated DNS header (<12 bytes)    | parse_header_truncated            |
+    // | RFC 1035 §4.1.2        | Question section (A/IN)             | parse_question_a_in               |
+    // | RFC 1035 §4.1.3/§3.4.1 | A record RDATA                      | parse_a_record                    |
+    // | RFC 1035 §3.3.1/§3.3.11/§3.3.12 | CNAME / NS / PTR           | parse_cname_ns_ptr_record         |
+    // | RFC 1035 §3.3.9        | MX record                           | parse_mx_record                   |
+    // | RFC 1035 §3.3.13       | SOA record                          | parse_soa_record                  |
+    // | RFC 1035 §3.3.14       | TXT record                          | parse_txt_record                  |
+    // | RFC 1035 §2.3.4/§3.1   | Name length > 255 octets rejected   | reject_name_over_255_octets       |
+    // | RFC 1035 §4.1.4        | Name compression pointer loop       | reject_name_pointer_loop          |
+    // | RFC 1035 §3.1          | Reserved label type (10)            | reject_reserved_label_type        |
+    // | RFC 1035 §4.2.2 / 7766 | TCP 2-byte length prefix            | parse_tcp_length_prefix           |
+    // | RFC 3596               | AAAA record                         | parse_aaaa_record                 |
+    // | RFC 2782               | SRV record                          | parse_srv_record                  |
+    // | RFC 3403               | NAPTR record                        | parse_naptr_record                |
+    // | RFC 3403               | NAPTR parsing is zero-allocation    | naptr_dissect_zero_alloc          |
+    // | RFC 4035 §3.1.6        | AD / CD flag bit positions          | parse_header_flags                |
+    // | RFC 4034 §2.1          | DNSKEY record                       | parse_dnskey_record               |
+    // | RFC 4034 §3.1          | RRSIG record                        | parse_rrsig_record                |
+    // | RFC 4034 §4.1          | NSEC record                         | parse_nsec_record                 |
+    // | RFC 4034 §5.1          | DS record                           | parse_ds_record                   |
+    // | RFC 4255               | SSHFP record                        | parse_sshfp_record                |
+    // | RFC 5155 §3.2          | NSEC3 record                        | parse_nsec3_record                |
+    // | RFC 5155 §4.2          | NSEC3PARAM record                   | parse_nsec3param_record           |
+    // | RFC 6672               | DNAME record                        | parse_cname_ns_ptr_record         |
+    // | RFC 6698               | TLSA record                         | parse_tlsa_record                 |
+    // | RFC 6891 §6.1.2/§6.1.3 | OPT pseudo-RR (UDP size, DO bit)    | parse_opt_record_edns0            |
+    // | RFC 7344               | CDS / CDNSKEY records               | parse_cds_record                  |
+    // | RFC 7828 §3            | EDNS0 TCP Keepalive option          | parse_edns_tcp_keepalive          |
+    // | RFC 8659 §4.1          | CAA record RDATA layout             | parse_caa_record                  |
+    // | RFC 9460 §2.2          | SVCB / HTTPS record                 | parse_svcb_record                 |
+    // | —                      | Opcode / RCODE / TYPE / CLASS names | type_class_opcode_rcode_names     |
+    // | —                      | Dispatch hint is End                | dispatch_hint_is_end              |
+    // | —                      | `write_dns_name` formats output     | write_dns_name_formats_output     |
+
+    /// Shared `DissectBuffer` for tests that only need a fresh buffer.
+    fn buf() -> DissectBuffer<'static> {
+        DissectBuffer::new()
+    }
+
+    /// Look up a child field by name within the nested range of `parent`.
+    fn find_child<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        parent: &Field<'pkt>,
+        name: &str,
+    ) -> Option<&'a Field<'pkt>> {
+        let range = match &parent.value {
+            FieldValue::Object(r) | FieldValue::Array(r) => r.clone(),
+            _ => return None,
+        };
+        buf.nested_fields(&range).iter().find(|f| f.name() == name)
+    }
+
+    /// Return the first Object placeholder within an Array field.
+    ///
+    /// Flat-storage note: `nested_fields(array_range)` returns all fields
+    /// between the Array's `begin_container` and `end_container`, i.e. both
+    /// the per-entry Object placeholders AND their flattened children.
+    /// Tests that only look at a single RR use this helper to locate that
+    /// first Object directly.
+    fn first_array_entry<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        array: &Field<'pkt>,
+    ) -> &'a Field<'pkt> {
+        let range = match &array.value {
+            FieldValue::Array(r) => r.clone(),
+            _ => panic!("expected Array field"),
+        };
+        buf.nested_fields(&range)
+            .iter()
+            .find(|f| matches!(f.value, FieldValue::Object(_)))
+            .expect("array must have at least one Object entry")
+    }
+
+    /// Encode a domain name in wire format (no compression).
+    fn wire_name(name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !name.is_empty() {
+            for label in name.split('.') {
+                out.push(label.len() as u8);
+                out.extend_from_slice(label.as_bytes());
+            }
+        }
+        out.push(0); // root terminator
+        out
+    }
+
+    /// Assemble a DNS header (ID=0, flags=0x0000, counts = provided).
+    fn header(qd: u16, an: u16, ns: u16, ar: u16) -> Vec<u8> {
+        let mut h = Vec::with_capacity(12);
+        h.extend_from_slice(&0u16.to_be_bytes()); // ID
+        h.extend_from_slice(&0u16.to_be_bytes()); // Flags
+        h.extend_from_slice(&qd.to_be_bytes());
+        h.extend_from_slice(&an.to_be_bytes());
+        h.extend_from_slice(&ns.to_be_bytes());
+        h.extend_from_slice(&ar.to_be_bytes());
+        h
+    }
+
+    // ---- RFC 1035 §4.1.1 — header & flag extraction ----------------------
+
+    #[test]
+    fn parse_header_flags() {
+        // All flags set (including AD/CD from RFC 4035) with opcode=UPDATE(5),
+        // rcode=REFUSED(5).
+        // bits: QR=1 Opcode=5 AA=1 TC=1 RD=1 RA=1 Z=1 AD=1 CD=1 RCODE=5
+        // 1 0101 1 1 1 1 1 1 1 0101 = 0xAFF5
+        let flags: u16 = (1 << 15) // QR
+            | (5 << 11) // Opcode=UPDATE
+            | (1 << 10) // AA
+            | (1 << 9)  // TC
+            | (1 << 8)  // RD
+            | (1 << 7)  // RA
+            | (1 << 6)  // Z
+            | (1 << 5)  // AD
+            | (1 << 4)  // CD
+            | 5; // RCODE=REFUSED
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&0xABCDu16.to_be_bytes());
+        data.extend_from_slice(&flags.to_be_bytes());
+        data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // zeros for counts
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+
+        let layer = &b.layers()[0];
+        let get = |name: &str| b.field_by_name(layer, name).unwrap().value.clone();
+
+        assert_eq!(get("id"), FieldValue::U16(0xABCD));
+        assert_eq!(get("qr"), FieldValue::U8(1));
+        assert_eq!(get("opcode"), FieldValue::U8(5));
+        assert_eq!(get("aa"), FieldValue::U8(1));
+        assert_eq!(get("tc"), FieldValue::U8(1));
+        assert_eq!(get("rd"), FieldValue::U8(1));
+        assert_eq!(get("ra"), FieldValue::U8(1));
+        assert_eq!(get("z"), FieldValue::U8(1));
+        assert_eq!(get("ad"), FieldValue::U8(1));
+        assert_eq!(get("cd"), FieldValue::U8(1));
+        assert_eq!(get("rcode"), FieldValue::U8(5));
+    }
+
+    #[test]
+    fn parse_header_truncated() {
+        // RFC 1035 §4.1.1 — minimum header is 12 bytes.
+        let mut b = buf();
+        let err = DnsDissector.dissect(&[0u8; 11], &mut b, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 12,
+                actual: 11,
+            }
+        ));
+    }
+
+    // ---- RFC 1035 §4.1.2 — question & §3.4.1 A RDATA ---------------------
+
+    #[test]
+    fn parse_question_a_in() {
+        let mut data = header(1, 0, 0, 0);
+        data.extend_from_slice(&wire_name("example.com"));
+        data.extend_from_slice(&1u16.to_be_bytes()); // QTYPE=A
+        data.extend_from_slice(&1u16.to_be_bytes()); // QCLASS=IN
+
+        let mut b = buf();
+        let res = DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        assert_eq!(res.bytes_consumed, data.len());
+
+        let layer = &b.layers()[0];
+        let questions = b.field_by_name(layer, "questions").unwrap();
+        let FieldValue::Array(ref q_range) = questions.value else {
+            panic!("questions should be an Array");
+        };
+        let q_list = b.nested_fields(q_range);
+
+        let q = &q_list[0];
+        assert_eq!(find_child(&b, q, "type").unwrap().value, FieldValue::U16(1));
+        assert_eq!(
+            find_child(&b, q, "class").unwrap().value,
+            FieldValue::U16(1)
+        );
+    }
+
+    #[test]
+    fn parse_a_record() {
+        // 1 answer RR: example.com. IN A 192.0.2.1
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("example.com"));
+        data.extend_from_slice(&1u16.to_be_bytes()); // TYPE=A
+        data.extend_from_slice(&1u16.to_be_bytes()); // CLASS=IN
+        data.extend_from_slice(&3600u32.to_be_bytes()); // TTL
+        data.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH
+        data.extend_from_slice(&[192, 0, 2, 1]);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        let rdata = find_child(&b, rr, "rdata").unwrap();
+        assert_eq!(rdata.value, FieldValue::Ipv4Addr([192, 0, 2, 1]));
+    }
+
+    // ---- RFC 3596 — AAAA -------------------------------------------------
+
+    #[test]
+    fn parse_aaaa_record() {
+        let addr: [u8; 16] = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+        ];
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("example.com"));
+        data.extend_from_slice(&TYPE_AAAA.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes()); // IN
+        data.extend_from_slice(&3600u32.to_be_bytes());
+        data.extend_from_slice(&16u16.to_be_bytes());
+        data.extend_from_slice(&addr);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        let rdata = find_child(&b, rr, "rdata").unwrap();
+        assert_eq!(rdata.value, FieldValue::Ipv6Addr(addr));
+    }
+
+    // ---- RFC 1035 §3.3.{1,9,11,12,13,14} / RFC 6672 ----------------------
+
+    #[test]
+    fn parse_cname_ns_ptr_record() {
+        // A single CNAME record: owner "a.test" → target "b.test"
+        for rtype in [TYPE_CNAME, TYPE_NS, TYPE_PTR, TYPE_DNAME] {
+            let mut data = header(0, 1, 0, 0);
+            data.extend_from_slice(&wire_name("a.test"));
+            data.extend_from_slice(&rtype.to_be_bytes());
+            data.extend_from_slice(&1u16.to_be_bytes()); // IN
+            data.extend_from_slice(&0u32.to_be_bytes());
+            let target = wire_name("b.test");
+            data.extend_from_slice(&(target.len() as u16).to_be_bytes());
+            data.extend_from_slice(&target);
+
+            let mut b = buf();
+            DnsDissector.dissect(&data, &mut b, 0).unwrap();
+            let layer = &b.layers()[0];
+            let answers = b.field_by_name(layer, "answers").unwrap();
+            let rr = first_array_entry(&b, answers);
+            let rdata = find_child(&b, rr, "rdata").unwrap();
+            // RDATA is stored as raw bytes pointing into the wire format name.
+            assert_eq!(rdata.value, FieldValue::Bytes(&target));
+        }
+    }
+
+    #[test]
+    fn parse_mx_record() {
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_MX.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        let exch = wire_name("mail.ex.test");
+        let rdlen = (2 + exch.len()) as u16;
+        data.extend_from_slice(&rdlen.to_be_bytes());
+        data.extend_from_slice(&10u16.to_be_bytes()); // preference
+        data.extend_from_slice(&exch);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_preference").unwrap().value,
+            FieldValue::U16(10)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_exchange").unwrap().value,
+            FieldValue::Bytes(&exch)
+        );
+    }
+
+    #[test]
+    fn parse_soa_record() {
+        let mname = wire_name("ns1.ex.test");
+        let rname = wire_name("hostmaster.ex.test");
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&mname);
+        rdata.extend_from_slice(&rname);
+        rdata.extend_from_slice(&20_240_101u32.to_be_bytes()); // SERIAL
+        rdata.extend_from_slice(&3600u32.to_be_bytes()); // REFRESH
+        rdata.extend_from_slice(&1800u32.to_be_bytes()); // RETRY
+        rdata.extend_from_slice(&604_800u32.to_be_bytes()); // EXPIRE
+        rdata.extend_from_slice(&300u32.to_be_bytes()); // MINIMUM
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_SOA.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+
+        assert_eq!(
+            find_child(&b, rr, "rdata_serial").unwrap().value,
+            FieldValue::U32(20_240_101)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_refresh").unwrap().value,
+            FieldValue::U32(3600)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_retry").unwrap().value,
+            FieldValue::U32(1800)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_expire").unwrap().value,
+            FieldValue::U32(604_800)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_minimum").unwrap().value,
+            FieldValue::U32(300)
+        );
+    }
+
+    #[test]
+    fn parse_txt_record() {
+        let rdata: &[u8] = &[3, b'a', b'b', b'c', 2, b'd', b'e'];
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_TXT.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata").unwrap().value,
+            FieldValue::Bytes(rdata)
+        );
+    }
+
+    // ---- RFC 2782 — SRV --------------------------------------------------
+
+    #[test]
+    fn parse_srv_record() {
+        let target = wire_name("sip.ex.test");
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&10u16.to_be_bytes()); // priority
+        rdata.extend_from_slice(&20u16.to_be_bytes()); // weight
+        rdata.extend_from_slice(&5060u16.to_be_bytes()); // port
+        rdata.extend_from_slice(&target);
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("_sip._udp.ex.test"));
+        data.extend_from_slice(&TYPE_SRV.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_priority").unwrap().value,
+            FieldValue::U16(10)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_weight").unwrap().value,
+            FieldValue::U16(20)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_port").unwrap().value,
+            FieldValue::U16(5060)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_target").unwrap().value,
+            FieldValue::Bytes(&target)
+        );
+    }
+
+    // ---- RFC 3403 — NAPTR ------------------------------------------------
+
+    fn build_naptr_packet() -> Vec<u8> {
+        let replacement = wire_name("ex.test");
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&100u16.to_be_bytes()); // order
+        rdata.extend_from_slice(&10u16.to_be_bytes()); // preference
+        // flags char-string "s"
+        rdata.extend_from_slice(&[1, b's']);
+        // services "SIP+D2U"
+        let svc = b"SIP+D2U";
+        rdata.push(svc.len() as u8);
+        rdata.extend_from_slice(svc);
+        // regexp (empty)
+        rdata.push(0);
+        // replacement name
+        rdata.extend_from_slice(&replacement);
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_NAPTR.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+        data
+    }
+
+    #[test]
+    fn parse_naptr_record() {
+        let data = build_naptr_packet();
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_order").unwrap().value,
+            FieldValue::U16(100)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_preference").unwrap().value,
+            FieldValue::U16(10)
+        );
+        // flags and services character-strings include the leading length byte
+        // in the stored bytes (they are emitted as raw RDATA slices).
+        let flags = find_child(&b, rr, "rdata_flags").unwrap();
+        assert_eq!(flags.value, FieldValue::Bytes(&[1, b's']));
+        let services = find_child(&b, rr, "rdata_services").unwrap();
+        let mut expected_svc = vec![7u8];
+        expected_svc.extend_from_slice(b"SIP+D2U");
+        assert_eq!(services.value, FieldValue::Bytes(&expected_svc));
+    }
+
+    // ---- RFC 6891 — EDNS0 OPT --------------------------------------------
+
+    #[test]
+    fn parse_opt_record_edns0() {
+        // OPT pseudo-RR with UDP payload size 4096, DO=1, extended_rcode=0,
+        // version=0, and a COOKIE option.
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&10u16.to_be_bytes()); // OPTION-CODE = COOKIE
+        rdata.extend_from_slice(&8u16.to_be_bytes()); // OPTION-LENGTH = 8
+        rdata.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33]);
+
+        let mut data = header(0, 0, 0, 1);
+        // OPT NAME MUST be root.
+        data.push(0);
+        data.extend_from_slice(&TYPE_OPT.to_be_bytes());
+        data.extend_from_slice(&4096u16.to_be_bytes()); // CLASS = UDP payload size
+        // TTL: extended-rcode(0) | version(0) | DO=1 | Z=0
+        // DO bit = high bit of byte 2 → 0x8000_0000 in 16-bit lower half.
+        data.extend_from_slice(&0x0000_8000u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let additionals = b.field_by_name(layer, "additionals").unwrap();
+        let rr = first_array_entry(&b, additionals);
+        assert_eq!(
+            find_child(&b, rr, "udp_payload_size").unwrap().value,
+            FieldValue::U16(4096)
+        );
+        assert_eq!(
+            find_child(&b, rr, "extended_rcode").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            find_child(&b, rr, "edns_version").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            find_child(&b, rr, "do_bit").unwrap().value,
+            FieldValue::U8(1)
+        );
+
+        let opts = find_child(&b, rr, "edns_options").unwrap();
+        let FieldValue::Array(ref opt_range) = opts.value else {
+            unreachable!()
+        };
+        let opt_list = b.nested_fields(opt_range);
+        assert_eq!(
+            find_child(&b, &opt_list[0], "code").unwrap().value,
+            FieldValue::U16(10) // COOKIE
+        );
+        assert_eq!(
+            find_child(&b, &opt_list[0], "length").unwrap().value,
+            FieldValue::U16(8)
+        );
+    }
+
+    // ---- RFC 7828 — EDNS TCP Keepalive -----------------------------------
+
+    #[test]
+    fn parse_edns_tcp_keepalive() {
+        // OPT RR carrying a TCP-KEEPALIVE option with timeout = 300 (30 s).
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&EDNS_OPT_TCP_KEEPALIVE.to_be_bytes()); // code = 11
+        rdata.extend_from_slice(&2u16.to_be_bytes()); // length = 2
+        rdata.extend_from_slice(&300u16.to_be_bytes()); // 30.0 seconds
+
+        let mut data = header(0, 0, 0, 1);
+        data.push(0);
+        data.extend_from_slice(&TYPE_OPT.to_be_bytes());
+        data.extend_from_slice(&1232u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let additionals = b.field_by_name(layer, "additionals").unwrap();
+        let rr = first_array_entry(&b, additionals);
+        let opts = find_child(&b, rr, "edns_options").unwrap();
+        let opt = first_array_entry(&b, opts);
+        assert_eq!(
+            find_child(&b, opt, "timeout").unwrap().value,
+            FieldValue::U16(300)
+        );
+    }
+
+    // ---- RFC 4255 — SSHFP ------------------------------------------------
+
+    #[test]
+    fn parse_sshfp_record() {
+        // algorithm=2 (DSS), fingerprint_type=1 (SHA-1), fingerprint = 20 bytes.
+        let rdata: Vec<u8> = {
+            let mut v = vec![2u8, 1u8];
+            v.extend_from_slice(&[0u8; 20]);
+            v
+        };
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_SSHFP.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_algorithm").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_fingerprint_type").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_fingerprint").unwrap().value,
+            FieldValue::Bytes(&[0u8; 20])
+        );
+    }
+
+    // ---- RFC 6698 — TLSA -------------------------------------------------
+
+    #[test]
+    fn parse_tlsa_record() {
+        // usage=3 (DANE-EE), selector=1 (SPKI), matching_type=1 (SHA-256),
+        // 32-byte SHA-256 hash.
+        let rdata: Vec<u8> = {
+            let mut v = vec![3u8, 1u8, 1u8];
+            v.extend_from_slice(&[0xAAu8; 32]);
+            v
+        };
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("_443._tcp.ex.test"));
+        data.extend_from_slice(&TYPE_TLSA.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_cert_usage").unwrap().value,
+            FieldValue::U8(3)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_selector").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_matching_type").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_cert_assoc_data").unwrap().value,
+            FieldValue::Bytes(&[0xAAu8; 32])
+        );
+    }
+
+    // ---- RFC 4034 §5.1 — DS ---------------------------------------------
+
+    #[test]
+    fn parse_ds_record() {
+        let digest = [0x11u8; 20]; // SHA-1 digest
+        let rdata: Vec<u8> = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&12345u16.to_be_bytes()); // key tag
+            v.push(8); // RSASHA256
+            v.push(1); // SHA-1
+            v.extend_from_slice(&digest);
+            v
+        };
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_DS.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_key_tag").unwrap().value,
+            FieldValue::U16(12345)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_algorithm").unwrap().value,
+            FieldValue::U8(8)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_digest_type").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_digest").unwrap().value,
+            FieldValue::Bytes(&digest)
+        );
+    }
+
+    // ---- RFC 7344 — CDS / CDNSKEY share parsing with DS / DNSKEY ---------
+
+    #[test]
+    fn parse_cds_record() {
+        let digest = [0x22u8; 20];
+        let rdata: Vec<u8> = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&65535u16.to_be_bytes());
+            v.push(13); // ECDSAP256SHA256
+            v.push(2); // SHA-256
+            v.extend_from_slice(&digest);
+            v
+        };
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_CDS.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_key_tag").unwrap().value,
+            FieldValue::U16(65535)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_digest").unwrap().value,
+            FieldValue::Bytes(&digest)
+        );
+    }
+
+    // ---- RFC 4034 §2.1 — DNSKEY ------------------------------------------
+
+    #[test]
+    fn parse_dnskey_record() {
+        let pubkey = [0x33u8; 64];
+        let rdata: Vec<u8> = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&256u16.to_be_bytes()); // flags: ZONE=1 (bit 7)
+            v.push(3); // protocol MUST be 3
+            v.push(13); // algorithm ECDSAP256SHA256
+            v.extend_from_slice(&pubkey);
+            v
+        };
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_DNSKEY.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_flags").unwrap().value,
+            FieldValue::U16(256)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_protocol").unwrap().value,
+            FieldValue::U8(3)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_algorithm").unwrap().value,
+            FieldValue::U8(13)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_public_key").unwrap().value,
+            FieldValue::Bytes(&pubkey)
+        );
+    }
+
+    // ---- RFC 4034 §3.1 — RRSIG ------------------------------------------
+
+    #[test]
+    fn parse_rrsig_record() {
+        let signer = wire_name("ex.test");
+        let signature = [0x55u8; 64];
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&TYPE_A.to_be_bytes()); // type covered
+        rdata.push(13); // algorithm
+        rdata.push(2); // labels
+        rdata.extend_from_slice(&3600u32.to_be_bytes()); // original TTL
+        rdata.extend_from_slice(&2_000_000_000u32.to_be_bytes()); // expiration
+        rdata.extend_from_slice(&1_000_000_000u32.to_be_bytes()); // inception
+        rdata.extend_from_slice(&4321u16.to_be_bytes()); // key tag
+        rdata.extend_from_slice(&signer);
+        rdata.extend_from_slice(&signature);
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_RRSIG.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_type_covered").unwrap().value,
+            FieldValue::U16(TYPE_A)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_labels").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_original_ttl").unwrap().value,
+            FieldValue::U32(3600)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_signature_expiration")
+                .unwrap()
+                .value,
+            FieldValue::U32(2_000_000_000)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_signature_inception")
+                .unwrap()
+                .value,
+            FieldValue::U32(1_000_000_000)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_key_tag").unwrap().value,
+            FieldValue::U16(4321)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_signature").unwrap().value,
+            FieldValue::Bytes(&signature)
+        );
+    }
+
+    // ---- RFC 4034 §4.1 — NSEC -------------------------------------------
+
+    #[test]
+    fn parse_nsec_record() {
+        // NSEC with next-domain-name = "next.ex.test" and a type bitmap
+        // window 0 indicating A and AAAA are present.
+        let next_name = wire_name("next.ex.test");
+        // Bitmap window 0, length 4, bitmap covers bits for types 1 (A) and
+        // 28 (AAAA). bit 1 in byte 0 → 0x40, bit 28 in byte 3 → 0x08.
+        let bitmap = [0u8, 0, 0, 0x08, 0x40];
+        // Actually build the bitmap dynamically for clarity.
+        let mut bitmaps = Vec::new();
+        bitmaps.push(0u8); // window block 0
+        bitmaps.push(4u8); // bitmap length (covers bytes 0..4 → types 0..31)
+        bitmaps.extend_from_slice(&[0x40, 0, 0, 0x08]); // A (1), AAAA (28)
+        let _ = bitmap;
+
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&next_name);
+        rdata.extend_from_slice(&bitmaps);
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_NSEC.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_next_domain_name").unwrap().value,
+            FieldValue::Bytes(&next_name)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_type_bitmaps").unwrap().value,
+            FieldValue::Bytes(&bitmaps)
+        );
+    }
+
+    // ---- RFC 5155 §3.2 — NSEC3 ------------------------------------------
+
+    #[test]
+    fn parse_nsec3_record() {
+        let salt = [0xCAu8, 0xFE];
+        let next_hash = [0x11u8; 20];
+        let bitmaps = [0u8, 1u8, 0x40u8]; // window 0, length 1, bit 1 (A)
+        let mut rdata = Vec::new();
+        rdata.push(1); // hash algorithm = SHA-1
+        rdata.push(0); // flags
+        rdata.extend_from_slice(&10u16.to_be_bytes()); // iterations
+        rdata.push(salt.len() as u8);
+        rdata.extend_from_slice(&salt);
+        rdata.push(next_hash.len() as u8);
+        rdata.extend_from_slice(&next_hash);
+        rdata.extend_from_slice(&bitmaps);
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_NSEC3.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_hash_algorithm").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_iterations").unwrap().value,
+            FieldValue::U16(10)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_salt_length").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_salt").unwrap().value,
+            FieldValue::Bytes(&salt)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_hash_length").unwrap().value,
+            FieldValue::U8(20)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_next_hashed_owner").unwrap().value,
+            FieldValue::Bytes(&next_hash)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_type_bitmaps").unwrap().value,
+            FieldValue::Bytes(&bitmaps)
+        );
+    }
+
+    // ---- RFC 5155 §4.2 — NSEC3PARAM -------------------------------------
+
+    #[test]
+    fn parse_nsec3param_record() {
+        let salt = [0x01u8, 0x02, 0x03];
+        let mut rdata = Vec::new();
+        rdata.push(1); // hash algorithm
+        rdata.push(0); // flags
+        rdata.extend_from_slice(&5u16.to_be_bytes()); // iterations
+        rdata.push(salt.len() as u8);
+        rdata.extend_from_slice(&salt);
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_NSEC3PARAM.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_hash_algorithm").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_iterations").unwrap().value,
+            FieldValue::U16(5)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_salt").unwrap().value,
+            FieldValue::Bytes(&salt)
+        );
+    }
+
+    // ---- RFC 8659 §4.1 — CAA --------------------------------------------
+
+    #[test]
+    fn parse_caa_record() {
+        // Flags = 0x80 (Issuer Critical), tag = "issue", value = "ca.example.net".
+        let tag = b"issue";
+        let value = b"ca.example.net";
+        let mut rdata = Vec::new();
+        rdata.push(0x80); // critical flag
+        rdata.push(tag.len() as u8);
+        rdata.extend_from_slice(tag);
+        rdata.extend_from_slice(value);
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_CAA.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        // Remember absolute offset of the RDATA for range verification.
+        let rdata_abs = data.len();
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+
+        assert_eq!(
+            find_child(&b, rr, "rdata_flags").unwrap().value,
+            FieldValue::U8(0x80)
+        );
+
+        // Tag value and range. Range MUST cover exactly the tag bytes
+        // (rdata[2..2+tag_len]) per RFC 8659 §4.1, not include the length
+        // byte at offset 1.
+        let tag_field = find_child(&b, rr, "rdata_tag").unwrap();
+        assert_eq!(tag_field.value, FieldValue::Bytes(tag));
+        assert_eq!(
+            tag_field.range,
+            (rdata_abs + 2)..(rdata_abs + 2 + tag.len())
+        );
+        assert_eq!(tag_field.range.len(), tag.len());
+
+        let value_field = find_child(&b, rr, "rdata_value").unwrap();
+        assert_eq!(value_field.value, FieldValue::Bytes(value));
+        assert_eq!(
+            value_field.range,
+            (rdata_abs + 2 + tag.len())..(rdata_abs + 2 + tag.len() + value.len())
+        );
+    }
+
+    // ---- RFC 9460 — SVCB / HTTPS -----------------------------------------
+
+    #[test]
+    fn parse_svcb_record() {
+        // ServiceMode priority=1, target=svc.ex.test, empty SvcParams.
+        let target = wire_name("svc.ex.test");
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&1u16.to_be_bytes()); // priority
+        rdata.extend_from_slice(&target);
+        // No SvcParams.
+
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&TYPE_HTTPS.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_priority").unwrap().value,
+            FieldValue::U16(1)
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_target").unwrap().value,
+            FieldValue::Bytes(&target)
+        );
+    }
+
+    // ---- RFC 1035 §2.3.4 / §3.1 / §4.1.4 — name limits ------------------
+
+    #[test]
+    fn reject_name_over_255_octets() {
+        // Build a 256-octet name (just exceeds the 255 limit) by stringing
+        // together labels of 63 bytes + 63 + 63 + 62 + terminator.
+        let label_63: Vec<u8> = core::iter::once(63u8)
+            .chain(std::iter::repeat_n(b'a', 63))
+            .collect();
+        let label_62: Vec<u8> = core::iter::once(62u8)
+            .chain(std::iter::repeat_n(b'a', 62))
+            .collect();
+        let mut name = Vec::new();
+        name.extend_from_slice(&label_63);
+        name.extend_from_slice(&label_63);
+        name.extend_from_slice(&label_63);
+        name.extend_from_slice(&label_62);
+        name.push(0);
+        assert_eq!(name.len(), 64 * 3 + 63 + 1); // 256
+
+        let mut data = header(1, 0, 0, 0);
+        data.extend_from_slice(&name);
+        data.extend_from_slice(&1u16.to_be_bytes()); // QTYPE
+        data.extend_from_slice(&1u16.to_be_bytes()); // QCLASS
+
+        let mut b = buf();
+        let err = DnsDissector.dissect(&data, &mut b, 0).unwrap_err();
+        assert!(matches!(err, PacketError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn reject_name_pointer_loop() {
+        // Construct a QNAME that is a single 2-byte pointer referencing itself.
+        // Pointer at offset 12 (== HEADER_SIZE) points back to offset 12.
+        let mut data = header(1, 0, 0, 0);
+        data.push(0xC0);
+        data.push(HEADER_SIZE as u8); // pointer to self
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+
+        let mut b = buf();
+        let err = DnsDissector.dissect(&data, &mut b, 0).unwrap_err();
+        assert!(matches!(err, PacketError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn reject_reserved_label_type() {
+        // 01 / 10 label-type prefixes are reserved (RFC 1035 §4.1.4).
+        let mut data = header(1, 0, 0, 0);
+        data.push(0x80); // starts with bits 10 — reserved
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+
+        let mut b = buf();
+        let err = DnsDissector.dissect(&data, &mut b, 0).unwrap_err();
+        assert!(matches!(err, PacketError::InvalidHeader(_)));
+    }
+
+    // ---- RFC 1035 §4.2.2 / RFC 7766 §8 — TCP length prefix ---------------
+
+    #[test]
+    fn parse_tcp_length_prefix() {
+        let mut dns = header(1, 0, 0, 0);
+        dns.extend_from_slice(&wire_name("ex.test"));
+        dns.extend_from_slice(&1u16.to_be_bytes()); // QTYPE=A
+        dns.extend_from_slice(&1u16.to_be_bytes()); // QCLASS=IN
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(dns.len() as u16).to_be_bytes());
+        framed.extend_from_slice(&dns);
+
+        let mut b = buf();
+        let res = DnsTcpDissector.dissect(&framed, &mut b, 0).unwrap();
+        assert_eq!(res.bytes_consumed, framed.len());
+
+        let layer = &b.layers()[0];
+        assert_eq!(layer.name, "DNS");
+        let tcp_len = b.field_by_name(layer, "tcp_length").unwrap();
+        assert_eq!(tcp_len.value, FieldValue::U16(dns.len() as u16));
+        assert_eq!(tcp_len.range, 0..2);
+    }
+
+    #[test]
+    fn tcp_truncated_length_prefix() {
+        let mut b = buf();
+        let err = DnsTcpDissector.dissect(&[0u8], &mut b, 0).unwrap_err();
+        assert!(matches!(err, PacketError::Truncated { .. }));
+    }
+
+    // ---- Name lookup helpers --------------------------------------------
+
+    #[test]
+    fn type_class_opcode_rcode_names() {
+        assert_eq!(dns_type_name(TYPE_A), Some("A"));
+        assert_eq!(dns_type_name(TYPE_AAAA), Some("AAAA"));
+        assert_eq!(dns_type_name(TYPE_OPT), Some("OPT"));
+        assert_eq!(dns_type_name(TYPE_HTTPS), Some("HTTPS"));
+        assert_eq!(dns_type_name(9999), None);
+
+        assert_eq!(dns_class_name(1), Some("IN"));
+        assert_eq!(dns_class_name(255), Some("ANY"));
+        assert_eq!(dns_class_name(7), None);
+
+        assert_eq!(dns_opcode_name(0), Some("QUERY"));
+        assert_eq!(dns_opcode_name(5), Some("UPDATE"));
+        assert_eq!(dns_opcode_name(15), None);
+
+        assert_eq!(dns_rcode_name(0), Some("NOERROR"));
+        assert_eq!(dns_rcode_name(3), Some("NXDOMAIN"));
+        assert_eq!(dns_rcode_name(15), None);
+
+        assert_eq!(edns_option_code_name(10), Some("COOKIE"));
+        assert_eq!(
+            edns_option_code_name(EDNS_OPT_TCP_KEEPALIVE),
+            Some("TCP-KEEPALIVE")
+        );
+        assert_eq!(edns_option_code_name(9999), None);
+    }
+
+    #[test]
+    fn dispatch_hint_is_end() {
+        // DNS is terminal: dispatch key must be End.
+        let mut data = header(0, 0, 0, 0);
+        data.extend_from_slice(&[]);
+        let mut b = buf();
+        let res = DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        assert!(matches!(res.next, DispatchHint::End));
+    }
+
+    #[test]
+    fn write_dns_name_formats_output() {
+        // Build a minimal DNS message where the QNAME is a single compressed
+        // pointer to "example.com." stored earlier in the buffer.
+        let target = wire_name("example.com");
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0xBE, 0xEF, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        // Place target name right after the header to make pointer offsets easy.
+        let name_off = data.len();
+        data.extend_from_slice(&target);
+        data.extend_from_slice(&1u16.to_be_bytes()); // QTYPE
+        data.extend_from_slice(&1u16.to_be_bytes()); // QCLASS
+
+        let ctx = FormatContext {
+            packet_data: &data,
+            scratch: &[],
+            layer_range: 0..data.len() as u32,
+            field_range: name_off as u32..(name_off + target.len()) as u32,
+        };
+        let mut out = Vec::new();
+        write_dns_name(&FieldValue::Bytes(&target), &ctx, &mut out).unwrap();
+        assert_eq!(&out, b"\"example.com\"");
     }
 }
