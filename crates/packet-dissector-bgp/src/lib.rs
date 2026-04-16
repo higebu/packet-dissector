@@ -6,12 +6,16 @@
 //! - RFC 2918 (Route Refresh): <https://www.rfc-editor.org/rfc/rfc2918>
 //! - RFC 4360 (Extended Communities): <https://www.rfc-editor.org/rfc/rfc4360>
 //! - RFC 4456 (Route Reflection): <https://www.rfc-editor.org/rfc/rfc4456>
+//! - RFC 4486 (Cease NOTIFICATION subcodes): <https://www.rfc-editor.org/rfc/rfc4486>
 //! - RFC 4760 (Multiprotocol Extensions): <https://www.rfc-editor.org/rfc/rfc4760>
 //! - RFC 6793 (4-octet AS Numbers): <https://www.rfc-editor.org/rfc/rfc6793>
+//! - RFC 7313 (Enhanced Route Refresh): <https://www.rfc-editor.org/rfc/rfc7313>
 //! - RFC 8092 (Large Communities): <https://www.rfc-editor.org/rfc/rfc8092>
+//! - RFC 8203 (Hard Reset Cease subcode): <https://www.rfc-editor.org/rfc/rfc8203>
 //! - RFC 8654 (Extended Message): <https://www.rfc-editor.org/rfc/rfc8654>
 //! - RFC 8669 (BGP Prefix-SID): <https://www.rfc-editor.org/rfc/rfc8669>
 //! - RFC 9012 (Tunnel Encapsulation / Color): <https://www.rfc-editor.org/rfc/rfc9012>
+//! - RFC 9072 (Extended Optional Parameters Length): <https://www.rfc-editor.org/rfc/rfc9072>
 //! - RFC 9252 (SRv6 BGP Services): <https://www.rfc-editor.org/rfc/rfc9252>
 //! - draft-ietf-bess-mup-safi-00 (MUP SAFI): <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 //!
@@ -59,6 +63,24 @@
 //! | RFC Section | Description | Test |
 //! |-------------|-------------|------|
 //! | 3 | ROUTE-REFRESH | `parse_bgp_route_refresh` |
+//!
+//! # RFC 7313 (Enhanced Route Refresh) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | 4 | Message Subtype (BoRR) | `parse_bgp_route_refresh_subtype_borr` |
+//!
+//! # RFC 9072 (Extended Optional Parameters Length) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | 2 | Extended OPEN encoding + 2-octet param length | `parse_bgp_open_extended_optional_parameters` |
+//!
+//! # RFC 4486 / RFC 8203 (Cease NOTIFICATION subcodes) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 4486 §4 | Cease subcodes 1–8 + RFC 8203 §4 subcode 9 | `parse_bgp_notification_cease_subcode_name` |
 //!
 //! # RFC 4360 / RFC 9012 Coverage
 //!
@@ -211,32 +233,43 @@ fn safi_name(v: u8) -> Option<&'static str> {
 
 /// Parses OPEN message optional parameters, extracting capabilities.
 ///
+/// `param_len_size` selects the parameter Length encoding width: 1 octet for the
+/// classic encoding (RFC 4271) or 2 octets for the extended encoding
+/// (RFC 9072, Section 3 — <https://www.rfc-editor.org/rfc/rfc9072#section-3>).
+///
 /// RFC 4271, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.2>
 /// RFC 5492 — <https://www.rfc-editor.org/rfc/rfc5492>
 fn parse_optional_parameters<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     params_data: &'pkt [u8],
     base_offset: usize,
+    param_len_size: usize,
 ) {
     let mut pos = 0;
+    let hdr_size = 1 + param_len_size;
 
-    while pos + 2 <= params_data.len() {
+    while pos + hdr_size <= params_data.len() {
         let param_type = params_data[pos];
-        let param_len = params_data[pos + 1] as usize;
+        let param_len = if param_len_size == 1 {
+            params_data[pos + 1] as usize
+        } else {
+            // RFC 9072 Figure 2 — 2-octet parameter length field.
+            ((params_data[pos + 1] as usize) << 8) | (params_data[pos + 2] as usize)
+        };
         let param_start = base_offset + pos;
 
-        if pos + 2 + param_len > params_data.len() {
+        if pos + hdr_size + param_len > params_data.len() {
             break;
         }
 
         // RFC 5492: Capability Optional Parameter (type=2)
         if param_type == 2 {
-            let cap_data = &params_data[pos + 2..pos + 2 + param_len];
+            let cap_data = &params_data[pos + hdr_size..pos + hdr_size + param_len];
             let mut cap_pos = 0;
             while cap_pos + 2 <= cap_data.len() {
                 let cap_code = cap_data[cap_pos];
                 let cap_len = cap_data[cap_pos + 1] as usize;
-                let cap_abs = base_offset + pos + 2 + cap_pos;
+                let cap_abs = base_offset + pos + hdr_size + cap_pos;
 
                 if cap_pos + 2 + cap_len > cap_data.len() {
                     break;
@@ -272,11 +305,11 @@ fn parse_optional_parameters<'pkt>(
             }
         } else {
             // Non-capability parameter: store raw
-            let val = &params_data[pos + 2..pos + 2 + param_len];
+            let val = &params_data[pos + hdr_size..pos + hdr_size + param_len];
             let obj_idx = buf.begin_container(
                 &OPT_PARAM_OBJECT_DESCRIPTOR,
                 FieldValue::Object(0..0),
-                param_start..param_start + 2 + param_len,
+                param_start..param_start + hdr_size + param_len,
             );
             buf.push_field(
                 &NON_CAP_PARAM_CHILDREN[FD_NCP_PARAM_TYPE],
@@ -286,18 +319,20 @@ fn parse_optional_parameters<'pkt>(
             buf.push_field(
                 &NON_CAP_PARAM_CHILDREN[FD_NCP_VALUE],
                 FieldValue::Bytes(val),
-                param_start + 2..param_start + 2 + param_len,
+                param_start + hdr_size..param_start + hdr_size + param_len,
             );
             buf.end_container(obj_idx);
         }
 
-        pos += 2 + param_len;
+        pos += hdr_size + param_len;
     }
 }
 
 /// Parses OPEN message body and appends fields.
 ///
 /// RFC 4271, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.2>
+/// RFC 9072 (Extended Optional Parameters Length) —
+/// <https://www.rfc-editor.org/rfc/rfc9072>
 fn parse_open<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -314,7 +349,7 @@ fn parse_open<'pkt>(
     let my_as = read_be_u16(data, 20)?;
     let hold_time = read_be_u16(data, 22)?;
     let bgp_id = [data[24], data[25], data[26], data[27]];
-    let opt_params_len = data[28] as usize;
+    let opt_params_len_byte = data[28];
 
     buf.push_field(
         &FIELD_DESCRIPTORS[FD_VERSION],
@@ -338,12 +373,31 @@ fn parse_open<'pkt>(
     );
     buf.push_field(
         &FIELD_DESCRIPTORS[FD_OPT_PARAMS_LENGTH],
-        FieldValue::U8(opt_params_len as u8),
+        FieldValue::U8(opt_params_len_byte),
         offset + 28..offset + 29,
     );
 
-    if opt_params_len > 0 {
-        let params_end = 29 + opt_params_len;
+    // RFC 9072, Section 2 — <https://www.rfc-editor.org/rfc/rfc9072#section-2>
+    // Extended encoding is signalled by the byte at offset 29 (Non-Ext OP Type)
+    // having value 255. The Extended Opt. Parm. Length is then encoded as a
+    // 2-octet unsigned integer at bytes 30..32 and each parameter uses a
+    // 2-octet length field.
+    let extended = data.len() >= 32 && data[29] == 255;
+
+    let (params_offset, params_len, param_len_size) = if extended {
+        let ext_len = read_be_u16(data, 30)? as usize;
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_EXT_OPT_PARAMS_LENGTH],
+            FieldValue::U16(ext_len as u16),
+            offset + 30..offset + 32,
+        );
+        (32usize, ext_len, 2usize)
+    } else {
+        (29usize, opt_params_len_byte as usize, 1usize)
+    };
+
+    if params_len > 0 {
+        let params_end = params_offset + params_len;
         if data.len() < params_end {
             return Err(PacketError::Truncated {
                 expected: params_end,
@@ -351,13 +405,13 @@ fn parse_open<'pkt>(
             });
         }
 
-        let params_data = &data[29..params_end];
+        let params_data = &data[params_offset..params_end];
         let array_idx = buf.begin_container(
             &FIELD_DESCRIPTORS[FD_OPTIONAL_PARAMETERS],
             FieldValue::Array(0..0),
-            offset + 29..offset + params_end,
+            offset + params_offset..offset + params_end,
         );
-        parse_optional_parameters(buf, params_data, offset + 29);
+        parse_optional_parameters(buf, params_data, offset + params_offset, param_len_size);
         buf.end_container(array_idx);
     }
 
@@ -377,6 +431,25 @@ fn error_code_name(v: u8) -> Option<&'static str> {
         6 => Some("Cease"),
         7 => Some("ROUTE-REFRESH Message Error"),
         8 => Some("Send Hold Timer Expired"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for Cease NOTIFICATION subcodes.
+///
+/// RFC 4486, Section 4 — <https://www.rfc-editor.org/rfc/rfc4486#section-4>
+/// RFC 8203, Section 4 — <https://www.rfc-editor.org/rfc/rfc8203#section-4>
+fn cease_subcode_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("Maximum Number of Prefixes Reached"),
+        2 => Some("Administrative Shutdown"),
+        3 => Some("Peer De-configured"),
+        4 => Some("Administrative Reset"),
+        5 => Some("Connection Rejected"),
+        6 => Some("Other Configuration Change"),
+        7 => Some("Connection Collision Resolution"),
+        8 => Some("Out of Resources"),
+        9 => Some("Hard Reset"),
         _ => None,
     }
 }
@@ -422,9 +495,22 @@ fn parse_notification<'pkt>(
     Ok(())
 }
 
+/// Returns a human-readable name for ROUTE-REFRESH Message Subtypes.
+///
+/// RFC 7313, Section 4 — <https://www.rfc-editor.org/rfc/rfc7313#section-4>
+fn route_refresh_subtype_name(v: u8) -> Option<&'static str> {
+    match v {
+        0 => Some("Route Refresh"),
+        1 => Some("BoRR"),
+        2 => Some("EoRR"),
+        _ => None,
+    }
+}
+
 /// Parses ROUTE-REFRESH message body and appends fields.
 ///
 /// RFC 2918 — <https://www.rfc-editor.org/rfc/rfc2918>
+/// RFC 7313 (Enhanced Route Refresh) — <https://www.rfc-editor.org/rfc/rfc7313>
 fn parse_route_refresh<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -438,12 +524,20 @@ fn parse_route_refresh<'pkt>(
     }
 
     let afi = read_be_u16(data, 19)?;
-    let safi = data[22]; // byte 21 is Reserved
+    // RFC 7313, Section 4 — <https://www.rfc-editor.org/rfc/rfc7313#section-4>
+    // redefined byte 21 from "Reserved" to "Message Subtype".
+    let message_subtype = data[21];
+    let safi = data[22];
 
     buf.push_field(
         &FIELD_DESCRIPTORS[FD_AFI],
         FieldValue::U16(afi),
         offset + 19..offset + 21,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MESSAGE_SUBTYPE],
+        FieldValue::U8(message_subtype),
+        offset + 21..offset + 22,
     );
     buf.push_field(
         &FIELD_DESCRIPTORS[FD_SAFI],
@@ -1260,13 +1354,6 @@ fn parse_attr_value<'pkt>(
     }
 }
 
-/// Parses MP_REACH_NLRI attribute value.
-///
-/// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
-/// Returns a human-readable name for MUP route types.
-///
-/// draft-ietf-bess-mup-safi-00, Section 3 —
-/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 /// Returns a human-readable name for MUP route types.
 ///
 /// draft-ietf-bess-mup-safi-00, Section 3 —
@@ -1774,6 +1861,9 @@ fn format_teid(
     write!(w, "\"0x{val:08x}\"")
 }
 
+/// Parses MP_REACH_NLRI attribute value.
+///
+/// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
 fn parse_mp_reach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
     let afi = read_be_u16(data, 0).unwrap_or_default();
     let safi = data[2];
@@ -2372,26 +2462,28 @@ static PATH_ATTR_CHILDREN: &[FieldDescriptor] = &[
 const FD_MARKER: usize = 0;
 const FD_LENGTH: usize = 1;
 const FD_TYPE: usize = 2;
-// OPEN fields (RFC 4271, Section 4.2)
+// OPEN fields (RFC 4271, Section 4.2; RFC 9072)
 const FD_VERSION: usize = 3;
 const FD_MY_AS: usize = 4;
 const FD_HOLD_TIME: usize = 5;
 const FD_BGP_IDENTIFIER: usize = 6;
 const FD_OPT_PARAMS_LENGTH: usize = 7;
-const FD_OPTIONAL_PARAMETERS: usize = 8;
+const FD_EXT_OPT_PARAMS_LENGTH: usize = 8;
+const FD_OPTIONAL_PARAMETERS: usize = 9;
 // NOTIFICATION fields (RFC 4271, Section 4.5)
-const FD_ERROR_CODE: usize = 9;
-const FD_ERROR_SUBCODE: usize = 10;
-const FD_DATA: usize = 11;
-// ROUTE-REFRESH fields (RFC 2918)
-const FD_AFI: usize = 12;
-const FD_SAFI: usize = 13;
+const FD_ERROR_CODE: usize = 10;
+const FD_ERROR_SUBCODE: usize = 11;
+const FD_DATA: usize = 12;
+// ROUTE-REFRESH fields (RFC 2918, RFC 7313)
+const FD_AFI: usize = 13;
+const FD_SAFI: usize = 14;
+const FD_MESSAGE_SUBTYPE: usize = 15;
 // UPDATE fields (RFC 4271, Section 4.3)
-const FD_WITHDRAWN_ROUTES_LENGTH: usize = 14;
-const FD_WITHDRAWN_ROUTES: usize = 15;
-const FD_TOTAL_PATH_ATTRIBUTE_LENGTH: usize = 16;
-const FD_PATH_ATTRIBUTES: usize = 17;
-const FD_NLRI: usize = 18;
+const FD_WITHDRAWN_ROUTES_LENGTH: usize = 16;
+const FD_WITHDRAWN_ROUTES: usize = 17;
+const FD_TOTAL_PATH_ATTRIBUTE_LENGTH: usize = 18;
+const FD_PATH_ATTRIBUTES: usize = 19;
+const FD_NLRI: usize = 20;
 
 /// Field descriptors for the BGP dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -2421,6 +2513,14 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::U8,
     )
     .optional(),
+    // RFC 9072 — Extended Optional Parameters Length (2 octets, only when
+    // byte 29 of the OPEN message equals the 0xFF sentinel).
+    FieldDescriptor::new(
+        "ext_opt_params_length",
+        "Extended Optional Parameters Length",
+        FieldType::U16,
+    )
+    .optional(),
     FieldDescriptor::new(
         "optional_parameters",
         "Optional Parameters",
@@ -2441,7 +2541,31 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         }),
         format_fn: None,
     },
-    FieldDescriptor::new("error_subcode", "Error Subcode", FieldType::U8).optional(),
+    // RFC 4486 / RFC 8203 — Cease subcode names. The lookup is conditional on
+    // the sibling `error_code` being 6 (Cease); other error codes have their
+    // own subcode tables that are not currently decoded.
+    FieldDescriptor {
+        name: "error_subcode",
+        display_name: "Error Subcode",
+        field_type: FieldType::U8,
+        optional: true,
+        children: None,
+        display_fn: Some(|v, siblings| {
+            let FieldValue::U8(subcode) = v else {
+                return None;
+            };
+            let error_code = siblings
+                .iter()
+                .find(|f| f.name() == "error_code")
+                .and_then(|f| f.value.as_u8())?;
+            if error_code == 6 {
+                cease_subcode_name(*subcode)
+            } else {
+                None
+            }
+        }),
+        format_fn: None,
+    },
     FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
     // ROUTE-REFRESH fields (RFC 2918)
     FieldDescriptor {
@@ -2464,6 +2588,19 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         children: None,
         display_fn: Some(|v, _siblings| match v {
             FieldValue::U8(s) => safi_name(*s),
+            _ => None,
+        }),
+        format_fn: None,
+    },
+    // RFC 7313, Section 4 — Enhanced Route Refresh Message Subtype
+    FieldDescriptor {
+        name: "message_subtype",
+        display_name: "Message Subtype",
+        field_type: FieldType::U8,
+        optional: true,
+        children: None,
+        display_fn: Some(|v, _siblings| match v {
+            FieldValue::U8(s) => route_refresh_subtype_name(*s),
             _ => None,
         }),
         format_fn: None,
@@ -2772,6 +2909,80 @@ mod tests {
     }
 
     #[test]
+    fn parse_bgp_open_extended_optional_parameters() {
+        // RFC 9072 Section 2 — Extended OPEN encoding.
+        // - byte 28: Non-Ext OP Len  = 255
+        // - byte 29: Non-Ext OP Type = 255 (sentinel)
+        // - bytes 30-31: Extended Opt. Parm. Length (u16)
+        // - bytes 32+: parameters with 2-octet length per parameter (RFC 9072 Figure 2)
+        //
+        // Build a single Capability parameter (type=2) containing one
+        // Multiprotocol Extensions capability (code=1, len=4, AFI=1, res=0, SAFI=1).
+        let cap_mp = [1u8, 4, 0, 1, 0, 1]; // capability code=1, len=4, AFI/res/SAFI
+        let cap_param_value = cap_mp;
+        let ext_param_hdr_len = 1 /* type */ + 2 /* len */;
+        let ext_param_total_len = ext_param_hdr_len + cap_param_value.len();
+        let ext_opt_params_len = ext_param_total_len; // single param
+        let total_len = 29 /* OPEN body offsets up to byte 28 */
+            + 1 /* Non-Ext OP Type */
+            + 2 /* Extended Opt. Parm. Length */
+            + ext_opt_params_len;
+
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&(total_len as u16).to_be_bytes());
+        raw.push(1); // Type = OPEN
+        raw.push(4); // Version
+        raw.extend_from_slice(&65001u16.to_be_bytes()); // My AS
+        raw.extend_from_slice(&180u16.to_be_bytes()); // Hold Time
+        raw.extend_from_slice(&[10, 0, 0, 1]); // BGP Identifier
+        raw.push(255); // byte 28: Non-Ext OP Len = 255
+        raw.push(255); // byte 29: Non-Ext OP Type = 255 (sentinel)
+        raw.extend_from_slice(&(ext_opt_params_len as u16).to_be_bytes()); // bytes 30-31
+        // Extended Optional Parameter (type=2 Capability, 2-byte length)
+        raw.push(2); // Param Type = Capability
+        raw.extend_from_slice(&(cap_param_value.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&cap_param_value);
+
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.resolve_display_name(layer, "type_name"), Some("OPEN"));
+        // Original 1-byte length field reflects the 0xFF sentinel byte at offset 28.
+        assert_eq!(
+            buf.field_by_name(layer, "opt_params_length").unwrap().value,
+            FieldValue::U8(255)
+        );
+        // Extended length field is present only when extended encoding is used.
+        assert_eq!(
+            buf.field_by_name(layer, "ext_opt_params_length")
+                .unwrap()
+                .value,
+            FieldValue::U16(ext_opt_params_len as u16)
+        );
+        // Capability is parsed using the 2-byte parameter length.
+        let params = buf.field_by_name(layer, "optional_parameters").unwrap();
+        let FieldValue::Array(ref arr_range) = params.value else {
+            panic!("expected Array");
+        };
+        let objects: Vec<_> = buf
+            .nested_fields(arr_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(objects.len(), 1);
+        let cap_range = objects[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, cap_range, "code"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, cap_range, "value"),
+            FieldValue::Bytes(&[0, 1, 0, 1])
+        );
+    }
+
+    #[test]
     fn parse_bgp_notification() {
         let mut raw = vec![0xFF; 16];
         raw.extend_from_slice(&23u16.to_be_bytes()); // Length = 23
@@ -2809,6 +3020,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_bgp_notification_cease_subcode_name() {
+        // RFC 4486, Section 4 — Cease NOTIFICATION subcode 2 = "Administrative Shutdown".
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&21u16.to_be_bytes()); // Length = 21 (no data)
+        raw.push(3); // Type = NOTIFICATION
+        raw.push(6); // Error Code = Cease
+        raw.push(2); // Error Subcode = Administrative Shutdown
+
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "error_subcode_name"),
+            Some("Administrative Shutdown")
+        );
+
+        // RFC 8203, Section 4 — Cease subcode 9 = "Hard Reset".
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&21u16.to_be_bytes());
+        raw.push(3); // Type = NOTIFICATION
+        raw.push(6); // Cease
+        raw.push(9); // Hard Reset (RFC 8203)
+
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "error_subcode_name"),
+            Some("Hard Reset")
+        );
+
+        // For non-Cease error codes, error_subcode_name must NOT decode as a
+        // Cease subcode (the lookup table is error-code specific).
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&21u16.to_be_bytes());
+        raw.push(3); // Type = NOTIFICATION
+        raw.push(1); // Error Code = Message Header Error
+        raw.push(2); // Subcode (not Cease subcode)
+
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.resolve_display_name(layer, "error_subcode_name"), None);
+    }
+
+    #[test]
     fn parse_bgp_route_refresh() {
         let mut raw = vec![0xFF; 16];
         raw.extend_from_slice(&23u16.to_be_bytes()); // Length = 23
@@ -2837,6 +3094,35 @@ mod tests {
         assert_eq!(
             buf.resolve_display_name(layer, "safi_name"),
             Some("Unicast")
+        );
+    }
+
+    #[test]
+    fn parse_bgp_route_refresh_subtype_borr() {
+        // RFC 7313 redefines byte 21 of ROUTE-REFRESH from Reserved to Message Subtype.
+        // Subtype 1 = Beginning of RIB (BoRR).
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&23u16.to_be_bytes()); // Length = 23
+        raw.push(5); // Type = ROUTE-REFRESH
+        raw.extend_from_slice(&1u16.to_be_bytes()); // AFI = IPv4
+        raw.push(1); // Message Subtype = BoRR (RFC 7313)
+        raw.push(1); // SAFI = Unicast
+
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "message_subtype").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "message_subtype_name"),
+            Some("BoRR")
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "safi").unwrap().value,
+            FieldValue::U8(1)
         );
     }
 
