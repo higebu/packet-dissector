@@ -2,6 +2,7 @@
 //!
 //! ## References
 //! - RFC 1661 (PPP / LCP): <https://www.rfc-editor.org/rfc/rfc1661>
+//! - RFC 2153 (updates RFC 1661; vendor-specific code/option): <https://www.rfc-editor.org/rfc/rfc2153>
 
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -10,6 +11,8 @@ use packet_dissector_core::util::{read_be_u16, read_be_u32};
 use crate::PPP_HEADER_SIZE;
 
 /// Option descriptors for LCP configuration options.
+///
+/// RFC 1661, Section 6 — <https://www.rfc-editor.org/rfc/rfc1661#section-6>
 static LCP_OPTION_DESCRIPTORS: &[FieldDescriptor] = ppp_option_descriptors!(|v, _| match v {
     FieldValue::U8(t) => Some(lcp_option_name(*t)),
     _ => None,
@@ -20,11 +23,27 @@ static FD_INLINE_DATA: FieldDescriptor = FieldDescriptor::new("data", "Data", Fi
 static FD_INLINE_OPTIONS: FieldDescriptor =
     FieldDescriptor::new("options", "Options", FieldType::Array);
 
+// Protocol-Reject (Code 8) data fields.
+// RFC 1661, Section 5.7 — <https://www.rfc-editor.org/rfc/rfc1661#section-5.7>
+static FD_REJECTED_PROTOCOL: FieldDescriptor =
+    FieldDescriptor::new("rejected_protocol", "Rejected-Protocol", FieldType::U16);
+static FD_REJECTED_INFORMATION: FieldDescriptor = FieldDescriptor::new(
+    "rejected_information",
+    "Rejected-Information",
+    FieldType::Bytes,
+);
+
+// Echo-Request / Echo-Reply / Discard-Request (Codes 9/10/11) data fields.
+// RFC 1661, Sections 5.8–5.10 — <https://www.rfc-editor.org/rfc/rfc1661#section-5.8>
+static FD_MAGIC_NUMBER: FieldDescriptor =
+    FieldDescriptor::new("magic_number", "Magic-Number", FieldType::U32);
+
 /// Parse an LCP packet into a DissectBuffer.
 ///
-/// RFC 1661, Section 5 -- <https://www.rfc-editor.org/rfc/rfc1661#section-5>
+/// RFC 1661, Section 5 — <https://www.rfc-editor.org/rfc/rfc1661#section-5>
 pub fn parse<'pkt>(data: &'pkt [u8], offset: usize, buf: &mut DissectBuffer<'pkt>) {
-    let Some((code, length)) = crate::parse_header(data, offset, crate::HEADER_DESCRIPTORS, buf)
+    let Some((code, length)) =
+        crate::parse_header(data, offset, crate::LCP_HEADER_DESCRIPTORS, buf)
     else {
         static FD_RAW: FieldDescriptor = FieldDescriptor::new("data", "Data", FieldType::Bytes);
         buf.push_field(
@@ -39,46 +58,100 @@ pub fn parse<'pkt>(data: &'pkt [u8], offset: usize, buf: &mut DissectBuffer<'pkt
         return;
     }
 
-    if matches!(code, 1..=4) {
-        let options_data = if (length as usize) <= data.len() && length >= 4 {
-            &data[PPP_HEADER_SIZE..length as usize]
-        } else {
-            &data[PPP_HEADER_SIZE..]
-        };
-        let options_end = offset + PPP_HEADER_SIZE + options_data.len();
-        let array_idx = buf.begin_container(
-            &FD_INLINE_OPTIONS,
-            FieldValue::Array(0..0),
-            offset + PPP_HEADER_SIZE..options_end,
-        );
-        let has_options = crate::parse_options(
-            options_data,
-            offset + PPP_HEADER_SIZE,
-            LCP_OPTION_DESCRIPTORS,
-            parse_option_value,
-            buf,
-        );
-        buf.end_container(array_idx);
-        if !has_options {
-            buf.pop_field();
-        }
+    // Honour the Length field per RFC 1661, Section 5 — truncate any payload
+    // beyond Length as padding; clip Length that exceeds the supplied buffer.
+    let payload = if (length as usize) <= data.len() && length >= PPP_HEADER_SIZE as u16 {
+        &data[PPP_HEADER_SIZE..length as usize]
     } else {
-        buf.push_field(
-            &FD_INLINE_DATA,
-            FieldValue::Bytes(&data[PPP_HEADER_SIZE..]),
-            offset + PPP_HEADER_SIZE..offset + data.len(),
-        );
+        &data[PPP_HEADER_SIZE..]
+    };
+    let payload_offset = offset + PPP_HEADER_SIZE;
+
+    match code {
+        // Configure-Request / -Ack / -Nak / -Reject carry TLV-encoded options.
+        // RFC 1661, Sections 5.1–5.4 — <https://www.rfc-editor.org/rfc/rfc1661#section-5.1>
+        1..=4 => {
+            let array_idx = buf.begin_container(
+                &FD_INLINE_OPTIONS,
+                FieldValue::Array(0..0),
+                payload_offset..payload_offset + payload.len(),
+            );
+            let has_options = crate::parse_options(
+                payload,
+                payload_offset,
+                LCP_OPTION_DESCRIPTORS,
+                parse_option_value,
+                buf,
+            );
+            buf.end_container(array_idx);
+            if !has_options {
+                buf.pop_field();
+            }
+        }
+        // Protocol-Reject: Rejected-Protocol (2 octets) + Rejected-Information.
+        // RFC 1661, Section 5.7 — <https://www.rfc-editor.org/rfc/rfc1661#section-5.7>
+        8 if payload.len() >= 2 => {
+            let rejected_protocol = read_be_u16(payload, 0).unwrap_or_default();
+            buf.push_field(
+                &FD_REJECTED_PROTOCOL,
+                FieldValue::U16(rejected_protocol),
+                payload_offset..payload_offset + 2,
+            );
+            if payload.len() > 2 {
+                buf.push_field(
+                    &FD_REJECTED_INFORMATION,
+                    FieldValue::Bytes(&payload[2..]),
+                    payload_offset + 2..payload_offset + payload.len(),
+                );
+            }
+        }
+        // Echo-Request / Echo-Reply / Discard-Request: Magic-Number (4 octets) + Data.
+        // RFC 1661, Sections 5.8–5.10 —
+        // <https://www.rfc-editor.org/rfc/rfc1661#section-5.8>
+        9..=11 if payload.len() >= 4 => {
+            let magic = read_be_u32(payload, 0).unwrap_or_default();
+            buf.push_field(
+                &FD_MAGIC_NUMBER,
+                FieldValue::U32(magic),
+                payload_offset..payload_offset + 4,
+            );
+            if payload.len() > 4 {
+                buf.push_field(
+                    &FD_INLINE_DATA,
+                    FieldValue::Bytes(&payload[4..]),
+                    payload_offset + 4..payload_offset + payload.len(),
+                );
+            }
+        }
+        _ => {
+            buf.push_field(
+                &FD_INLINE_DATA,
+                FieldValue::Bytes(payload),
+                payload_offset..payload_offset + payload.len(),
+            );
+        }
     }
 }
 
 fn parse_option_value(opt_type: u8, value_data: &[u8]) -> FieldValue<'_> {
     match opt_type {
+        // MRU — RFC 1661, Section 6.1 —
+        // <https://www.rfc-editor.org/rfc/rfc1661#section-6.1>
         1 if value_data.len() >= 2 => {
             FieldValue::U16(read_be_u16(value_data, 0).unwrap_or_default())
         }
+        // Authentication-Protocol — RFC 1661, Section 6.2 —
+        // <https://www.rfc-editor.org/rfc/rfc1661#section-6.2>
         3 if value_data.len() >= 2 => {
             FieldValue::U16(read_be_u16(value_data, 0).unwrap_or_default())
         }
+        // Quality-Protocol — RFC 1661, Section 6.3 —
+        // <https://www.rfc-editor.org/rfc/rfc1661#section-6.3>
+        4 if value_data.len() >= 2 => {
+            FieldValue::U16(read_be_u16(value_data, 0).unwrap_or_default())
+        }
+        // Magic-Number — RFC 1661, Section 6.4 —
+        // <https://www.rfc-editor.org/rfc/rfc1661#section-6.4>
         5 if value_data.len() >= 4 => {
             FieldValue::U32(read_be_u32(value_data, 0).unwrap_or_default())
         }
@@ -86,8 +159,13 @@ fn parse_option_value(opt_type: u8, value_data: &[u8]) -> FieldValue<'_> {
     }
 }
 
+// LCP Configuration Option Types.
+// RFC 1661, Section 6 — <https://www.rfc-editor.org/rfc/rfc1661#section-6>
+// Type 0 (Vendor-Specific) from RFC 2153 —
+// <https://www.rfc-editor.org/rfc/rfc2153#section-4>
 fn lcp_option_name(opt_type: u8) -> &'static str {
     match opt_type {
+        0 => "Vendor-Specific",
         1 => "Maximum-Receive-Unit",
         3 => "Authentication-Protocol",
         4 => "Quality-Protocol",
@@ -100,6 +178,34 @@ fn lcp_option_name(opt_type: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    //! # RFC 1661 (LCP) Coverage
+    //!
+    //! | RFC Section | Description                                 | Test                                   |
+    //! |-------------|---------------------------------------------|----------------------------------------|
+    //! | 5           | Packet Format (Code/Identifier/Length)      | parse_lcp_no_data, parse_lcp_truncated |
+    //! | 5.1         | Configure-Request + options                 | parse_configure_request_mru            |
+    //! | 5.2         | Configure-Ack                               | parse_configure_ack                    |
+    //! | 5.3         | Configure-Nak                               | parse_configure_nak                    |
+    //! | 5.4         | Configure-Reject                            | parse_configure_reject                 |
+    //! | 5.5         | Terminate-Request                           | parse_lcp_with_data                    |
+    //! | 5.6         | Terminate-Ack                               | parse_terminate_ack                    |
+    //! | 5.7         | Code-Reject                                 | parse_code_reject                      |
+    //! | 5.7         | Protocol-Reject                             | parse_protocol_reject                  |
+    //! | 5.8         | Echo-Request (Magic-Number + Data)          | parse_echo_request                     |
+    //! | 5.9         | Echo-Reply (Magic-Number + Data)            | parse_echo_reply                       |
+    //! | 5.10        | Discard-Request (Magic-Number + Data)       | parse_discard_request                  |
+    //! | 6.1         | Maximum-Receive-Unit option                 | parse_configure_request_mru            |
+    //! | 6.2         | Authentication-Protocol option              | parse_configure_request_auth           |
+    //! | 6.3         | Quality-Protocol option                     | parse_quality_protocol_option          |
+    //! | 6.4         | Magic-Number option                         | parse_configure_request_magic          |
+    //! | 6.5/6.6     | PFC / ACFC options                          | parse_pfc_and_acfc_combined            |
+    //! | —           | Unknown code fallback                       | parse_unknown_code                     |
+    //! | —           | Length larger than buffer                   | parse_length_exceeds_data              |
+    //! | —           | Truncated option                            | parse_truncated_option                 |
+    //! | —           | Unknown option                              | parse_unknown_option                   |
+    //! | —           | Configure-Request with multiple options     | parse_multiple_options                 |
+    //! | —           | Code name display for codes 8..=11          | lcp_code_name_extended_codes           |
+
     use super::*;
 
     fn obj_fields<'a, 'b>(
@@ -371,14 +477,141 @@ mod tests {
     #[test]
     fn parse_unknown_code() {
         #[rustfmt::skip]
-        let data = [0x09, 0x01, 0x00, 0x06, 0x01, 0x02];
+        let data = [0xFE, 0x01, 0x00, 0x06, 0x01, 0x02];
         let buf = parse_to_buf(&data, 0);
         let fields = obj_fields(&buf);
-        assert_eq!(fields[0].value, FieldValue::U8(9));
+        assert_eq!(fields[0].value, FieldValue::U8(0xFE));
         assert_eq!(
             fields[0].descriptor.display_fn.unwrap()(&fields[0].value, &[]),
             Some("Unknown")
         );
         assert_eq!(fields[3].value, FieldValue::Bytes(&[0x01, 0x02]));
+    }
+
+    #[test]
+    fn parse_protocol_reject() {
+        // Code=8 (Protocol-Reject), Id=1, Len=8,
+        // Rejected-Protocol=0x8021, Rejected-Information=0xDE 0xAD
+        #[rustfmt::skip]
+        let data = [0x08, 0x01, 0x00, 0x08, 0x80, 0x21, 0xDE, 0xAD];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        assert_eq!(fields[0].value, FieldValue::U8(8));
+        assert_eq!(
+            fields[0].descriptor.display_fn.unwrap()(&fields[0].value, &[]),
+            Some("Protocol-Reject")
+        );
+        // Expect Code, Identifier, Length, Rejected-Protocol, Rejected-Information
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[3].name(), "rejected_protocol");
+        assert_eq!(fields[3].value, FieldValue::U16(0x8021));
+        assert_eq!(fields[4].name(), "rejected_information");
+        assert_eq!(fields[4].value, FieldValue::Bytes(&[0xDE, 0xAD]));
+    }
+
+    #[test]
+    fn parse_protocol_reject_no_info() {
+        // Code=8, no Rejected-Information (minimum valid Length=6).
+        #[rustfmt::skip]
+        let data = [0x08, 0x01, 0x00, 0x06, 0xC0, 0x23];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[3].value, FieldValue::U16(0xC023));
+    }
+
+    #[test]
+    fn parse_echo_request() {
+        // Code=9 (Echo-Request), Magic-Number=0xDEADBEEF, Data=[0xAB, 0xCD]
+        #[rustfmt::skip]
+        let data = [0x09, 0x01, 0x00, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF, 0xAB, 0xCD];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        assert_eq!(fields[0].value, FieldValue::U8(9));
+        assert_eq!(
+            fields[0].descriptor.display_fn.unwrap()(&fields[0].value, &[]),
+            Some("Echo-Request")
+        );
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[3].name(), "magic_number");
+        assert_eq!(fields[3].value, FieldValue::U32(0xDEAD_BEEF));
+        assert_eq!(fields[4].name(), "data");
+        assert_eq!(fields[4].value, FieldValue::Bytes(&[0xAB, 0xCD]));
+    }
+
+    #[test]
+    fn parse_echo_reply() {
+        // Code=10 (Echo-Reply), Magic-Number only.
+        #[rustfmt::skip]
+        let data = [0x0A, 0x02, 0x00, 0x08, 0x01, 0x02, 0x03, 0x04];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        assert_eq!(
+            fields[0].descriptor.display_fn.unwrap()(&fields[0].value, &[]),
+            Some("Echo-Reply")
+        );
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[3].value, FieldValue::U32(0x0102_0304));
+    }
+
+    #[test]
+    fn parse_discard_request() {
+        // Code=11 (Discard-Request), Magic-Number + Data.
+        #[rustfmt::skip]
+        let data = [0x0B, 0x03, 0x00, 0x0B, 0x11, 0x22, 0x33, 0x44, b'x', b'y', b'z'];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        assert_eq!(
+            fields[0].descriptor.display_fn.unwrap()(&fields[0].value, &[]),
+            Some("Discard-Request")
+        );
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[3].value, FieldValue::U32(0x1122_3344));
+        assert_eq!(fields[4].value, FieldValue::Bytes(b"xyz" as &[u8]));
+    }
+
+    #[test]
+    fn parse_echo_request_truncated_magic() {
+        // Echo-Request with fewer than 4 bytes of data must fall back to raw Data.
+        #[rustfmt::skip]
+        let data = [0x09, 0x01, 0x00, 0x07, 0xAA, 0xBB, 0xCC];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[3].name(), "data");
+        assert_eq!(fields[3].value, FieldValue::Bytes(&[0xAA, 0xBB, 0xCC]));
+    }
+
+    #[test]
+    fn parse_quality_protocol_option() {
+        // Configure-Request with Quality-Protocol (Type=4, Length=8,
+        // Protocol=0xC025 LQR, 4 bytes Reporting-Period).
+        #[rustfmt::skip]
+        let data = [
+            0x01, 0x01, 0x00, 0x0C, 4, 8, 0xC0, 0x25, 0x00, 0x00, 0x03, 0xE8,
+        ];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        let FieldValue::Array(ref r) = fields[3].value else {
+            panic!("expected Array")
+        };
+        let opt = nth_obj(&buf, r, 0);
+        assert_eq!(
+            opt[0].descriptor.display_fn.unwrap()(&opt[0].value, &[]),
+            Some("Quality-Protocol")
+        );
+        assert_eq!(opt[2].value, FieldValue::U16(0xC025));
+    }
+
+    #[test]
+    fn lcp_code_name_extended_codes() {
+        // Direct coverage of the LCP-only code name table (8..=11).
+        assert_eq!(crate::lcp_code_name(8), "Protocol-Reject");
+        assert_eq!(crate::lcp_code_name(9), "Echo-Request");
+        assert_eq!(crate::lcp_code_name(10), "Echo-Reply");
+        assert_eq!(crate::lcp_code_name(11), "Discard-Request");
+        assert_eq!(crate::lcp_code_name(12), "Unknown");
+        // IPCP-facing code_name still covers only 1..=7 per RFC 1332 Section 2.
+        assert_eq!(crate::code_name(8), "Unknown");
     }
 }

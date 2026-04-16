@@ -1,11 +1,11 @@
 //! PPP (Point-to-Point Protocol) frame dissector and sub-protocol parsers.
 //!
-//! Provides a [`PppDissector`] for PPP frame dissection (RFC 1661 S2) as well
-//! as sub-protocol parsers commonly carried inside 3GPP Protocol Configuration
-//! Options (PCO) and PPPoE sessions:
+//! Provides a [`PppDissector`] for PPP frame dissection (RFC 1661 Section 2)
+//! as well as sub-protocol parsers commonly carried inside 3GPP Protocol
+//! Configuration Options (PCO) and PPPoE sessions:
 //!
 //! - **IPCP** -- Internet Protocol Control Protocol ([RFC 1332], [RFC 1877])
-//! - **LCP** -- Link Control Protocol ([RFC 1661])
+//! - **LCP** -- Link Control Protocol ([RFC 1661], [RFC 2153])
 //! - **PAP** -- Password Authentication Protocol ([RFC 1334])
 //! - **CHAP** -- Challenge Handshake Authentication Protocol ([RFC 1994])
 //!
@@ -14,16 +14,18 @@
 //!
 //! ## References
 //! - RFC 1661 (PPP): <https://www.rfc-editor.org/rfc/rfc1661>
+//! - RFC 2153 (PPP Vendor Extensions, updates RFC 1661): <https://www.rfc-editor.org/rfc/rfc2153>
 //! - RFC 1332 (IPCP): <https://www.rfc-editor.org/rfc/rfc1332>
-//! - RFC 1334 (PAP / CHAP): <https://www.rfc-editor.org/rfc/rfc1334>
-//! - RFC 1877 (DNS extensions for IPCP): <https://www.rfc-editor.org/rfc/rfc1877>
-//! - RFC 1994 (CHAP): <https://www.rfc-editor.org/rfc/rfc1994>
+//! - RFC 1334 (PAP): <https://www.rfc-editor.org/rfc/rfc1334>
+//! - RFC 1877 (DNS/NBNS extensions for IPCP): <https://www.rfc-editor.org/rfc/rfc1877>
+//! - RFC 1994 (CHAP, obsoletes RFC 1334 CHAP): <https://www.rfc-editor.org/rfc/rfc1994>
 //!
 //! [RFC 1332]: https://www.rfc-editor.org/rfc/rfc1332
 //! [RFC 1334]: https://www.rfc-editor.org/rfc/rfc1334
 //! [RFC 1661]: https://www.rfc-editor.org/rfc/rfc1661
 //! [RFC 1877]: https://www.rfc-editor.org/rfc/rfc1877
 //! [RFC 1994]: https://www.rfc-editor.org/rfc/rfc1994
+//! [RFC 2153]: https://www.rfc-editor.org/rfc/rfc2153
 
 #![deny(missing_docs)]
 
@@ -61,16 +63,27 @@ use packet_dissector_core::util::read_be_u16;
 
 /// Minimum PPP packet header size (Code + Identifier + Length).
 ///
-/// RFC 1661, Section 5 -- all PPP control packets share this 4-byte header.
+/// RFC 1661, Section 5 — <https://www.rfc-editor.org/rfc/rfc1661#section-5>
+/// RFC 1332, Section 2 — <https://www.rfc-editor.org/rfc/rfc1332#section-2>
+/// RFC 1334, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc1334#section-2.2>
+/// RFC 1994, Section 4 — <https://www.rfc-editor.org/rfc/rfc1994#section-4>
 pub const PPP_HEADER_SIZE: usize = 4;
 
 const FD_HDR_CODE: usize = 0;
 const FD_HDR_IDENTIFIER: usize = 1;
 const FD_HDR_LENGTH: usize = 2;
 
+// IPCP shares LCP codes 1–7 (RFC 1332, Section 2 —
+// https://www.rfc-editor.org/rfc/rfc1332#section-2); LCP additionally defines
+// codes 8–11 (RFC 1661, Section 5 — https://www.rfc-editor.org/rfc/rfc1661#section-5).
 pub(crate) static HEADER_DESCRIPTORS: &[FieldDescriptor] =
     ppp_header_descriptors!(|v, _| match v {
         FieldValue::U8(c) => Some(code_name(*c)),
+        _ => None,
+    });
+pub(crate) static LCP_HEADER_DESCRIPTORS: &[FieldDescriptor] =
+    ppp_header_descriptors!(|v, _| match v {
+        FieldValue::U8(c) => Some(lcp_code_name(*c)),
         _ => None,
     });
 pub(crate) static PAP_HEADER_DESCRIPTORS: &[FieldDescriptor] =
@@ -122,7 +135,12 @@ pub fn parse_header(
     Some((code, length))
 }
 
-/// Returns the human-readable name for a PPP Code value.
+/// Returns the human-readable name for a PPP Code value common to LCP, IPCP
+/// and other NCPs (codes 1..=7).
+///
+/// RFC 1661, Section 5 — <https://www.rfc-editor.org/rfc/rfc1661#section-5>
+/// RFC 1332, Section 2 — <https://www.rfc-editor.org/rfc/rfc1332#section-2>
+/// (IPCP uses only codes 1..=7.)
 pub fn code_name(code: u8) -> &'static str {
     match code {
         1 => "Configure-Request",
@@ -136,7 +154,31 @@ pub fn code_name(code: u8) -> &'static str {
     }
 }
 
+/// Returns the human-readable name for an LCP Code value (codes 1..=11).
+///
+/// RFC 1661, Section 5 — <https://www.rfc-editor.org/rfc/rfc1661#section-5>
+/// Codes 8..=11 are LCP-only and are not used by NCPs (RFC 1332, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc1332#section-2>).
+pub fn lcp_code_name(code: u8) -> &'static str {
+    match code {
+        1 => "Configure-Request",
+        2 => "Configure-Ack",
+        3 => "Configure-Nak",
+        4 => "Configure-Reject",
+        5 => "Terminate-Request",
+        6 => "Terminate-Ack",
+        7 => "Code-Reject",
+        8 => "Protocol-Reject",
+        9 => "Echo-Request",
+        10 => "Echo-Reply",
+        11 => "Discard-Request",
+        _ => "Unknown",
+    }
+}
+
 /// Returns the human-readable name for a PAP Code value.
+///
+/// RFC 1334, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc1334#section-2.2>
 pub fn pap_code_name(code: u8) -> &'static str {
     match code {
         1 => "Authenticate-Request",
@@ -147,6 +189,8 @@ pub fn pap_code_name(code: u8) -> &'static str {
 }
 
 /// Returns the human-readable name for a CHAP Code value.
+///
+/// RFC 1994, Section 4 — <https://www.rfc-editor.org/rfc/rfc1994#section-4>
 pub fn chap_code_name(code: u8) -> &'static str {
     match code {
         1 => "Challenge",
@@ -158,6 +202,9 @@ pub fn chap_code_name(code: u8) -> &'static str {
 }
 
 /// Dispatch a PPP sub-protocol payload to the appropriate parser.
+///
+/// Selector is the PPP Protocol field (RFC 1661, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc1661#section-2>).
 pub fn parse_protocol<'pkt>(
     protocol_id: u16,
     data: &'pkt [u8],
@@ -165,10 +212,10 @@ pub fn parse_protocol<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
 ) {
     match protocol_id {
-        0x8021 => ipcp::parse(data, offset, buf),
-        0xC021 => lcp::parse(data, offset, buf),
-        0xC023 => pap::parse(data, offset, buf),
-        0xC223 => chap::parse(data, offset, buf),
+        PPP_PROTO_IPCP => ipcp::parse(data, offset, buf),
+        PPP_PROTO_LCP => lcp::parse(data, offset, buf),
+        PPP_PROTO_PAP => pap::parse(data, offset, buf),
+        PPP_PROTO_CHAP => chap::parse(data, offset, buf),
         _ => {
             static FD_RAW: FieldDescriptor = FieldDescriptor::new("data", "Data", FieldType::Bytes);
             buf.push_field(
@@ -181,6 +228,9 @@ pub fn parse_protocol<'pkt>(
 }
 
 /// Parse TLV-encoded configuration options into a DissectBuffer. Returns `true` if any parsed.
+///
+/// Each option is Type(1) + Length(1) + Data(Length-2) per RFC 1661, Section 6 —
+/// <https://www.rfc-editor.org/rfc/rfc1661#section-6>.
 pub(crate) fn parse_options<'pkt>(
     options_data: &'pkt [u8],
     base_offset: usize,
@@ -231,9 +281,16 @@ pub(crate) fn parse_options<'pkt>(
     count > 0
 }
 
+// HDLC-like framing constants.
+// RFC 1662, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc1662#section-3.1>
 const HDLC_ADDRESS: u8 = 0xFF;
 const HDLC_CONTROL: u8 = 0x03;
+// Minimum PPP frame: 2 octets of Protocol field (without HDLC framing).
+// RFC 1661, Section 2 — <https://www.rfc-editor.org/rfc/rfc1661#section-2>
 const MIN_FRAME_SIZE: usize = 2;
+// PPP DLL Protocol numbers.
+// RFC 1661, Section 2 — <https://www.rfc-editor.org/rfc/rfc1661#section-2>
+// IANA registry: <https://www.iana.org/assignments/ppp-numbers>
 const PPP_PROTO_IPV4: u16 = 0x0021;
 const PPP_PROTO_IPV6: u16 = 0x0057;
 const PPP_PROTO_IPCP: u16 = 0x8021;
@@ -368,6 +425,22 @@ impl Dissector for PppDissector {
 
 #[cfg(test)]
 mod tests {
+    //! # RFC 1661 (PPP Frame) Coverage
+    //!
+    //! | RFC Section | Description                             | Test                          |
+    //! |-------------|-----------------------------------------|-------------------------------|
+    //! | 2           | Protocol field (no HDLC)                | dissect_no_hdlc_ipv4          |
+    //! | 2           | Protocol field + HDLC Address/Control   | dissect_hdlc_ipv4             |
+    //! | 2           | IPv4 dispatch (0x0021)                  | dissect_hdlc_ipv4             |
+    //! | 2           | IPv6 dispatch (0x0057)                  | dissect_ipv6                  |
+    //! | 2           | LCP inline parsing (0xC021)             | dissect_lcp_inline            |
+    //! | 2           | IPCP inline parsing (0x8021)            | dispatch_ipcp                 |
+    //! | 2           | Unknown protocol -> raw Data            | dispatch_unknown              |
+    //! | 2           | Unknown protocol -> End dispatch        | dissect_unknown_protocol      |
+    //! | 5           | Shared packet header parser             | parse_header_valid            |
+    //! | —           | Header truncated                        | parse_header_truncated        |
+    //! | —           | Frame truncated                         | dissect_truncated             |
+
     use super::*;
 
     #[test]
