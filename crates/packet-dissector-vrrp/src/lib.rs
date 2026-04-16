@@ -7,7 +7,7 @@
 
 use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_ipv6_addr};
 
@@ -63,9 +63,16 @@ fn is_ipv6(buf: &DissectBuffer) -> bool {
 const FD_ADDRESS_ENTRY: usize = 0;
 
 /// Child field descriptors for the `addresses` array.
+///
+/// RFC 9568, Section 5.2.9 — <https://www.rfc-editor.org/rfc/rfc9568#section-5.2.9>
+///
+/// The concrete address family (IPv4 vs IPv6) is inferred from the
+/// encapsulating IP layer at dissect time, so the descriptor uses
+/// [`FieldType::Bytes`] as a generic container; the pushed
+/// [`FieldValue::Ipv4Addr`] / [`FieldValue::Ipv6Addr`] values carry
+/// canonical textual formatting via their [`core::fmt::Display`] impls.
 static ADDRESS_CHILD_FIELDS: &[FieldDescriptor] =
-    &[FieldDescriptor::new("address", "Address", FieldType::Bytes)
-        .with_format_fn(format_utf8_lossy)];
+    &[FieldDescriptor::new("address", "Address", FieldType::Bytes)];
 
 /// Field descriptors for the VRRP dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -146,20 +153,25 @@ impl Dissector for VrrpDissector {
             });
         }
 
-        // RFC 9568, Section 5 — fixed header fields
+        // RFC 9568, Section 5.1 — Packet Format (fixed header fields)
+        //   <https://www.rfc-editor.org/rfc/rfc9568#section-5.1>
         let version = (data[0] >> 4) & 0x0F;
         let vrrp_type = data[0] & 0x0F;
         let vrid = data[1];
         let priority = data[2];
         let addr_count = data[3];
-        // Reserved: upper 4 bits of byte 4; Max Advertise Interval: lower 4 bits + byte 5
+        // RFC 9568, Sections 5.2.6 & 5.2.7 — Reserve (4 bits) and
+        // Max Advertise Interval (12 bits) share bytes 4..6.
+        //   <https://www.rfc-editor.org/rfc/rfc9568#section-5.2.6>
+        //   <https://www.rfc-editor.org/rfc/rfc9568#section-5.2.7>
         let reserved = (data[4] >> 4) & 0x0F;
         let max_advert_int = read_be_u16(data, 4)? & 0x0FFF;
         let checksum = read_be_u16(data, 6)?;
 
         // RFC 9568, Section 5.2.9 — IPvX Address(es)
-        // Address family is not encoded in the VRRP header; infer it from the
-        // encapsulating IP layer that was already dissected.
+        //   <https://www.rfc-editor.org/rfc/rfc9568#section-5.2.9>
+        // The address family is not encoded in the VRRP header; infer it from
+        // the encapsulating IP layer that was already dissected.
         let ipv6 = is_ipv6(buf);
         let addr_size = if ipv6 { IPV6_ADDR_SIZE } else { IPV4_ADDR_SIZE };
         let count = addr_count as usize;
@@ -274,21 +286,30 @@ impl Dissector for VrrpDissector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use packet_dissector_core::field::FormatContext;
 
     // # RFC 9568 (VRRP) Coverage
     //
-    // | RFC Section | Description              | Test                          |
-    // |-------------|--------------------------|-------------------------------|
-    // | 5.2.1       | Version                  | parse_vrrp_ipv4_advertisement |
-    // | 5.2.2       | Type (Advertisement)     | parse_vrrp_ipv4_advertisement |
-    // | 5.2.3       | Virtual Router ID        | parse_vrrp_ipv4_advertisement |
-    // | 5.2.4       | Priority                 | parse_vrrp_priority_owner     |
-    // | 5.2.5       | IPvX Addr Count          | parse_vrrp_multiple_ipv4_addrs|
-    // | 5.2.6       | Reserved                 | parse_vrrp_ipv4_advertisement |
-    // | 5.2.7       | Max Advertise Interval   | parse_vrrp_ipv4_advertisement |
-    // | 5.2.8       | Checksum                 | parse_vrrp_ipv4_advertisement |
-    // | 5.2.9       | IPvX Addresses (IPv4)    | parse_vrrp_ipv4_advertisement |
-    // | 5.2.9       | IPvX Addresses (IPv6)    | parse_vrrp_ipv6_advertisement |
+    // | RFC Section | Description                   | Test                                |
+    // |-------------|-------------------------------|-------------------------------------|
+    // | 5.1         | Minimum header truncation     | parse_vrrp_truncated                |
+    // | 5.2.1       | Version                       | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.2       | Type (Advertisement)          | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.3       | Virtual Router ID             | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.4       | Priority (default backup)     | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.4       | Priority 255 (address owner)  | parse_vrrp_priority_owner           |
+    // | 5.2.4       | Priority 0 (stop)             | parse_vrrp_priority_stop            |
+    // | 5.2.5       | IPvX Addr Count               | parse_vrrp_multiple_ipv4_addrs      |
+    // | 5.2.5       | Zero addr count               | parse_vrrp_zero_addr_count          |
+    // | 5.2.5       | Truncated addresses           | parse_vrrp_truncated_addresses      |
+    // | 5.2.6       | Reserved (bit masking)        | parse_vrrp_reserved_bits_nonzero    |
+    // | 5.2.7       | Max Advertise Interval        | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.7       | Max Advertise Interval 12-bit | parse_vrrp_max_advert_int_12bit_max |
+    // | 5.2.8       | Checksum                      | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.9       | IPvX Addresses (IPv4)         | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.9       | IPvX Addresses (IPv6)         | parse_vrrp_ipv6_advertisement       |
+    // | 5.2.9       | Address serialization         | address_child_field_has_no_format_fn|
+    // | —           | Default address family (IPv4) | parse_vrrp_no_ip_layer_defaults_ipv4|
 
     /// Helper: builds a DissectBuffer with an IPv4 layer already present, simulating
     /// the registry dispatch chain.
@@ -578,5 +599,99 @@ mod tests {
                 actual: 12
             }
         ));
+    }
+
+    #[test]
+    fn parse_vrrp_max_advert_int_12bit_max() {
+        // RFC 9568, Section 5.2.7 — Max Advertise Interval is 12 bits; max value
+        // is 0xFFF (4095 centiseconds). Section 5.2.6 — Reserve bits are masked
+        // out of the advertise interval.
+        let raw: &[u8] = &[
+            0x31, 0x01, 0x64, 0x01, // v3, type=1, vrid=1, pri=100, count=1
+            0x0F, 0xFF, // Reserve=0, MaxAdvInt=0xFFF
+            0x00, 0x00, // checksum
+            10, 0, 0, 1,
+        ];
+        let mut buf = buf_with_ipv4_layer();
+        VrrpDissector.dissect(raw, &mut buf, 20).unwrap();
+
+        let layer = buf.layer_by_name("VRRP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "reserved").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "max_advert_int").unwrap().value,
+            FieldValue::U16(0x0FFF)
+        );
+    }
+
+    #[test]
+    fn parse_vrrp_reserved_bits_nonzero() {
+        // RFC 9568, Section 5.2.6 — Reserve "MUST be set to zero on transmission
+        // and ignored on reception." Non-zero reserved bits MUST NOT leak into
+        // the Max Advertise Interval field.
+        let raw: &[u8] = &[
+            0x31, 0x01, 0x64, 0x01, // v3, type=1, vrid=1, pri=100, count=1
+            0xF1, 0x23, // Reserve=0xF, MaxAdvInt=0x123
+            0x00, 0x00, // checksum
+            10, 0, 0, 1,
+        ];
+        let mut buf = buf_with_ipv4_layer();
+        VrrpDissector.dissect(raw, &mut buf, 20).unwrap();
+
+        let layer = buf.layer_by_name("VRRP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "reserved").unwrap().value,
+            FieldValue::U8(0x0F)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "max_advert_int").unwrap().value,
+            FieldValue::U16(0x123)
+        );
+    }
+
+    fn call_format_fn(
+        f: fn(&FieldValue<'_>, &FormatContext<'_>, &mut dyn std::io::Write) -> std::io::Result<()>,
+        value: &FieldValue<'_>,
+    ) -> String {
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        f(value, &ctx, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn address_child_field_has_no_format_fn() {
+        // RFC 9568, Section 5.2.9 — IPvX Address(es) are pushed as
+        // FieldValue::Ipv4Addr / Ipv6Addr, whose Display impls yield the
+        // canonical textual form. A custom format_fn intended for raw bytes
+        // (such as format_utf8_lossy) would emit an empty string for these
+        // variants and must not be attached.
+        let desc = &ADDRESS_CHILD_FIELDS[FD_ADDRESS_ENTRY];
+        assert!(
+            desc.format_fn.is_none(),
+            "ADDRESS_CHILD_FIELDS must not override formatting for IP address values"
+        );
+
+        // If a format_fn is ever added, it must handle Ipv4Addr and Ipv6Addr.
+        if let Some(f) = desc.format_fn {
+            assert_ne!(
+                call_format_fn(f, &FieldValue::Ipv4Addr([192, 168, 1, 1])),
+                "\"\""
+            );
+            assert_ne!(
+                call_format_fn(
+                    f,
+                    &FieldValue::Ipv6Addr([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+                ),
+                "\"\""
+            );
+        }
     }
 }
