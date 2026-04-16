@@ -28,3 +28,30 @@ fn zero_alloc_dissect_lldp() {
     });
     assert_eq!(allocs, 0, "LLDP dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_lldp_with_mgmt_address() {
+    // Mandatory prefix + Management Address TLV (IPv4) + End Of LLDPDU.
+    let raw: &[u8] = &[
+        // Chassis ID TLV: type=1, length=7
+        0x02, 0x07, 0x04, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+        // Port ID TLV: type=2, length=4
+        0x04, 0x04, 0x07, 0x67, 0x65, 0x30, // "ge0"
+        // TTL TLV: type=3, length=2
+        0x06, 0x02, 0x00, 0x78, // 120 seconds
+        // Management Address TLV: type=8, length=12
+        0x10, 0x0c, // addr string length=5, subtype=1 (IPv4), addr=192.168.1.1
+        0x05, 0x01, 0xc0, 0xa8, 0x01,
+        0x01, // iface numbering subtype=2 (ifIndex), iface number=1
+        0x02, 0x00, 0x00, 0x00, 0x01, // OID string length=0
+        0x00, // End Of LLDPDU
+        0x00, 0x00,
+    ];
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        LldpDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "LLDP dissect allocated {allocs} times");
+}
