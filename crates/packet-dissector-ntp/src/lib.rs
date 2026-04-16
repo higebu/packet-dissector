@@ -1,7 +1,15 @@
 //! NTP (Network Time Protocol) dissector.
 //!
 //! ## References
-//! - RFC 5905: <https://www.rfc-editor.org/rfc/rfc5905>
+//! - RFC 5905 (NTPv4): <https://www.rfc-editor.org/rfc/rfc5905>
+//! - RFC 7822 (Extension Fields update): <https://www.rfc-editor.org/rfc/rfc7822>
+//! - RFC 8573 (AES-CMAC for NTP): <https://www.rfc-editor.org/rfc/rfc8573>
+//! - RFC 9109 (Port Randomization): <https://www.rfc-editor.org/rfc/rfc9109>
+//! - RFC 9748 (IANA Registry updates): <https://www.rfc-editor.org/rfc/rfc9748>
+//! - RFC 9769 (Interleaved Modes): <https://www.rfc-editor.org/rfc/rfc9769>
+//!
+//! Only the 48-octet fixed NTPv4 header (RFC 5905, Section 7.3) is dissected;
+//! extension fields and MACs are left to higher layers.
 
 #![deny(missing_docs)]
 
@@ -9,12 +17,15 @@ use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_i32, read_be_u32, read_be_u64};
+use packet_dissector_core::util::{read_be_u32, read_be_u64};
 
 /// Format NTP reference_id: stratum 0-1 as ASCII code, stratum 2+ as IPv4 address.
 ///
-/// RFC 5905, Section 7.3: for stratum 0-1 the field is a 4-character ASCII
-/// string (e.g., "GPS", "PPS"); for stratum 2+ it is an IPv4 address.
+/// RFC 5905, Section 7.3 — <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>:
+/// for stratum 0 the field is a 4-character ASCII "kiss code" (KoD); for
+/// stratum 1 it is a left-justified, zero-padded ASCII identifier of the
+/// reference clock (e.g., "GPS", "PPS"); for stratum 2+ it is an IPv4
+/// address (or the first four octets of the MD5 hash of an IPv6 address).
 fn format_ntp_ref_id(
     value: &FieldValue<'_>,
     _ctx: &FormatContext<'_>,
@@ -37,71 +48,93 @@ fn format_ntp_ref_id(
     }
 }
 
-/// NTP fixed header size in bytes (RFC 5905, Section 7.3).
+/// NTP fixed header size in bytes.
+///
+/// RFC 5905, Section 7.3 — <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>:
+/// "The NTP packet is a UDP datagram [RFC0768]. ... The packet consists of an
+/// integral number of 32-bit (4 octet) words in network byte order."  The
+/// fixed header is 12 words (48 octets).
 const HEADER_SIZE: usize = 48;
 
 /// Returns a human-readable name for the Leap Indicator value.
 ///
-/// RFC 5905, Section 7.3 — LI (Leap Indicator).
+/// RFC 5905, Section 7.3, Figure 9 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
 fn leap_indicator_name(li: u8) -> &'static str {
+    // Verbatim from RFC 5905, Figure 9.
     match li {
-        0 => "No warning",
-        1 => "Last minute of the day has 61 seconds",
-        2 => "Last minute of the day has 59 seconds",
-        3 => "Unknown (clock not synchronized)",
+        0 => "no warning",
+        1 => "last minute of the day has 61 seconds",
+        2 => "last minute of the day has 59 seconds",
+        3 => "unknown (clock unsynchronized)",
         _ => unreachable!(),
     }
 }
 
 /// Returns a human-readable name for the Mode value.
 ///
-/// RFC 5905, Section 7.3 — Mode.
+/// RFC 5905, Section 7.3, Figure 10 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
 fn mode_name(mode: u8) -> &'static str {
+    // Verbatim from RFC 5905, Figure 10.
     match mode {
-        0 => "Reserved",
-        1 => "Symmetric Active",
-        2 => "Symmetric Passive",
-        3 => "Client",
-        4 => "Server",
-        5 => "Broadcast",
-        6 => "NTP Control Message",
-        7 => "Reserved for Private Use",
+        0 => "reserved",
+        1 => "symmetric active",
+        2 => "symmetric passive",
+        3 => "client",
+        4 => "server",
+        5 => "broadcast",
+        6 => "NTP control message",
+        7 => "reserved for private use",
         _ => unreachable!(),
     }
 }
 
 /// Returns a human-readable name for the Stratum value.
 ///
-/// RFC 5905, Section 7.3 — Stratum.
+/// RFC 5905, Section 7.3, Figure 11 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
 fn stratum_name(stratum: u8) -> &'static str {
+    // Verbatim from RFC 5905, Figure 11. Stratum 0 is also referred to as
+    // "Kiss-o'-Death" in Section 7.4 when carried in a received packet.
     match stratum {
-        0 => "Kiss-o'-Death",
-        1 => "Primary",
-        2..=15 => "Secondary",
-        16 => "Unsynchronized",
-        _ => "Reserved",
+        0 => "unspecified or invalid",
+        1 => "primary server",
+        2..=15 => "secondary server",
+        16 => "unsynchronized",
+        _ => "reserved",
     }
 }
 
 /// Returns a human-readable name for a Kiss-o'-Death code.
 ///
-/// RFC 5905, Section 7.4 — Kiss-o'-Death codes.
+/// RFC 5905, Section 7.4, Figure 13 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.4>.
+///
+/// Per RFC 9748, codes beginning with "X" are reserved for experimental use;
+/// the registry is maintained by IANA with a Specification Required policy
+/// (<https://www.rfc-editor.org/rfc/rfc9748>).
 pub fn kod_name(code: &str) -> Option<&'static str> {
+    // Verbatim meanings from RFC 5905, Figure 13.
     match code {
-        "ACST" => Some("Unicast server"),
+        "ACST" => Some("The association belongs to a unicast server"),
         "AUTH" => Some("Server authentication failed"),
         "AUTO" => Some("Autokey sequence failed"),
-        "BCST" => Some("Broadcast server"),
-        "CRYP" => Some("Cryptographic authentication failed"),
+        "BCST" => Some("The association belongs to a broadcast server"),
+        "CRYP" => Some("Cryptographic authentication or identification failed"),
         "DENY" => Some("Access denied by remote server"),
         "DROP" => Some("Lost peer in symmetric mode"),
         "RSTR" => Some("Access denied due to local policy"),
-        "INIT" => Some("Association not yet synchronized"),
-        "MCST" => Some("Dynamically discovered server"),
-        "NKEY" => Some("No key found"),
-        "RATE" => Some("Rate exceeded"),
-        "RMOT" => Some("Remote host alteration"),
-        "STEP" => Some("Step change in system time"),
+        "INIT" => Some("The association has not yet synchronized for the first time"),
+        "MCST" => Some("The association belongs to a dynamically discovered server"),
+        "NKEY" => Some("No key found. Either the key was never installed or is not trusted"),
+        "RATE" => Some(
+            "Rate exceeded. The server has temporarily denied access because the client exceeded the rate threshold",
+        ),
+        "RMOT" => Some("Alteration of association from a remote host running ntpdc"),
+        "STEP" => Some(
+            "A step change in system time has occurred, but the association has not yet resynchronized",
+        ),
         _ => None,
     }
 }
@@ -165,7 +198,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     },
     FieldDescriptor::new("poll", "Poll Interval", FieldType::I32),
     FieldDescriptor::new("precision", "Precision", FieldType::I32),
-    FieldDescriptor::new("root_delay", "Root Delay", FieldType::I32),
+    FieldDescriptor::new("root_delay", "Root Delay", FieldType::U32),
     FieldDescriptor::new("root_dispersion", "Root Dispersion", FieldType::U32),
     FieldDescriptor::new("reference_id", "Reference ID", FieldType::Bytes)
         .with_format_fn(format_ntp_ref_id),
@@ -201,22 +234,31 @@ impl Dissector for NtpDissector {
             });
         }
 
-        // RFC 5905, Section 7.3 — first octet: LI (2 bits) | VN (3 bits) | Mode (3 bits)
+        // RFC 5905, Section 7.3 — first octet: LI (2 bits) | VN (3 bits) | Mode (3 bits).
+        // https://www.rfc-editor.org/rfc/rfc5905#section-7.3
         let first_byte = data[0];
         let li = (first_byte >> 6) & 0x03;
         let vn = (first_byte >> 3) & 0x07;
         let mode = first_byte & 0x07;
 
         let stratum = data[1];
-        // Poll and Precision are signed 8-bit integers (log₂ seconds)
+        // RFC 5905, Section 7.3 — Poll and Precision are signed 8-bit integers
+        // (log2 seconds).
+        // https://www.rfc-editor.org/rfc/rfc5905#section-7.3
         let poll = data[2] as i8 as i32;
         let precision = data[3] as i8 as i32;
 
-        // RFC 5905, Section 7.3 — Root Delay is a signed 16.16 fixed-point value
-        let root_delay = read_be_i32(data, 4)?;
-        // RFC 5905, Section 7.3 — Root Dispersion is an unsigned 16.16 fixed-point value
+        // RFC 5905, Section 6 (Figure 3, "NTP Short Format"): Root Delay and
+        // Root Dispersion are each a 16-bit unsigned seconds field followed by
+        // a 16-bit fraction field, i.e. unsigned 16.16 fixed-point.
+        // https://www.rfc-editor.org/rfc/rfc5905#section-6
+        let root_delay = read_be_u32(data, 4)?;
         let root_dispersion = read_be_u32(data, 8)?;
 
+        // RFC 5905, Section 6 (Figure 4, "NTP Timestamp Format"): 32-bit
+        // unsigned seconds plus 32-bit fraction. A value of zero is a special
+        // case representing unknown or unsynchronized time (Section 7.3).
+        // https://www.rfc-editor.org/rfc/rfc5905#section-6
         let reference_ts = read_be_u64(data, 16)?;
         let origin_ts = read_be_u64(data, 24)?;
         let receive_ts = read_be_u64(data, 32)?;
@@ -260,7 +302,7 @@ impl Dissector for NtpDissector {
         );
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_ROOT_DELAY],
-            FieldValue::I32(root_delay),
+            FieldValue::U32(root_delay),
             offset + 4..offset + 8,
         );
         buf.push_field(
@@ -309,16 +351,26 @@ mod tests {
 
     // # RFC 5905 Coverage
     //
-    // | RFC Section | Description                        | Test                          |
-    // |-------------|------------------------------------|-------------------------------|
-    // | 7.3         | Header: LI, VN, Mode               | test_parse_client_request     |
-    // | 7.3         | Header: Stratum, Poll, Precision   | test_parse_server_response    |
-    // | 7.3         | Header: Root Delay, Root Dispersion| test_parse_server_response    |
-    // | 7.3         | Header: Reference ID (ASCII)       | test_parse_stratum_1_primary  |
-    // | 7.3         | Header: Reference ID (IPv4)        | test_parse_server_response    |
-    // | 7.3         | Header: Timestamps                 | test_parse_server_response    |
-    // | 7.4         | Kiss-o'-Death reference ID         | test_parse_stratum_0_kod      |
-    // | ---         | Truncated header                   | test_truncated_packet         |
+    // | RFC Section | Description                                  | Test                                |
+    // |-------------|----------------------------------------------|-------------------------------------|
+    // | 6           | NTP Short Format (unsigned 16.16)            | test_root_delay_is_unsigned         |
+    // | 7.3         | Header: LI, VN, Mode bit layout              | test_parse_client_request           |
+    // | 7.3         | VN field width (3 bits)                      | test_version_number_field_width     |
+    // | 7.3, Fig. 9 | Leap Indicator values                        | test_leap_indicator_values          |
+    // | 7.3, Fig. 10| Mode values                                  | test_mode_values                    |
+    // | 7.3, Fig. 11| Stratum values                               | test_stratum_ranges                 |
+    // | 7.3         | Poll (signed log2 s), Precision              | test_parse_server_response          |
+    // | 7.3         | Root Delay, Root Dispersion                  | test_parse_server_response          |
+    // | 7.3         | Reference ID (ASCII, stratum 1)              | test_parse_stratum_1_primary        |
+    // | 7.3         | Reference ID (IPv4, stratum >= 2)            | test_reference_id_ipv4_formatting   |
+    // | 7.3         | Reference ID ASCII formatting                | test_reference_id_ascii_formatting  |
+    // | 7.3         | Reference, Origin, Receive, Transmit TSes    | test_parse_server_response          |
+    // | 7.4, Fig. 13| Kiss-o'-Death reference ID (all codes)       | test_all_kod_codes_from_rfc_figure_13 |
+    // | 7.4         | Kiss-o'-Death packet (stratum 0)             | test_parse_stratum_0_kod            |
+    // | 7.4         | KoD code lookup                              | test_kod_name_lookup                |
+    // | 7.3         | Dissection at non-zero offset                | test_dissect_with_offset            |
+    // | ---         | Truncated header                             | test_truncated_packet               |
+    // | ---         | Field descriptor count / naming              | test_field_descriptors              |
 
     /// Build a minimal NTP packet with the given parameters.
     #[allow(clippy::too_many_arguments)]
@@ -383,7 +435,7 @@ mod tests {
         );
         assert_eq!(
             buf.resolve_display_name(layer, "leap_indicator_name"),
-            Some("No warning")
+            Some("no warning")
         );
         assert_eq!(
             buf.field_by_name(layer, "version").unwrap().value,
@@ -393,7 +445,7 @@ mod tests {
             buf.field_by_name(layer, "mode").unwrap().value,
             FieldValue::U8(3)
         );
-        assert_eq!(buf.resolve_display_name(layer, "mode_name"), Some("Client"));
+        assert_eq!(buf.resolve_display_name(layer, "mode_name"), Some("client"));
         assert_eq!(
             buf.field_by_name(layer, "stratum").unwrap().value,
             FieldValue::U8(0)
@@ -440,14 +492,14 @@ mod tests {
             buf.field_by_name(layer, "mode").unwrap().value,
             FieldValue::U8(4)
         );
-        assert_eq!(buf.resolve_display_name(layer, "mode_name"), Some("Server"));
+        assert_eq!(buf.resolve_display_name(layer, "mode_name"), Some("server"));
         assert_eq!(
             buf.field_by_name(layer, "stratum").unwrap().value,
             FieldValue::U8(2)
         );
         assert_eq!(
             buf.resolve_display_name(layer, "stratum_name"),
-            Some("Secondary")
+            Some("secondary server")
         );
         assert_eq!(
             buf.field_by_name(layer, "precision").unwrap().value,
@@ -455,7 +507,7 @@ mod tests {
         );
         assert_eq!(
             buf.field_by_name(layer, "root_delay").unwrap().value,
-            FieldValue::I32(0x0000_0100)
+            FieldValue::U32(0x0000_0100)
         );
         assert_eq!(
             buf.field_by_name(layer, "root_dispersion").unwrap().value,
@@ -502,11 +554,11 @@ mod tests {
         );
         assert_eq!(
             buf.resolve_display_name(layer, "leap_indicator_name"),
-            Some("Unknown (clock not synchronized)")
+            Some("unknown (clock unsynchronized)")
         );
         assert_eq!(
             buf.resolve_display_name(layer, "stratum_name"),
-            Some("Kiss-o'-Death")
+            Some("unspecified or invalid")
         );
         assert_eq!(
             buf.field_by_name(layer, "reference_id").unwrap().value,
@@ -524,7 +576,7 @@ mod tests {
         let layer = &buf.layers()[0];
         assert_eq!(
             buf.resolve_display_name(layer, "stratum_name"),
-            Some("Primary")
+            Some("primary server")
         );
         // Raw bytes including trailing NUL
         assert_eq!(
@@ -618,7 +670,7 @@ mod tests {
         NtpDissector.dissect(&data, &mut buf, 0).unwrap();
         assert_eq!(
             buf.resolve_display_name(&buf.layers()[0], "stratum_name"),
-            Some("Unsynchronized")
+            Some("unsynchronized")
         );
 
         // Stratum 17 = Reserved
@@ -627,14 +679,123 @@ mod tests {
         NtpDissector.dissect(&data, &mut buf, 0).unwrap();
         assert_eq!(
             buf.resolve_display_name(&buf.layers()[0], "stratum_name"),
-            Some("Reserved")
+            Some("reserved")
         );
     }
 
     #[test]
     fn test_kod_name_lookup() {
-        assert_eq!(kod_name("RATE"), Some("Rate exceeded"));
+        // Descriptions are verbatim from RFC 5905, Figure 13.
         assert_eq!(kod_name("DENY"), Some("Access denied by remote server"));
+        assert_eq!(
+            kod_name("RATE"),
+            Some(
+                "Rate exceeded. The server has temporarily denied access because the client exceeded the rate threshold"
+            )
+        );
         assert_eq!(kod_name("XXXX"), None);
+    }
+
+    #[test]
+    fn test_root_delay_is_unsigned() {
+        // RFC 5905, Section 6 (Figure 3 — NTP Short Format) defines Root Delay
+        // as a 16-bit unsigned seconds field and a 16-bit fraction field, so
+        // high-bit values must decode as large positive numbers, not as
+        // negative values.
+        // https://www.rfc-editor.org/rfc/rfc5905#section-6
+        let data = build_ntp(
+            0,
+            4,
+            4,
+            2,
+            6,
+            -24,
+            0xFFFF_FFFF, // root delay: max unsigned 16.16
+            0xFFFF_FFFF, // root dispersion: max unsigned 16.16
+            [0; 4],
+            0,
+            0,
+            0,
+            0,
+        );
+        let mut buf = DissectBuffer::new();
+        NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "root_delay").unwrap().value,
+            FieldValue::U32(0xFFFF_FFFF)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "root_dispersion").unwrap().value,
+            FieldValue::U32(0xFFFF_FFFF)
+        );
+    }
+
+    #[test]
+    fn test_version_number_field_width() {
+        // RFC 5905, Section 7.3: VN is a 3-bit integer, so values 0..=7 must
+        // round-trip through the dissector. This guards against accidental
+        // masking changes.
+        // https://www.rfc-editor.org/rfc/rfc5905#section-7.3
+        for vn in 0u8..=7 {
+            let data = build_ntp(0, vn, 3, 0, 0, 0, 0, 0, [0; 4], 0, 0, 0, 0);
+            let mut buf = DissectBuffer::new();
+            NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert_eq!(
+                buf.field_by_name(layer, "version").unwrap().value,
+                FieldValue::U8(vn)
+            );
+        }
+    }
+
+    /// Helper: call `format_ntp_ref_id` with an empty `FormatContext`.
+    fn call_ref_id_format(value: &FieldValue<'_>) -> Vec<u8> {
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        format_ntp_ref_id(value, &ctx, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn test_reference_id_ipv4_formatting() {
+        // Stratum >= 2 encodes Reference ID as an IPv4 address
+        // (RFC 5905, Section 7.3).
+        // https://www.rfc-editor.org/rfc/rfc5905#section-7.3
+        let bytes = [10u8, 0, 0, 42];
+        let out = call_ref_id_format(&FieldValue::Bytes(&bytes));
+        assert_eq!(out, b"\"10.0.0.42\"");
+    }
+
+    #[test]
+    fn test_reference_id_ascii_formatting() {
+        // Stratum 0/1 encode Reference ID as a 4-character ASCII code
+        // (RFC 5905, Section 7.3 / Section 7.4 — KoD codes).
+        // https://www.rfc-editor.org/rfc/rfc5905#section-7.4
+        let bytes = *b"GPS\0";
+        let out = call_ref_id_format(&FieldValue::Bytes(&bytes));
+        assert_eq!(out, b"\"GPS\"");
+    }
+
+    #[test]
+    fn test_all_kod_codes_from_rfc_figure_13() {
+        // Every KoD code from RFC 5905, Figure 13 must resolve to a
+        // non-empty description. This guards against entries being removed.
+        // https://www.rfc-editor.org/rfc/rfc5905#section-7.4
+        const CODES: &[&str] = &[
+            "ACST", "AUTH", "AUTO", "BCST", "CRYP", "DENY", "DROP", "RSTR", "INIT", "MCST", "NKEY",
+            "RATE", "RMOT", "STEP",
+        ];
+        for code in CODES {
+            assert!(
+                kod_name(code).is_some_and(|s| !s.is_empty()),
+                "KoD code {code} missing description"
+            );
+        }
     }
 }
