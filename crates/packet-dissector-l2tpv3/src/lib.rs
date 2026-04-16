@@ -340,17 +340,24 @@ const UDP_DATA_HEADER_SIZE: usize = 8;
 
 // Field descriptor indices for L2tpv3UdpDissector.
 const UDP_FD_T_BIT: usize = 0;
-const UDP_FD_VERSION: usize = 1;
-const UDP_FD_LENGTH: usize = 2;
-const UDP_FD_CONTROL_CONNECTION_ID: usize = 3;
-const UDP_FD_NS: usize = 4;
-const UDP_FD_NR: usize = 5;
-const UDP_FD_SESSION_ID: usize = 6;
-const UDP_FD_MESSAGE_TYPE: usize = 7;
-const UDP_FD_AVPS: usize = 8;
+const UDP_FD_L_BIT: usize = 1;
+const UDP_FD_S_BIT: usize = 2;
+const UDP_FD_VERSION: usize = 3;
+const UDP_FD_LENGTH: usize = 4;
+const UDP_FD_CONTROL_CONNECTION_ID: usize = 5;
+const UDP_FD_NS: usize = 6;
+const UDP_FD_NR: usize = 7;
+const UDP_FD_SESSION_ID: usize = 8;
+const UDP_FD_MESSAGE_TYPE: usize = 9;
+const UDP_FD_AVPS: usize = 10;
 
 static UDP_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("t_bit", "T Bit", FieldType::U8),
+    // Control-only bits. In data messages the L and S bits are reserved and
+    // MUST be 0 (RFC 3931, Section 4.1.2.1), so they are surfaced only when a
+    // control header is present.
+    FieldDescriptor::new("l_bit", "L Bit", FieldType::U8).optional(),
+    FieldDescriptor::new("s_bit", "S Bit", FieldType::U8).optional(),
     FieldDescriptor::new("version", "Version", FieldType::U8),
     // Control-only fields
     FieldDescriptor::new("length", "Length", FieldType::U16).optional(),
@@ -433,6 +440,13 @@ impl Dissector for L2tpv3UdpDissector {
                 });
             }
 
+            // RFC 3931, Section 3.2.1 — In control messages the L bit (bit 1)
+            // and S bit (bit 4) MUST be 1, indicating that Length and the
+            // Ns/Nr sequence numbers are present. They share the same
+            // flags/version word as the T and Ver fields.
+            let l_bit = ((flags_ver >> 14) & 1) as u8;
+            let s_bit = ((flags_ver >> 11) & 1) as u8;
+
             // RFC 3931, Section 3.2.1
             let length = read_be_u16(data, 2)?;
 
@@ -465,6 +479,16 @@ impl Dissector for L2tpv3UdpDissector {
             buf.push_field(
                 &UDP_FIELD_DESCRIPTORS[UDP_FD_T_BIT],
                 FieldValue::U8(t_bit),
+                offset..offset + 1,
+            );
+            buf.push_field(
+                &UDP_FIELD_DESCRIPTORS[UDP_FD_L_BIT],
+                FieldValue::U8(l_bit),
+                offset..offset + 1,
+            );
+            buf.push_field(
+                &UDP_FIELD_DESCRIPTORS[UDP_FD_S_BIT],
+                FieldValue::U8(s_bit),
                 offset..offset + 1,
             );
             buf.push_field(
@@ -562,8 +586,9 @@ mod tests {
     // | 4.1.1.2     | IP control with AVPs              | parse_l2tpv3_ip_control_with_avps     |
     // | 4.1.1.2     | IP control ZLB ACK                | parse_l2tpv3_ip_control_zlb           |
     // | 4.1.1       | IP data with offset               | parse_l2tpv3_ip_with_offset           |
-    // | 3.2.1       | UDP control message (T=1)         | parse_l2tpv3_udp_control_message      |
+    // | 3.2.1       | UDP control message (T/L/S/Ver)   | parse_l2tpv3_udp_control_message      |
     // | 4.1.2.1     | UDP data message (T=0)            | parse_l2tpv3_udp_data_message         |
+    // | 4.1.2.1     | UDP data omits L/S bit fields     | parse_l2tpv3_udp_data_has_no_l_s_bits |
     // | 3.2.1       | UDP invalid version               | parse_l2tpv3_udp_invalid_version      |
     // | 4.1.2       | UDP truncated                     | parse_l2tpv3_udp_truncated            |
     // | 4.1.2.2     | UDP truncated control             | parse_l2tpv3_udp_truncated_control    |
@@ -807,6 +832,16 @@ mod tests {
             buf.field_by_name(layer, "t_bit").unwrap().value,
             FieldValue::U8(1)
         );
+        // RFC 3931, Section 3.2.1 — L bit MUST be 1 in control messages.
+        assert_eq!(
+            buf.field_by_name(layer, "l_bit").unwrap().value,
+            FieldValue::U8(1)
+        );
+        // RFC 3931, Section 3.2.1 — S bit MUST be 1 in control messages.
+        assert_eq!(
+            buf.field_by_name(layer, "s_bit").unwrap().value,
+            FieldValue::U8(1)
+        );
         assert_eq!(
             buf.field_by_name(layer, "version").unwrap().value,
             FieldValue::U8(3)
@@ -829,6 +864,22 @@ mod tests {
             buf.field_by_name(layer, "nr").unwrap().value,
             FieldValue::U16(0)
         );
+    }
+
+    #[test]
+    fn parse_l2tpv3_udp_data_has_no_l_s_bits() {
+        // In UDP data messages the L and S bits are reserved (MUST be 0) per
+        // RFC 3931, Section 4.1.2.1 and are not surfaced as separate fields.
+        let raw: &[u8] = &[
+            0x00, 0x03, // T=0, Ver=3
+            0x00, 0x00, // Reserved
+            0xDE, 0xAD, 0xBE, 0xEF, // Session ID
+        ];
+        let mut buf = DissectBuffer::new();
+        L2tpv3UdpDissector.dissect(raw, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("L2TPv3-UDP").unwrap();
+        assert!(buf.field_by_name(layer, "l_bit").is_none());
+        assert!(buf.field_by_name(layer, "s_bit").is_none());
     }
 
     #[test]
@@ -880,6 +931,14 @@ mod tests {
         assert_eq!(result.bytes_consumed, 20);
 
         let layer = buf.layer_by_name("L2TPv3-UDP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "l_bit").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "s_bit").unwrap().value,
+            FieldValue::U8(1)
+        );
         assert_eq!(
             buf.field_by_name(layer, "message_type").unwrap().value,
             FieldValue::U16(2)
@@ -980,8 +1039,10 @@ mod tests {
     #[test]
     fn field_descriptors_consistent_udp() {
         let descs = L2tpv3UdpDissector.field_descriptors();
-        assert_eq!(descs.len(), 9);
+        assert_eq!(descs.len(), 11);
         assert_eq!(descs[UDP_FD_T_BIT].name, "t_bit");
+        assert_eq!(descs[UDP_FD_L_BIT].name, "l_bit");
+        assert_eq!(descs[UDP_FD_S_BIT].name, "s_bit");
         assert_eq!(descs[UDP_FD_VERSION].name, "version");
         assert_eq!(descs[UDP_FD_LENGTH].name, "length");
         assert_eq!(
