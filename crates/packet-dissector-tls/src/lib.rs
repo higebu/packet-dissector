@@ -7,6 +7,13 @@
 //! ## References
 //! - RFC 5246 (TLS 1.2): <https://www.rfc-editor.org/rfc/rfc5246>
 //! - RFC 8446 (TLS 1.3): <https://www.rfc-editor.org/rfc/rfc8446>
+//! - RFC 6066 (TLS Extensions Definitions): <https://www.rfc-editor.org/rfc/rfc6066>
+//! - RFC 6520 (Heartbeat Extension): <https://www.rfc-editor.org/rfc/rfc6520>
+//! - RFC 7301 (ALPN): <https://www.rfc-editor.org/rfc/rfc7301>
+//! - RFC 7366 (Encrypt-then-MAC): <https://www.rfc-editor.org/rfc/rfc7366>
+//! - RFC 7905 (ChaCha20-Poly1305 Cipher Suites): <https://www.rfc-editor.org/rfc/rfc7905>
+//! - RFC 8449 (Record Size Limit): <https://www.rfc-editor.org/rfc/rfc8449>
+//! - RFC 8879 (TLS Certificate Compression): <https://www.rfc-editor.org/rfc/rfc8879>
 
 #![deny(missing_docs)]
 
@@ -48,16 +55,20 @@ const CONTENT_TYPE_ALERT: u8 = 21;
 const CONTENT_TYPE_HANDSHAKE: u8 = 22;
 /// `application_data(23)`
 const CONTENT_TYPE_APPLICATION_DATA: u8 = 23;
+/// `heartbeat(24)` — RFC 6520, Section 3 — <https://www.rfc-editor.org/rfc/rfc6520#section-3>
+const CONTENT_TYPE_HEARTBEAT: u8 = 24;
 
 /// Returns a human-readable name for a TLS `ContentType` value.
 ///
 /// RFC 5246, Section 6.2.1 — <https://www.rfc-editor.org/rfc/rfc5246#section-6.2.1>
+/// RFC 6520, Section 3 — <https://www.rfc-editor.org/rfc/rfc6520#section-3> (Heartbeat)
 fn content_type_name(ct: u8) -> &'static str {
     match ct {
         CONTENT_TYPE_CHANGE_CIPHER_SPEC => "Change Cipher Spec",
         CONTENT_TYPE_ALERT => "Alert",
         CONTENT_TYPE_HANDSHAKE => "Handshake",
         CONTENT_TYPE_APPLICATION_DATA => "Application Data",
+        CONTENT_TYPE_HEARTBEAT => "Heartbeat",
         _ => "Unknown",
     }
 }
@@ -99,6 +110,7 @@ fn version_short_name(version: u16) -> Option<&'static str> {
 ///
 /// RFC 5246, Section 7.4 — <https://www.rfc-editor.org/rfc/rfc5246#section-7.4>
 /// RFC 8446, Section 4 — <https://www.rfc-editor.org/rfc/rfc8446#section-4>
+/// RFC 8879, Section 5 — <https://www.rfc-editor.org/rfc/rfc8879#section-5> (Compressed Certificate)
 fn handshake_type_name(ht: u8) -> &'static str {
     match ht {
         // RFC 5246, Section 7.4
@@ -117,6 +129,8 @@ fn handshake_type_name(ht: u8) -> &'static str {
         20 => "Finished",
         // RFC 8446, Section 4
         24 => "Key Update",
+        // RFC 8879, Section 5
+        25 => "Compressed Certificate",
         254 => "Message Hash",
         _ => "Unknown",
     }
@@ -205,7 +219,13 @@ fn extension_type_name(ext_type: u16) -> &'static str {
         19 => "client_certificate_type",
         20 => "server_certificate_type",
         21 => "padding",
+        // RFC 7366, Section 2 — https://www.rfc-editor.org/rfc/rfc7366#section-2
+        22 => "encrypt_then_mac",
         23 => "extended_master_secret",
+        // RFC 8879, Section 7.1 — https://www.rfc-editor.org/rfc/rfc8879#section-7.1
+        27 => "compress_certificate",
+        // RFC 8449, Section 5 — https://www.rfc-editor.org/rfc/rfc8449#section-5
+        28 => "record_size_limit",
         35 => "session_ticket",
         41 => "pre_shared_key",
         42 => "early_data",
@@ -837,6 +857,11 @@ mod tests {
     //! | 5246 §7.4.1.2 | ClientHello truncated  | parse_client_hello_truncated_body        |
     //! | 5246 §7.4.1.3 | ServerHello truncated  | parse_server_hello_truncated_body        |
     //! | 8446 §4.2     | TLS 1.3 ExtensionType  | parse_tls_extension_type_names           |
+    //! | 6520 §3       | Heartbeat ContentType  | parse_tls_heartbeat_content_type         |
+    //! | 7366 §2       | encrypt_then_mac (22)  | parse_tls_extension_type_names           |
+    //! | 8449 §5       | record_size_limit (28) | parse_tls_extension_type_names           |
+    //! | 8879 §5       | Compressed Certificate | parse_tls_handshake_type_names           |
+    //! | 8879 §7.1     | compress_certificate   | parse_tls_extension_type_names           |
 
     use super::*;
 
@@ -1027,6 +1052,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_tls_heartbeat_content_type() {
+        // RFC 6520, Section 3 — https://www.rfc-editor.org/rfc/rfc6520#section-3
+        // ContentType heartbeat(24); minimal HeartbeatMessage body is irrelevant
+        // here — we only verify that ContentType 24 is recognised by name.
+        let data = build_tls_record(CONTENT_TYPE_HEARTBEAT, 0x0303, &[0u8; 16]);
+
+        let mut buf = DissectBuffer::new();
+        TlsDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("TLS").unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "content_type_name"),
+            Some("Heartbeat")
+        );
+    }
+
+    #[test]
     fn parse_tls_version_names() {
         for (ver, expected_name) in [
             (0x0300u16, "SSL 3.0"),
@@ -1067,6 +1109,8 @@ mod tests {
             (16, "Client Key Exchange"),
             (20, "Finished"),
             (24, "Key Update"),
+            // RFC 8879 §5 — https://www.rfc-editor.org/rfc/rfc8879#section-5
+            (25, "Compressed Certificate"),
             (254, "Message Hash"),
             (99, "Unknown"),
         ] {
@@ -1567,6 +1611,12 @@ mod tests {
             // RFC 8446 §4.2 — https://www.rfc-editor.org/rfc/rfc8446#section-4.2
             (19, "client_certificate_type"),
             (20, "server_certificate_type"),
+            // RFC 7366 §2 — https://www.rfc-editor.org/rfc/rfc7366#section-2
+            (22, "encrypt_then_mac"),
+            // RFC 8879 §7.1 — https://www.rfc-editor.org/rfc/rfc8879#section-7.1
+            (27, "compress_certificate"),
+            // RFC 8449 §5 — https://www.rfc-editor.org/rfc/rfc8449#section-5
+            (28, "record_size_limit"),
             (43, "supported_versions"),
             // RFC 8446 §4.2.5 — https://www.rfc-editor.org/rfc/rfc8446#section-4.2.5
             (48, "oid_filters"),
