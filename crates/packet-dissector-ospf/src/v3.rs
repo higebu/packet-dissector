@@ -11,20 +11,31 @@ use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
 use crate::common::{LSR_ENTRY_SIZE, push_lsa_headers, push_lsu_lsas};
 
-/// OSPFv3 common header size in bytes (RFC 5340, A.3.1).
+/// OSPFv3 common header size in bytes.
+///
+/// RFC 5340, Appendix A.3.1 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.1>
 const HEADER_SIZE: usize = 16;
 
-/// Hello packet body size excluding neighbors (RFC 5340, A.3.2).
+/// Hello packet body size excluding neighbors.
+///
+/// RFC 5340, Appendix A.3.2 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.2>
 const HELLO_BODY_SIZE: usize = 20;
 
-/// Database Description packet body size excluding LSA headers (RFC 5340, A.3.3).
+/// Database Description packet body size excluding LSA headers.
+///
+/// RFC 5340, Appendix A.3.3 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.3>
 const DD_BODY_SIZE: usize = 12;
 
 /// Returns a human-readable name for OSPFv3 LSA function codes.
 ///
-/// RFC 5340, A.4.
+/// RFC 5340, Appendix A.4.2.1 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.2.1>
+///
+/// The LS Type field is 16 bits. The high-order three bits encode the U-bit
+/// (bit 15) and the S1/S2 flooding-scope bits (bits 13-14); the low-order
+/// 13 bits are the LSA function code. Function code 6 is explicitly marked
+/// "Deprecated (may be reassigned)" and has no name.
 fn lsa_type_name(ls_type: u16) -> Option<&'static str> {
-    // Function code is in the lower 13 bits; scope is in upper 3 bits.
+    // Function code is in the lower 13 bits; U/S2/S1 bits are in the upper 3 bits.
     let function_code = ls_type & 0x1FFF;
     match function_code {
         1 => Some("Router-LSA"),
@@ -32,7 +43,8 @@ fn lsa_type_name(ls_type: u16) -> Option<&'static str> {
         3 => Some("Inter-Area-Prefix-LSA"),
         4 => Some("Inter-Area-Router-LSA"),
         5 => Some("AS-External-LSA"),
-        7 => Some("Type-7-LSA"),
+        // 6: Deprecated (may be reassigned) — intentionally not named.
+        7 => Some("NSSA-LSA"),
         8 => Some("Link-LSA"),
         9 => Some("Intra-Area-Prefix-LSA"),
         _ => None,
@@ -55,7 +67,7 @@ const FD_LSR_ADVERTISING_ROUTER: usize = 2;
 
 /// Pushes fields for a single OSPFv3 LSA header (20 bytes) into the buffer.
 ///
-/// RFC 5340, A.4.1.
+/// RFC 5340, Appendix A.4.2 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.2>
 fn push_lsa_header_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -276,7 +288,8 @@ impl Dissector for Ospfv3Dissector {
             });
         }
 
-        // RFC 5340, A.3.1 — Common header (16 bytes, no auth fields)
+        // RFC 5340, Appendix A.3.1 — Common header (16 bytes, no auth fields)
+        // <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.1>
         let version = data[0];
         if version != 3 {
             return Err(PacketError::InvalidHeader("expected OSPFv3 (version 3)"));
@@ -352,7 +365,8 @@ impl Dissector for Ospfv3Dissector {
         let body_offset = offset + HEADER_SIZE;
 
         match ospf_type {
-            // Hello (Type 1) — RFC 5340, A.3.2
+            // Hello (Type 1) — RFC 5340, Appendix A.3.2
+            // <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.2>
             1 => {
                 if body.len() < HELLO_BODY_SIZE {
                     return Err(PacketError::InvalidHeader(
@@ -406,16 +420,13 @@ impl Dissector for Ospfv3Dissector {
                     body_offset + 16..body_offset + 20,
                 );
 
-                // Neighbor list (Router IDs, 4 bytes each)
+                // Neighbor list (Router IDs, 4 bytes each).
+                // RFC 5340, Appendix A.3.2 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.2>
                 let neighbor_data = &body[HELLO_BODY_SIZE..];
                 if neighbor_data.len() % 4 != 0 {
-                    // Neighbor list must be a sequence of 4-byte Router IDs (RFC 5340, A.3.2).
-                    // Treat trailing partial IDs as truncation of the expected structure.
-                    let trailing = neighbor_data.len() % 4;
-                    return Err(PacketError::Truncated {
-                        expected: data.len() - trailing,
-                        actual: data.len(),
-                    });
+                    return Err(PacketError::InvalidHeader(
+                        "ospfv3: neighbor list length is not a multiple of 4",
+                    ));
                 }
                 let neighbors_start = body_offset + HELLO_BODY_SIZE;
                 let array_idx = buf.begin_container(
@@ -441,7 +452,8 @@ impl Dissector for Ospfv3Dissector {
                 }
                 buf.end_container(array_idx);
             }
-            // Database Description (Type 2) — RFC 5340, A.3.3
+            // Database Description (Type 2) — RFC 5340, Appendix A.3.3
+            // <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.3>
             2 => {
                 if body.len() < DD_BODY_SIZE {
                     return Err(PacketError::Truncated {
@@ -497,7 +509,8 @@ impl Dissector for Ospfv3Dissector {
                 );
                 buf.end_container(array_idx);
             }
-            // Link State Request (Type 3) — RFC 5340, A.3.4
+            // Link State Request (Type 3) — RFC 5340, Appendix A.3.4
+            // <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.4>
             3 => {
                 let array_idx = buf.begin_container(
                     &FIELD_DESCRIPTORS[FD_REQUESTS],
@@ -538,7 +551,8 @@ impl Dissector for Ospfv3Dissector {
                 }
                 buf.end_container(array_idx);
             }
-            // Link State Update (Type 4) — RFC 5340, A.3.5
+            // Link State Update (Type 4) — RFC 5340, Appendix A.3.5
+            // <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.5>
             4 => {
                 if body.len() < 4 {
                     return Err(PacketError::Truncated {
@@ -569,7 +583,8 @@ impl Dissector for Ospfv3Dissector {
                 );
                 buf.end_container(array_idx);
             }
-            // Link State Acknowledgment (Type 5) — RFC 5340, A.3.6
+            // Link State Acknowledgment (Type 5) — RFC 5340, Appendix A.3.6
+            // <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.6>
             5 => {
                 let array_idx = buf.begin_container(
                     &FIELD_DESCRIPTORS[FD_LSA_HEADERS],
@@ -600,14 +615,21 @@ mod tests {
 
     // # RFC 5340 (OSPFv3) Coverage
     //
-    // | RFC Section | Description | Test |
-    // |-------------|-------------|------|
-    // | A.3.1 | Common header | parse_hello |
-    // | A.3.2 | Hello packet | parse_hello, parse_hello_with_neighbors |
-    // | A.3.3 | Database Description | parse_dd |
-    // | A.3.4 | Link State Request | parse_lsr |
-    // | A.3.5 | Link State Update | parse_lsu |
-    // | A.3.6 | Link State Ack | parse_lsack |
+    // RFC 5340: <https://www.rfc-editor.org/rfc/rfc5340>
+    //
+    // | RFC Section      | Description             | Test                                         |
+    // |------------------|-------------------------|----------------------------------------------|
+    // | Appendix A.3.1   | Common header           | parse_hello, parse_wrong_version,            |
+    // |                  |                         | parse_truncated_header                       |
+    // | Appendix A.3.2   | Hello packet            | parse_hello, parse_hello_with_neighbors,     |
+    // |                  |                         | parse_hello_misaligned_neighbors             |
+    // | Appendix A.3.3   | Database Description    | parse_dd                                     |
+    // | Appendix A.3.4   | Link State Request      | parse_lsr, lsa_type_nssa_name                |
+    // | Appendix A.3.5   | Link State Update       | parse_lsu                                    |
+    // | Appendix A.3.6   | Link State Ack          | parse_lsack                                  |
+    // | Appendix A.4.2   | LSA header              | parse_dd, parse_lsu, parse_lsack             |
+    // | Appendix A.4.2.1 | LSA Type / Function Code | lsa_type_names_cover_rfc5340,               |
+    // |                  |                         | lsa_type_nssa_name                           |
 
     /// Build an OSPFv3 common header (16 bytes).
     fn build_header(ospf_type: u8, packet_length: u16, router_id: [u8; 4]) -> Vec<u8> {
@@ -850,5 +872,87 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let err = Ospfv3Dissector.dissect(&modified, &mut buf, 0).unwrap_err();
         assert!(matches!(err, PacketError::InvalidHeader(_)));
+    }
+
+    /// RFC 5340, Appendix A.4.2.1 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.2.1>
+    ///
+    /// LSA function code 7 (LS Type 0x2007) is "NSSA-LSA", not "Type-7-LSA".
+    #[test]
+    fn lsa_type_nssa_name() {
+        // Build an LSR with LS Type = 0x2007 (NSSA-LSA, area scope).
+        let mut pkt = build_header(3, 28, [1, 1, 1, 1]);
+        pkt.extend_from_slice(&[0, 0]); // Reserved
+        pkt.extend_from_slice(&[0x20, 0x07]); // LS Type = 0x2007
+        pkt.extend_from_slice(&[0, 0, 0, 1]); // Link State ID
+        pkt.extend_from_slice(&[2, 2, 2, 2]); // Advertising Router
+
+        let mut buf = DissectBuffer::new();
+        Ospfv3Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("OSPFv3").unwrap();
+        let requests = buf.field_by_name(layer, "requests").unwrap();
+        let FieldValue::Array(ref range) = requests.value else {
+            panic!("expected Array");
+        };
+        let items = buf.nested_fields(range);
+        let first_obj = items
+            .iter()
+            .find(|f| f.value.is_object())
+            .expect("expected Object");
+        let FieldValue::Object(ref obj_range) = first_obj.value else {
+            panic!("expected Object");
+        };
+        assert_eq!(
+            buf.resolve_nested_display_name(obj_range, "ls_type_name"),
+            Some("NSSA-LSA"),
+        );
+    }
+
+    /// RFC 5340, Appendix A.4.2.1 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.2.1>
+    ///
+    /// All LSA function codes defined in RFC 5340 resolve to human-readable names.
+    /// Function code 6 is explicitly marked "Deprecated (may be reassigned)" and
+    /// intentionally has no name.
+    #[test]
+    fn lsa_type_names_cover_rfc5340() {
+        fn name_of(ls_type: u16) -> Option<&'static str> {
+            lsa_type_name(ls_type)
+        }
+        assert_eq!(name_of(0x2001), Some("Router-LSA"));
+        assert_eq!(name_of(0x2002), Some("Network-LSA"));
+        assert_eq!(name_of(0x2003), Some("Inter-Area-Prefix-LSA"));
+        assert_eq!(name_of(0x2004), Some("Inter-Area-Router-LSA"));
+        assert_eq!(name_of(0x4005), Some("AS-External-LSA"));
+        assert_eq!(name_of(0x2006), None); // Deprecated
+        assert_eq!(name_of(0x2007), Some("NSSA-LSA"));
+        assert_eq!(name_of(0x0008), Some("Link-LSA"));
+        assert_eq!(name_of(0x2009), Some("Intra-Area-Prefix-LSA"));
+    }
+
+    /// RFC 5340, Appendix A.3.2 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.2>
+    ///
+    /// The neighbor list is a sequence of 4-byte Router IDs. If the declared
+    /// packet length leaves a remainder that is not a multiple of 4, the header
+    /// itself is malformed — report `InvalidHeader` rather than `Truncated`,
+    /// because all the declared bytes are present in the buffer.
+    #[test]
+    fn parse_hello_misaligned_neighbors() {
+        // Header (16) + Hello body (20) + 2 spurious bytes = 38.
+        let mut pkt = build_header(1, 38, [1, 1, 1, 1]);
+        pkt.extend_from_slice(&[0, 0, 0, 1]); // Interface ID
+        pkt.push(1); // Rtr Priority
+        pkt.extend_from_slice(&[0x00, 0x00, 0x13]); // Options
+        pkt.extend_from_slice(&[0, 10]); // HelloInterval
+        pkt.extend_from_slice(&[0, 40]); // RouterDeadInterval
+        pkt.extend_from_slice(&[10, 0, 0, 1]); // DR
+        pkt.extend_from_slice(&[10, 0, 0, 2]); // BDR
+        pkt.extend_from_slice(&[0xAA, 0xBB]); // 2 extra bytes (misaligned)
+
+        let mut buf = DissectBuffer::new();
+        let err = Ospfv3Dissector.dissect(&pkt, &mut buf, 0).unwrap_err();
+        assert!(
+            matches!(err, PacketError::InvalidHeader(_)),
+            "expected InvalidHeader, got {err:?}",
+        );
     }
 }
