@@ -90,6 +90,9 @@ const FD_HOME_AGENT_ADDRESSES: usize = 26;
 const FD_QUERY_INTERVAL: usize = 27;
 const FD_ROBUSTNESS_VARIABLE: usize = 28;
 const FD_INVOKING_PACKET: usize = 29;
+/// RFC 8335, Section 2 — the Sequence Number in Extended Echo messages is
+/// an 8-bit field, unlike the 16-bit field in classic Echo (RFC 4443, §4.1).
+const FD_SEQUENCE_NUMBER_U8: usize = 30;
 
 /// Minimum IPv6 header size (RFC 8200, Section 3).
 const IPV6_MIN_HEADER: usize = 40;
@@ -241,6 +244,10 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("invoking_packet", "Invoking Packet", FieldType::Object)
         .optional()
         .with_children(INVOKING_PACKET_CHILDREN),
+    // RFC 8335, Section 2 — Extended Echo Sequence Number is an 8-bit field.
+    // A separate descriptor is needed because the classic Echo (RFC 4443, §4.1)
+    // uses a 16-bit Sequence Number (see FD_SEQUENCE_NUMBER above).
+    FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U8).optional(),
 ];
 
 /// ICMPv6 dissector.
@@ -799,6 +806,11 @@ impl Dissector for Icmpv6Dissector {
             }
 
             // RFC 4443, Section 3.2 — Packet Too Big (Type 2)
+            // <https://www.rfc-editor.org/rfc/rfc4443#section-3.2>
+            // The MTU field is followed by "As much of invoking packet as
+            // possible" (same rule as other error messages). RFC 4884, §5
+            // explicitly notes that Packet Too Big has no Length extension
+            // field, so all bytes after MTU belong to the invoking packet.
             2 => {
                 let mtu = read_be_u32(data, 4)?;
                 buf.push_field(
@@ -806,9 +818,17 @@ impl Dissector for Icmpv6Dissector {
                     FieldValue::U32(mtu),
                     offset + 4..offset + 8,
                 );
+                if data.len() > HEADER_SIZE {
+                    push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
+                }
             }
 
             // RFC 4443, Section 3.4 — Parameter Problem (Type 4)
+            // <https://www.rfc-editor.org/rfc/rfc4443#section-3.4>
+            // The Pointer field is followed by "As much of invoking packet as
+            // possible". RFC 4884, §5 states no Length extension is defined
+            // for this message, so remaining bytes are purely the invoking
+            // packet.
             4 => {
                 let pointer = read_be_u32(data, 4)?;
                 buf.push_field(
@@ -816,6 +836,9 @@ impl Dissector for Icmpv6Dissector {
                     FieldValue::U32(pointer),
                     offset + 4..offset + 8,
                 );
+                if data.len() > HEADER_SIZE {
+                    push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
+                }
             }
 
             // RFC 4443, Section 4.1 — Echo Request (Type 128)
@@ -1138,9 +1161,16 @@ impl Dissector for Icmpv6Dissector {
             // Bytes 4-7 are reserved.
             152 | 153 => {}
 
-            // RFC 8335, Section 2 — Extended Echo Request (Type 160)
-            // RFC 8335, Section 2 — Extended Echo Reply (Type 161)
-            // identifier(2) + sequence_number(1) + flags(1)
+            // RFC 8335, Section 2 — Extended Echo Request (Type 160) and
+            // Extended Echo Reply (Type 161).
+            // <https://www.rfc-editor.org/rfc/rfc8335#section-2>
+            // Layout (after the 4-byte ICMPv6 common header):
+            //   Identifier (16 bits) | Sequence Number (8 bits) | flags (8 bits)
+            // For Request: flags = Reserved(7) + L(1).
+            // For Reply:   flags = State(3) + Res(2) + A(1) + 4(1) + 6(1).
+            // Note: the Sequence Number here is 8 bits wide, whereas the
+            // classic Echo Sequence Number in RFC 4443, §4.1 is 16 bits wide;
+            // we therefore use a dedicated U8 descriptor.
             160 | 161 => {
                 let identifier = read_be_u16(data, 4)?;
                 let sequence_number = data[6];
@@ -1152,7 +1182,7 @@ impl Dissector for Icmpv6Dissector {
                     offset + 4..offset + 6,
                 );
                 buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_SEQUENCE_NUMBER],
+                    &FIELD_DESCRIPTORS[FD_SEQUENCE_NUMBER_U8],
                     FieldValue::U8(sequence_number),
                     offset + 6..offset + 7,
                 );
@@ -1177,12 +1207,15 @@ impl Dissector for Icmpv6Dissector {
 mod tests {
     //! # ICMPv6 invoking packet coverage
     //!
-    //! | RFC Section                          | Description                        | Test                                          |
-    //! |--------------------------------------|------------------------------------|-----------------------------------------------|
-    //! | RFC 4443 §3.1 Destination Unreachable | Invoking IPv6 packet parsing      | parse_dest_unreachable_with_invoking_ipv6      |
-    //! | RFC 4443 §3.3 Time Exceeded          | Invoking IPv6 packet parsing       | parse_time_exceeded_with_invoking_ipv6         |
-    //! | RFC 4443 §3.1 Destination Unreachable | Truncated invoking packet          | parse_dest_unreachable_truncated_invoking       |
-    //! | RFC 4443 §3.1 Destination Unreachable | No invoking packet data            | parse_dest_unreachable_no_invoking             |
+    //! | RFC Section                            | Description                        | Test                                           |
+    //! |----------------------------------------|------------------------------------|------------------------------------------------|
+    //! | RFC 4443 §3.1 Destination Unreachable  | Invoking IPv6 packet parsing       | parse_dest_unreachable_with_invoking_ipv6      |
+    //! | RFC 4443 §3.3 Time Exceeded            | Invoking IPv6 packet parsing       | parse_time_exceeded_with_invoking_ipv6         |
+    //! | RFC 4443 §3.1 Destination Unreachable  | Truncated invoking packet          | parse_dest_unreachable_truncated_invoking      |
+    //! | RFC 4443 §3.1 Destination Unreachable  | No invoking packet data            | parse_dest_unreachable_no_invoking             |
+    //! | RFC 4443 §3.2 Packet Too Big           | Invoking IPv6 packet parsing       | parse_packet_too_big_with_invoking_ipv6        |
+    //! | RFC 4443 §3.4 Parameter Problem        | Invoking IPv6 packet parsing       | parse_parameter_problem_with_invoking_ipv6     |
+    //! | RFC 8335 §2 Extended Echo Request      | Sequence Number is 8-bit           | parse_extended_echo_request_u8_sequence_number |
 
     use super::*;
 
@@ -1301,5 +1334,124 @@ mod tests {
                 .iter()
                 .all(|f| f.descriptor.name != "invoking_packet")
         );
+    }
+
+    /// RFC 4443, Section 3.2 — Packet Too Big (Type 2) carries the invoking
+    /// packet after the 32-bit MTU field.
+    /// <https://www.rfc-editor.org/rfc/rfc4443#section-3.2>
+    #[test]
+    fn parse_packet_too_big_with_invoking_ipv6() {
+        let src = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let invoking = build_ipv6_header(17, src, dst); // UDP
+
+        let mut pkt = Vec::with_capacity(HEADER_SIZE + invoking.len());
+        pkt.push(2); // Packet Too Big
+        pkt.push(0); // Code
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt.extend_from_slice(&[0x00, 0x00, 0x05, 0xdc]); // MTU = 1500
+        pkt.extend_from_slice(&invoking);
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+
+        // MTU must still be present.
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.descriptor.name == "mtu" && f.value == FieldValue::U32(1500))
+        );
+
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .expect("Packet Too Big must expose the invoking packet");
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        assert_eq!(children[0].value, FieldValue::U8(6)); // version
+        assert_eq!(children[1].value, FieldValue::U8(17)); // next_header (UDP)
+        assert_eq!(children[2].value, FieldValue::Ipv6Addr(src));
+        assert_eq!(children[3].value, FieldValue::Ipv6Addr(dst));
+    }
+
+    /// RFC 4443, Section 3.4 — Parameter Problem (Type 4) carries the invoking
+    /// packet after the 32-bit Pointer field.
+    /// <https://www.rfc-editor.org/rfc/rfc4443#section-3.4>
+    #[test]
+    fn parse_parameter_problem_with_invoking_ipv6() {
+        let src = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa];
+        let dst = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xbb];
+        let invoking = build_ipv6_header(58, src, dst); // ICMPv6
+
+        let mut pkt = Vec::with_capacity(HEADER_SIZE + invoking.len());
+        pkt.push(4); // Parameter Problem
+        pkt.push(0); // Code = erroneous header field encountered
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x06]); // Pointer = 6
+        pkt.extend_from_slice(&invoking);
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+
+        // Pointer must still be present.
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.descriptor.name == "pointer" && f.value == FieldValue::U32(6))
+        );
+
+        let ip_obj = fields
+            .iter()
+            .find(|f| f.descriptor.name == "invoking_packet")
+            .expect("Parameter Problem must expose the invoking packet");
+        let range = match &ip_obj.value {
+            FieldValue::Object(r) => r.clone(),
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(&range);
+        assert_eq!(children[0].value, FieldValue::U8(6));
+        assert_eq!(children[1].value, FieldValue::U8(58));
+        assert_eq!(children[2].value, FieldValue::Ipv6Addr(src));
+        assert_eq!(children[3].value, FieldValue::Ipv6Addr(dst));
+    }
+
+    /// RFC 8335, Section 2 — Extended Echo Request (Type 160) Sequence Number
+    /// is an 8-bit field, distinct from the 16-bit Sequence Number in the
+    /// classic Echo Request/Reply (RFC 4443, Section 4.1).
+    /// <https://www.rfc-editor.org/rfc/rfc8335#section-2>
+    #[test]
+    fn parse_extended_echo_request_u8_sequence_number() {
+        let pkt: [u8; 8] = [
+            160, // Type: Extended Echo Request
+            0,   // Code
+            0x00, 0x00, // Checksum
+            0x12, 0x34, // Identifier
+            0x2a, // Sequence Number (8-bit) = 42
+            0x01, // Reserved(7) + L(1)
+        ];
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+
+        let seq = fields
+            .iter()
+            .find(|f| f.descriptor.name == "sequence_number")
+            .expect("sequence_number field must be present");
+        // Per RFC 8335, the Sequence Number for Extended Echo is 8 bits wide,
+        // so the descriptor must report U8 and the value must match.
+        assert_eq!(seq.value, FieldValue::U8(0x2a));
+        assert_eq!(seq.descriptor.field_type, FieldType::U8);
     }
 }
