@@ -3,10 +3,18 @@
 //! ## References
 //! - ISO/IEC 10589:2002 (base IS-IS protocol)
 //! - RFC 1195: <https://www.rfc-editor.org/rfc/rfc1195>
+//! - RFC 5120: <https://www.rfc-editor.org/rfc/rfc5120>
+//! - RFC 5301: <https://www.rfc-editor.org/rfc/rfc5301>
 //! - RFC 5302: <https://www.rfc-editor.org/rfc/rfc5302>
+//! - RFC 5303: <https://www.rfc-editor.org/rfc/rfc5303>
 //! - RFC 5304: <https://www.rfc-editor.org/rfc/rfc5304>
 //! - RFC 5305: <https://www.rfc-editor.org/rfc/rfc5305>
 //! - RFC 5308: <https://www.rfc-editor.org/rfc/rfc5308>
+//! - RFC 5310: <https://www.rfc-editor.org/rfc/rfc5310>
+//! - RFC 7981: <https://www.rfc-editor.org/rfc/rfc7981>
+//! - RFC 8706: <https://www.rfc-editor.org/rfc/rfc8706>
+//! - IANA IS-IS TLV Codepoints registry:
+//!   <https://www.iana.org/assignments/isis-tlv-codepoints/isis-tlv-codepoints.xhtml>
 
 #![deny(missing_docs)]
 
@@ -82,55 +90,73 @@ const TLV_PADDING: u8 = 8;
 /// TLV type: LSP Entries — ISO/IEC 10589:2002.
 const TLV_LSP_ENTRIES: u8 = 9;
 
-/// TLV type: Authentication — ISO/IEC 10589:2002, RFC 5304.
+/// TLV type: Authentication — ISO/IEC 10589:2002;
+/// RFC 5304, Section 3 — <https://www.rfc-editor.org/rfc/rfc5304#section-3>;
+/// RFC 5310, Section 3 — <https://www.rfc-editor.org/rfc/rfc5310#section-3>.
 const TLV_AUTHENTICATION: u8 = 10;
 
-/// TLV type: Extended IS Reachability — RFC 5305, Section 3.
+/// TLV type: Extended IS Reachability — RFC 5305, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5305#section-3>.
 const TLV_EXTENDED_IS_REACHABILITY: u8 = 22;
 
-/// TLV type: IP Internal Reachability — RFC 1195.
+/// TLV type: IP Internal Reachability — RFC 1195, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
 const TLV_IP_INTERNAL_REACHABILITY: u8 = 128;
 
-/// TLV type: Protocols Supported — RFC 1195.
+/// TLV type: Protocols Supported — RFC 1195, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
 const TLV_PROTOCOLS_SUPPORTED: u8 = 129;
 
-/// TLV type: IP External Reachability — RFC 1195.
+/// TLV type: IP External Reachability — RFC 1195, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
 const TLV_IP_EXTERNAL_REACHABILITY: u8 = 130;
 
-/// TLV type: IP Interface Address — RFC 1195.
+/// TLV type: IP Interface Address — RFC 1195, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
 const TLV_IP_INTERFACE_ADDRESS: u8 = 132;
 
-/// TLV type: TE Router ID — RFC 5305, Section 4.3.
+/// TLV type: TE Router ID — RFC 5305, Section 4.3 —
+/// <https://www.rfc-editor.org/rfc/rfc5305#section-4.3>.
 const TLV_TE_ROUTER_ID: u8 = 134;
 
-/// TLV type: Extended IP Reachability — RFC 5305, Section 4.
+/// TLV type: Extended IP Reachability — RFC 5305, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc5305#section-4>.
 const TLV_EXTENDED_IP_REACHABILITY: u8 = 135;
 
-/// TLV type: Dynamic Hostname — RFC 5301.
+/// TLV type: Dynamic Hostname — RFC 5301, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5301#section-3>.
 const TLV_DYNAMIC_HOSTNAME: u8 = 137;
 
-/// TLV type: Restart — RFC 8706.
+/// TLV type: Restart — RFC 8706, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc8706#section-3>.
 const TLV_RESTART: u8 = 211;
 
-/// TLV type: MT IS Neighbors — RFC 5120.
+/// TLV type: MT IS Neighbors — RFC 5120, Section 7.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.1>.
 const TLV_MT_IS_NEIGHBORS: u8 = 222;
 
-/// TLV type: IPv6 Interface Address — RFC 5308, Section 2.
+/// TLV type: IPv6 Interface Address — RFC 5308, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-2>.
 const TLV_IPV6_INTERFACE_ADDRESS: u8 = 232;
 
-/// TLV type: MT IP Reachability — RFC 5120.
+/// TLV type: MT IP Reachability — RFC 5120, Section 7.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.2>.
 const TLV_MT_IP_REACHABILITY: u8 = 235;
 
-/// TLV type: IPv6 Reachability — RFC 5308, Section 5.
+/// TLV type: IPv6 Reachability — RFC 5308, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-5>.
 const TLV_IPV6_REACHABILITY: u8 = 236;
 
-/// TLV type: MT IPv6 Reachability — RFC 5120.
+/// TLV type: MT IPv6 Reachability — RFC 5120, Section 7.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.2>.
 const TLV_MT_IPV6_REACHABILITY: u8 = 237;
 
-/// TLV type: P2P Three-Way Adjacency — RFC 5303.
+/// TLV type: P2P Three-Way Adjacency — RFC 5303, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5303#section-3>.
 const TLV_P2P_THREE_WAY_ADJ: u8 = 240;
 
-/// TLV type: Router Capability — RFC 7981.
+/// TLV type: Router Capability — RFC 7981, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc7981#section-2>.
 const TLV_ROUTER_CAPABILITY: u8 = 242;
 
 // ---------------------------------------------------------------------------
@@ -155,67 +181,69 @@ fn pdu_type_name(v: u8) -> Option<&'static str> {
 
 /// Returns a human-readable name for IS-IS TLV type codes.
 ///
-/// Covers all IANA-assigned IS-IS TLV codepoints commonly seen in real deployments.
-/// <https://www.iana.org/assignments/isis-tlv-codepoints/>
+/// Covers IANA-assigned IS-IS TLV codepoints commonly seen in real deployments.
+/// IANA registry: <https://www.iana.org/assignments/isis-tlv-codepoints/isis-tlv-codepoints.xhtml>
 fn tlv_type_name(v: u8) -> Option<&'static str> {
+    // Per-value references are attached via `tlv_type_rfc_url` below; each code
+    // point is traceable to either ISO/IEC 10589:2002 or a specific RFC.
     match v {
-        TLV_AREA_ADDRESSES => Some("Area Addresses"), // 1, ISO 10589
-        2 => Some("IS Neighbors (LSP)"),              // ISO 10589
-        3 => Some("ES Neighbors"),                    // ISO 10589
-        4 => Some("Partition Designated L2 IS"),      // ISO 10589
-        5 => Some("Prefix Neighbors"),                // ISO 10589
-        TLV_IS_NEIGHBORS_IIH => Some("IS Neighbors"), // 6, ISO 10589
-        7 => Some("Instance Identifier"),             // RFC 8202
-        TLV_PADDING => Some("Padding"),               // 8, ISO 10589
-        TLV_LSP_ENTRIES => Some("LSP Entries"),       // 9, ISO 10589
-        TLV_AUTHENTICATION => Some("Authentication"), // 10, RFC 5304
-        11 => Some("ESN"),                            // RFC 7602
-        12 => Some("Optional Checksum"),              // RFC 3358
-        13 => Some("Purge Originator Identification"), // RFC 6232
-        14 => Some("LSP Buffer Size"),                // ISO 10589
-        15 => Some("Router-Fingerprint"),             // RFC 8196
-        16 => Some("Reverse Metric"),                 // RFC 8500
-        TLV_EXTENDED_IS_REACHABILITY => Some("Extended IS Reachability"), // 22, RFC 5305
-        23 => Some("IS Neighbor Attribute"),          // RFC 5311
-        24 => Some("IS Alias ID"),                    // RFC 5311
-        25 => Some("L2 Bundle Member Attributes"),    // RFC 8668
-        27 => Some("SRv6 Locator"),                   // RFC 9352
-        TLV_IP_INTERNAL_REACHABILITY => Some("IP Internal Reachability"), // 128, RFC 1195
-        TLV_PROTOCOLS_SUPPORTED => Some("Protocols Supported"), // 129, RFC 1195
-        TLV_IP_EXTERNAL_REACHABILITY => Some("IP External Reachability"), // 130, RFC 1195
-        131 => Some("Inter-Domain Routing Protocol Info"), // RFC 1195
-        TLV_IP_INTERFACE_ADDRESS => Some("IP Interface Address"), // 132, RFC 1195
-        TLV_TE_ROUTER_ID => Some("TE Router ID"),     // 134, RFC 5305
-        TLV_EXTENDED_IP_REACHABILITY => Some("Extended IP Reachability"), // 135, RFC 5305
-        TLV_DYNAMIC_HOSTNAME => Some("Dynamic Hostname"), // 137, RFC 5301
-        138 => Some("GMPLS SRLG"),                    // RFC 5307
-        139 => Some("IPv6 SRLG"),                     // RFC 6119
-        140 => Some("IPv6 TE Router ID"),             // RFC 6119
-        141 => Some("Inter-AS Reachability Information"), // RFC 9346
-        143 => Some("MT Port Capability"),            // RFC 6165
-        144 => Some("MT Capability"),                 // RFC 6329
-        148 => Some("BFD Enabled"),                   // RFC 6213
-        149 => Some("Segment Identifier / Label Binding"), // RFC 8667
-        150 => Some("MT Segment Identifier / Label Binding"), // RFC 8667
-        161 => Some("Flood Reflection"),              // RFC 9377
-        TLV_RESTART => Some("Restart"),               // 211, RFC 8706
-        TLV_MT_IS_NEIGHBORS => Some("MT IS Neighbors"), // 222, RFC 5120
-        223 => Some("MT IS Neighbor Attribute"),      // RFC 5311
-        229 => Some("Multi-Topology"),                // RFC 5120
-        TLV_IPV6_INTERFACE_ADDRESS => Some("IPv6 Interface Address"), // 232, RFC 5308
-        233 => Some("IPv6 Global Interface Address"), // RFC 6119
-        TLV_MT_IP_REACHABILITY => Some("MT IP Reachability"), // 235, RFC 5120
-        TLV_IPV6_REACHABILITY => Some("IPv6 Reachability"), // 236, RFC 5308
-        TLV_MT_IPV6_REACHABILITY => Some("MT IPv6 Reachability"), // 237, RFC 5120
-        TLV_P2P_THREE_WAY_ADJ => Some("P2P Three-Way Adjacency"), // 240, RFC 5303
-        TLV_ROUTER_CAPABILITY => Some("Router Capability"), // 242, RFC 7981
-        243 => Some("Scope Flooding Support"),        // RFC 7356
+        TLV_AREA_ADDRESSES => Some("Area Addresses"), // 1, ISO/IEC 10589:2002 §9.8
+        2 => Some("IS Neighbors (LSP)"),              // ISO/IEC 10589:2002 §9.8
+        3 => Some("ES Neighbors"),                    // ISO/IEC 10589:2002 §9.8
+        4 => Some("Partition Designated L2 IS"),      // ISO/IEC 10589:2002 §9.8
+        5 => Some("Prefix Neighbors"),                // ISO/IEC 10589:2002 §9.9
+        TLV_IS_NEIGHBORS_IIH => Some("IS Neighbors"), // 6, ISO/IEC 10589:2002 §9.5
+        7 => Some("Instance Identifier"), // RFC 8202 — https://www.rfc-editor.org/rfc/rfc8202
+        TLV_PADDING => Some("Padding"),   // 8, ISO/IEC 10589:2002 §9.5
+        TLV_LSP_ENTRIES => Some("LSP Entries"), // 9, ISO/IEC 10589:2002 §9.11
+        TLV_AUTHENTICATION => Some("Authentication"), // 10, RFC 5304 — https://www.rfc-editor.org/rfc/rfc5304
+        11 => Some("ESN"), // RFC 7602 — https://www.rfc-editor.org/rfc/rfc7602
+        12 => Some("Optional Checksum"), // RFC 3358 — https://www.rfc-editor.org/rfc/rfc3358
+        13 => Some("Purge Originator Identification"), // RFC 6232 — https://www.rfc-editor.org/rfc/rfc6232
+        14 => Some("LSP Buffer Size"),                 // ISO/IEC 10589:2002 §9.8
+        15 => Some("Router-Fingerprint"), // RFC 8196 — https://www.rfc-editor.org/rfc/rfc8196
+        16 => Some("Reverse Metric"),     // RFC 8500 — https://www.rfc-editor.org/rfc/rfc8500
+        TLV_EXTENDED_IS_REACHABILITY => Some("Extended IS Reachability"), // 22, RFC 5305 — https://www.rfc-editor.org/rfc/rfc5305
+        23 => Some("IS Neighbor Attribute"), // RFC 5311 — https://www.rfc-editor.org/rfc/rfc5311
+        24 => Some("IS Alias ID"),           // RFC 5311 — https://www.rfc-editor.org/rfc/rfc5311
+        25 => Some("L2 Bundle Member Attributes"), // RFC 8668 — https://www.rfc-editor.org/rfc/rfc8668
+        27 => Some("SRv6 Locator"), // RFC 9352 — https://www.rfc-editor.org/rfc/rfc9352
+        TLV_IP_INTERNAL_REACHABILITY => Some("IP Internal Reachability"), // 128, RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
+        TLV_PROTOCOLS_SUPPORTED => Some("Protocols Supported"), // 129, RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
+        TLV_IP_EXTERNAL_REACHABILITY => Some("IP External Reachability"), // 130, RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
+        131 => Some("Inter-Domain Routing Protocol Info"), // RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
+        TLV_IP_INTERFACE_ADDRESS => Some("IP Interface Address"), // 132, RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
+        TLV_TE_ROUTER_ID => Some("TE Router ID"), // 134, RFC 5305 — https://www.rfc-editor.org/rfc/rfc5305
+        TLV_EXTENDED_IP_REACHABILITY => Some("Extended IP Reachability"), // 135, RFC 5305 — https://www.rfc-editor.org/rfc/rfc5305
+        TLV_DYNAMIC_HOSTNAME => Some("Dynamic Hostname"), // 137, RFC 5301 — https://www.rfc-editor.org/rfc/rfc5301
+        138 => Some("GMPLS SRLG"), // RFC 5307 — https://www.rfc-editor.org/rfc/rfc5307
+        139 => Some("IPv6 SRLG"),  // RFC 6119 — https://www.rfc-editor.org/rfc/rfc6119
+        140 => Some("IPv6 TE Router ID"), // RFC 6119 — https://www.rfc-editor.org/rfc/rfc6119
+        141 => Some("Inter-AS Reachability Information"), // RFC 9346 — https://www.rfc-editor.org/rfc/rfc9346
+        143 => Some("MT Port Capability"), // RFC 6165 — https://www.rfc-editor.org/rfc/rfc6165
+        144 => Some("MT Capability"),      // RFC 6329 — https://www.rfc-editor.org/rfc/rfc6329
+        148 => Some("BFD Enabled"),        // RFC 6213 — https://www.rfc-editor.org/rfc/rfc6213
+        149 => Some("Segment Identifier / Label Binding"), // RFC 8667 — https://www.rfc-editor.org/rfc/rfc8667
+        150 => Some("MT Segment Identifier / Label Binding"), // RFC 8667 — https://www.rfc-editor.org/rfc/rfc8667
+        161 => Some("Flood Reflection"), // RFC 9377 — https://www.rfc-editor.org/rfc/rfc9377
+        TLV_RESTART => Some("Restart"),  // 211, RFC 8706 — https://www.rfc-editor.org/rfc/rfc8706
+        TLV_MT_IS_NEIGHBORS => Some("MT IS Neighbors"), // 222, RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
+        223 => Some("MT IS Neighbor Attribute"), // RFC 5311 — https://www.rfc-editor.org/rfc/rfc5311
+        229 => Some("Multi-Topology"), // RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
+        TLV_IPV6_INTERFACE_ADDRESS => Some("IPv6 Interface Address"), // 232, RFC 5308 — https://www.rfc-editor.org/rfc/rfc5308
+        233 => Some("IPv6 Global Interface Address"), // RFC 6119 — https://www.rfc-editor.org/rfc/rfc6119
+        TLV_MT_IP_REACHABILITY => Some("MT IP Reachability"), // 235, RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
+        TLV_IPV6_REACHABILITY => Some("IPv6 Reachability"), // 236, RFC 5308 — https://www.rfc-editor.org/rfc/rfc5308
+        TLV_MT_IPV6_REACHABILITY => Some("MT IPv6 Reachability"), // 237, RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
+        TLV_P2P_THREE_WAY_ADJ => Some("P2P Three-Way Adjacency"), // 240, RFC 5303 — https://www.rfc-editor.org/rfc/rfc5303
+        TLV_ROUTER_CAPABILITY => Some("Router Capability"), // 242, RFC 7981 — https://www.rfc-editor.org/rfc/rfc7981
+        243 => Some("Scope Flooding Support"), // RFC 7356 — https://www.rfc-editor.org/rfc/rfc7356
         _ => None,
     }
 }
 
 /// Returns a human-readable name for NLPID values.
-/// RFC 1195, Section 1.3.
+/// RFC 1195, Section 1.3 — <https://www.rfc-editor.org/rfc/rfc1195#section-1.3>.
 fn nlpid_name(v: u8) -> Option<&'static str> {
     match v {
         0xCC => Some("IPv4"),
@@ -229,7 +257,7 @@ fn nlpid_name(v: u8) -> Option<&'static str> {
 
 /// Returns a human-readable name for IS-IS restart flags (5 bits).
 ///
-/// RFC 8706, Section 3.
+/// RFC 8706, Section 3 — <https://www.rfc-editor.org/rfc/rfc8706#section-3>.
 fn restart_flags_name(flags: u8) -> &'static str {
     /// Pre-computed flag names for all 32 combinations of the 5-bit restart flags.
     static TABLE: [&str; 32] = [
@@ -453,9 +481,13 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
         field_type: FieldType::U8,
         optional: true,
         children: None,
+        // RFC 5304, Section 3 — https://www.rfc-editor.org/rfc/rfc5304#section-3
+        // RFC 5310, Section 6.1 — https://www.rfc-editor.org/rfc/rfc5310#section-6.1
+        // IANA "IS-IS Authentication Type Codes for TLV 10" subregistry.
         display_fn: Some(|v, _siblings| match v {
             FieldValue::U8(0) => Some("Reserved"),
             FieldValue::U8(1) => Some("Cleartext Password"),
+            FieldValue::U8(3) => Some("Generic Cryptographic"),
             FieldValue::U8(54) => Some("HMAC-MD5"),
             FieldValue::U8(255) => Some("Routing Domain Private"),
             _ => None,
@@ -643,7 +675,8 @@ fn parse_area_addresses_fields<'pkt>(
     true
 }
 
-/// TLV 129: Protocols Supported — RFC 1195.
+/// TLV 129: Protocols Supported — RFC 1195, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
 fn parse_protocols_supported_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -671,7 +704,8 @@ fn parse_protocols_supported_fields<'pkt>(
     true
 }
 
-/// TLV 132: IP Interface Address — RFC 1195.
+/// TLV 132: IP Interface Address — RFC 1195, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
 fn parse_ip_address_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -697,7 +731,8 @@ fn parse_ip_address_fields<'pkt>(
     true
 }
 
-/// TLV 134: TE Router ID — RFC 5305, Section 4.3.
+/// TLV 134: TE Router ID — RFC 5305, Section 4.3 —
+/// <https://www.rfc-editor.org/rfc/rfc5305#section-4.3>.
 fn parse_te_router_id_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -714,7 +749,8 @@ fn parse_te_router_id_fields<'pkt>(
     true
 }
 
-/// TLV 137: Dynamic Hostname — RFC 5301.
+/// TLV 137: Dynamic Hostname — RFC 5301, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5301#section-3>.
 fn parse_hostname_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -728,7 +764,8 @@ fn parse_hostname_fields<'pkt>(
     true
 }
 
-/// TLV 232: IPv6 Interface Address — RFC 5308, Section 2.
+/// TLV 232: IPv6 Interface Address — RFC 5308, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-2>.
 fn parse_ipv6_address_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -781,7 +818,8 @@ fn parse_is_neighbors_iih_fields<'pkt>(
     true
 }
 
-/// TLV 22: Extended IS Reachability — RFC 5305, Section 3.
+/// TLV 22: Extended IS Reachability — RFC 5305, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5305#section-3>.
 fn parse_extended_is_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -822,7 +860,8 @@ fn parse_extended_is_reach_fields<'pkt>(
     true
 }
 
-/// TLV 135: Extended IP Reachability — RFC 5305, Section 4.
+/// TLV 135: Extended IP Reachability — RFC 5305, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc5305#section-4>.
 fn parse_extended_ip_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -887,7 +926,8 @@ fn parse_extended_ip_reach_fields<'pkt>(
     true
 }
 
-/// TLV 236: IPv6 Reachability — RFC 5308, Section 5.
+/// TLV 236: IPv6 Reachability — RFC 5308, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-5>.
 fn parse_ipv6_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -952,7 +992,8 @@ fn parse_ipv6_reach_fields<'pkt>(
     true
 }
 
-/// TLV 128/130: IP Internal/External Reachability — RFC 1195.
+/// TLV 128/130: IP Internal/External Reachability — RFC 1195, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
 fn parse_ip_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -1043,7 +1084,8 @@ fn parse_lsp_entries_fields<'pkt>(
     true
 }
 
-/// TLV 240: P2P Three-Way Adjacency — RFC 5303.
+/// TLV 240: P2P Three-Way Adjacency — RFC 5303, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5303#section-3>.
 fn parse_p2p_adj_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -1061,7 +1103,9 @@ fn parse_p2p_adj_fields<'pkt>(
     true
 }
 
-/// TLV 10: Authentication — ISO/IEC 10589:2002, RFC 5304.
+/// TLV 10: Authentication — ISO/IEC 10589:2002;
+/// RFC 5304, Section 3 — <https://www.rfc-editor.org/rfc/rfc5304#section-3>;
+/// RFC 5310, Section 3 — <https://www.rfc-editor.org/rfc/rfc5310#section-3>.
 fn parse_authentication_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -1079,7 +1123,8 @@ fn parse_authentication_fields<'pkt>(
     true
 }
 
-/// TLV 211: Restart — RFC 8706.
+/// TLV 211: Restart — RFC 8706, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc8706#section-3>.
 fn parse_restart_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
@@ -1630,6 +1675,9 @@ mod tests {
 
     // # IS-IS Coverage
     //
+    // RFC URLs are enumerated in the crate-level `## References` doc comment at
+    // the top of this file; section links are listed beside each constant / fn.
+    //
     // | Spec Section               | Description                    | Test                                   |
     // |----------------------------|--------------------------------|----------------------------------------|
     // | ISO 10589 §9.5             | Common fixed header            | parse_common_header                    |
@@ -1666,6 +1714,7 @@ mod tests {
     // | RFC 5305 §4                | Extended IP Reachability TLV   | parse_tlv_extended_ip_reachability     |
     // | RFC 5305 §4.3              | TE Router ID TLV (134)         | parse_tlv_te_router_id                 |
     // | RFC 5304                   | Authentication TLV (10)        | parse_tlv_authentication               |
+    // | RFC 5310 §3                | Generic Crypto Authentication   | parse_tlv_authentication_hmac_sha      |
     // | RFC 5308 §2                | IPv6 Interface Address TLV     | parse_tlv_ipv6_interface_address       |
     // | RFC 5308 §5                | IPv6 Reachability TLV (236)    | parse_tlv_ipv6_reachability            |
     // | RFC 5120                   | MT IS Neighbors (222) raw      | parse_tlv_mt_is_neighbors_raw          |
@@ -2951,6 +3000,30 @@ mod tests {
             assert_eq!(
                 base.descriptor.display_fn.unwrap()(&base.value, &[]),
                 Some("HMAC-MD5")
+            );
+        }
+    }
+
+    // RFC 5310, Section 3 — https://www.rfc-editor.org/rfc/rfc5310#section-3
+    // Authentication Type 3 = Generic Cryptographic Authentication (HMAC-SHA).
+    #[test]
+    fn parse_tlv_authentication_hmac_sha() {
+        let tlvs = [TLV_AUTHENTICATION, 1, 3]; // auth type 3 = Generic Crypto (HMAC-SHA)
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("ISIS").unwrap();
+        let tlvs_field = buf.field_by_name(layer, "tlvs").unwrap();
+        let tlvs_range = tlvs_field.value.as_container_range().unwrap().clone();
+        {
+            let base = buf
+                .nested_fields(&nth_tlv_range(&buf, &tlvs_range, 0))
+                .iter()
+                .find(|f: &&Field<'_>| f.name() == "auth_type")
+                .unwrap();
+            assert_eq!(
+                base.descriptor.display_fn.unwrap()(&base.value, &[]),
+                Some("Generic Cryptographic")
             );
         }
     }
