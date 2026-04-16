@@ -83,7 +83,9 @@ pub static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("segment_count", "Segment Count", FieldType::U32).optional(),
 ];
 
-/// Bit-to-name table for TCP control bits (RFC 9293, Section 3.1).
+/// Bit-to-name table for TCP control bits.
+///
+/// RFC 9293, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
 const TCP_FLAG_BITS: &[(u8, &str)] = &[
     (0x01, "FIN"),
     (0x02, "SYN"),
@@ -321,6 +323,7 @@ impl Dissector for TcpDissector {
         }
 
         // RFC 9293, Section 3.1 — TCP Header Format
+        // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
         let src_port = read_be_u16(data, 0)?;
         let dst_port = read_be_u16(data, 2)?;
         let seq = read_be_u32(data, 4)?;
@@ -345,7 +348,9 @@ impl Dissector for TcpDissector {
             });
         }
 
-        // Flags (8 bits): CWR, ECE, URG, ACK, PSH, RST, SYN, FIN
+        // RFC 9293, Section 3.1 — Flags / Control Bits (8 bits, MSB→LSB):
+        // CWR, ECE, URG, ACK, PSH, RST, SYN, FIN
+        // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
         let flags = data[13];
         let window = read_be_u16(data, 14)?;
         let checksum = read_be_u16(data, 16)?;
@@ -409,6 +414,7 @@ impl Dissector for TcpDissector {
         );
 
         // RFC 9293, Section 3.1 — Options (variable length, if Data Offset > 5)
+        // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
         if header_len > MIN_HEADER_SIZE {
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_OPTIONS],
