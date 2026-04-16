@@ -2,11 +2,22 @@
 //!
 //! Parses MPLS label stack entries as defined in RFC 3032, with the
 //! Traffic Class (TC) field renamed from "Experimental" per RFC 5462.
+//! Next-layer dispatch for non-reserved bottom labels uses the first-nibble
+//! heuristic documented in RFC 4928.
 //!
 //! ## References
-//! - RFC 3032: <https://www.rfc-editor.org/rfc/rfc3032>
-//! - RFC 5462: <https://www.rfc-editor.org/rfc/rfc5462>
-//! - RFC 5332: <https://www.rfc-editor.org/rfc/rfc5332>
+//! - RFC 3032 (MPLS Label Stack Encoding): <https://www.rfc-editor.org/rfc/rfc3032>
+//! - RFC 4182 (updates RFC 3032 — Explicit NULL may appear anywhere in the stack):
+//!   <https://www.rfc-editor.org/rfc/rfc4182>
+//! - RFC 4928 (first-nibble heuristic / ECMP): <https://www.rfc-editor.org/rfc/rfc4928>
+//! - RFC 5332 (MPLS Multicast Encapsulations): <https://www.rfc-editor.org/rfc/rfc5332>
+//! - RFC 5462 (EXP field renamed to TC): <https://www.rfc-editor.org/rfc/rfc5462>
+//! - RFC 5586 (MPLS Generic Associated Channel — GAL, label 13):
+//!   <https://www.rfc-editor.org/rfc/rfc5586>
+//! - RFC 7274 (Special-Purpose MPLS Label registry):
+//!   <https://www.rfc-editor.org/rfc/rfc7274>
+//! - RFC 9017 (Special-Purpose Label terminology):
+//!   <https://www.rfc-editor.org/rfc/rfc9017>
 
 #![deny(missing_docs)]
 
@@ -48,11 +59,40 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] =
             .with_children(ENTRY_CHILDREN),
     ];
 
-/// Reserved label value: IPv4 Explicit NULL (RFC 3032, Section 2.1).
+/// Reserved label value: IPv4 Explicit NULL (RFC 3032, Section 2.1 — updated by RFC 4182).
+///
+/// Legal anywhere in the label stack (RFC 4182 relaxed the original
+/// bottom-of-stack restriction); when popped from the bottom of the stack
+/// the network-layer protocol MUST be IPv4.
 const LABEL_IPV4_EXPLICIT_NULL: u32 = 0;
 
-/// Reserved label value: IPv6 Explicit NULL (RFC 3032, Section 2.1).
+/// Reserved label value: Router Alert Label (RFC 3032, Section 2.1).
+///
+/// Legal anywhere except the bottom of the label stack. Parsing is lossless
+/// even if the value appears at the bottom (Postel's Law).
+#[allow(dead_code)]
+const LABEL_ROUTER_ALERT: u32 = 1;
+
+/// Reserved label value: IPv6 Explicit NULL (RFC 3032, Section 2.1 — updated by RFC 4182).
+///
+/// Legal anywhere in the label stack (RFC 4182 relaxed the original
+/// bottom-of-stack restriction); when popped from the bottom of the stack
+/// the network-layer protocol MUST be IPv6.
 const LABEL_IPV6_EXPLICIT_NULL: u32 = 2;
+
+/// Reserved label value: Implicit NULL Label (RFC 3032, Section 2.1).
+///
+/// A signalling-only value that "never actually appears in the encapsulation";
+/// defined here for documentation completeness.
+#[allow(dead_code)]
+const LABEL_IMPLICIT_NULL: u32 = 3;
+
+/// Reserved label value: Generic Associated Channel Label (GAL).
+///
+/// RFC 5586, Section 4 — indicates that a Generic Associated Channel Header
+/// (ACH) immediately follows the label stack. The GAL MUST appear at the
+/// bottom of the label stack (S=1) and MUST NOT be used with pseudowires.
+const LABEL_GAL: u32 = 13;
 
 /// MPLS dissector.
 ///
@@ -103,6 +143,7 @@ impl Dissector for MplsDissector {
         );
 
         // RFC 3032, Section 2.1 — parse label stack entries until Bottom of Stack (S=1).
+        // The TC field follows the RFC 5462 rename (EXP → TC).
         // Returns the bottom label for next-layer dispatch.
         let bottom_label = loop {
             if data.len() < pos + LABEL_ENTRY_SIZE {
@@ -171,13 +212,27 @@ impl Dissector for MplsDissector {
 
         buf.end_layer();
 
-        // RFC 3032, Section 2.1 — determine next-layer protocol
+        // Determine next-layer protocol from the bottom label (S=1).
+        //
+        // RFC 3032, Section 2.1 — the label stack contains no explicit
+        // network-layer protocol identifier; the payload type must be
+        // inferable from the bottom label.  Reserved label semantics are
+        // fixed by RFC 3032 / RFC 5586; all other bottom labels require
+        // the first-nibble heuristic from RFC 4928, Section 3.
         let next = match bottom_label {
+            // RFC 3032, Section 2.1 (updated by RFC 4182): Label 0 → IPv4.
             LABEL_IPV4_EXPLICIT_NULL => DispatchHint::ByEtherType(0x0800),
+            // RFC 3032, Section 2.1 (updated by RFC 4182): Label 2 → IPv6.
             LABEL_IPV6_EXPLICIT_NULL => DispatchHint::ByEtherType(0x86DD),
+            // RFC 5586, Section 4 — bottom-of-stack GAL signals that a
+            // Generic Associated Channel Header (ACH) follows the label
+            // stack, not an IP packet.  No ACH dissector exists, so end
+            // dispatch here.
+            LABEL_GAL => DispatchHint::End,
             _ => {
-                // Heuristic: inspect first nibble of the payload to determine
-                // the network-layer protocol (common practice, e.g. Wireshark).
+                // RFC 4928, Section 3 — existing equipment infers IPv4 or
+                // IPv6 from the first nibble of the MPLS payload when the
+                // bottom label does not itself identify the payload type.
                 if pos < data.len() {
                     match data[pos] >> 4 {
                         4 => DispatchHint::ByEtherType(0x0800),
@@ -198,21 +253,25 @@ impl Dissector for MplsDissector {
 mod tests {
     use super::*;
 
-    // # RFC 3032 / RFC 5462 (MPLS) Coverage
+    // # RFC 3032 / RFC 4928 / RFC 5462 / RFC 5586 (MPLS) Coverage
     //
-    // | RFC Section | Description              | Test                           |
-    // |-------------|--------------------------|--------------------------------|
-    // | 3032 §2.1   | Label stack entry format | parse_mpls_single_label        |
-    // | 3032 §2.1   | Label stack (multiple)   | parse_mpls_two_labels          |
-    // | 3032 §2.1   | IPv4 Explicit NULL (0)   | parse_mpls_ipv4_explicit_null  |
-    // | 3032 §2.1   | IPv6 Explicit NULL (2)   | parse_mpls_ipv6_explicit_null  |
-    // | 3032 §2.1   | First nibble heuristic   | parse_mpls_payload_heuristic   |
-    // | 3032 §2.1   | Heuristic IPv6           | parse_mpls_payload_heuristic_ipv6 |
-    // | 3032 §2.1   | No payload after stack   | parse_mpls_no_payload          |
-    // | 5462 §2     | TC field (renamed EXP)   | parse_mpls_tc_field            |
-    // | 3032 §2.1   | Truncated packet         | parse_mpls_truncated           |
-    // | 3032 §2.1   | Truncated mid-stack      | parse_mpls_truncated_mid_stack |
-    // | 3032 §2.1   | Offset handling          | parse_mpls_with_offset         |
+    // | RFC Section | Description                        | Test                                |
+    // |-------------|------------------------------------|-------------------------------------|
+    // | 3032 §2.1   | Label stack entry format           | parse_mpls_single_label             |
+    // | 3032 §2.1   | Label stack (multiple)             | parse_mpls_two_labels               |
+    // | 3032 §2.1   | Max 20-bit label value             | parse_mpls_max_label_value          |
+    // | 3032 §2.1   | IPv4 Explicit NULL (0)             | parse_mpls_ipv4_explicit_null       |
+    // | 3032 §2.1   | IPv6 Explicit NULL (2)             | parse_mpls_ipv6_explicit_null       |
+    // | 5586 §4     | GAL (13) bottom → End              | parse_mpls_gal                      |
+    // | 4928 §3     | First nibble heuristic IPv4        | parse_mpls_payload_heuristic        |
+    // | 4928 §3     | First nibble heuristic IPv6        | parse_mpls_payload_heuristic_ipv6   |
+    // | 4928 §3     | Unknown first nibble → End         | parse_mpls_payload_unknown_nibble   |
+    // | 4928 §3     | No payload after stack             | parse_mpls_no_payload               |
+    // | 5462 §2     | TC field (renamed EXP)             | parse_mpls_tc_field                 |
+    // | 3032 §2.1   | Truncated packet                   | parse_mpls_truncated                |
+    // | 3032 §2.1   | Truncated mid-stack                | parse_mpls_truncated_mid_stack      |
+    // | 3032 §2.1   | Offset handling                    | parse_mpls_with_offset              |
+    // | 3032 §2.1   | Reserved label constants           | reserved_label_constants            |
 
     /// Helper: dissect raw bytes at offset 0 and return the result.
     fn dissect(data: &[u8]) -> Result<(DissectBuffer<'_>, DissectResult), PacketError> {
@@ -457,5 +516,62 @@ mod tests {
         assert_eq!(children[1].name, "tc");
         assert_eq!(children[2].name, "s");
         assert_eq!(children[3].name, "ttl");
+    }
+
+    #[test]
+    fn reserved_label_constants() {
+        // RFC 3032, Section 2.1 — Reserved Label Values
+        assert_eq!(LABEL_IPV4_EXPLICIT_NULL, 0);
+        assert_eq!(LABEL_ROUTER_ALERT, 1);
+        assert_eq!(LABEL_IPV6_EXPLICIT_NULL, 2);
+        assert_eq!(LABEL_IMPLICIT_NULL, 3);
+        // RFC 5586, Section 4 — Generic Associated Channel Label.
+        assert_eq!(LABEL_GAL, 13);
+    }
+
+    #[test]
+    fn parse_mpls_max_label_value() {
+        // RFC 3032, Section 2.1 — Label is 20 bits (max 0xFFFFF).
+        let entry = mpls_entry(0xFFFFF, 0, 1, 64);
+        let (buf, _) = dissect(&entry).expect("dissect failed");
+        let array_range = label_stack_range(&buf);
+        let obj_range = entry_object_range(&buf, &array_range, 0);
+        assert_eq!(
+            *entry_field_value(&buf, &obj_range, "label"),
+            FieldValue::U32(0xFFFFF)
+        );
+    }
+
+    #[test]
+    fn parse_mpls_gal() {
+        // RFC 5586, Section 4 — GAL (label=13) at bottom of stack signals
+        // that a Generic Associated Channel Header (ACH) follows.  The
+        // dispatcher MUST NOT misclassify the ACH as IP via the first-nibble
+        // heuristic.
+        let entry = mpls_entry(LABEL_GAL, 0, 1, 64);
+        let mut raw = entry.to_vec();
+        // First byte of an ACH always starts with 0x1 in the high nibble
+        // (ACH version); the heuristic would otherwise ignore this value,
+        // but the GAL-specific short-circuit ensures End dispatch.
+        raw.push(0x10);
+        let (_, result) = dissect(&raw).expect("dissect failed");
+        assert_eq!(result.next, DispatchHint::End);
+    }
+
+    #[test]
+    fn parse_mpls_payload_unknown_nibble() {
+        // RFC 4928, Section 3 — a first nibble outside {4, 6} is treated as
+        // "not IP", so the dispatcher ends here.  0x0 is the PWE3 Control
+        // Word indicator, and 0x1 begins an ACH.
+        let entry = mpls_entry(1000, 0, 1, 64);
+        let mut raw = entry.to_vec();
+        raw.push(0x00);
+        let (_, result) = dissect(&raw).expect("dissect failed");
+        assert_eq!(result.next, DispatchHint::End);
+
+        let mut raw2 = entry.to_vec();
+        raw2.push(0x10);
+        let (_, result2) = dissect(&raw2).expect("dissect failed");
+        assert_eq!(result2.next, DispatchHint::End);
     }
 }
