@@ -47,6 +47,23 @@ static HEADER_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("value", "Value", FieldType::Str),
 ];
 
+/// Descriptor for the HTTP header Object container.
+///
+/// The outer label ("Header") no longer collides with the inner `Name`
+/// child. The header's own name is a borrowed string from the packet and
+/// therefore cannot be returned through
+/// [`DissectBuffer::resolve_container_display_name`], which requires a
+/// `&'static str`.
+static FD_HEADER: FieldDescriptor = FieldDescriptor {
+    name: "header",
+    display_name: "Header",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: None,
+    format_fn: None,
+};
+
 /// All field descriptors for the HTTP dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // RFC 9112, Section 2.1 — distinguishes request from response
@@ -350,11 +367,8 @@ fn build_header_fields<'pkt>(
         let value_end = slice_offset(data, header.value)? + header.value.len();
         let header_range = offset + name_start..offset + value_end;
 
-        let obj_idx = buf.begin_container(
-            &HEADER_CHILDREN[HC_NAME], // placeholder descriptor for the Object — we reuse HC_NAME
-            FieldValue::Object(0..0),
-            header_range.clone(),
-        );
+        let obj_idx =
+            buf.begin_container(&FD_HEADER, FieldValue::Object(0..0), header_range.clone());
         buf.push_field(
             &HEADER_CHILDREN[HC_NAME],
             FieldValue::Str(name),
@@ -474,6 +488,25 @@ mod tests {
             FieldValue::Str("HTTP/1.1")
         );
         assert!(buf.field_by_name(layer, "status_code").is_none());
+    }
+
+    #[test]
+    fn header_container_descriptor_distinct_from_inner_name() {
+        // The per-header Object container must use a descriptor distinct
+        // from the inner `name` child so that the outer display label does
+        // not collide with the child's "Name" label.
+        let data = b"GET / HTTP/1.1\r\nContent-Type: text/html\r\n\r\n";
+        let buf = dissect(data).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "header")
+            .expect("header container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Header");
+        assert_eq!(buf.resolve_container_display_name(idx as u32), None);
     }
 
     #[test]
