@@ -513,6 +513,27 @@ impl<'pkt> DissectBuffer<'pkt> {
         display_fn(&base_field.value, fields)
     }
 
+    /// Resolve a container (Array / Object) field's display name from its
+    /// children.
+    ///
+    /// When the field at `field_index` is a container whose descriptor has a
+    /// `display_fn`, this calls `display_fn(&value, children)` where
+    /// `children` is the slice of fields referenced by the container's
+    /// range. Returns `None` if the field is missing, not a container,
+    /// has no `display_fn`, or if `display_fn` itself returns `None`.
+    ///
+    /// This is distinct from
+    /// [`resolve_display_name`](Self::resolve_display_name) /
+    /// [`resolve_nested_display_name`](Self::resolve_nested_display_name),
+    /// which pass sibling fields for resolving `_name` virtual fields.
+    pub fn resolve_container_display_name(&self, field_index: u32) -> Option<&'static str> {
+        let field = self.fields.get(field_index as usize)?;
+        let children_range = field.value.as_container_range()?.clone();
+        let display_fn = field.descriptor.display_fn?;
+        let children = self.nested_fields(&children_range);
+        display_fn(&field.value, children)
+    }
+
     /// Look up a field by name within a layer and extract its `u8` value.
     ///
     /// Returns `None` if the field is missing or the value is not
@@ -677,6 +698,11 @@ impl<'a, 'pkt> Packet<'a, 'pkt> {
         self.buf.resolve_nested_display_name(object_range, name)
     }
 
+    /// Resolve a container field's display name from its children.
+    pub fn resolve_container_display_name(&self, field_index: u32) -> Option<&'static str> {
+        self.buf.resolve_container_display_name(field_index)
+    }
+
     /// Get the current number of fields.
     pub fn field_count(&self) -> u32 {
         self.buf.field_count()
@@ -770,6 +796,63 @@ mod tests {
         assert_eq!(nested.len(), 2);
         assert_eq!(nested[0].name(), "name");
         assert_eq!(nested[1].name(), "type");
+    }
+
+    #[test]
+    fn resolve_container_display_name_uses_children() {
+        static TYPE_DESC: FieldDescriptor = FieldDescriptor::new("type", "Type", FieldType::U32);
+        static IE_DESC: FieldDescriptor = FieldDescriptor {
+            name: "ie",
+            display_name: "IE",
+            field_type: FieldType::Object,
+            optional: false,
+            children: None,
+            display_fn: Some(|v, children| match v {
+                FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+                    ("type", FieldValue::U32(96)) => Some("Recovery Time Stamp"),
+                    _ => None,
+                }),
+                _ => None,
+            }),
+            format_fn: None,
+        };
+        static VALUE_DESC: FieldDescriptor =
+            FieldDescriptor::new("value", "Value", FieldType::Bytes);
+
+        let mut buf: DissectBuffer<'_> = DissectBuffer::new();
+        buf.begin_layer("Test", None, &[], 0..12);
+
+        let ie_idx = buf.begin_container(&IE_DESC, FieldValue::Object(0..0), 0..12);
+        buf.push_field(&TYPE_DESC, FieldValue::U32(96), 0..2);
+        buf.push_field(&VALUE_DESC, FieldValue::Bytes(&[]), 4..12);
+        buf.end_container(ie_idx);
+
+        // Second IE with an unknown type — display_fn should return None.
+        let ie2_idx = buf.begin_container(&IE_DESC, FieldValue::Object(0..0), 12..16);
+        buf.push_field(&TYPE_DESC, FieldValue::U32(9999), 12..14);
+        buf.end_container(ie2_idx);
+
+        buf.end_layer();
+
+        assert_eq!(
+            buf.resolve_container_display_name(ie_idx),
+            Some("Recovery Time Stamp")
+        );
+        assert_eq!(buf.resolve_container_display_name(ie2_idx), None);
+
+        // Non-container field returns None.
+        let type_field_idx = ie_idx + 1;
+        assert_eq!(buf.resolve_container_display_name(type_field_idx), None);
+
+        // Out-of-range index returns None.
+        assert_eq!(buf.resolve_container_display_name(999), None);
+
+        // Container without display_fn returns None.
+        static PLAIN_OBJ: FieldDescriptor =
+            FieldDescriptor::new("plain", "Plain", FieldType::Object);
+        let plain_idx = buf.begin_container(&PLAIN_OBJ, FieldValue::Object(0..0), 0..0);
+        buf.end_container(plain_idx);
+        assert_eq!(buf.resolve_container_display_name(plain_idx), None);
     }
 
     #[test]

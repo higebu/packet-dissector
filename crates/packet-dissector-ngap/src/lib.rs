@@ -46,6 +46,28 @@ static FD_INLINE_ID: FieldDescriptor = FieldDescriptor {
     format_fn: None,
 };
 
+/// Descriptor for the ProtocolIE-Field Object container itself.
+///
+/// `display_fn` is invoked by
+/// [`DissectBuffer::resolve_container_display_name`] with the container's
+/// children, so the outer label resolves to the IE name instead of
+/// colliding with the inner `ID` field.
+static FD_IE: FieldDescriptor = FieldDescriptor {
+    name: "ie",
+    display_name: "IE",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("id", FieldValue::U16(id)) => Some(ie_id::ie_id_name(*id)),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 static FD_INLINE_LENGTH: FieldDescriptor = FieldDescriptor::new("length", "Length", FieldType::U32);
 
 // Note: FD_INLINE_VALUE was removed — IE values are now pushed by
@@ -253,11 +275,7 @@ fn parse_ies<'pkt>(
         let ie_value_offset = base_offset + pos;
 
         // Begin Object container for this IE element.
-        let obj_idx = buf.begin_container(
-            &FD_INLINE_ID, // descriptor is placeholder, overwritten by end_container
-            FieldValue::Object(0..0),
-            ie_start..ie_end,
-        );
+        let obj_idx = buf.begin_container(&FD_IE, FieldValue::Object(0..0), ie_start..ie_end);
 
         buf.push_field(
             &FD_INLINE_ID,
@@ -667,6 +685,31 @@ mod tests {
         } else {
             panic!("expected Object");
         }
+    }
+
+    #[test]
+    fn ie_container_resolves_to_ie_name() {
+        let ie_value = [0x01, 0x02, 0x03];
+        let container = build_ie_container(&[(10, 0, &ie_value)]); // AMF-UE-NGAP-ID
+        let data = build_ngap_pdu(0, 15, 0, &container);
+
+        let mut buf = DissectBuffer::new();
+        NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        // Find the IE Object container and verify its outer label resolves
+        // to the IE name rather than duplicating "ID".
+        let (ie_idx, ie_field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| matches!(f.value, FieldValue::Object(_)))
+            .expect("IE container not found");
+        assert_eq!(ie_field.name(), "ie");
+        assert_eq!(ie_field.display_name(), "IE");
+        assert_eq!(
+            buf.resolve_container_display_name(ie_idx as u32),
+            Some("AMF-UE-NGAP-ID")
+        );
     }
 
     #[test]
