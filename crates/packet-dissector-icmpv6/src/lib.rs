@@ -42,6 +42,25 @@ fn icmpv6_type_name(v: u8) -> Option<&'static str> {
     }
 }
 
+fn ndp_option_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        // RFC 4861, Section 4.6
+        1 => Some("Source Link-Layer Address"),
+        2 => Some("Target Link-Layer Address"),
+        3 => Some("Prefix Information"),
+        4 => Some("Redirected Header"),
+        5 => Some("MTU"),
+        // RFC 4191, Section 2.3
+        24 => Some("Route Information"),
+        // RFC 8106
+        25 => Some("Recursive DNS Server"),
+        31 => Some("DNS Search List"),
+        // RFC 8781
+        38 => Some("PREF64"),
+        _ => None,
+    }
+}
+
 /// Minimum ICMPv6 header size (Type + Code + Checksum + 4 bytes type-specific).
 /// RFC 4443, Section 2.1.
 const HEADER_SIZE: usize = 8;
@@ -120,6 +139,26 @@ const NOC_SCALED_LIFETIME: usize = 12;
 const NOC_PLC: usize = 13;
 const NOC_VALUE: usize = 14;
 const NOC_MTU: usize = 15;
+
+/// Container descriptor for an NDP option entry.
+///
+/// `display_fn` resolves the outer container's label to the option kind name
+/// (e.g. "Source Link-Layer Address") by looking up the inner `type` field.
+static FD_NDP_OPTION: FieldDescriptor = FieldDescriptor {
+    name: "option",
+    display_name: "Option",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => ndp_option_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
 
 /// Child field descriptors for NDP option entries within the `options` array.
 static NDP_OPTION_CHILDREN: &[FieldDescriptor] = &[
@@ -334,11 +373,8 @@ fn parse_ndp_options<'pkt>(
         let opt_end = offset + cursor + opt_len;
         let value_data = &data[cursor + 2..cursor + opt_len];
 
-        let obj_idx = buf.begin_container(
-            &NDP_OPTION_CHILDREN[NOC_TYPE],
-            FieldValue::Object(0..0),
-            opt_start..opt_end,
-        );
+        let obj_idx =
+            buf.begin_container(&FD_NDP_OPTION, FieldValue::Object(0..0), opt_start..opt_end);
 
         buf.push_field(
             &NDP_OPTION_CHILDREN[NOC_TYPE],
@@ -1453,5 +1489,47 @@ mod tests {
         // so the descriptor must report U8 and the value must match.
         assert_eq!(seq.value, FieldValue::U8(0x2a));
         assert_eq!(seq.descriptor.field_type, FieldType::U8);
+    }
+
+    #[test]
+    fn ndp_option_container_resolves_to_option_name() {
+        // Router Solicitation (RFC 4861 §4.1) with a Source Link-Layer Address
+        // option (type 1, length 1 * 8 bytes).
+        let pkt: [u8; 16] = [
+            133, 0, 0x00, 0x00, // Type, Code, Checksum
+            0x00, 0x00, 0x00, 0x00, // Reserved
+            0x01, 0x01, // Option type=1 (Source LLA), length=1
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // Link-layer address
+        ];
+
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+
+        let opts = fields
+            .iter()
+            .find(|f| f.descriptor.name == "options")
+            .expect("options array must be present");
+        let opts_range = match &opts.value {
+            FieldValue::Array(r) => r.clone(),
+            other => panic!("expected Array, got {other:?}"),
+        };
+
+        let opt_children = buf.nested_fields(&opts_range);
+        let (opt_offset, option) = opt_children
+            .iter()
+            .enumerate()
+            .find(|(_, f)| matches!(f.value, FieldValue::Object(_)))
+            .expect("option Object must be present");
+        // Outer container uses the generic descriptor label.
+        assert_eq!(option.descriptor.display_name, "Option");
+        // Resolved label from the inner `type` field.
+        let opt_idx = opts_range.start + opt_offset as u32;
+        assert_eq!(
+            buf.resolve_container_display_name(opt_idx),
+            Some("Source Link-Layer Address"),
+        );
     }
 }
