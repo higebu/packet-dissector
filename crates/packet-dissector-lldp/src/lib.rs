@@ -191,6 +191,27 @@ const FD_TLV_IFACE_NUMBER: usize = 16;
 const FD_TLV_OID_LENGTH: usize = 17;
 const FD_TLV_OID: usize = 18;
 
+/// Container descriptor for a TLV Object.
+///
+/// The outer label resolves to the TLV name (e.g. `Chassis ID`) by looking
+/// up the inner `type` field, avoiding collision with the inner "TLV Type"
+/// label.
+static FD_TLV: FieldDescriptor = FieldDescriptor {
+    name: "tlv",
+    display_name: "TLV",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => Some(tlv_type_name(*t)),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Child field descriptors for each TLV entry within the `tlvs` array.
 static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor {
@@ -332,7 +353,7 @@ impl Dissector for LldpDissector {
 
             // Begin Object for this TLV entry.
             let obj_idx = buf.begin_container(
-                &TLV_CHILD_FIELDS[FD_TLV_TYPE], // placeholder descriptor, overwritten by Object
+                &FD_TLV,
                 FieldValue::Object(0..0),
                 offset + pos..offset + pos + tlv_total,
             );
@@ -1170,5 +1191,27 @@ mod tests {
 
         let mut buf = DissectBuffer::new();
         assert!(LldpDissector.dissect(&data, &mut buf, 0).is_err());
+    }
+
+    #[test]
+    fn tlv_container_resolves_to_tlv_name() {
+        // Minimal LLDPDU — the first TLV is Chassis ID so the container
+        // label resolves to "Chassis ID" instead of duplicating "TLV Type".
+        let data = build_mandatory_lldp();
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "tlv")
+            .expect("tlv container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "TLV");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("Chassis ID")
+        );
     }
 }
