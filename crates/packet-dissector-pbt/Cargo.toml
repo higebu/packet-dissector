@@ -16,3 +16,4 @@ proptest = "1"
 
 [dev-dependencies]
 packet-dissector-ipv4 = { workspace = true }
+packet-dissector-tcp = { workspace = true }
