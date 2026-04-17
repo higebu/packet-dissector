@@ -37,7 +37,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // RFC 4303, Section 2.2 — Sequence Number
     // <https://www.rfc-editor.org/rfc/rfc4303#section-2.2>
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U32),
-    // RFC 4303, Section 2.3-2.8 — encrypted payload (payload + padding + ICV)
+    // RFC 4303, Sections 2.3–2.7 — opaque payload region.
+    // Wire layout: (optional IV) | Payload Data | Padding | Pad Length |
+    // Next Header | ICV.  Per RFC 4303 Section 2.3, "if the algorithm used
+    // to encrypt the payload requires cryptographic synchronization data,
+    // e.g., an Initialization Vector (IV), then this data is carried
+    // explicitly in the Payload field, but it is not called out as a
+    // separate field in ESP."
     // <https://www.rfc-editor.org/rfc/rfc4303#section-2.3>
     FieldDescriptor::new("encrypted_data", "Encrypted Data", FieldType::Bytes).optional(),
     // Decryption result fields (present only when SA is configured)
@@ -308,7 +314,7 @@ mod tests {
     //! | 2           | Header Format                     | parse_esp_basic                 |
     //! | 2.1         | SPI                               | parse_esp_basic                 |
     //! | 2.2         | Sequence Number                   | parse_esp_basic                 |
-    //! | 2.3-2.8     | Encrypted Data                    | parse_esp_with_payload          |
+    //! | 2.3-2.7     | Encrypted Data                    | parse_esp_with_payload          |
     //! | —           | Truncated header                  | truncated_header                |
     //! | —           | Header only (no payload)          | parse_esp_header_only           |
     //! | —           | NULL decryption (with SA)         | decrypt_null_sa                 |
