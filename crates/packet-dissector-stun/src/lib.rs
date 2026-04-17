@@ -97,6 +97,27 @@ const AFD_TYPE: usize = 0;
 const AFD_LENGTH: usize = 1;
 const AFD_VALUE: usize = 2;
 
+/// Container descriptor for an attribute Object.
+///
+/// The outer label resolves to the attribute name (e.g. `USERNAME`) by looking
+/// up the inner `type` field. This avoids duplicating the inner "Attribute
+/// Type" label on the surrounding container.
+static FD_ATTRIBUTE: FieldDescriptor = FieldDescriptor {
+    name: "attribute",
+    display_name: "Attribute",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U16(t)) => attribute_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Child field descriptors for attribute Array elements.
 ///
 /// RFC 8489, Section 14 — Each attribute is TLV-encoded —
@@ -208,7 +229,7 @@ fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectB
         let value_data = &attr_data[pos + MIN_ATTR_SIZE..pos + MIN_ATTR_SIZE + attr_len];
 
         let obj_idx = buf.begin_container(
-            &ATTR_CHILD_FIELDS[AFD_TYPE],
+            &FD_ATTRIBUTE,
             FieldValue::Object(0..0),
             abs..abs + MIN_ATTR_SIZE + attr_len,
         );
@@ -841,6 +862,29 @@ mod tests {
         } else {
             panic!("expected Array");
         }
+    }
+
+    #[test]
+    fn attribute_container_resolves_to_attribute_name() {
+        // USERNAME attribute so the container label resolves to "USERNAME"
+        // rather than duplicating the inner "Attribute Type" label.
+        let attr = build_attr(0x0006, b"user");
+        let data = build_stun(0b00, 0x001, &attr);
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "attribute")
+            .expect("attribute container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Attribute");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("USERNAME")
+        );
     }
 
     #[test]
