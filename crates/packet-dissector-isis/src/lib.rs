@@ -369,6 +369,27 @@ static PROTOCOL_CHILD_FIELDS: &[FieldDescriptor] = &[FieldDescriptor {
     format_fn: None,
 }];
 
+/// Container descriptor for a single Protocols-Supported entry Object.
+///
+/// The outer label resolves to the protocol name (e.g. `IPv4`) by looking
+/// up the inner `nlpid` field, avoiding collision with the enclosing
+/// "Protocols" Array label.
+static FD_PROTOCOL_ENTRY: FieldDescriptor = FieldDescriptor {
+    name: "protocol",
+    display_name: "Protocol",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("nlpid", FieldValue::U8(n)) => nlpid_name(*n),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Field descriptor indices for [`EXT_IS_REACH_CHILD_FIELDS`].
 const FD_EIR_NEIGHBOR_ID: usize = 0;
 const FD_EIR_METRIC: usize = 1;
@@ -689,7 +710,7 @@ fn parse_protocols_supported_fields<'pkt>(
     );
     for (i, &v) in value.iter().enumerate() {
         let obj_idx = buf.begin_container(
-            &TLV_CHILD_FIELDS[FD_TLV_PROTOCOLS],
+            &FD_PROTOCOL_ENTRY,
             FieldValue::Object(0..0),
             offset + i..offset + i + 1,
         );
@@ -3912,5 +3933,25 @@ mod tests {
                 .is_some()
         );
         assert!(LSP_ENTRY_CHILD_FIELDS[FD_LSPE_LSP_ID].format_fn.is_some());
+    }
+
+    #[test]
+    fn protocol_entry_container_resolves_to_protocol_name() {
+        // Protocols Supported TLV with NLPID 0xCC (IPv4) so the inner
+        // Object's label resolves to "IPv4" instead of duplicating the
+        // enclosing "Protocols" Array label.
+        let data = build_l1_lan_iih(&[TLV_PROTOCOLS_SUPPORTED, 0x01, 0xCC]);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "protocol")
+            .expect("protocol container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Protocol");
+        assert_eq!(buf.resolve_container_display_name(idx as u32), Some("IPv4"));
     }
 }
