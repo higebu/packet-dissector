@@ -86,7 +86,7 @@ jobs:
           --adapter rust_criterion \
           --github-actions '${{ secrets.GITHUB_TOKEN }}' \
           --err \
-          --file combined.txt
+          "cat combined.txt"
 
   report_pr:
     name: Report PR benchmarks
@@ -122,7 +122,7 @@ jobs:
           --adapter rust_criterion \
           --github-actions '${{ secrets.GITHUB_TOKEN }}' \
           --err \
-          --file combined.txt
+          "cat combined.txt"
 
   archive_pr:
     name: Archive closed PR
