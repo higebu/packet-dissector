@@ -157,6 +157,63 @@ static OPTION_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("vendor_info", "Vendor Information", FieldType::Bytes).optional(),
 ];
 
+/// Returns a human-readable name for DHCPv6 option codes.
+///
+/// RFC 9915, Section 24 — DHCPv6 Option Codes.
+/// RFC 3646 (23, 24); RFC 4704 (39).
+fn dhcpv6_option_name(code: u16) -> Option<&'static str> {
+    match code {
+        1 => Some("Client Identifier"),
+        2 => Some("Server Identifier"),
+        3 => Some("IA_NA"),
+        4 => Some("IA_TA"),
+        5 => Some("IA Address"),
+        6 => Some("Option Request"),
+        7 => Some("Preference"),
+        8 => Some("Elapsed Time"),
+        9 => Some("Relay Message"),
+        11 => Some("Authentication"),
+        12 => Some("Server Unicast"),
+        13 => Some("Status Code"),
+        14 => Some("Rapid Commit"),
+        15 => Some("User Class"),
+        16 => Some("Vendor Class"),
+        17 => Some("Vendor-Specific Information"),
+        18 => Some("Interface-Id"),
+        19 => Some("Reconfigure Message"),
+        20 => Some("Reconfigure Accept"),
+        23 => Some("DNS Recursive Name Server"),
+        24 => Some("Domain Search List"),
+        25 => Some("IA_PD"),
+        26 => Some("IA Prefix"),
+        39 => Some("Client FQDN"),
+        _ => None,
+    }
+}
+
+/// Descriptor for the DHCPv6 option Object container.
+///
+/// `display_fn` is invoked by
+/// [`DissectBuffer::resolve_container_display_name`] with the container's
+/// children, so the outer label resolves to the option name (e.g.
+/// "Client Identifier") instead of colliding with the inner `Option Code`
+/// field.
+static FD_DHCPV6_OPTION: FieldDescriptor = FieldDescriptor {
+    name: "dhcpv6_option",
+    display_name: "DHCPv6 Option",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("code", FieldValue::U16(c)) => dhcpv6_option_name(*c),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Minimum client/server message size: msg-type (1) + transaction-id (3).
 const CLIENT_SERVER_HEADER_SIZE: usize = 4;
 
@@ -454,11 +511,8 @@ fn parse_options<'pkt>(
         match option_code {
             // RFC 9915, Section 21.2 — Client Identifier Option.
             1 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -473,11 +527,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.3 — Server Identifier Option.
             2 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -493,11 +544,8 @@ fn parse_options<'pkt>(
             // RFC 9915, Section 21.4 — Identity Association for Non-Temporary
             // Addresses Option (IA_NA).
             3 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -544,11 +592,8 @@ fn parse_options<'pkt>(
             // Addresses Option (IA_TA). Obsoleted by RFC 9915; retained so the
             // dissector can still decode legacy captures.
             4 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -581,11 +626,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.6 — IA Address Option.
             5 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -630,11 +672,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.7 — Option Request Option.
             6 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -662,7 +701,7 @@ fn parse_options<'pkt>(
             7 => {
                 if !option_data.is_empty() {
                     let obj_idx = buf.begin_container(
-                        &OPTION_CHILD_FIELDS[OFD_CODE],
+                        &FD_DHCPV6_OPTION,
                         FieldValue::Object(0..0),
                         field_range,
                     );
@@ -684,7 +723,7 @@ fn parse_options<'pkt>(
                 if option_data.len() >= 2 {
                     let elapsed = read_be_u16(option_data, 0)?;
                     let obj_idx = buf.begin_container(
-                        &OPTION_CHILD_FIELDS[OFD_CODE],
+                        &FD_DHCPV6_OPTION,
                         FieldValue::Object(0..0),
                         field_range,
                     );
@@ -703,11 +742,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.10 — Relay Message Option.
             9 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -723,11 +759,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.11 — Authentication Option.
             11 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -777,7 +810,7 @@ fn parse_options<'pkt>(
                 if option_data.len() >= 16 {
                     let addr = read_ipv6_addr(option_data, 0)?;
                     let obj_idx = buf.begin_container(
-                        &OPTION_CHILD_FIELDS[OFD_CODE],
+                        &FD_DHCPV6_OPTION,
                         FieldValue::Object(0..0),
                         field_range,
                     );
@@ -799,7 +832,7 @@ fn parse_options<'pkt>(
                 if option_data.len() >= 2 {
                     let status_code = read_be_u16(option_data, 0)?;
                     let obj_idx = buf.begin_container(
-                        &OPTION_CHILD_FIELDS[OFD_CODE],
+                        &FD_DHCPV6_OPTION,
                         FieldValue::Object(0..0),
                         field_range,
                     );
@@ -825,11 +858,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.14 — Rapid Commit Option.
             14 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -839,11 +869,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.15 — User Class Option.
             15 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -858,11 +885,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.16 — Vendor Class Option.
             16 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -893,11 +917,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.17 — Vendor-Specific Information Option.
             17 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -928,11 +949,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.18 — Interface-Id Option.
             18 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -949,7 +967,7 @@ fn parse_options<'pkt>(
             19 => {
                 if !option_data.is_empty() {
                     let obj_idx = buf.begin_container(
-                        &OPTION_CHILD_FIELDS[OFD_CODE],
+                        &FD_DHCPV6_OPTION,
                         FieldValue::Object(0..0),
                         field_range,
                     );
@@ -968,11 +986,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.20 — Reconfigure Accept Option.
             20 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -982,11 +997,8 @@ fn parse_options<'pkt>(
             }
             // RFC 3646, Section 3 — DNS Recursive Name Server
             23 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -1012,11 +1024,8 @@ fn parse_options<'pkt>(
             }
             // RFC 3646, Section 4 — Domain Search List
             24 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -1068,11 +1077,8 @@ fn parse_options<'pkt>(
             // RFC 9915, Section 21.21 — Identity Association for Prefix
             // Delegation Option (IA_PD).
             25 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -1117,11 +1123,8 @@ fn parse_options<'pkt>(
             }
             // RFC 9915, Section 21.22 — IA Prefix Option.
             26 => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -1175,7 +1178,7 @@ fn parse_options<'pkt>(
             39 => {
                 if !option_data.is_empty() {
                     let obj_idx = buf.begin_container(
-                        &OPTION_CHILD_FIELDS[OFD_CODE],
+                        &FD_DHCPV6_OPTION,
                         FieldValue::Object(0..0),
                         field_range,
                     );
@@ -1202,11 +1205,8 @@ fn parse_options<'pkt>(
             }
             // Unknown option — store as raw bytes
             _ => {
-                let obj_idx = buf.begin_container(
-                    &OPTION_CHILD_FIELDS[OFD_CODE],
-                    FieldValue::Object(0..0),
-                    field_range,
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_DHCPV6_OPTION, FieldValue::Object(0..0), field_range);
                 buf.push_field(
                     &OPTION_CHILD_FIELDS[OFD_CODE],
                     FieldValue::U16(option_code),
@@ -1692,6 +1692,32 @@ mod tests {
         let fields = find_option_fields(&buf, &buf.layers()[0], 1);
         let client_id = fields.iter().find(|f| f.name() == "client_id").unwrap();
         assert_eq!(client_id.value, FieldValue::Bytes(&duid));
+    }
+
+    #[test]
+    fn option_container_resolves_to_option_name() {
+        // Option 1 (Client Identifier): the outer container label should
+        // resolve to "Client Identifier" rather than duplicating "Option Code".
+        let duid = [0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD];
+        let opt = dhcpv6_option(1, &duid);
+        let pkt = build_dhcpv6(1, 1, &opt);
+
+        let d = Dhcpv6Dissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "dhcpv6_option")
+            .expect("DHCPv6 option container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "DHCPv6 Option");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("Client Identifier")
+        );
     }
 
     // ── Group 5: Option 2 — Server Identifier ────────────────────────
