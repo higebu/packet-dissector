@@ -230,7 +230,7 @@ fn parse_tlvs<'pkt>(
         // RFC 8754, Section 2.1.1 — Pad1 TLV (Type 0)
         if type_byte == 0 {
             let obj_idx = buf.begin_container(
-                &TLV_DESCRIPTORS[FD_TLV_TYPE],
+                &FD_TLV,
                 FieldValue::Object(0..0),
                 offset + cursor..offset + cursor + 1,
             );
@@ -264,7 +264,7 @@ fn parse_tlvs<'pkt>(
         }
 
         let obj_idx = buf.begin_container(
-            &TLV_DESCRIPTORS[FD_TLV_TYPE],
+            &FD_TLV,
             FieldValue::Object(0..0),
             offset + cursor..offset + value_end,
         );
@@ -672,6 +672,38 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 // ---------------------------------------------------------------------------
 // Child field descriptor arrays for sub-fields
 // ---------------------------------------------------------------------------
+
+/// Returns a human-readable name for an SRv6 TLV type.
+///
+/// RFC 8754, Section 2.1 — IANA SRv6 TLV Types registry.
+fn srv6_tlv_type_name(t: u8) -> Option<&'static str> {
+    match t {
+        0 => Some("Pad1"),
+        4 => Some("PadN"),
+        5 => Some("HMAC"),
+        _ => None,
+    }
+}
+
+/// Container descriptor for an SRv6 TLV Object.
+///
+/// The outer label resolves to the TLV name (e.g. `HMAC`) by looking up
+/// the inner `type` field, avoiding collision with the inner "Type" label.
+static FD_TLV: FieldDescriptor = FieldDescriptor {
+    name: "tlv",
+    display_name: "TLV",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => srv6_tlv_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
 
 // TLV sub-field descriptors (used in parse_tlvs)
 const FD_TLV_TYPE: usize = 0;
@@ -2496,5 +2528,25 @@ mod tests {
     fn format_sid_hex_other_variant() {
         let val = FieldValue::U8(42);
         assert_eq!(call_format_fn(format_sid_hex, &val, &[]), "\"\"");
+    }
+
+    #[test]
+    fn tlv_container_resolves_to_tlv_name() {
+        // PadN TLV so the container label resolves to "PadN" instead of
+        // duplicating the inner "Type" label.
+        let tlvs = [4, 4, 0, 0, 0, 0];
+        let data = build_srh(6, 1, &[SID_A], 0, 0, &tlvs);
+        let mut buf = DissectBuffer::new();
+        Srv6Dissector::new().dissect(&data, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "tlv")
+            .expect("tlv container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "TLV");
+        assert_eq!(buf.resolve_container_display_name(idx as u32), Some("PadN"));
     }
 }
