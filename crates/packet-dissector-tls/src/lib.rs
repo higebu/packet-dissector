@@ -328,6 +328,27 @@ const EFD_LENGTH: usize = 1;
 const EFD_DATA: usize = 2;
 const EFD_SERVER_NAME: usize = 3;
 
+/// Container descriptor for an extension Object.
+///
+/// The outer label resolves to the extension name (e.g. `server_name`) by
+/// looking up the inner `type` field, avoiding collision with the inner
+/// "Extension Type" label.
+static FD_EXTENSION: FieldDescriptor = FieldDescriptor {
+    name: "extension",
+    display_name: "Extension",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U16(t)) => Some(extension_type_name(*t)),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Child field descriptors for extension objects within the `extensions` array.
 ///
 /// RFC 5246, Section 7.4.1.4 — <https://www.rfc-editor.org/rfc/rfc5246#section-7.4.1.4>
@@ -472,7 +493,7 @@ fn parse_extensions<'pkt>(data: &'pkt [u8], offset: usize, buf: &mut DissectBuff
         let ext_data = &data[pos + 4..pos + 4 + ext_len];
 
         let obj_idx = buf.begin_container(
-            &EXTENSION_CHILD_FIELDS[EFD_TYPE],
+            &FD_EXTENSION,
             FieldValue::Object(0..0),
             offset + pos..offset + pos + 4 + ext_len,
         );
@@ -1694,5 +1715,29 @@ mod tests {
         let sv_range = second_obj.value.as_container_range().unwrap();
         let sv_children = buf.nested_fields(sv_range);
         assert_eq!(sv_children[0].value, FieldValue::U16(43));
+    }
+
+    #[test]
+    fn extension_container_resolves_to_extension_name() {
+        // ClientHello with a single SNI extension so the container label
+        // resolves to "server_name" instead of duplicating "Extension Type".
+        let sni = build_sni_extension("test.example.org");
+        let body = build_client_hello_body(0x0303, &[], &[0x1301], &[0x00], Some(&sni));
+        let data = wrap_client_hello(&body);
+        let mut buf = DissectBuffer::new();
+        TlsDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "extension")
+            .expect("extension container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Extension");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("server_name")
+        );
     }
 }
