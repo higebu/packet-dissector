@@ -64,12 +64,13 @@ jobs:
           merge-multiple: true
           path: results
       - uses: bencherdev/bencher@f639b1b6030ebd80690d396b2b003c4f8a183563 # main
+      - name: Combine benchmark results
+        run: |
+          ls -la results/
+          cat results/*.txt > combined.txt
+          wc -l combined.txt
       - name: Track base branch benchmarks
         run: |
-          args=()
-          for f in results/*.txt; do
-            args+=(--file "$f")
-          done
           bencher run \
           --project packet-dissector \
           --token '${{ secrets.BENCHER_API_TOKEN }}' \
@@ -84,7 +85,7 @@ jobs:
           --adapter rust_criterion \
           --github-actions '${{ secrets.GITHUB_TOKEN }}' \
           --err \
-          "${args[@]}"
+          --file combined.txt
 
   report_pr:
     name: Report PR benchmarks
@@ -100,12 +101,13 @@ jobs:
           merge-multiple: true
           path: results
       - uses: bencherdev/bencher@f639b1b6030ebd80690d396b2b003c4f8a183563 # main
+      - name: Combine benchmark results
+        run: |
+          ls -la results/
+          cat results/*.txt > combined.txt
+          wc -l combined.txt
       - name: Track PR benchmarks
         run: |
-          args=()
-          for f in results/*.txt; do
-            args+=(--file "$f")
-          done
           bencher run \
           --project packet-dissector \
           --token '${{ secrets.BENCHER_API_TOKEN }}' \
@@ -118,7 +120,7 @@ jobs:
           --adapter rust_criterion \
           --github-actions '${{ secrets.GITHUB_TOKEN }}' \
           --err \
-          "${args[@]}"
+          --file combined.txt
 
   archive_pr:
     name: Archive closed PR
