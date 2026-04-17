@@ -79,6 +79,27 @@ static LSR_ENTRY_CHILD_FIELDS: &[FieldDescriptor] = &[
     ),
 ];
 
+/// Container descriptor for an LSR entry Object.
+///
+/// The outer label resolves to the LSA type name (e.g. `Router-LSA`) by
+/// looking up the inner `ls_type` field, avoiding collision with the
+/// inner "LS Type" label.
+static FD_LSR_ENTRY: FieldDescriptor = FieldDescriptor {
+    name: "lsr_entry",
+    display_name: "LSR Entry",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("ls_type", FieldValue::U32(t)) => u8::try_from(*t).ok().and_then(lsa_type_name),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Returns a human-readable name for LSA types.
 ///
 /// RFC 2328, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.1>
@@ -514,7 +535,7 @@ impl Dissector for Ospfv2Dissector {
                     let abs = body_offset + pos;
 
                     let obj_idx = buf.begin_container(
-                        &LSR_ENTRY_CHILD_FIELDS[FD_LSR_LS_TYPE],
+                        &FD_LSR_ENTRY,
                         FieldValue::Object(0..0),
                         abs..abs + LSR_ENTRY_SIZE,
                     );
@@ -910,5 +931,31 @@ mod tests {
         assert_eq!(layer.range, 34..78);
         // Version field should be at absolute offset 34
         assert_eq!(buf.field_by_name(layer, "version").unwrap().range, 34..35);
+    }
+
+    #[test]
+    fn lsr_entry_container_resolves_to_lsa_type_name() {
+        // LSR entry with LS Type = 1 (Router-LSA) so the container label
+        // resolves to "Router-LSA" instead of duplicating "LS Type".
+        let mut pkt = build_header(3, 36, [1, 1, 1, 1]);
+        pkt.extend_from_slice(&[0, 0, 0, 1]);
+        pkt.extend_from_slice(&[10, 0, 0, 1]);
+        pkt.extend_from_slice(&[2, 2, 2, 2]);
+
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "lsr_entry")
+            .expect("lsr_entry container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "LSR Entry");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("Router-LSA")
+        );
     }
 }
