@@ -102,6 +102,23 @@ static HEADER_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("value", "Value", FieldType::Str),
 ];
 
+/// Descriptor for the HTTP/2 header Object container.
+///
+/// The outer label ("Header") no longer collides with the inner `Name`
+/// child. The header's own name is a borrowed string from the packet and
+/// therefore cannot be returned through
+/// [`DissectBuffer::resolve_container_display_name`], which requires a
+/// `&'static str`.
+static FD_HEADER: FieldDescriptor = FieldDescriptor {
+    name: "header",
+    display_name: "Header",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: None,
+    format_fn: None,
+};
+
 /// Child descriptors for each SETTINGS parameter entry.
 static SETTINGS_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("id", "Identifier", FieldType::U16).with_display_fn(settings_id_name),
@@ -510,11 +527,8 @@ fn push_decoded_headers<'pkt>(
     for h in &decoded {
         match h {
             hpack::DecodedHeader::Resolved { name, value } => {
-                let obj_idx = buf.begin_container(
-                    &HEADER_CHILDREN[HC_NAME],
-                    FieldValue::Object(0..0),
-                    frag_range.clone(),
-                );
+                let obj_idx =
+                    buf.begin_container(&FD_HEADER, FieldValue::Object(0..0), frag_range.clone());
                 let name_val = resolve_header_string(name, fragment, buf);
                 buf.push_field(&HEADER_CHILDREN[HC_NAME], name_val, frag_range.clone());
                 let value_val = resolve_header_string(value, fragment, buf);
@@ -1065,6 +1079,26 @@ mod tests {
         let (n2, v2) = get_header_pair(&buf, layer, 2);
         assert_eq!(n2, ":path");
         assert_eq!(v2, "/");
+    }
+
+    #[test]
+    fn header_container_descriptor_distinct_from_inner_name() {
+        // The per-header Object container must use a descriptor distinct
+        // from the inner `name` child so that the outer display label does
+        // not collide with the child's "Name" label.
+        let fragment = &[0x82];
+        let data = build_frame(FRAME_TYPE_HEADERS, FLAG_END_HEADERS, 1, fragment);
+        let buf = dissect(&data).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "header")
+            .expect("header container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Header");
+        assert_eq!(buf.resolve_container_display_name(idx as u32), None);
     }
 
     #[test]
