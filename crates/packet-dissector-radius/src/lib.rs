@@ -133,6 +133,29 @@ fn attr_name_str(attr_type_code: u8) -> &'static str {
     attr_def.map(|d| d.name).unwrap_or("Unknown")
 }
 
+/// Descriptor for the RADIUS attribute Object container.
+///
+/// `display_fn` is invoked by
+/// [`DissectBuffer::resolve_container_display_name`] with the container's
+/// children, so the outer label resolves to the attribute name (e.g.
+/// "User-Name") instead of colliding with the inner `Attribute Type`
+/// field.
+static FD_ATTRIBUTE: FieldDescriptor = FieldDescriptor {
+    name: "attribute",
+    display_name: "Attribute",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(c)) => Some(attr_name_str(*c)),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Parse attribute value according to its type.
 ///
 /// RFC 2865, Section 5 — attribute data types.
@@ -189,11 +212,8 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
         let attr_def = lookup_attr(attr_type_code);
 
         // Begin Object for this attribute.
-        let obj_idx = buf.begin_container(
-            &ATTR_CHILD_FIELDS[AFD_TYPE],
-            FieldValue::Object(0..0),
-            abs..abs + attr_len,
-        );
+        let obj_idx =
+            buf.begin_container(&FD_ATTRIBUTE, FieldValue::Object(0..0), abs..abs + attr_len);
 
         buf.push_field(
             &ATTR_CHILD_FIELDS[AFD_TYPE],
@@ -508,6 +528,29 @@ mod tests {
         assert_eq!(
             *obj_field_value(&buf, &obj_range, "value"),
             FieldValue::Bytes(b"admin" as &[u8])
+        );
+    }
+
+    #[test]
+    fn attribute_container_resolves_to_attribute_name() {
+        // Attribute 1 (User-Name): the outer container label should
+        // resolve to "User-Name" rather than duplicating "Attribute Type".
+        let user_name = build_attr(1, b"admin");
+        let data = build_radius(1, 42, &auth(), &user_name);
+        let mut buf = DissectBuffer::new();
+        RadiusDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "attribute")
+            .expect("attribute container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Attribute");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("User-Name")
         );
     }
 
