@@ -1,0 +1,18 @@
+[package]
+name = "packet-dissector-pbt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Property-based testing helpers and generators for packet-dissector crates"
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "testing", "property-based"]
+categories = ["development-tools::testing"]
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+proptest = "1"
+
+[dev-dependencies]
+packet-dissector-ipv4 = { workspace = true }

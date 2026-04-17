@@ -144,16 +144,18 @@ pub use packet_dissector_ipv4::Ipv4Dissector;
 6. Register in `DissectorRegistry::default()` with feature gate
 7. Add integration tests to `crates/packet-dissector/tests/integration_test.rs`
 8. Add any required allocation tests to `crates/packet-dissector-<protocol>/tests/alloc_test.rs`
-9. If the public API or feature surface changes, coordinate downstream updates in consumers such as the separate `bask` repo
-10. Pass all pre-commit checks
+9. Optionally add property-based tests at `crates/packet-dissector-pbt/tests/prop_<protocol>.rs` invoking `check_universal` (recommended for protocols with TLV/IE or other variable-length parsing)
+10. If the public API or feature surface changes, coordinate downstream updates in consumers such as the separate `bask` repo
+11. Pass all pre-commit checks
 
 ### Tests
 
 - **Unit tests** (`crates/packet-dissector-<protocol>/src/lib.rs` `#[cfg(test)] mod tests`): Single-protocol isolation using `Packet::default()`. No cross-protocol deps.
 - **Integration tests** (`crates/packet-dissector/tests/integration_test.rs`): Multi-layer dissection through `DissectorRegistry`. All in one file, using `assert_layers_contiguous`.
 - **Allocation tests** (`crates/packet-dissector-<protocol>/tests/alloc_test.rs`): Verify zero heap allocations during dissection.
+- **Property-based tests** (`crates/packet-dissector-pbt/tests/prop_<protocol>.rs`): `proptest` checks of universal invariants (no panic, `bytes_consumed ≤ data.len()`, `Truncated.actual == data.len()`, determinism) over arbitrary and structured inputs. Complements, not replaces, unit tests. Run with `cargo test -p packet-dissector-pbt`; use `PROPTEST_CASES=10000 cargo test -p packet-dissector-pbt` for long runs before releases. Commit `proptest-regressions/` files for reproducibility.
 
-New dissectors must add all three.
+New dissectors must add the first three; PBT coverage is recommended for protocols with variable-length fields (TLV/IE, options, extension headers).
 
 #### Allocation Tests
 
