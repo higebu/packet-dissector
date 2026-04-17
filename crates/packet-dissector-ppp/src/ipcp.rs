@@ -19,6 +19,26 @@ static IPCP_OPTION_DESCRIPTORS: &[FieldDescriptor] = ppp_option_descriptors!(|v,
     _ => None,
 });
 
+/// Container descriptor for an IPCP configuration option entry.
+///
+/// `display_fn` resolves the outer container's label to the option name
+/// (e.g. "IP-Address") by looking up the inner `type` field.
+static FD_IPCP_OPTION: FieldDescriptor = FieldDescriptor {
+    name: "option",
+    display_name: "Option",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => Some(ipcp_option_name(*t)),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 static FD_INLINE_OPTIONS: FieldDescriptor =
     FieldDescriptor::new("options", "Options", FieldType::Array);
 
@@ -60,6 +80,7 @@ pub fn parse<'pkt>(data: &'pkt [u8], offset: usize, buf: &mut DissectBuffer<'pkt
         let has_options = crate::parse_options(
             options_data,
             offset + PPP_HEADER_SIZE,
+            &FD_IPCP_OPTION,
             IPCP_OPTION_DESCRIPTORS,
             ipcp_option_value,
             buf,
