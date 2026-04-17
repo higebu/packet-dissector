@@ -94,6 +94,7 @@ changelog_include = [
   "packet-dissector-ngap",
   "packet-dissector-ntp",
   "packet-dissector-ospf",
+  "packet-dissector-pbt",
   "packet-dissector-pcap",
   "packet-dissector-pfcp",
   "packet-dissector-ppp",
@@ -256,6 +257,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-ospf"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-pbt"
 version_group = "workspace"
 
 [[package]]
