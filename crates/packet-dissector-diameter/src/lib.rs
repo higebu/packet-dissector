@@ -92,6 +92,37 @@ const FD_AVP_VENDOR_ID: usize = 3;
 const FD_AVP_NAME: usize = 4;
 const FD_AVP_VALUE: usize = 5;
 
+/// Container descriptor for a parsed AVP entry.
+///
+/// `display_fn` resolves the outer container's label to the AVP name
+/// (e.g. "Origin-Host") by looking up the inner `code` and optional
+/// `vendor_id` fields.
+static FD_AVP: FieldDescriptor = FieldDescriptor {
+    name: "avp",
+    display_name: "AVP",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| {
+        let FieldValue::Object(_) = v else {
+            return None;
+        };
+        let code = children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("code", FieldValue::U32(c)) => Some(*c),
+            _ => None,
+        })?;
+        let vendor_id = children
+            .iter()
+            .find_map(|f| match (f.name(), &f.value) {
+                ("vendor_id", FieldValue::U32(v)) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(0);
+        lookup_avp(vendor_id, code).map(|def| def.name)
+    }),
+    format_fn: None,
+};
+
 /// Child fields for a parsed AVP entry.
 static AVP_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("code", "AVP Code", FieldType::U32),
@@ -284,11 +315,7 @@ fn parse_avps<'pkt>(
         let abs = buf_offset + pos;
         let avp_range = abs..buf_offset + data_end;
 
-        let obj_idx = buf.begin_container(
-            &AVP_CHILD_FIELDS[FD_AVP_CODE],
-            FieldValue::Object(0..0),
-            avp_range,
-        );
+        let obj_idx = buf.begin_container(&FD_AVP, FieldValue::Object(0..0), avp_range);
 
         buf.push_field(
             &AVP_CHILD_FIELDS[FD_AVP_CODE],
@@ -840,6 +867,28 @@ mod tests {
     }
 
     // ── AVP parsing tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn avp_container_resolves_to_avp_name() {
+        // Origin-Host (264) — base protocol AVP, no vendor-id.
+        let avp = make_avp(264, 0x40, b"test");
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+
+        let avps_range = get_avps_range(&buf).unwrap().clone();
+        let children = buf.nested_fields(&avps_range);
+        let (offset, object) = children
+            .iter()
+            .enumerate()
+            .find(|(_, f)| matches!(f.value, FieldValue::Object(_)))
+            .expect("AVP Object must be present");
+        assert_eq!(object.descriptor.display_name, "AVP");
+        let avp_idx = avps_range.start + offset as u32;
+        assert_eq!(
+            buf.resolve_container_display_name(avp_idx),
+            Some("Origin-Host"),
+        );
+    }
 
     #[test]
     fn parse_avp_no_vendor() {
