@@ -22,6 +22,84 @@ static FD_INLINE_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value",
 static FD_INLINE_VENDOR_ID: FieldDescriptor =
     FieldDescriptor::new("vendor_id", "Vendor ID", FieldType::U16);
 
+/// Map an L2TPv3 base-protocol Attribute Type (Vendor ID=0) to its AVP name.
+///
+/// RFC 3931, Section 5.4 — Control Message Attribute Value Pairs.
+/// <https://www.rfc-editor.org/rfc/rfc3931#section-5.4>
+pub(crate) fn avp_name(attribute_type: u16) -> Option<&'static str> {
+    match attribute_type {
+        0 => Some("Message Type"),
+        1 => Some("Result Code"),
+        2 => Some("Protocol Version"),
+        3 => Some("Framing Capabilities"),
+        4 => Some("Bearer Capabilities"),
+        5 => Some("Tie Breaker"),
+        6 => Some("Firmware Revision"),
+        7 => Some("Host Name"),
+        8 => Some("Vendor Name"),
+        9 => Some("Assigned Control Connection ID"),
+        10 => Some("Receive Window Size"),
+        11 => Some("Challenge"),
+        13 => Some("Challenge Response"),
+        14 => Some("Cause Code"),
+        15 => Some("Assigned Session ID"),
+        16 => Some("Remote Session ID"),
+        18 => Some("Assigned Cookie"),
+        19 => Some("Remote End ID"),
+        21 => Some("Pseudowire Type"),
+        22 => Some("L2-Specific Sublayer"),
+        23 => Some("Data Sequencing"),
+        24 => Some("Circuit Status"),
+        25 => Some("Preferred Language"),
+        26 => Some("Control Message Authentication Nonce"),
+        27 => Some("Tx Connect Speed"),
+        28 => Some("Rx Connect Speed"),
+        29 => Some("Failover Capability"),
+        30 => Some("Tunnel Recovery"),
+        31 => Some("Suggested Control Sequence"),
+        32 => Some("Failover Session State"),
+        36 => Some("Random Vector"),
+        37 => Some("Message Digest"),
+        38 => Some("Router ID"),
+        39 => Some("Assigned Control Connection ID"),
+        40 => Some("Pseudowire Capabilities List"),
+        _ => None,
+    }
+}
+
+/// Container descriptor for an L2TPv3 AVP entry.
+///
+/// `display_fn` resolves the outer container's label to the AVP name by
+/// looking up the inner `vendor_id` and `attribute_type` fields.
+/// When `vendor_id == 0`, the Attribute Type is mapped via [`avp_name`];
+/// otherwise the label is "Vendor-Specific AVP".
+static FD_AVP: FieldDescriptor = FieldDescriptor {
+    name: "avp",
+    display_name: "AVP",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| {
+        let FieldValue::Object(_) = v else {
+            return None;
+        };
+        let vendor_id = children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("vendor_id", FieldValue::U16(v)) => Some(*v),
+            _ => None,
+        })?;
+        let attribute_type = children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("attribute_type", FieldValue::U16(t)) => Some(*t),
+            _ => None,
+        })?;
+        if vendor_id == 0 {
+            avp_name(attribute_type)
+        } else {
+            Some("Vendor-Specific AVP")
+        }
+    }),
+    format_fn: None,
+};
+
 /// Minimum AVP size: M(1 bit) + H(1 bit) + rsvd(4 bits) + Length(10 bits) +
 /// Vendor ID(16 bits) + Attribute Type(16 bits) = 6 octets.
 ///
@@ -87,11 +165,7 @@ pub(crate) fn parse_avps<'pkt>(data: &'pkt [u8], buf_offset: usize, buf: &mut Di
         let value_data = &data[pos + MIN_AVP_SIZE..pos + length];
 
         let abs = buf_offset + pos;
-        let obj_idx = buf.begin_container(
-            &FD_INLINE_MANDATORY,
-            FieldValue::Object(0..0),
-            abs..abs + length,
-        );
+        let obj_idx = buf.begin_container(&FD_AVP, FieldValue::Object(0..0), abs..abs + length);
         buf.push_field(&FD_INLINE_MANDATORY, FieldValue::U8(m_flag), abs..abs + 1);
         buf.push_field(&FD_INLINE_HIDDEN, FieldValue::U8(h_flag), abs..abs + 1);
         buf.push_field(
@@ -252,6 +326,36 @@ mod tests {
         parse_avps(data, 0, &mut buf);
         buf.end_layer();
         assert!(buf.fields().iter().all(|f| !f.value.is_object()));
+    }
+
+    #[test]
+    fn avp_container_resolves_to_avp_name() {
+        // Message Type AVP: Vendor=0, Type=0 → "Message Type".
+        let data: &[u8] = &[0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("test", None, &[], 0..8);
+        parse_avps(data, 0, &mut buf);
+        buf.end_layer();
+
+        assert!(buf.fields()[0].value.is_object());
+        assert_eq!(buf.fields()[0].descriptor.display_name, "AVP");
+        assert_eq!(buf.resolve_container_display_name(0), Some("Message Type"),);
+    }
+
+    #[test]
+    fn avp_container_vendor_specific_label() {
+        // Non-zero Vendor ID → "Vendor-Specific AVP".
+        let data: &[u8] = &[0x00, 0x08, 0x12, 0x34, 0x00, 0x01, 0x00, 0x01];
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("test", None, &[], 0..8);
+        parse_avps(data, 0, &mut buf);
+        buf.end_layer();
+
+        assert!(buf.fields()[0].value.is_object());
+        assert_eq!(
+            buf.resolve_container_display_name(0),
+            Some("Vendor-Specific AVP"),
+        );
     }
 
     #[test]
