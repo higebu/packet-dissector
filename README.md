@@ -148,6 +148,24 @@ impl Dissector for MyProtocol {
 }
 ```
 
+## Testing
+
+Four complementary test layers run in CI:
+
+- **Unit tests** — per-protocol example-based tests inside each
+  `packet-dissector-<protocol>` crate.
+- **Integration tests** — multi-layer dissection through `DissectorRegistry`
+  in `crates/packet-dissector/tests/`.
+- **Allocation tests** — `packet-dissector-test-alloc` verifies zero heap
+  allocations during dissection.
+- **Property-based tests** — `packet-dissector-pbt` uses `proptest` to check
+  universal parser invariants (no panic, `bytes_consumed ≤ data.len()`,
+  `Truncated.actual == data.len()`, determinism) across arbitrary and
+  structured inputs. Run with `cargo test -p packet-dissector-pbt`, or
+  `PROPTEST_CASES=10000 cargo test -p packet-dissector-pbt` for long runs.
+  Shrunk counter-examples are written to `proptest-regressions/` and
+  committed for reproducibility.
+
 ## Documentation
 
 Full API documentation is available on [docs.rs](https://docs.rs/packet-dissector).
