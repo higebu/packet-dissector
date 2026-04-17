@@ -27,6 +27,28 @@ static FD_INLINE_TYPE: FieldDescriptor = FieldDescriptor {
     format_fn: None,
 };
 
+/// Descriptor for the IE Object container itself.
+///
+/// `display_fn` is invoked by
+/// [`DissectBuffer::resolve_container_display_name`] with the container's
+/// children, so the outer label resolves to the IE name (e.g. "Recovery
+/// Time Stamp") instead of colliding with the inner `Type` field.
+static FD_IE: FieldDescriptor = FieldDescriptor {
+    name: "ie",
+    display_name: "IE",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U32(t)) => Some(ie_type_name(*t as u16)),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Child field descriptors for each IE element in the `ies` array.
 ///
 /// These describe the common fields present in every parsed IE object.
@@ -87,8 +109,7 @@ pub fn parse_ies<'pkt>(
         let ie_end = ie_start + IE_HEADER_SIZE + ie_length;
 
         // Each IE is an Object in the array
-        let obj_idx =
-            buf.begin_container(&FD_INLINE_TYPE, FieldValue::Object(0..0), ie_start..ie_end);
+        let obj_idx = buf.begin_container(&FD_IE, FieldValue::Object(0..0), ie_start..ie_end);
 
         buf.push_field(
             &FD_INLINE_TYPE,
@@ -598,6 +619,24 @@ mod tests {
 
         // Check range covers the entire IE.
         assert_eq!(ie.range, 0..5);
+    }
+
+    #[test]
+    fn ie_container_resolves_to_ie_name() {
+        // Type=96 (Recovery Time Stamp), Length=4, Data=[0x12, 0x34, 0x56, 0x78]
+        let data = [0x00, 0x60, 0x00, 0x04, 0x12, 0x34, 0x56, 0x78];
+        let mut buf = DissectBuffer::new();
+        parse_ies(&data, 0, 0, &mut buf).unwrap();
+
+        // First field is the IE Object container; its outer label should
+        // resolve to the IE name rather than duplicating "Type".
+        assert!(matches!(buf.fields()[0].value, FieldValue::Object(_)));
+        assert_eq!(buf.fields()[0].name(), "ie");
+        assert_eq!(buf.fields()[0].display_name(), "IE");
+        assert_eq!(
+            buf.resolve_container_display_name(0),
+            Some("Recovery Time Stamp")
+        );
     }
 
     #[test]
