@@ -618,7 +618,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "packet-dissector"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-ah",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ah"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-arp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-bfd"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-bgp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -714,14 +714,14 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "packet-dissector-dhcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-dhcpv6"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-diameter"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -748,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-dns"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-esp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes 0.9.0",
  "aes-gcm",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ethernet"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-geneve"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-gre"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-gtpv1u"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-gtpv2c"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-http"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "httparse",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-http2"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-icmp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-icmpv6"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-igmp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-test-alloc",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ike"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ipv4"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ipv6"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-isis"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-l2tp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-l2tpv3"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-lacp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-linux-sll"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -932,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-linux-sll2"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-lldp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-mdns"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-mpls"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-nas5g"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-test-alloc",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ngap"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ntp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ospf"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-pbt"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-ipv4",
@@ -1015,14 +1015,14 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-pcap"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "packet-dissector-pfcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-ppp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-quic"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-test-alloc",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-radius"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1057,14 +1057,14 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-reassembly"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "packet-dissector-rtp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-sctp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-sip"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "httparse",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-srv6"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-stp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-stun"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-tcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1128,14 +1128,14 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-test-alloc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "packet-dissector-core",
 ]
 
 [[package]]
 name = "packet-dissector-tls"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-udp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-vrrp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-vxlan"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "packet-dissector-core",
