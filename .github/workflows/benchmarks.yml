@@ -10,17 +10,67 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  benchmark_base:
-    name: Benchmark base
-    if: github.event_name == 'push'
-    permissions:
-      checks: write
+  discover:
+    name: Discover benchmark crates
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    outputs:
+      crates: ${{ steps.list.outputs.crates }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - id: list
+        name: List crates with benches
+        run: |
+          crates=$(cargo metadata --format-version=1 --no-deps \
+            | jq -c '[.packages[] | . as $p | select(.targets[] | .kind[] == "bench") | $p.name] | unique')
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+          echo "Discovered crates: $crates"
+
+  bench:
+    name: Bench ${{ matrix.crate }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: ${{ fromJSON(needs.discover.outputs.crates) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Run benchmarks
+        run: |
+          mkdir -p results
+          cargo bench -p "${{ matrix.crate }}" 2>&1 | tee "results/${{ matrix.crate }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.crate }}
+          path: results/${{ matrix.crate }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  report_base:
+    name: Report base benchmarks
+    needs: bench
+    if: github.event_name == 'push'
+    permissions:
+      actions: read
+      checks: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-results-*
+          merge-multiple: true
+          path: results
       - uses: bencherdev/bencher@f639b1b6030ebd80690d396b2b003c4f8a183563 # main
+      - name: Combine benchmark results
+        run: |
+          ls -la results/
+          cat results/*.txt > combined.txt
+          wc -l combined.txt
       - name: Track base branch benchmarks
         run: |
           bencher run \
@@ -37,19 +87,29 @@ jobs:
           --adapter rust_criterion \
           --github-actions '${{ secrets.GITHUB_TOKEN }}' \
           --err \
-          "cargo bench"
+          "cat combined.txt"
 
-  benchmark_pr:
-    name: Benchmark PR
+  report_pr:
+    name: Report PR benchmarks
+    needs: bench
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     permissions:
+      actions: read
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-results-*
+          merge-multiple: true
+          path: results
       - uses: bencherdev/bencher@f639b1b6030ebd80690d396b2b003c4f8a183563 # main
+      - name: Combine benchmark results
+        run: |
+          ls -la results/
+          cat results/*.txt > combined.txt
+          wc -l combined.txt
       - name: Track PR benchmarks
         run: |
           bencher run \
@@ -64,7 +124,7 @@ jobs:
           --adapter rust_criterion \
           --github-actions '${{ secrets.GITHUB_TOKEN }}' \
           --err \
-          "cargo bench"
+          "cat combined.txt"
 
   archive_pr:
     name: Archive closed PR
