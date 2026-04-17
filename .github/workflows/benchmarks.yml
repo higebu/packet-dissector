@@ -55,6 +55,7 @@ jobs:
     needs: bench
     if: github.event_name == 'push'
     permissions:
+      actions: read
       checks: write
     runs-on: ubuntu-latest
     steps:
@@ -92,6 +93,7 @@ jobs:
     needs: bench
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     permissions:
+      actions: read
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
