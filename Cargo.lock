@@ -1005,10 +1005,11 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-pbt"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-ipv4",
+ "packet-dissector-tcp",
  "proptest",
 ]
 
