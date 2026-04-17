@@ -248,12 +248,6 @@ impl Dissector for VrrpDissector {
             );
 
             for _ in 0..count {
-                let obj_idx = buf.begin_container(
-                    &ADDRESS_CHILD_FIELDS[FD_ADDRESS_ENTRY],
-                    FieldValue::Object(0..0),
-                    offset + pos..offset + pos + addr_size,
-                );
-
                 if ipv6 {
                     let addr = read_ipv6_addr(data, pos)?;
                     buf.push_field(
@@ -269,8 +263,6 @@ impl Dissector for VrrpDissector {
                         offset + pos..offset + pos + IPV4_ADDR_SIZE,
                     );
                 }
-
-                buf.end_container(obj_idx);
                 pos += addr_size;
             }
 
@@ -387,19 +379,13 @@ mod tests {
             FieldValue::U16(0xA8FD)
         );
 
-        // Check address array
+        // Check address array — addresses are pushed as flat Array children.
         let addresses_field = buf.field_by_name(layer, "addresses").unwrap();
         if let FieldValue::Array(ref range) = addresses_field.value {
-            // Find the first Object in the array (skip nested children)
-            let first_obj = buf
-                .nested_fields(range)
-                .iter()
-                .find(|f| f.value.is_object())
-                .expect("expected Object in array");
-            if let FieldValue::Object(ref obj_range) = first_obj.value {
-                let obj_fields = buf.nested_fields(obj_range);
-                assert_eq!(obj_fields[0].value, FieldValue::Ipv4Addr([192, 168, 1, 1]));
-            }
+            let elems = buf.nested_fields(range);
+            assert_eq!(elems.len(), 1);
+            assert_eq!(elems[0].value, FieldValue::Ipv4Addr([192, 168, 1, 1]));
+            assert_eq!(elems[0].descriptor.display_name, "Address");
         } else {
             panic!("expected Array");
         }
@@ -436,19 +422,13 @@ mod tests {
 
         let addresses_field = buf.field_by_name(layer, "addresses").unwrap();
         if let FieldValue::Array(ref range) = addresses_field.value {
-            let first_obj = buf
-                .nested_fields(range)
-                .iter()
-                .find(|f| f.value.is_object())
-                .expect("expected Object in array");
-            if let FieldValue::Object(ref obj_range) = first_obj.value {
-                let obj_fields = buf.nested_fields(obj_range);
-                let expected: [u8; 16] = [
-                    0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x01,
-                ];
-                assert_eq!(obj_fields[0].value, FieldValue::Ipv6Addr(expected));
-            }
+            let elems = buf.nested_fields(range);
+            assert_eq!(elems.len(), 1);
+            let expected: [u8; 16] = [
+                0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x01,
+            ];
+            assert_eq!(elems[0].value, FieldValue::Ipv6Addr(expected));
         } else {
             panic!("expected Array");
         }
@@ -471,14 +451,10 @@ mod tests {
         let layer = buf.layer_by_name("VRRP").unwrap();
         let addresses_field = buf.field_by_name(layer, "addresses").unwrap();
         if let FieldValue::Array(ref range) = addresses_field.value {
-            // Count top-level Objects (skip nested children)
-            let obj_count = buf
-                .nested_fields(range)
-                .iter()
-                .filter(|f| f.value.is_object())
-                .count();
-            // 2 Objects + their address children = more fields, but 2 Object entries
-            assert_eq!(obj_count, 2);
+            let elems = buf.nested_fields(range);
+            assert_eq!(elems.len(), 2);
+            assert_eq!(elems[0].value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
+            assert_eq!(elems[1].value, FieldValue::Ipv4Addr([10, 0, 0, 2]));
         } else {
             panic!("expected Array");
         }
@@ -568,15 +544,9 @@ mod tests {
         let layer = buf.layer_by_name("VRRP").unwrap();
         let addresses_field = buf.field_by_name(layer, "addresses").unwrap();
         if let FieldValue::Array(ref range) = addresses_field.value {
-            let first_obj = buf
-                .nested_fields(range)
-                .iter()
-                .find(|f| f.value.is_object())
-                .expect("expected Object in array");
-            if let FieldValue::Object(ref obj_range) = first_obj.value {
-                let obj_fields = buf.nested_fields(obj_range);
-                assert_eq!(obj_fields[0].value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
-            }
+            let elems = buf.nested_fields(range);
+            assert_eq!(elems.len(), 1);
+            assert_eq!(elems[0].value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
         } else {
             panic!("expected Array");
         }
