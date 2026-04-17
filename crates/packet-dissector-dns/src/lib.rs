@@ -986,7 +986,7 @@ fn parse_edns_options<'pkt>(buf: &mut DissectBuffer<'pkt>, rdata: &'pkt [u8], ab
         let option_end = option_start + 4 + length;
 
         let obj_idx = buf.begin_container(
-            &EDNS_OPTION_CHILD_FIELDS[EOFD_CODE],
+            &FD_EDNS_OPTION,
             FieldValue::Object(0..0),
             option_start..option_end,
         );
@@ -1027,6 +1027,28 @@ fn parse_edns_options<'pkt>(buf: &mut DissectBuffer<'pkt>, rdata: &'pkt [u8], ab
         pos += 4 + length;
     }
 }
+
+/// Descriptor for the EDNS0 option Object container itself.
+///
+/// `display_fn` is invoked by
+/// [`DissectBuffer::resolve_container_display_name`] with the container's
+/// children, so the outer label resolves to the option name (e.g.
+/// "COOKIE") instead of colliding with the inner `Code` field.
+static FD_EDNS_OPTION: FieldDescriptor = FieldDescriptor {
+    name: "edns_option",
+    display_name: "EDNS Option",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("code", FieldValue::U16(c)) => edns_option_code_name(*c),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
 
 /// Child field descriptors for EDNS0 option entries.
 ///
@@ -2344,6 +2366,40 @@ mod tests {
         assert_eq!(
             find_child(&b, &opt_list[0], "length").unwrap().value,
             FieldValue::U16(8)
+        );
+    }
+
+    #[test]
+    fn edns_option_container_resolves_to_option_name() {
+        // OPT RR carrying a single COOKIE option so the container label
+        // should resolve to "COOKIE" rather than duplicating "Code".
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&10u16.to_be_bytes()); // code = COOKIE
+        rdata.extend_from_slice(&8u16.to_be_bytes()); // length = 8
+        rdata.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33]);
+
+        let mut data = header(0, 0, 0, 1);
+        data.push(0);
+        data.extend_from_slice(&TYPE_OPT.to_be_bytes());
+        data.extend_from_slice(&4096u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+
+        let (opt_idx, opt_field) = b
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "edns_option")
+            .expect("edns_option container not found");
+        assert!(matches!(opt_field.value, FieldValue::Object(_)));
+        assert_eq!(opt_field.display_name(), "EDNS Option");
+        assert_eq!(
+            b.resolve_container_display_name(opt_idx as u32),
+            Some("COOKIE")
         );
     }
 

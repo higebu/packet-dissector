@@ -388,6 +388,50 @@ static RELAY_AGENT_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
 ];
 
+/// Returns a human-readable name for Relay Agent Information sub-option codes.
+///
+/// RFC 3046 (1, 2); RFC 3256 (4); RFC 3527 (5); RFC 3993 (6); RFC 4014 (7);
+/// RFC 4030 (8); RFC 4243 (9); RFC 5010 (10); RFC 5107 (11); RFC 6925 (12).
+fn relay_agent_sub_option_name(code: u8) -> Option<&'static str> {
+    match code {
+        1 => Some("Agent Circuit ID"),
+        2 => Some("Agent Remote ID"),
+        4 => Some("DOCSIS Device Class"),
+        5 => Some("Link Selection"),
+        6 => Some("Subscriber-ID"),
+        7 => Some("RADIUS Attributes"),
+        8 => Some("Authentication"),
+        9 => Some("Vendor-Specific Information"),
+        10 => Some("Relay Agent Flags"),
+        11 => Some("Server Identifier Override"),
+        12 => Some("Relay Agent Identifier"),
+        _ => None,
+    }
+}
+
+/// Descriptor for the Relay Agent sub-option Object container.
+///
+/// `display_fn` is invoked by
+/// [`DissectBuffer::resolve_container_display_name`] with the container's
+/// children, so the outer label resolves to the sub-option name (e.g.
+/// "Agent Circuit ID") instead of colliding with the inner `Sub-Option`
+/// field.
+static FD_RELAY_AGENT_SUB_OPTION: FieldDescriptor = FieldDescriptor {
+    name: "relay_agent_sub_option",
+    display_name: "Relay Agent Sub-Option",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("sub_option", FieldValue::U8(c)) => relay_agent_sub_option_name(*c),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Child field descriptor indices for [`CLASSLESS_ROUTE_CHILDREN`].
 const CFD_ROUTE_PREFIX_LENGTH: usize = 0;
 const CFD_ROUTE_DESTINATION: usize = 1;
@@ -659,7 +703,7 @@ fn push_relay_agent_info<'pkt>(
             _ => CFD_RELAY_DATA,
         };
         let obj_idx = buf.begin_container(
-            &RELAY_AGENT_CHILDREN[CFD_RELAY_SUB_OPTION],
+            &FD_RELAY_AGENT_SUB_OPTION,
             FieldValue::Object(0..0),
             base..base + 2 + sub_len,
         );
@@ -2911,6 +2955,32 @@ mod tests {
         assert_eq!(second[0].value, FieldValue::U8(2));
         assert_eq!(second[1].name(), "remote_id");
         assert_eq!(second[1].value, FieldValue::Bytes(b"rid1"));
+    }
+
+    #[test]
+    fn relay_agent_sub_option_container_resolves_to_name() {
+        // Sub-option 1 (Agent Circuit ID): the outer container label should
+        // resolve to "Agent Circuit ID" rather than duplicating "Sub-Option".
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let relay_info = [1, 3, b'c', b'i', b'd'];
+        push_option(&mut pkt, 82, &relay_info);
+        pkt.push(255);
+        let d = DhcpDissector;
+        let mut buf = DissectBuffer::new();
+        d.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "relay_agent_sub_option")
+            .expect("sub-option container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Relay Agent Sub-Option");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("Agent Circuit ID")
+        );
     }
 
     #[test]

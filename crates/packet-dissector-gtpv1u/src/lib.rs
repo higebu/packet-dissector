@@ -27,6 +27,28 @@ fn gtpv1u_message_type_name(v: u8) -> Option<&'static str> {
     }
 }
 
+/// Map a GTPv1-U Next Extension Header Type value to its name.
+///
+/// 3GPP TS 29.281, Section 5.2.1, Table 5.2.1-3.
+fn gtpv1u_ext_header_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        0x00 => Some("No more extension headers"),
+        0x01 => Some("MBMS support indication"),
+        0x02 => Some("MS Info Change Reporting support indication"),
+        0x20 => Some("Service Class Indicator"),
+        0x40 => Some("UDP Port"),
+        0x81 => Some("RAN Container"),
+        0x82 => Some("Long PDCP PDU Number"),
+        0x83 => Some("Xw RAN Container"),
+        0x84 => Some("NR RAN Container"),
+        0x85 => Some("PDU Session Container"),
+        0xC0 => Some("PDCP PDU Number"),
+        0xC1 => Some("Suspend Request"),
+        0xC2 => Some("Suspend Response"),
+        _ => None,
+    }
+}
+
 /// Minimum GTP-U header size (mandatory fields only).
 ///
 /// 3GPP TS 29.281, Section 5.1 — The GTP-U header is a variable length
@@ -99,6 +121,27 @@ static EXT_HEADER_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("length", "Length", FieldType::U8),
     FieldDescriptor::new("content", "Content", FieldType::Bytes),
 ];
+
+/// Container descriptor for a GTPv1-U extension header entry.
+///
+/// `display_fn` resolves the outer container's label to the extension header
+/// type name (e.g. "PDU Session Container") by looking up the inner `type`
+/// field.
+static FD_EXTENSION_HEADER: FieldDescriptor = FieldDescriptor {
+    name: "extension_header",
+    display_name: "Extension Header",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => gtpv1u_ext_header_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
 
 /// GTPv1-U dissector.
 ///
@@ -378,7 +421,7 @@ fn parse_extension_headers<'pkt>(
         let next = data[pos + ext_len_bytes - 1];
 
         let obj_idx = buf.begin_container(
-            &EXT_HEADER_FIELD_DESCRIPTORS[FD_EXT_TYPE],
+            &FD_EXTENSION_HEADER,
             FieldValue::Object(0..0),
             packet_offset + pos..packet_offset + pos + ext_len_bytes,
         );
@@ -729,6 +772,51 @@ mod tests {
         assert_eq!(ext_type.value, FieldValue::U8(0x85));
         let ext_content = ext.iter().find(|f| f.name() == "content").unwrap();
         assert_eq!(ext_content.value, FieldValue::Bytes(&[0x09, 0x00]));
+    }
+
+    #[test]
+    fn extension_header_container_resolves_to_type_name() {
+        let mut pkt = Vec::new();
+        // Version=1, PT=1, E=1 → 0x34
+        pkt.push(0x34);
+        pkt.push(0xFF); // Message Type = G-PDU
+        let len_pos = pkt.len();
+        pkt.extend_from_slice(&0u16.to_be_bytes());
+        pkt.extend_from_slice(&0x11223344u32.to_be_bytes()); // TEID
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // Sequence Number
+        pkt.push(0x00); // N-PDU Number
+        pkt.push(0x85); // Next Extension Header Type = PDU Session Container
+
+        // Extension header: type carried via next-field above
+        pkt.push(0x01); // Length = 1 (4 bytes)
+        pkt.extend_from_slice(&[0x09, 0x00]); // content
+        pkt.push(0x00); // Next Extension Header Type = 0
+
+        // Payload: IPv4 stub
+        pkt.push(0x45);
+        pkt.extend_from_slice(&[0u8; 19]);
+
+        let length = (pkt.len() - MIN_HEADER_SIZE) as u16;
+        pkt[len_pos..len_pos + 2].copy_from_slice(&length.to_be_bytes());
+
+        let mut buf = DissectBuffer::new();
+        Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let ext_headers = buf.field_by_name(layer, "extension_headers").unwrap();
+        let ext_range = ext_headers.value.as_container_range().unwrap().clone();
+        let elems = buf.nested_fields(&ext_range);
+        let (offset, object) = elems
+            .iter()
+            .enumerate()
+            .find(|(_, f)| matches!(f.value, FieldValue::Object(_)))
+            .expect("extension header Object must be present");
+        assert_eq!(object.descriptor.display_name, "Extension Header");
+        let obj_idx = ext_range.start + offset as u32;
+        assert_eq!(
+            buf.resolve_container_display_name(obj_idx),
+            Some("PDU Session Container"),
+        );
     }
 
     #[test]

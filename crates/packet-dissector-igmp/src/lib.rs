@@ -150,6 +150,27 @@ const GRC_SOURCES: usize = 4;
 /// Child field descriptor index for group record `aux_data`.
 const GRC_AUX_DATA: usize = 5;
 
+/// Container descriptor for an IGMPv3 group record Object.
+///
+/// The outer label resolves to the record type name (e.g.
+/// `MODE_IS_INCLUDE`) by looking up the inner `record_type` field,
+/// avoiding collision with the inner "Record Type" label.
+static FD_GROUP_RECORD: FieldDescriptor = FieldDescriptor {
+    name: "group_record",
+    display_name: "Group Record",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("record_type", FieldValue::U8(t)) => igmpv3_record_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Child field descriptors for IGMPv3 group record Array elements.
 static GROUP_RECORD_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor {
@@ -332,7 +353,7 @@ fn push_group_records<'pkt>(
 
         let abs_pos = offset + pos;
         let obj_idx = buf.begin_container(
-            &GROUP_RECORD_CHILDREN[GRC_RECORD_TYPE],
+            &FD_GROUP_RECORD,
             FieldValue::Object(0..0),
             abs_pos..abs_pos + record_size,
         );
@@ -1202,6 +1223,32 @@ mod tests {
         assert_eq!(
             buf.field_by_name(layer, "group_address").unwrap().range,
             38..42
+        );
+    }
+
+    #[test]
+    fn group_record_container_resolves_to_record_type_name() {
+        // IGMPv3 Report with one MODE_IS_INCLUDE record so the container
+        // label resolves to "MODE_IS_INCLUDE" instead of duplicating the
+        // inner "Record Type" label.
+        let raw: &[u8] = &[
+            0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0xEF, 0x01,
+            0x01, 0x01,
+        ];
+        let mut buf = DissectBuffer::new();
+        IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "group_record")
+            .expect("group_record container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Group Record");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("MODE_IS_INCLUDE")
         );
     }
 }
