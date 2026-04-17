@@ -152,6 +152,27 @@ const PFD_CRITICAL: usize = 1;
 const PFD_PAYLOAD_LENGTH: usize = 2;
 const PFD_PAYLOAD_DATA: usize = 3;
 
+/// Container descriptor for a payload Object.
+///
+/// The outer label resolves to the payload name (e.g. `SA`) by looking up
+/// the inner `payload_type` field, avoiding collision with the inner
+/// "Payload Type" label.
+static FD_PAYLOAD: FieldDescriptor = FieldDescriptor {
+    name: "payload",
+    display_name: "Payload",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("payload_type", FieldValue::U8(t)) => payload_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Payload child field descriptors.
 ///
 /// IKEv2 generic payload header has a Critical bit followed by 7 RESERVED bits
@@ -539,7 +560,7 @@ fn parse_payload_chain<'pkt>(
         let payload_offset = base_offset + pos;
 
         let obj_idx = buf.begin_container(
-            &PAYLOAD_CHILDREN[PFD_PAYLOAD_TYPE],
+            &FD_PAYLOAD,
             FieldValue::Object(0..0),
             payload_offset..base_offset + end,
         );
@@ -1166,6 +1187,41 @@ mod tests {
         assert!(
             buf.field_by_name(layer, "flag_authentication_only")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn payload_container_resolves_to_payload_name() {
+        // IKEv2 message with a single SA payload (type 33) so the container
+        // label resolves to "Security Association" instead of duplicating
+        // the inner "Payload Type" label.
+        let mut data = make_ike_header(
+            &[0x01; 8],
+            &[0x00; 8],
+            33, // first payload = SA
+            2,
+            0,
+            34, // IKE_SA_INIT
+            0x08,
+            0,
+            28 + 8,
+        );
+        data.extend_from_slice(&[0, 0x00, 0x00, 0x08, 0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "payload")
+            .expect("payload container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Payload");
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("Security Association")
         );
     }
 }
