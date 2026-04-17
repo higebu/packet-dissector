@@ -71,6 +71,27 @@ const CFD_FLAGS: usize = 1;
 const CFD_LENGTH: usize = 2;
 const CFD_VALUE: usize = 3;
 
+/// Container descriptor for a chunk Object.
+///
+/// The outer label resolves to the chunk name (e.g. `INIT`) by looking up
+/// the inner `type` field, avoiding collision with the inner "Chunk Type"
+/// label.
+static FD_CHUNK: FieldDescriptor = FieldDescriptor {
+    name: "chunk",
+    display_name: "Chunk",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => sctp_chunk_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 /// Child field descriptors for SCTP chunk entries within the `chunks` array.
 static CHUNK_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor {
@@ -228,7 +249,7 @@ impl Dissector for SctpDissector {
             }
 
             let obj_idx = buf.begin_container(
-                &CHUNK_CHILD_FIELDS[CFD_TYPE],
+                &FD_CHUNK,
                 FieldValue::Object(0..0),
                 offset + pos..offset + pos + chunk_length,
             );
@@ -659,5 +680,25 @@ mod tests {
         assert_eq!(descs[FD_VERIFICATION_TAG].name, "verification_tag");
         assert_eq!(descs[FD_CHECKSUM].name, "checksum");
         assert_eq!(descs[FD_CHUNKS].name, "chunks");
+    }
+
+    #[test]
+    fn chunk_container_resolves_to_chunk_name() {
+        // Single INIT chunk so the container label resolves to "INIT"
+        // instead of duplicating the inner "Chunk Type" label.
+        let mut pkt = build_common_header(36412, 3868, 0xAABB_CCDD, 0x1234_5678);
+        push_chunk(&mut pkt, 1, 0, &[0u8; 16]); // INIT
+        let mut buf = DissectBuffer::new();
+        SctpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let (idx, field) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "chunk")
+            .expect("chunk container not found");
+        assert!(matches!(field.value, FieldValue::Object(_)));
+        assert_eq!(field.display_name(), "Chunk");
+        assert_eq!(buf.resolve_container_display_name(idx as u32), Some("INIT"));
     }
 }
