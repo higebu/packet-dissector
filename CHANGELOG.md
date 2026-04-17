@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.2] - 2026-04-17
+
+### 🚀 Features
+
+- *(core)* Resolve container display name from children
+
+### 🐛 Bug Fixes
+
+- *(vrrp)* Flatten single-address Object into Array children
+- *(tls)* Derive extension container label from inner type
+- *(stun)* Derive attribute container label from inner type
+- *(srv6)* Derive TLV container label from inner type
+- *(sip)* Separate header container descriptor from inner name field
+- *(sctp)* Derive chunk container label from inner type
+- *(radius)* Derive attribute container label from inner type
+- *(ppp)* Derive option container label from inner type
+- *(pfcp)* Derive IE container label from inner type
+- *(ospf)* Derive LSR entry container label from inner ls_type
+- *(ngap)* Derive IE container label from inner id
+- *(lldp)* Derive TLV container label from inner type
+- *(l2tpv3)* Derive AVP container label from inner vendor_id/attribute_type
+- *(isis)* Derive Protocols-Supported container label from inner nlpid
+- *(ike)* Derive payload container label from inner type
+- *(igmp)* Derive group record container label from inner record_type
+- *(icmpv6)* Derive NDP option container label from inner type
+- *(http2)* Separate header container descriptor from inner name field
+- *(http)* Separate header container descriptor from inner name field
+- *(gtpv2c)* Derive IE container label from inner type
+- *(gtpv1u)* Derive extension header container label from inner type
+- *(dns)* Derive EDNS option container label from inner code
+- *(diameter)* Derive AVP container label from inner code
+- *(dhcpv6)* Derive option container label from inner code
+- *(dhcp)* Derive relay agent sub-option container label from inner code
+
+### 📚 Documentation
+
+- Update README version to 0.3
 ## [0.3.1] - 2026-04-17
 
 ### 📚 Documentation
