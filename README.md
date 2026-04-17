@@ -12,7 +12,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-packet-dissector = "0.2"
+packet-dissector = "0.3"
 ```
 
 ## Features
@@ -46,13 +46,13 @@ select only what you need:
 
 ```toml
 # All protocols (default)
-packet-dissector = "0.2"
+packet-dissector = "0.3"
 
 # Only Ethernet + IPv4 + TCP
-packet-dissector = { version = "0.2", default-features = false, features = ["ethernet", "ipv4", "tcp"] }
+packet-dissector = { version = "0.3", default-features = false, features = ["ethernet", "ipv4", "tcp"] }
 
 # Convenience groups
-packet-dissector = { version = "0.2", default-features = false, features = ["layer2", "layer3", "layer4"] }
+packet-dissector = { version = "0.3", default-features = false, features = ["layer2", "layer3", "layer4"] }
 ```
 
 Representative feature flags:
