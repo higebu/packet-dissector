@@ -18,6 +18,26 @@ static LCP_OPTION_DESCRIPTORS: &[FieldDescriptor] = ppp_option_descriptors!(|v, 
     _ => None,
 });
 
+/// Container descriptor for an LCP configuration option entry.
+///
+/// `display_fn` resolves the outer container's label to the option name
+/// (e.g. "Maximum-Receive-Unit") by looking up the inner `type` field.
+static FD_LCP_OPTION: FieldDescriptor = FieldDescriptor {
+    name: "option",
+    display_name: "Option",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => Some(lcp_option_name(*t)),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
 static FD_INLINE_DATA: FieldDescriptor = FieldDescriptor::new("data", "Data", FieldType::Bytes);
 
 static FD_INLINE_OPTIONS: FieldDescriptor =
@@ -79,6 +99,7 @@ pub fn parse<'pkt>(data: &'pkt [u8], offset: usize, buf: &mut DissectBuffer<'pkt
             let has_options = crate::parse_options(
                 payload,
                 payload_offset,
+                &FD_LCP_OPTION,
                 LCP_OPTION_DESCRIPTORS,
                 parse_option_value,
                 buf,
@@ -601,6 +622,33 @@ mod tests {
             Some("Quality-Protocol")
         );
         assert_eq!(opt[2].value, FieldValue::U16(0xC025));
+    }
+
+    #[test]
+    fn option_container_resolves_to_option_name() {
+        // Configure-Request with MRU option (Type=1, Length=4, Value=1500).
+        #[rustfmt::skip]
+        let data = [0x01, 0x01, 0x00, 0x08, 1, 4, 0x05, 0xDC];
+        let buf = parse_to_buf(&data, 0);
+        let fields = obj_fields(&buf);
+        let FieldValue::Array(ref r) = fields[3].value else {
+            panic!("expected Array")
+        };
+        // Locate the option Object; its descriptor must be the generic
+        // container, and the resolved label must be the option name.
+        let mut opt_idx = r.start;
+        while opt_idx < r.end {
+            if let FieldValue::Object(_) = buf.fields()[opt_idx as usize].value {
+                break;
+            }
+            opt_idx += 1;
+        }
+        let obj = &buf.fields()[opt_idx as usize];
+        assert_eq!(obj.descriptor.display_name, "Option");
+        assert_eq!(
+            buf.resolve_container_display_name(opt_idx),
+            Some("Maximum-Receive-Unit"),
+        );
     }
 
     #[test]

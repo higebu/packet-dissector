@@ -234,6 +234,7 @@ pub fn parse_protocol<'pkt>(
 pub(crate) fn parse_options<'pkt>(
     options_data: &'pkt [u8],
     base_offset: usize,
+    container_descriptor: &'static FieldDescriptor,
     descriptors: &'static [FieldDescriptor],
     value_parser: fn(u8, &[u8]) -> FieldValue,
     buf: &mut DissectBuffer<'pkt>,
@@ -255,7 +256,7 @@ pub(crate) fn parse_options<'pkt>(
         let opt_start = base_offset + pos;
         let opt_value = value_parser(opt_type, &options_data[pos + 2..pos + opt_len]);
         let obj_idx = buf.begin_container(
-            &descriptors[FD_OPT_TYPE],
+            container_descriptor,
             FieldValue::Object(0..0),
             opt_start..opt_start + opt_len,
         );
