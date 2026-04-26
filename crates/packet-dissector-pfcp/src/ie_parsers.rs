@@ -31,6 +31,9 @@ static FD_INLINE_RECOVERY_TIME_STAMP: FieldDescriptor =
 static FD_INLINE_NETWORK_INSTANCE: FieldDescriptor =
     FieldDescriptor::new("network_instance", "Network Instance", FieldType::Bytes);
 
+static FD_INLINE_APN_DNN: FieldDescriptor =
+    FieldDescriptor::new("apn_dnn", "APN/DNN", FieldType::Bytes);
+
 // Shared field descriptors for F-SEID and F-TEID.
 
 static FD_INLINE_V4: FieldDescriptor = FieldDescriptor::new("v4", "V4", FieldType::U8);
@@ -153,6 +156,73 @@ static FD_INLINE_GTPU_EXT_HDR_DELETION: FieldDescriptor = FieldDescriptor::new(
 )
 .optional();
 
+// UE IP Address — 3GPP TS 29.244, Section 8.2.62.
+
+static FD_INLINE_UE_IP_SD: FieldDescriptor = FieldDescriptor::new("sd", "S/D", FieldType::U8);
+static FD_INLINE_UE_IP_IPV6D: FieldDescriptor =
+    FieldDescriptor::new("ipv6d", "IPv6D", FieldType::U8);
+static FD_INLINE_UE_IP_CHV4: FieldDescriptor =
+    FieldDescriptor::new("chv4", "CHV4 (CHOOSE IPv4)", FieldType::U8);
+static FD_INLINE_UE_IP_CHV6: FieldDescriptor =
+    FieldDescriptor::new("chv6", "CHV6 (CHOOSE IPv6)", FieldType::U8);
+static FD_INLINE_UE_IP_IP6PL: FieldDescriptor =
+    FieldDescriptor::new("ip6pl", "IP6PL", FieldType::U8);
+static FD_INLINE_IPV6_PD_BITS: FieldDescriptor = FieldDescriptor::new(
+    "ipv6_prefix_delegation_bits",
+    "IPv6 Prefix Delegation Bits",
+    FieldType::U8,
+)
+.optional();
+static FD_INLINE_IPV6_PREFIX_LENGTH: FieldDescriptor =
+    FieldDescriptor::new("ipv6_prefix_length", "IPv6 Prefix Length", FieldType::U8).optional();
+
+// Remote GTP-U Peer — 3GPP TS 29.244, Section 8.2.70.
+
+static FD_INLINE_REMOTE_GTPU_DI: FieldDescriptor = FieldDescriptor::new("di", "DI", FieldType::U8);
+static FD_INLINE_REMOTE_GTPU_NI: FieldDescriptor = FieldDescriptor::new("ni", "NI", FieldType::U8);
+static FD_INLINE_REMOTE_GTPU_RTS: FieldDescriptor =
+    FieldDescriptor::new("rts", "RTS", FieldType::U8);
+static FD_INLINE_REMOTE_GTPU_DI_LENGTH: FieldDescriptor =
+    FieldDescriptor::new("di_length", "Destination Interface Length", FieldType::U16).optional();
+static FD_INLINE_REMOTE_GTPU_NI_LENGTH: FieldDescriptor =
+    FieldDescriptor::new("ni_length", "Network Instance Length", FieldType::U16).optional();
+static FD_INLINE_REMOTE_GTPU_RTS_VALUE: FieldDescriptor =
+    FieldDescriptor::new("recovery_timestamp", "Recovery Timestamp", FieldType::U32).optional();
+
+// Report Type — 3GPP TS 29.244, Section 8.2.21.
+
+static FD_INLINE_REPORT_DLDR: FieldDescriptor = FieldDescriptor::new("dldr", "DLDR", FieldType::U8);
+static FD_INLINE_REPORT_USAR: FieldDescriptor = FieldDescriptor::new("usar", "USAR", FieldType::U8);
+static FD_INLINE_REPORT_ERIR: FieldDescriptor = FieldDescriptor::new("erir", "ERIR", FieldType::U8);
+static FD_INLINE_REPORT_UPIR: FieldDescriptor = FieldDescriptor::new("upir", "UPIR", FieldType::U8);
+static FD_INLINE_REPORT_TMIR: FieldDescriptor = FieldDescriptor::new("tmir", "TMIR", FieldType::U8);
+static FD_INLINE_REPORT_SESR: FieldDescriptor = FieldDescriptor::new("sesr", "SESR", FieldType::U8);
+static FD_INLINE_REPORT_UISR: FieldDescriptor = FieldDescriptor::new("uisr", "UISR", FieldType::U8);
+
+// UP Function Features — 3GPP TS 29.244, Section 8.2.25.
+//
+// The IE is a variable-length bitmask (octet pairs). The full set of bits is
+// large and grows with each release, so we expose each octet as a raw `U8`
+// rather than expanding every flag. Consumers can interpret bits per
+// 3GPP TS 29.244 Table 8.2.25-1.
+
+static FD_INLINE_UPFF_OCTET_5: FieldDescriptor = FieldDescriptor::new(
+    "supported_features_octet_5",
+    "Supported-Features (Octet 5)",
+    FieldType::U8,
+);
+static FD_INLINE_UPFF_OCTET_6: FieldDescriptor = FieldDescriptor::new(
+    "supported_features_octet_6",
+    "Supported-Features (Octet 6)",
+    FieldType::U8,
+);
+static FD_INLINE_UPFF_ADDITIONAL: FieldDescriptor = FieldDescriptor::new(
+    "additional_supported_features",
+    "Additional Supported-Features",
+    FieldType::Bytes,
+)
+.optional();
+
 /// Parse the value portion of a PFCP IE into a structured [`FieldValue`],
 /// pushing fields directly into `buf` for Object and grouped IE values.
 ///
@@ -212,20 +282,18 @@ pub fn parse_ie_value<'pkt>(
         21 if !data.is_empty() => parse_f_teid(data, offset, buf),
         // 3GPP TS 29.244, Section 8.2.4 — Network Instance
         22 if !data.is_empty() => {
-            let obj_idx = buf.begin_container(
-                &crate::ie::IE_CHILD_FIELDS[2],
-                FieldValue::Object(0..0),
-                offset..offset + data.len(),
-            );
-            // Store raw bytes (zero-copy) instead of decoded String
-            buf.push_field(
-                &FD_INLINE_NETWORK_INSTANCE,
-                FieldValue::Bytes(data),
-                offset..offset + data.len(),
-            );
-            buf.end_container(obj_idx);
-            FieldValue::Object(0..0)
+            parse_named_fqdn_ie(data, offset, buf, &FD_INLINE_NETWORK_INSTANCE)
         }
+        // 3GPP TS 29.244, Section 8.2.21 — Report Type
+        39 if !data.is_empty() => parse_report_type(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.25 — UP Function Features
+        43 if data.len() >= 2 => parse_up_function_features(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.62 — UE IP Address
+        93 if !data.is_empty() => parse_ue_ip_address(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.70 — Remote GTP-U Peer
+        103 if !data.is_empty() => parse_remote_gtpu_peer(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.117 — APN/DNN
+        159 if !data.is_empty() => parse_named_fqdn_ie(data, offset, buf, &FD_INLINE_APN_DNN),
         // 3GPP TS 29.244, Section 8.2.37 — F-SEID
         57 if data.len() >= 9 => parse_f_seid(data, offset, buf),
         // 3GPP TS 29.244, Section 8.2.38 — Node ID
@@ -513,11 +581,14 @@ fn parse_node_id<'pkt>(
                 offset + 1..offset + 17,
             );
         }
-        // FQDN — store as raw bytes (zero-copy)
+        // FQDN — decode label-prefixed form into scratch (e.g. "example.com")
         2 if data.len() >= 2 => {
+            let value = decode_fqdn_into_scratch(&data[1..], buf)
+                .map(FieldValue::Scratch)
+                .unwrap_or(FieldValue::Bytes(&data[1..]));
             buf.push_field(
                 &FD_INLINE_NODE_ID_VALUE,
-                FieldValue::Bytes(&data[1..]),
+                value,
                 offset + 1..offset + data.len(),
             );
         }
@@ -844,6 +915,442 @@ fn cause_name(value: u8) -> Option<&'static str> {
     }
 }
 
+/// Decode a label-prefixed FQDN/APN string into the scratch buffer.
+///
+/// Each label is preceded by a single-byte length and the labels are joined
+/// with `.`. A trailing zero-length label (`\x00`), if present, terminates
+/// the string. Returns the scratch range covering the joined string.
+///
+/// Returns `None` and leaves the scratch buffer unchanged when:
+///
+/// - the input is empty,
+/// - any label length exceeds the remaining bytes,
+/// - or no labels were decoded (e.g. plain UTF-8 input that does not match
+///   the label-length encoding).
+///
+/// Encoding follows 3GPP TS 23.003 clause 9.1 / RFC 1035 §3.1; this is the
+/// same scheme as go-pfcp's `utils.DecodeFQDN`.
+fn decode_fqdn_into_scratch<'pkt>(
+    data: &[u8],
+    buf: &mut DissectBuffer<'pkt>,
+) -> Option<core::ops::Range<u32>> {
+    if data.is_empty() {
+        return None;
+    }
+
+    // Validate first so we never have to roll back the scratch buffer on
+    // partial decodes.
+    let mut pos = 0;
+    let mut label_count = 0usize;
+    while pos < data.len() {
+        let label_len = data[pos] as usize;
+        if label_len == 0 {
+            // A null terminator is allowed only as the final byte.
+            if pos + 1 != data.len() {
+                return None;
+            }
+            break;
+        }
+        let next = pos.checked_add(1)?.checked_add(label_len)?;
+        if next > data.len() {
+            return None;
+        }
+        pos = next;
+        label_count += 1;
+    }
+    if label_count == 0 {
+        return None;
+    }
+
+    let start = buf.scratch_len();
+    let mut pos = 0;
+    let mut first = true;
+    while pos < data.len() {
+        let label_len = data[pos] as usize;
+        if label_len == 0 {
+            break;
+        }
+        if !first {
+            buf.extend_scratch(b".");
+        }
+        first = false;
+        buf.extend_scratch(&data[pos + 1..pos + 1 + label_len]);
+        pos += 1 + label_len;
+    }
+    let end = buf.scratch_len();
+    Some(start..end)
+}
+
+/// Parse a Network Instance / APN-DNN style IE — decode label-prefixed FQDN
+/// into scratch, fall back to raw bytes for non-FQDN encodings.
+///
+/// 3GPP TS 29.244, Sections 8.2.4 (Network Instance) and 8.2.117 (APN/DNN).
+fn parse_named_fqdn_ie<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+    descriptor: &'static FieldDescriptor,
+) -> FieldValue<'pkt> {
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    let value = decode_fqdn_into_scratch(data, buf)
+        .map(FieldValue::Scratch)
+        .unwrap_or(FieldValue::Bytes(data));
+    buf.push_field(descriptor, value, offset..offset + data.len());
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a UE IP Address IE value.
+///
+/// 3GPP TS 29.244, Section 8.2.62:
+///
+/// - Octet 5: Spare(1) | IP6PL | CHV6 | CHV4 | IPv6D | S/D | V4 | V6
+/// - if V4=1: IPv4 address (4 octets)
+/// - if V6=1: IPv6 address (16 octets)
+/// - if IPv6D=1: IPv6 Prefix Delegation Bits (1 octet)
+/// - if IP6PL=1: IPv6 Prefix Length (1 octet)
+fn parse_ue_ip_address<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    // Caller guarantees !data.is_empty() via match guard.
+    let flags = data[0];
+    let v6 = flags & 0x01;
+    let v4 = (flags >> 1) & 0x01;
+    let sd = (flags >> 2) & 0x01;
+    let ipv6d = (flags >> 3) & 0x01;
+    let chv4 = (flags >> 4) & 0x01;
+    let chv6 = (flags >> 5) & 0x01;
+    let ip6pl = (flags >> 6) & 0x01;
+
+    // Pre-compute the required tail length so we can reject truncated input
+    // up front (and leave the buffer untouched on failure).
+    let mut required = 1usize;
+    if v4 != 0 {
+        required = required.saturating_add(4);
+    }
+    if v6 != 0 {
+        required = required.saturating_add(16);
+    }
+    if ipv6d != 0 {
+        required = required.saturating_add(1);
+    }
+    if ip6pl != 0 {
+        required = required.saturating_add(1);
+    }
+    if data.len() < required {
+        return FieldValue::Bytes(data);
+    }
+
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+
+    buf.push_field(&FD_INLINE_V4, FieldValue::U8(v4), offset..offset + 1);
+    buf.push_field(&FD_INLINE_V6, FieldValue::U8(v6), offset..offset + 1);
+    buf.push_field(&FD_INLINE_UE_IP_SD, FieldValue::U8(sd), offset..offset + 1);
+    buf.push_field(
+        &FD_INLINE_UE_IP_IPV6D,
+        FieldValue::U8(ipv6d),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_UE_IP_CHV4,
+        FieldValue::U8(chv4),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_UE_IP_CHV6,
+        FieldValue::U8(chv6),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_UE_IP_IP6PL,
+        FieldValue::U8(ip6pl),
+        offset..offset + 1,
+    );
+
+    let mut pos = 1usize;
+    if v4 != 0 {
+        buf.push_field(
+            &FD_INLINE_IPV4_ADDRESS,
+            FieldValue::Ipv4Addr(read_ipv4_addr(data, pos).unwrap_or_default()),
+            offset + pos..offset + pos + 4,
+        );
+        pos += 4;
+    }
+    if v6 != 0 {
+        let addr = read_ipv6_addr(data, pos).unwrap_or_default();
+        buf.push_field(
+            &FD_INLINE_IPV6_ADDRESS,
+            FieldValue::Ipv6Addr(addr),
+            offset + pos..offset + pos + 16,
+        );
+        pos += 16;
+    }
+    if ipv6d != 0 {
+        buf.push_field(
+            &FD_INLINE_IPV6_PD_BITS,
+            FieldValue::U8(data[pos]),
+            offset + pos..offset + pos + 1,
+        );
+        pos += 1;
+    }
+    if ip6pl != 0 {
+        buf.push_field(
+            &FD_INLINE_IPV6_PREFIX_LENGTH,
+            FieldValue::U8(data[pos]),
+            offset + pos..offset + pos + 1,
+        );
+    }
+
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a Remote GTP-U Peer IE value.
+///
+/// 3GPP TS 29.244, Section 8.2.70:
+///
+/// - Octet 5: Spare(3) | RTS | NI | DI | V4 | V6
+/// - if V4=1: IPv4 address (4 octets)
+/// - if V6=1: IPv6 address (16 octets)
+/// - if DI=1: Length(2) + Destination Interface (variable, encoded as in §8.2.24)
+/// - if NI=1: Length(2) + Network Instance (variable, encoded as in §8.2.4)
+/// - if RTS=1: Recovery Timestamp (4 octets, encoded as in §8.2.114)
+fn parse_remote_gtpu_peer<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    // Caller guarantees !data.is_empty() via match guard.
+    let flags = data[0];
+    let v6 = flags & 0x01;
+    let v4 = (flags >> 1) & 0x01;
+    let di = (flags >> 2) & 0x01;
+    let ni = (flags >> 3) & 0x01;
+    let rts = (flags >> 4) & 0x01;
+
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+
+    buf.push_field(&FD_INLINE_V4, FieldValue::U8(v4), offset..offset + 1);
+    buf.push_field(&FD_INLINE_V6, FieldValue::U8(v6), offset..offset + 1);
+    buf.push_field(
+        &FD_INLINE_REMOTE_GTPU_DI,
+        FieldValue::U8(di),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REMOTE_GTPU_NI,
+        FieldValue::U8(ni),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REMOTE_GTPU_RTS,
+        FieldValue::U8(rts),
+        offset..offset + 1,
+    );
+
+    let mut pos = 1usize;
+    let mut truncated = false;
+
+    if v4 != 0 {
+        if pos + 4 <= data.len() {
+            buf.push_field(
+                &FD_INLINE_IPV4_ADDRESS,
+                FieldValue::Ipv4Addr(read_ipv4_addr(data, pos).unwrap_or_default()),
+                offset + pos..offset + pos + 4,
+            );
+            pos += 4;
+        } else {
+            truncated = true;
+        }
+    }
+    if !truncated && v6 != 0 {
+        if pos + 16 <= data.len() {
+            let addr = read_ipv6_addr(data, pos).unwrap_or_default();
+            buf.push_field(
+                &FD_INLINE_IPV6_ADDRESS,
+                FieldValue::Ipv6Addr(addr),
+                offset + pos..offset + pos + 16,
+            );
+            pos += 16;
+        } else {
+            truncated = true;
+        }
+    }
+    if !truncated && di != 0 {
+        if pos + 2 <= data.len() {
+            let di_len =
+                packet_dissector_core::util::read_be_u16(data, pos).unwrap_or_default() as usize;
+            buf.push_field(
+                &FD_INLINE_REMOTE_GTPU_DI_LENGTH,
+                FieldValue::U16(di_len as u16),
+                offset + pos..offset + pos + 2,
+            );
+            pos += 2;
+            if pos + di_len <= data.len() && !data[pos..pos + di_len].is_empty() {
+                let interface_value = data[pos] & 0x0F;
+                buf.push_field(
+                    &FD_INLINE_DESTINATION_INTERFACE_VALUE,
+                    FieldValue::U8(interface_value),
+                    offset + pos..offset + pos + 1,
+                );
+                pos += di_len;
+            } else {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    if !truncated && ni != 0 {
+        if pos + 2 <= data.len() {
+            let ni_len =
+                packet_dissector_core::util::read_be_u16(data, pos).unwrap_or_default() as usize;
+            buf.push_field(
+                &FD_INLINE_REMOTE_GTPU_NI_LENGTH,
+                FieldValue::U16(ni_len as u16),
+                offset + pos..offset + pos + 2,
+            );
+            pos += 2;
+            if pos + ni_len <= data.len() {
+                let ni_data = &data[pos..pos + ni_len];
+                let value = decode_fqdn_into_scratch(ni_data, buf)
+                    .map(FieldValue::Scratch)
+                    .unwrap_or(FieldValue::Bytes(ni_data));
+                buf.push_field(
+                    &FD_INLINE_NETWORK_INSTANCE,
+                    value,
+                    offset + pos..offset + pos + ni_len,
+                );
+                pos += ni_len;
+            } else {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    if !truncated && rts != 0 && pos + 4 <= data.len() {
+        let ts = read_be_u32(data, pos).unwrap_or_default();
+        buf.push_field(
+            &FD_INLINE_REMOTE_GTPU_RTS_VALUE,
+            FieldValue::U32(ts),
+            offset + pos..offset + pos + 4,
+        );
+    }
+
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a Report Type IE value.
+///
+/// 3GPP TS 29.244, Section 8.2.21:
+///
+/// - Octet 5: Spare(1) | UISR | SESR | TMIR | UPIR | ERIR | USAR | DLDR
+fn parse_report_type<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    // Caller guarantees !data.is_empty() via match guard.
+    let o5 = data[0];
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &FD_INLINE_REPORT_DLDR,
+        FieldValue::U8(o5 & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REPORT_USAR,
+        FieldValue::U8((o5 >> 1) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REPORT_ERIR,
+        FieldValue::U8((o5 >> 2) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REPORT_UPIR,
+        FieldValue::U8((o5 >> 3) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REPORT_TMIR,
+        FieldValue::U8((o5 >> 4) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REPORT_SESR,
+        FieldValue::U8((o5 >> 5) & 0x01),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_REPORT_UISR,
+        FieldValue::U8((o5 >> 6) & 0x01),
+        offset..offset + 1,
+    );
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
+/// Parse a UP Function Features IE value.
+///
+/// 3GPP TS 29.244, Section 8.2.25 — variable-length bitmask. The first two
+/// octets ("Supported-Features") are mandatory; subsequent pairs
+/// ("Additional Supported-Features 1..N") are present when explicitly
+/// specified. Each octet is exposed as a raw `U8`; bit-level interpretation
+/// is left to consumers since the flag list grows with each release.
+fn parse_up_function_features<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    // Caller guarantees data.len() >= 2 via match guard.
+    let obj_idx = buf.begin_container(
+        &crate::ie::IE_CHILD_FIELDS[2],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &FD_INLINE_UPFF_OCTET_5,
+        FieldValue::U8(data[0]),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FD_INLINE_UPFF_OCTET_6,
+        FieldValue::U8(data[1]),
+        offset + 1..offset + 2,
+    );
+    if data.len() > 2 {
+        buf.push_field(
+            &FD_INLINE_UPFF_ADDITIONAL,
+            FieldValue::Bytes(&data[2..]),
+            offset + 2..offset + data.len(),
+        );
+    }
+    buf.end_container(obj_idx);
+    FieldValue::Object(0..0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,12 +1478,12 @@ mod tests {
                 let nid_type = obj_field_buf(&buf, r, "node_id_type").unwrap();
                 assert_eq!(nid_type.value, FieldValue::U8(2));
                 let nid_val = obj_field_buf(&buf, r, "node_id_value").unwrap();
-                // Now stored as raw bytes
+                let FieldValue::Scratch(ref sr) = nid_val.value else {
+                    panic!("expected Scratch, got {:?}", nid_val.value)
+                };
                 assert_eq!(
-                    nid_val.value,
-                    FieldValue::Bytes(&[
-                        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0
-                    ])
+                    &buf.scratch()[sr.start as usize..sr.end as usize],
+                    b"example.com"
                 );
             }
             _ => panic!("expected Object"),
@@ -1452,8 +1959,13 @@ mod tests {
                 let fields = buf.nested_fields(r);
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].name(), "network_instance");
-                // Stored as raw bytes now
-                assert_eq!(fields[0].value, FieldValue::Bytes(&data));
+                let FieldValue::Scratch(ref sr) = fields[0].value else {
+                    panic!("expected Scratch, got {:?}", fields[0].value)
+                };
+                assert_eq!(
+                    &buf.scratch()[sr.start as usize..sr.end as usize],
+                    b"foo.bar"
+                );
                 assert_eq!(fields[0].range, 0..9);
             }
             _ => panic!("expected Object"),
@@ -1462,6 +1974,9 @@ mod tests {
 
     #[test]
     fn parse_network_instance_plain_utf8() {
+        // Plain UTF-8 (no label-length prefix): the first byte 'i' (0x69, 105)
+        // is interpreted as a label length that exceeds the remaining bytes,
+        // so decoding fails and we fall back to raw bytes.
         let data = b"internet";
         let (_val, buf) = parse_and_buf(22, data, 0);
         let obj = &buf.fields()[0];
@@ -1716,5 +2231,415 @@ mod tests {
             }
             _ => panic!("expected Object"),
         }
+    }
+
+    // --- UE IP Address (type 93) tests ---
+
+    #[test]
+    fn parse_ue_ip_address_v4_only() {
+        // flags=0x02 (V4=1), IPv4=10.0.0.1
+        let data = [0x02, 10, 0, 0, 1];
+        let (val, buf) = parse_and_buf(93, &data, 0);
+        assert!(matches!(val, FieldValue::Object(_)));
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "v4").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "v6").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "sd").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv4_address").unwrap().value,
+            FieldValue::Ipv4Addr([10, 0, 0, 1])
+        );
+        assert!(obj_field_buf(&buf, r, "ipv6_address").is_none());
+    }
+
+    #[test]
+    fn parse_ue_ip_address_v6_only() {
+        // flags=0x01 (V6=1), IPv6=::1
+        let mut data = vec![0x01];
+        data.extend_from_slice(&[0u8; 16]);
+        *data.last_mut().unwrap() = 1;
+        let (_val, buf) = parse_and_buf(93, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "v4").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "v6").unwrap().value,
+            FieldValue::U8(1)
+        );
+        let mut expected = [0u8; 16];
+        expected[15] = 1;
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv6_address").unwrap().value,
+            FieldValue::Ipv6Addr(expected)
+        );
+    }
+
+    #[test]
+    fn parse_ue_ip_address_dual_stack() {
+        // flags=0x03 (V4=1, V6=1), IPv4 then IPv6
+        let mut data = vec![0x03];
+        data.extend_from_slice(&[192, 168, 1, 1]);
+        let mut ipv6 = [0u8; 16];
+        ipv6[0] = 0xFE;
+        ipv6[1] = 0x80;
+        data.extend_from_slice(&ipv6);
+        let (_val, buf) = parse_and_buf(93, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv4_address").unwrap().value,
+            FieldValue::Ipv4Addr([192, 168, 1, 1])
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv6_address").unwrap().value,
+            FieldValue::Ipv6Addr(ipv6)
+        );
+    }
+
+    #[test]
+    fn parse_ue_ip_address_with_prefix_delegation() {
+        // flags=0x09 (V6=1, IPv6D=1): IPv6 then 1 byte of prefix delegation bits
+        let mut data = vec![0x09];
+        data.extend_from_slice(&[0u8; 16]);
+        data.push(60); // Prefix Delegation Bits
+        let (_val, buf) = parse_and_buf(93, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv6d").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv6_prefix_delegation_bits")
+                .unwrap()
+                .value,
+            FieldValue::U8(60)
+        );
+    }
+
+    #[test]
+    fn parse_ue_ip_address_with_ip6pl() {
+        // flags=0x41 (V6=1, IP6PL=1): IPv6 then 1 byte of prefix length
+        let mut data = vec![0x41];
+        data.extend_from_slice(&[0u8; 16]);
+        data.push(72); // Prefix Length = /72
+        let (_val, buf) = parse_and_buf(93, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "ip6pl").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv6_prefix_length").unwrap().value,
+            FieldValue::U8(72)
+        );
+    }
+
+    #[test]
+    fn parse_ue_ip_address_choose_v4() {
+        // flags=0x10 (CHV4=1, V4=0): no addresses follow
+        let data = [0x10];
+        let (_val, buf) = parse_and_buf(93, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "chv4").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "v4").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert!(obj_field_buf(&buf, r, "ipv4_address").is_none());
+    }
+
+    #[test]
+    fn parse_ue_ip_address_sd_destination() {
+        // flags=0x06 (V4=1, S/D=1)
+        let data = [0x06, 1, 2, 3, 4];
+        let (_val, buf) = parse_and_buf(93, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "sd").unwrap().value,
+            FieldValue::U8(1)
+        );
+    }
+
+    #[test]
+    fn parse_ue_ip_address_truncated() {
+        // V4=1 flag but only 3 trailing bytes (need 4) — fall back to bytes.
+        let data = [0x02, 10, 0, 0];
+        let (val, _buf) = parse_and_buf(93, &data, 0);
+        assert_eq!(val, FieldValue::Bytes(&data));
+    }
+
+    #[test]
+    fn parse_ue_ip_address_empty() {
+        let data: &[u8] = &[];
+        let (val, _buf) = parse_and_buf(93, data, 0);
+        assert_eq!(val, FieldValue::Bytes(&[]));
+    }
+
+    #[test]
+    fn parse_ue_ip_address_nonzero_offset() {
+        let data = [0x02, 10, 0, 0, 1];
+        let (_val, buf) = parse_and_buf(93, &data, 50);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        let ipv4 = obj_field_buf(&buf, r, "ipv4_address").unwrap();
+        assert_eq!(ipv4.range, 51..55);
+    }
+
+    // --- APN/DNN (type 159) tests ---
+
+    #[test]
+    fn parse_apn_dnn_fqdn() {
+        // "internet.example" encoded as labels.
+        let data = [
+            8, b'i', b'n', b't', b'e', b'r', b'n', b'e', b't', 7, b'e', b'x', b'a', b'm', b'p',
+            b'l', b'e',
+        ];
+        let (_val, buf) = parse_and_buf(159, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        let f = obj_field_buf(&buf, r, "apn_dnn").unwrap();
+        let FieldValue::Scratch(ref sr) = f.value else {
+            panic!("expected Scratch, got {:?}", f.value)
+        };
+        assert_eq!(
+            &buf.scratch()[sr.start as usize..sr.end as usize],
+            b"internet.example"
+        );
+    }
+
+    // --- Remote GTP-U Peer (type 103) tests ---
+
+    #[test]
+    fn parse_remote_gtpu_peer_v4_only() {
+        let data = [0x02, 10, 0, 0, 1]; // V4=1, IPv4=10.0.0.1
+        let (_val, buf) = parse_and_buf(103, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "v4").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "ipv4_address").unwrap().value,
+            FieldValue::Ipv4Addr([10, 0, 0, 1])
+        );
+    }
+
+    #[test]
+    fn parse_remote_gtpu_peer_v4_di_ni() {
+        // V4=1, DI=1, NI=1: flags=0x0E
+        // payload: 4 bytes IPv4, then DI len(2)+1 byte, then NI len(2)+8 bytes "internet" label
+        let mut data = vec![0x0E];
+        data.extend_from_slice(&[10, 0, 0, 1]);
+        // DI: length=1, value=1 (Core)
+        data.extend_from_slice(&0x0001u16.to_be_bytes());
+        data.push(0x01);
+        // NI: length=9, label-encoded "internet"
+        data.extend_from_slice(&0x0009u16.to_be_bytes());
+        data.extend_from_slice(&[8, b'i', b'n', b't', b'e', b'r', b'n', b'e', b't']);
+        let (_val, buf) = parse_and_buf(103, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "di").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "ni").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "interface_value").unwrap().value,
+            FieldValue::U8(1)
+        );
+        let ni = obj_field_buf(&buf, r, "network_instance").unwrap();
+        let FieldValue::Scratch(ref sr) = ni.value else {
+            panic!("expected Scratch, got {:?}", ni.value)
+        };
+        assert_eq!(
+            &buf.scratch()[sr.start as usize..sr.end as usize],
+            b"internet"
+        );
+    }
+
+    #[test]
+    fn parse_remote_gtpu_peer_truncated_di() {
+        // V4=1, DI=1: payload claims DI but length field is missing
+        let data = [0x06, 10, 0, 0, 1];
+        let (val, buf) = parse_and_buf(103, &data, 0);
+        // The truncated tail simply causes the DI fields to be absent;
+        // parsing of the head still produces an Object.
+        assert!(matches!(val, FieldValue::Object(_)));
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert!(obj_field_buf(&buf, r, "di_length").is_none());
+    }
+
+    // --- Report Type (type 39) tests ---
+
+    #[test]
+    fn parse_report_type_dldr_only() {
+        let data = [0x01]; // DLDR
+        let (_val, buf) = parse_and_buf(39, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "dldr").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "usar").unwrap().value,
+            FieldValue::U8(0)
+        );
+    }
+
+    #[test]
+    fn parse_report_type_all_flags() {
+        // All seven flag bits set (bit 8 is spare).
+        let data = [0x7F];
+        let (_val, buf) = parse_and_buf(39, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        for name in ["dldr", "usar", "erir", "upir", "tmir", "sesr", "uisr"] {
+            assert_eq!(
+                obj_field_buf(&buf, r, name).unwrap().value,
+                FieldValue::U8(1),
+                "flag {name} should be set",
+            );
+        }
+    }
+
+    // --- UP Function Features (type 43) tests ---
+
+    #[test]
+    fn parse_up_function_features_minimal() {
+        let data = [0x01, 0x80];
+        let (_val, buf) = parse_and_buf(43, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "supported_features_octet_5")
+                .unwrap()
+                .value,
+            FieldValue::U8(0x01)
+        );
+        assert_eq!(
+            obj_field_buf(&buf, r, "supported_features_octet_6")
+                .unwrap()
+                .value,
+            FieldValue::U8(0x80)
+        );
+        assert!(obj_field_buf(&buf, r, "additional_supported_features").is_none());
+    }
+
+    #[test]
+    fn parse_up_function_features_with_additional() {
+        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+        let (_val, buf) = parse_and_buf(43, &data, 0);
+        let obj = &buf.fields()[0];
+        let FieldValue::Object(ref r) = obj.value else {
+            panic!("expected Object")
+        };
+        let add = obj_field_buf(&buf, r, "additional_supported_features").unwrap();
+        assert_eq!(add.value, FieldValue::Bytes(&[0x03, 0x04, 0x05, 0x06]));
+    }
+
+    #[test]
+    fn parse_up_function_features_truncated() {
+        // Less than 2 octets — falls back to raw bytes.
+        let data = [0xFF];
+        let (val, _buf) = parse_and_buf(43, &data, 0);
+        assert_eq!(val, FieldValue::Bytes(&data));
+    }
+
+    // --- decode_fqdn_into_scratch helper tests ---
+
+    #[test]
+    fn decode_fqdn_simple() {
+        let data = [3, b'f', b'o', b'o', 3, b'b', b'a', b'r'];
+        let mut buf = DissectBuffer::new();
+        let r = decode_fqdn_into_scratch(&data, &mut buf).unwrap();
+        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"foo.bar");
+    }
+
+    #[test]
+    fn decode_fqdn_with_terminator() {
+        let data = [3, b'f', b'o', b'o', 3, b'b', b'a', b'r', 0];
+        let mut buf = DissectBuffer::new();
+        let r = decode_fqdn_into_scratch(&data, &mut buf).unwrap();
+        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"foo.bar");
+    }
+
+    #[test]
+    fn decode_fqdn_invalid_length() {
+        // First byte 0x69 = 105 > remaining bytes
+        let data = b"internet";
+        let mut buf = DissectBuffer::new();
+        assert!(decode_fqdn_into_scratch(data, &mut buf).is_none());
+        assert_eq!(buf.scratch_len(), 0);
+    }
+
+    #[test]
+    fn decode_fqdn_empty() {
+        let mut buf = DissectBuffer::new();
+        assert!(decode_fqdn_into_scratch(&[], &mut buf).is_none());
+    }
+
+    #[test]
+    fn decode_fqdn_terminator_not_at_end() {
+        // 0x00 not at end -> invalid
+        let data = [3, b'f', b'o', b'o', 0, 3, b'b', b'a', b'r'];
+        let mut buf = DissectBuffer::new();
+        assert!(decode_fqdn_into_scratch(&data, &mut buf).is_none());
     }
 }
