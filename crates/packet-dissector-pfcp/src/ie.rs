@@ -910,13 +910,11 @@ mod tests {
                 match &value_f.value {
                     FieldValue::Object(vr) => {
                         let ni = obj_field_buf(&buf, vr, "network_instance").unwrap();
-                        // Decoded into the scratch buffer as "foo.bar".
-                        let FieldValue::Scratch(ref sr) = ni.value else {
-                            panic!("expected Scratch, got {:?}", ni.value)
-                        };
+                        // Zero-copy raw label-encoded bytes; rendered as
+                        // "foo.bar" by the descriptor's format_fn.
                         assert_eq!(
-                            &buf.scratch()[sr.start as usize..sr.end as usize],
-                            b"foo.bar"
+                            ni.value,
+                            FieldValue::Bytes(&[3, b'f', b'o', b'o', 3, b'b', b'a', b'r', 0])
                         );
                     }
                     _ => panic!("expected Object"),

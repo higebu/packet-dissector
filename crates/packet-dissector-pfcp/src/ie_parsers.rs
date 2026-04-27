@@ -2,7 +2,7 @@
 //!
 //! 3GPP TS 29.244, Section 8.2.
 
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_fqdn_labels};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr};
 
@@ -25,14 +25,21 @@ static FD_INLINE_NODE_ID_TYPE: FieldDescriptor =
 static FD_INLINE_NODE_ID_VALUE: FieldDescriptor =
     FieldDescriptor::new("node_id_value", "Node ID Value", FieldType::Ipv4Addr);
 
+/// Node ID Value when Node ID Type = 2 (FQDN). Stores the raw label-encoded
+/// payload zero-copy and renders as a dotted string at serialization time.
+static FD_INLINE_NODE_ID_VALUE_FQDN: FieldDescriptor =
+    FieldDescriptor::new("node_id_value", "Node ID Value", FieldType::Bytes)
+        .with_format_fn(format_fqdn_labels);
+
 static FD_INLINE_RECOVERY_TIME_STAMP: FieldDescriptor =
     FieldDescriptor::new("recovery_time_stamp", "Recovery Time Stamp", FieldType::U32);
 
 static FD_INLINE_NETWORK_INSTANCE: FieldDescriptor =
-    FieldDescriptor::new("network_instance", "Network Instance", FieldType::Bytes);
+    FieldDescriptor::new("network_instance", "Network Instance", FieldType::Bytes)
+        .with_format_fn(format_fqdn_labels);
 
 static FD_INLINE_APN_DNN: FieldDescriptor =
-    FieldDescriptor::new("apn_dnn", "APN/DNN", FieldType::Bytes);
+    FieldDescriptor::new("apn_dnn", "APN/DNN", FieldType::Bytes).with_format_fn(format_fqdn_labels);
 
 // Shared field descriptors for F-SEID and F-TEID.
 
@@ -581,14 +588,12 @@ fn parse_node_id<'pkt>(
                 offset + 1..offset + 17,
             );
         }
-        // FQDN — decode label-prefixed form into scratch (e.g. "example.com")
+        // FQDN — keep the label-encoded bytes zero-copy; the descriptor's
+        // format_fn renders them as a dotted string at serialization time.
         2 if data.len() >= 2 => {
-            let value = decode_fqdn_into_scratch(&data[1..], buf)
-                .map(FieldValue::Scratch)
-                .unwrap_or(FieldValue::Bytes(&data[1..]));
             buf.push_field(
-                &FD_INLINE_NODE_ID_VALUE,
-                value,
+                &FD_INLINE_NODE_ID_VALUE_FQDN,
+                FieldValue::Bytes(&data[1..]),
                 offset + 1..offset + data.len(),
             );
         }
@@ -915,74 +920,10 @@ fn cause_name(value: u8) -> Option<&'static str> {
     }
 }
 
-/// Decode a label-prefixed FQDN/APN string into the scratch buffer.
-///
-/// Each label is preceded by a single-byte length and the labels are joined
-/// with `.`. A trailing zero-length label (`\x00`), if present, terminates
-/// the string. Returns the scratch range covering the joined string.
-///
-/// Returns `None` and leaves the scratch buffer unchanged when:
-///
-/// - the input is empty,
-/// - any label length exceeds the remaining bytes,
-/// - or no labels were decoded (e.g. plain UTF-8 input that does not match
-///   the label-length encoding).
-///
-/// Encoding follows 3GPP TS 23.003 clause 9.1 / RFC 1035 §3.1; this is the
-/// same scheme as go-pfcp's `utils.DecodeFQDN`.
-fn decode_fqdn_into_scratch<'pkt>(
-    data: &[u8],
-    buf: &mut DissectBuffer<'pkt>,
-) -> Option<core::ops::Range<u32>> {
-    if data.is_empty() {
-        return None;
-    }
-
-    // Validate first so we never have to roll back the scratch buffer on
-    // partial decodes.
-    let mut pos = 0;
-    let mut label_count = 0usize;
-    while pos < data.len() {
-        let label_len = data[pos] as usize;
-        if label_len == 0 {
-            // A null terminator is allowed only as the final byte.
-            if pos + 1 != data.len() {
-                return None;
-            }
-            break;
-        }
-        let next = pos.checked_add(1)?.checked_add(label_len)?;
-        if next > data.len() {
-            return None;
-        }
-        pos = next;
-        label_count += 1;
-    }
-    if label_count == 0 {
-        return None;
-    }
-
-    let start = buf.scratch_len();
-    let mut pos = 0;
-    let mut first = true;
-    while pos < data.len() {
-        let label_len = data[pos] as usize;
-        if label_len == 0 {
-            break;
-        }
-        if !first {
-            buf.extend_scratch(b".");
-        }
-        first = false;
-        buf.extend_scratch(&data[pos + 1..pos + 1 + label_len]);
-        pos += 1 + label_len;
-    }
-    let end = buf.scratch_len();
-    Some(start..end)
-}
-
-/// Parse a Network Instance / APN-DNN style IE — decode label-prefixed FQDN
-/// into scratch, fall back to raw bytes for non-FQDN encodings.
+/// Parse a Network Instance / APN-DNN style IE — store the raw label-encoded
+/// bytes zero-copy. The descriptor's `format_fn` (`format_fqdn_labels`)
+/// renders them as a dotted string at serialization time, falling back to
+/// UTF-8 lossy when the input is not actually label-prefixed.
 ///
 /// 3GPP TS 29.244, Sections 8.2.4 (Network Instance) and 8.2.117 (APN/DNN).
 fn parse_named_fqdn_ie<'pkt>(
@@ -996,10 +937,11 @@ fn parse_named_fqdn_ie<'pkt>(
         FieldValue::Object(0..0),
         offset..offset + data.len(),
     );
-    let value = decode_fqdn_into_scratch(data, buf)
-        .map(FieldValue::Scratch)
-        .unwrap_or(FieldValue::Bytes(data));
-    buf.push_field(descriptor, value, offset..offset + data.len());
+    buf.push_field(
+        descriptor,
+        FieldValue::Bytes(data),
+        offset..offset + data.len(),
+    );
     buf.end_container(obj_idx);
     FieldValue::Object(0..0)
 }
@@ -1227,12 +1169,9 @@ fn parse_remote_gtpu_peer<'pkt>(
             pos += 2;
             if pos + ni_len <= data.len() {
                 let ni_data = &data[pos..pos + ni_len];
-                let value = decode_fqdn_into_scratch(ni_data, buf)
-                    .map(FieldValue::Scratch)
-                    .unwrap_or(FieldValue::Bytes(ni_data));
                 buf.push_field(
                     &FD_INLINE_NETWORK_INSTANCE,
-                    value,
+                    FieldValue::Bytes(ni_data),
                     offset + pos..offset + pos + ni_len,
                 );
                 pos += ni_len;
@@ -1478,12 +1417,14 @@ mod tests {
                 let nid_type = obj_field_buf(&buf, r, "node_id_type").unwrap();
                 assert_eq!(nid_type.value, FieldValue::U8(2));
                 let nid_val = obj_field_buf(&buf, r, "node_id_value").unwrap();
-                let FieldValue::Scratch(ref sr) = nid_val.value else {
-                    panic!("expected Scratch, got {:?}", nid_val.value)
-                };
+                // Stored zero-copy as the raw label-encoded bytes; the
+                // descriptor's format_fn renders them as "example.com" at
+                // serialization time.
                 assert_eq!(
-                    &buf.scratch()[sr.start as usize..sr.end as usize],
-                    b"example.com"
+                    nid_val.value,
+                    FieldValue::Bytes(&[
+                        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0
+                    ])
                 );
             }
             _ => panic!("expected Object"),
@@ -1959,13 +1900,8 @@ mod tests {
                 let fields = buf.nested_fields(r);
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].name(), "network_instance");
-                let FieldValue::Scratch(ref sr) = fields[0].value else {
-                    panic!("expected Scratch, got {:?}", fields[0].value)
-                };
-                assert_eq!(
-                    &buf.scratch()[sr.start as usize..sr.end as usize],
-                    b"foo.bar"
-                );
+                // Zero-copy raw bytes; rendered as "foo.bar" via format_fn.
+                assert_eq!(fields[0].value, FieldValue::Bytes(&data));
                 assert_eq!(fields[0].range, 0..9);
             }
             _ => panic!("expected Object"),
@@ -2436,13 +2372,9 @@ mod tests {
             panic!("expected Object")
         };
         let f = obj_field_buf(&buf, r, "apn_dnn").unwrap();
-        let FieldValue::Scratch(ref sr) = f.value else {
-            panic!("expected Scratch, got {:?}", f.value)
-        };
-        assert_eq!(
-            &buf.scratch()[sr.start as usize..sr.end as usize],
-            b"internet.example"
-        );
+        // Stored zero-copy as label-encoded bytes; format_fn renders as
+        // "internet.example" at serialization time.
+        assert_eq!(f.value, FieldValue::Bytes(&data));
     }
 
     // --- Remote GTP-U Peer (type 103) tests ---
@@ -2495,12 +2427,10 @@ mod tests {
             FieldValue::U8(1)
         );
         let ni = obj_field_buf(&buf, r, "network_instance").unwrap();
-        let FieldValue::Scratch(ref sr) = ni.value else {
-            panic!("expected Scratch, got {:?}", ni.value)
-        };
+        // Zero-copy reference to the label-encoded "internet" payload.
         assert_eq!(
-            &buf.scratch()[sr.start as usize..sr.end as usize],
-            b"internet"
+            ni.value,
+            FieldValue::Bytes(&[8, b'i', b'n', b't', b'e', b'r', b'n', b'e', b't'])
         );
     }
 
@@ -2600,46 +2530,5 @@ mod tests {
         let data = [0xFF];
         let (val, _buf) = parse_and_buf(43, &data, 0);
         assert_eq!(val, FieldValue::Bytes(&data));
-    }
-
-    // --- decode_fqdn_into_scratch helper tests ---
-
-    #[test]
-    fn decode_fqdn_simple() {
-        let data = [3, b'f', b'o', b'o', 3, b'b', b'a', b'r'];
-        let mut buf = DissectBuffer::new();
-        let r = decode_fqdn_into_scratch(&data, &mut buf).unwrap();
-        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"foo.bar");
-    }
-
-    #[test]
-    fn decode_fqdn_with_terminator() {
-        let data = [3, b'f', b'o', b'o', 3, b'b', b'a', b'r', 0];
-        let mut buf = DissectBuffer::new();
-        let r = decode_fqdn_into_scratch(&data, &mut buf).unwrap();
-        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"foo.bar");
-    }
-
-    #[test]
-    fn decode_fqdn_invalid_length() {
-        // First byte 0x69 = 105 > remaining bytes
-        let data = b"internet";
-        let mut buf = DissectBuffer::new();
-        assert!(decode_fqdn_into_scratch(data, &mut buf).is_none());
-        assert_eq!(buf.scratch_len(), 0);
-    }
-
-    #[test]
-    fn decode_fqdn_empty() {
-        let mut buf = DissectBuffer::new();
-        assert!(decode_fqdn_into_scratch(&[], &mut buf).is_none());
-    }
-
-    #[test]
-    fn decode_fqdn_terminator_not_at_end() {
-        // 0x00 not at end -> invalid
-        let data = [3, b'f', b'o', b'o', 0, 3, b'b', b'a', b'r'];
-        let mut buf = DissectBuffer::new();
-        assert!(decode_fqdn_into_scratch(&data, &mut buf).is_none());
     }
 }
