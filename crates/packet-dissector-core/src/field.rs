@@ -123,6 +123,92 @@ pub fn format_utf8_lossy(
     w.write_all(b"\"")
 }
 
+/// Format a [`FieldValue::Bytes`] holding length-prefixed labels (RFC 1035 §3.1
+/// wire format) as a JSON-quoted dotted string.
+///
+/// Each label is a length octet followed by that many bytes; an optional
+/// zero-length terminator may end the sequence. Output is the labels joined
+/// by `'.'` with the same JSON escaping as [`format_utf8_lossy`].
+///
+/// Common [`FormatFn`] for protocol fields whose payload is encoded as
+/// length-prefixed labels per 3GPP TS 23.003 clause 9.1 (e.g., PFCP Network
+/// Instance, APN/DNN, Node ID FQDN; GTPv2-C APN). When a label length
+/// exceeds the remaining bytes (i.e., the input is not actually
+/// label-prefixed), the function falls back to [`format_utf8_lossy`] over
+/// the raw bytes so plain UTF-8 payloads still render readably.
+pub fn format_fqdn_labels(
+    value: &FieldValue<'_>,
+    ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let bytes = match value {
+        FieldValue::Bytes(b) => *b,
+        FieldValue::Str(s) => return write!(w, "\"{}\"", s),
+        _ => return w.write_all(b"\"\""),
+    };
+
+    // Validate the label structure first; on any inconsistency, render the
+    // raw bytes via the UTF-8 lossy formatter rather than emitting a
+    // partially-decoded string.
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let label_len = bytes[pos] as usize;
+        if label_len == 0 {
+            if pos + 1 != bytes.len() {
+                return format_utf8_lossy(value, ctx, w);
+            }
+            break;
+        }
+        let next = match pos.checked_add(1).and_then(|p| p.checked_add(label_len)) {
+            Some(n) => n,
+            None => return format_utf8_lossy(value, ctx, w),
+        };
+        if next > bytes.len() {
+            return format_utf8_lossy(value, ctx, w);
+        }
+        pos = next;
+    }
+    if bytes.is_empty() {
+        return w.write_all(b"\"\"");
+    }
+
+    w.write_all(b"\"")?;
+    let mut pos = 0;
+    let mut first = true;
+    while pos < bytes.len() {
+        let label_len = bytes[pos] as usize;
+        if label_len == 0 {
+            break;
+        }
+        if !first {
+            w.write_all(b".")?;
+        }
+        first = false;
+        let label = &bytes[pos + 1..pos + 1 + label_len];
+        for chunk in label.utf8_chunks() {
+            for ch in chunk.valid().chars() {
+                match ch {
+                    '"' => w.write_all(b"\\\"")?,
+                    '\\' => w.write_all(b"\\\\")?,
+                    '\n' => w.write_all(b"\\n")?,
+                    '\r' => w.write_all(b"\\r")?,
+                    '\t' => w.write_all(b"\\t")?,
+                    c if c < '\x20' => write!(w, "\\u{:04x}", c as u32)?,
+                    c => {
+                        let mut utf8 = [0u8; 4];
+                        w.write_all(c.encode_utf8(&mut utf8).as_bytes())?;
+                    }
+                }
+            }
+            if !chunk.invalid().is_empty() {
+                w.write_all("\u{FFFD}".as_bytes())?;
+            }
+        }
+        pos += 1 + label_len;
+    }
+    w.write_all(b"\"")
+}
+
 /// Describes a protocol field without carrying a value — a field schema entry.
 ///
 /// Used by [`Dissector::field_descriptors`](crate::dissector::Dissector::field_descriptors)
@@ -728,5 +814,72 @@ mod tests {
             format!("{}", FieldValue::Scratch(0..10)),
             "<10 scratch bytes>"
         );
+    }
+
+    fn empty_format_ctx() -> FormatContext<'static> {
+        FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        }
+    }
+
+    fn run_format_fqdn(bytes: &[u8]) -> String {
+        let mut out = Vec::new();
+        format_fqdn_labels(&FieldValue::Bytes(bytes), &empty_format_ctx(), &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn format_fqdn_labels_basic() {
+        assert_eq!(
+            run_format_fqdn(&[3, b'f', b'o', b'o', 3, b'b', b'a', b'r']),
+            "\"foo.bar\""
+        );
+    }
+
+    #[test]
+    fn format_fqdn_labels_with_terminator() {
+        assert_eq!(
+            run_format_fqdn(&[3, b'f', b'o', b'o', 3, b'b', b'a', b'r', 0]),
+            "\"foo.bar\""
+        );
+    }
+
+    #[test]
+    fn format_fqdn_labels_single_label() {
+        assert_eq!(
+            run_format_fqdn(&[8, b'i', b'n', b't', b'e', b'r', b'n', b'e', b't']),
+            "\"internet\""
+        );
+    }
+
+    #[test]
+    fn format_fqdn_labels_invalid_falls_back_to_utf8() {
+        // Plain UTF-8 — first byte 'i' (0x69) overshoots remaining length, so
+        // the formatter should fall back to UTF-8 lossy rendering.
+        assert_eq!(run_format_fqdn(b"internet"), "\"internet\"");
+    }
+
+    #[test]
+    fn format_fqdn_labels_terminator_in_middle_falls_back() {
+        // 0x00 not at end -> not a valid FQDN, fall back to UTF-8 lossy.
+        let bytes = [3, b'f', b'o', b'o', 0, 3, b'b', b'a', b'r'];
+        // Output should include both labels intact (UTF-8 lossy of full bytes).
+        let result = run_format_fqdn(&bytes);
+        assert!(result.starts_with('"') && result.ends_with('"'));
+    }
+
+    #[test]
+    fn format_fqdn_labels_empty() {
+        assert_eq!(run_format_fqdn(&[]), "\"\"");
+    }
+
+    #[test]
+    fn format_fqdn_labels_with_escapes() {
+        // Label containing a quote — must be JSON-escaped.
+        let bytes = [3, b'a', b'"', b'b'];
+        assert_eq!(run_format_fqdn(&bytes), "\"a\\\"b\"");
     }
 }

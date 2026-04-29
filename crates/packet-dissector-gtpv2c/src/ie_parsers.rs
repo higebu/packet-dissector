@@ -2,7 +2,7 @@
 //!
 //! 3GPP TS 29.274, Section 8.
 
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_fqdn_labels};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{
     read_be_u16, read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr,
@@ -10,6 +10,14 @@ use packet_dissector_core::util::{
 
 use crate::ie;
 use crate::pco;
+
+/// IE value descriptor for label-prefixed (APN / FQDN) payloads.
+///
+/// Stores the raw label-encoded bytes zero-copy and renders them as a
+/// dotted string at serialization time. Overrides the generic IE "value"
+/// descriptor for IE types whose payload follows 3GPP TS 23.003 clause 9.1.
+static FD_INLINE_APN_FQDN_VALUE: FieldDescriptor =
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).with_format_fn(format_fqdn_labels);
 
 static FD_INLINE_BCE: FieldDescriptor = FieldDescriptor::new("bce", "BCE", FieldType::U8);
 
@@ -357,27 +365,6 @@ fn decode_plmn(data: &[u8]) -> (String, String) {
     (mcc, mnc)
 }
 
-/// Decode APN labels (DNS-label encoding).
-///
-/// Each label is preceded by its length byte. Labels are joined with '.'.
-fn decode_apn(data: &[u8]) -> String {
-    let mut s = String::new();
-    let mut pos = 0;
-    while pos < data.len() {
-        let label_len = data[pos] as usize;
-        pos += 1;
-        if label_len == 0 || pos + label_len > data.len() {
-            break;
-        }
-        if !s.is_empty() {
-            s.push('.');
-        }
-        s.push_str(&String::from_utf8_lossy(&data[pos..pos + label_len]));
-        pos += label_len;
-    }
-    s
-}
-
 /// Push PLMN (MCC+MNC) fields into a buffer using scratch for the string data.
 fn push_plmn_fields<'pkt>(
     data: &'pkt [u8],
@@ -638,9 +625,13 @@ pub fn push_ie_value<'pkt>(
             buf,
         ),
         71 => {
-            let s = decode_apn(data);
-            let r = buf.push_scratch(s.as_bytes());
-            buf.push_field(value_desc, FieldValue::Scratch(r), value_range.clone());
+            // APN — keep label-encoded bytes zero-copy; format_fn renders
+            // them as a dotted string at serialization time.
+            buf.push_field(
+                &FD_INLINE_APN_FQDN_VALUE,
+                FieldValue::Bytes(data),
+                value_range.clone(),
+            );
         }
         72 => push_ambr(data, offset, value_desc, value_range, buf),
         73 => push_single_u8(
@@ -785,9 +776,12 @@ pub fn push_ie_value<'pkt>(
             buf,
         ),
         136 => {
-            let s = decode_apn(data);
-            let r = buf.push_scratch(s.as_bytes());
-            buf.push_field(value_desc, FieldValue::Scratch(r), value_range.clone());
+            // FQDN — same label-prefixed encoding as APN; render via format_fn.
+            buf.push_field(
+                &FD_INLINE_APN_FQDN_VALUE,
+                FieldValue::Bytes(data),
+                value_range.clone(),
+            );
         }
         155 => push_arp(data, offset, value_desc, value_range, buf),
         156 => push_epc_timer(data, offset, value_desc, value_range, buf),
@@ -1550,12 +1544,11 @@ mod tests {
     // 4. APN (type 71)
     #[test]
     fn apn_dns_labels() {
+        // Stored zero-copy as label-encoded bytes; rendered as "foo.bar"
+        // by the descriptor's format_fn at serialization time.
         let data = [3, b'f', b'o', b'o', 3, b'b', b'a', b'r'];
         let buf = push_and_get(71, &data, 0);
-        let FieldValue::Scratch(ref r) = buf.fields()[0].value else {
-            panic!("expected Scratch")
-        };
-        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"foo.bar");
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&data));
     }
 
     // 5. AMBR (type 72)
@@ -2045,17 +2038,13 @@ mod tests {
     }
     #[test]
     fn fqdn_dns_labels() {
+        // Stored zero-copy as label-encoded bytes; rendered as
+        // "example.com" by format_fn at serialization time.
         let data = [
             7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm',
         ];
         let buf = push_and_get(136, &data, 0);
-        let FieldValue::Scratch(ref r) = buf.fields()[0].value else {
-            panic!("expected Scratch")
-        };
-        assert_eq!(
-            &buf.scratch()[r.start as usize..r.end as usize],
-            b"example.com"
-        );
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&data));
     }
     #[test]
     fn arp_valid() {
@@ -2284,35 +2273,28 @@ mod tests {
     #[test]
     fn apn_empty() {
         let buf = push_and_get(71, &[], 0);
-        let FieldValue::Scratch(ref r) = buf.fields()[0].value else {
-            panic!("expected Scratch")
-        };
-        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"");
+        // Zero-copy reference to the empty payload; format_fn would render "".
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&[]));
     }
     #[test]
     fn apn_zero_length_label() {
-        let buf = push_and_get(71, &[0x00], 0);
-        let FieldValue::Scratch(ref r) = buf.fields()[0].value else {
-            panic!("expected Scratch")
-        };
-        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"");
+        let data = [0x00];
+        let buf = push_and_get(71, &data, 0);
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&data));
     }
     #[test]
     fn apn_label_exceeds_data() {
-        let buf = push_and_get(71, &[10, b'a', b'b', b'c'], 0);
-        let FieldValue::Scratch(ref r) = buf.fields()[0].value else {
-            panic!("expected Scratch")
-        };
-        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"");
+        // Malformed (label length > remaining bytes); format_fn falls back to
+        // UTF-8 lossy at display time. Stored bytes are the raw input.
+        let data = [10, b'a', b'b', b'c'];
+        let buf = push_and_get(71, &data, 0);
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&data));
     }
     #[test]
     fn apn_single_label() {
         let data = [3, b'f', b'o', b'o'];
         let buf = push_and_get(71, &data, 0);
-        let FieldValue::Scratch(ref r) = buf.fields()[0].value else {
-            panic!("expected Scratch")
-        };
-        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"foo");
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&data));
     }
     #[test]
     fn paa_unknown_pdn_type() {
