@@ -7,6 +7,17 @@ use packet_dissector_core::error::{PacketError, RegistrationError};
 use packet_dissector_core::field::{FieldDescriptor, FieldValue};
 use packet_dissector_core::packet::{AuxDataHandle, DissectBuffer};
 
+use crate::summary::{DissectSummary, FieldProjection};
+
+/// Always-`false` early-termination predicate used for full dissection.
+///
+/// A free fn (single concrete type) rather than a closure, so the recursive
+/// `dispatch_loop` instantiation for decrypted payloads does not create an
+/// unbounded chain of monomorphizations.
+fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
+    false
+}
+
 struct TmpRemapContext {
     padded_base: usize,
     padded_end: usize,
@@ -492,6 +503,21 @@ impl DissectorRegistry {
             .or(self.ipv6_routing_fallback.as_deref())
     }
 
+    /// Resolve the default entry dissector.
+    fn entry_dissector(&self) -> Result<&dyn Dissector, PacketError> {
+        self.entry
+            .as_deref()
+            .ok_or(PacketError::InvalidHeader("no entry dissector configured"))
+    }
+
+    /// Resolve the entry dissector for a pcap link-layer type, falling back
+    /// to the default entry dissector.
+    fn entry_dissector_for_link_type(&self, link_type: u32) -> Result<&dyn Dissector, PacketError> {
+        self.get_by_link_type(link_type)
+            .or(self.entry.as_deref())
+            .ok_or(PacketError::InvalidHeader("no entry dissector configured"))
+    }
+
     /// Dissect a raw packet by chaining dissectors starting from the entry dissector.
     ///
     /// Uses the entry dissector set via [`set_entry_dissector`](Self::set_entry_dissector)
@@ -502,19 +528,8 @@ impl DissectorRegistry {
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
     ) -> Result<(), PacketError> {
-        let entry = self
-            .entry
-            .as_ref()
-            .ok_or(PacketError::InvalidHeader("no entry dissector configured"))?;
-
-        let mut offset = 0;
-
-        let result = entry.dissect(&data[offset..], buf, offset)?;
-        offset += result.bytes_consumed;
-
-        self.dispatch_loop(data, buf, offset, result.next)?;
-
-        Ok(())
+        let entry = self.entry_dissector()?;
+        self.dissect_from_entry(entry, data, buf, &mut no_stop)
     }
 
     /// Dissect a raw packet using a link-layer type to select the entry dissector.
@@ -535,29 +550,238 @@ impl DissectorRegistry {
         link_type: u32,
         buf: &mut DissectBuffer<'pkt>,
     ) -> Result<(), PacketError> {
-        let entry = self
-            .get_by_link_type(link_type)
-            .or(self.entry.as_deref())
-            .ok_or(PacketError::InvalidHeader("no entry dissector configured"))?;
+        let entry = self.entry_dissector_for_link_type(link_type)?;
+        self.dissect_from_entry(entry, data, buf, &mut no_stop)
+    }
 
-        let mut offset = 0;
+    /// Shallow dissection for row summaries: stop once the transport layer
+    /// has been dissected, without building the application-layer field tree.
+    ///
+    /// The dispatch loop runs normally for link/network/transport layers and
+    /// stops as soon as a port-based dispatch hint
+    /// ([`ByTcpPort`](DispatchHint::ByTcpPort) /
+    /// [`ByUdpPort`](DispatchHint::ByUdpPort) /
+    /// [`BySctpPort`](DispatchHint::BySctpPort)) is produced. The protocol
+    /// that would handle the next layer is resolved from the dispatch tables
+    /// and reported as [`DissectSummary::next_protocol`] so callers can still
+    /// display it (e.g., in a packet-list protocol column).
+    ///
+    /// Chains that never produce a port-based hint (e.g., ARP, ICMP) are
+    /// dissected fully, identical to [`dissect`](Self::dissect).
+    ///
+    /// Stopping before the upper-layer dissector also skips TCP reassembly
+    /// and tunnel/inner-packet dissection, so for tunneled packets (e.g.,
+    /// VXLAN) the summary describes the outermost transport.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use packet_dissector::registry::DissectorRegistry;
+    /// use packet_dissector::packet::DissectBuffer;
+    ///
+    /// let registry = DissectorRegistry::default();
+    /// let packet_bytes: &[u8] = &[
+    ///     // Ethernet
+    ///     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ///     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ///     0x08, 0x00,
+    ///     // IPv4 (proto = UDP)
+    ///     0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00,
+    ///     0x40, 0x11, 0x00, 0x00,
+    ///     0x0a, 0x00, 0x00, 0x01, 0x0a, 0x00, 0x00, 0x02,
+    ///     // UDP (dst port 53 = DNS)
+    ///     0x30, 0x39, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00,
+    /// ];
+    ///
+    /// let mut buf = DissectBuffer::new();
+    /// let summary = registry.dissect_summary(packet_bytes, &mut buf).unwrap();
+    /// assert_eq!(buf.layers().len(), 3); // Ethernet, IPv4, UDP — DNS skipped
+    /// assert_eq!(summary.next_protocol, Some("DNS"));
+    /// ```
+    pub fn dissect_summary<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+    ) -> Result<DissectSummary, PacketError> {
+        let entry = self.entry_dissector()?;
+        let mut summary = DissectSummary::new();
+        self.dissect_from_entry(entry, data, buf, &mut |_, hint| {
+            self.summary_stop(hint, &mut summary)
+        })?;
+        Ok(summary)
+    }
 
-        let result = entry.dissect(&data[offset..], buf, offset)?;
-        offset += result.bytes_consumed;
+    /// [`dissect_summary`](Self::dissect_summary) variant that selects the
+    /// entry dissector by pcap link-layer type, like
+    /// [`dissect_with_link_type`](Self::dissect_with_link_type).
+    pub fn dissect_summary_with_link_type<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        link_type: u32,
+        buf: &mut DissectBuffer<'pkt>,
+    ) -> Result<DissectSummary, PacketError> {
+        let entry = self.entry_dissector_for_link_type(link_type)?;
+        let mut summary = DissectSummary::new();
+        self.dissect_from_entry(entry, data, buf, &mut |_, hint| {
+            self.summary_stop(hint, &mut summary)
+        })?;
+        Ok(summary)
+    }
 
-        self.dispatch_loop(data, buf, offset, result.next)?;
+    /// Summary stop predicate: stop at the first port-based dispatch hint
+    /// and record the next protocol's short name.
+    fn summary_stop(&self, hint: &DispatchHint, summary: &mut DissectSummary) -> bool {
+        match hint {
+            DispatchHint::ByTcpPort(..)
+            | DispatchHint::ByUdpPort(..)
+            | DispatchHint::BySctpPort(..) => {
+                summary.next_protocol = self.lookup_dissector(hint).map(|d| d.short_name());
+                true
+            }
+            _ => false,
+        }
+    }
 
-        Ok(())
+    /// Shallow dissection by field projection: stop as soon as every field
+    /// requested in `projection` has been produced.
+    ///
+    /// The projection is checked at layer granularity — after each dissector
+    /// finishes, newly added layers are scanned for the requested
+    /// `(layer, field)` targets, and the dispatch loop stops before
+    /// dissecting any deeper layer once all targets are found. If the packet
+    /// never produces all targets, the chain runs to completion, identical
+    /// to [`dissect`](Self::dissect), and
+    /// [`FieldProjection::is_satisfied`] returns `false`.
+    ///
+    /// `projection` is reset automatically, so it can be reused across
+    /// packets without per-packet allocation. Read the extracted values from
+    /// `buf` as usual (e.g., via
+    /// [`field_by_name`](packet_dissector_core::packet::DissectBuffer::field_by_name)).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use packet_dissector::registry::DissectorRegistry;
+    /// use packet_dissector::packet::DissectBuffer;
+    /// use packet_dissector::summary::FieldProjection;
+    ///
+    /// let registry = DissectorRegistry::default();
+    /// let packet_bytes: &[u8] = &[
+    ///     // Ethernet
+    ///     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ///     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ///     0x08, 0x00,
+    ///     // IPv4 (proto = UDP)
+    ///     0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00,
+    ///     0x40, 0x11, 0x00, 0x00,
+    ///     0x0a, 0x00, 0x00, 0x01, 0x0a, 0x00, 0x00, 0x02,
+    ///     // UDP
+    ///     0x30, 0x39, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00,
+    /// ];
+    ///
+    /// let mut projection = FieldProjection::new([("IPv4", "src"), ("IPv4", "dst")]);
+    /// let mut buf = DissectBuffer::new();
+    /// registry.dissect_projected(packet_bytes, &mut buf, &mut projection).unwrap();
+    /// assert!(projection.is_satisfied());
+    /// assert_eq!(buf.layers().len(), 2); // Ethernet, IPv4 — UDP skipped
+    /// ```
+    pub fn dissect_projected<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        projection: &mut FieldProjection,
+    ) -> Result<(), PacketError> {
+        let entry = self.entry_dissector()?;
+        projection.reset();
+        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf))
+    }
+
+    /// [`dissect_projected`](Self::dissect_projected) variant that selects
+    /// the entry dissector by pcap link-layer type, like
+    /// [`dissect_with_link_type`](Self::dissect_with_link_type).
+    pub fn dissect_projected_with_link_type<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        link_type: u32,
+        buf: &mut DissectBuffer<'pkt>,
+        projection: &mut FieldProjection,
+    ) -> Result<(), PacketError> {
+        let entry = self.entry_dissector_for_link_type(link_type)?;
+        projection.reset();
+        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf))
+    }
+
+    /// Dissect with the given entry dissector, then run the dispatch loop.
+    ///
+    /// `stop` is the early-termination predicate described on
+    /// [`dispatch_loop`](Self::dispatch_loop).
+    fn dissect_from_entry<'pkt, F>(
+        &self,
+        entry: &dyn Dissector,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        stop: &mut F,
+    ) -> Result<(), PacketError>
+    where
+        F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
+    {
+        let result = entry.dissect(data, buf, 0)?;
+        self.dispatch_loop(data, buf, result.bytes_consumed, result.next, stop)
+    }
+
+    /// Look up the dissector responsible for a dispatch hint.
+    ///
+    /// Port-based hints try the lower port first, then the higher port,
+    /// mirroring Wireshark's dual-port dispatch strategy.
+    fn lookup_dissector(&self, hint: &DispatchHint) -> Option<&dyn Dissector> {
+        match hint {
+            DispatchHint::End => None,
+            DispatchHint::ByEtherType(et) => self.get_by_ethertype(*et),
+            DispatchHint::ByIpProtocol(p) => self.get_by_ip_protocol(*p),
+            DispatchHint::ByTcpPort(src, dst) => {
+                let (low, high) = ((*src).min(*dst), (*src).max(*dst));
+                self.get_by_tcp_port(low)
+                    .or_else(|| self.get_by_tcp_port(high))
+            }
+            DispatchHint::ByUdpPort(src, dst) => {
+                let (low, high) = ((*src).min(*dst), (*src).max(*dst));
+                self.get_by_udp_port(low)
+                    .or_else(|| self.get_by_udp_port(high))
+            }
+            DispatchHint::BySctpPort(src, dst) => {
+                let (low, high) = ((*src).min(*dst), (*src).max(*dst));
+                self.get_by_sctp_port(low)
+                    .or_else(|| self.get_by_sctp_port(high))
+            }
+            DispatchHint::ByContentType(ct) => self.get_by_content_type(ct),
+            DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
+            DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
+        }
     }
 
     /// Run the dispatch loop starting from the given hint and offset.
-    fn dispatch_loop<'pkt>(
+    ///
+    /// `stop` is evaluated with the current buffer state and the pending
+    /// dispatch hint before each dissector runs, and again immediately after
+    /// each dissector returns (before reassembly / tunnel middleware). When
+    /// it returns `true` the loop terminates early, leaving the layers
+    /// dissected so far in `buf`. Full dissection passes a predicate that
+    /// always returns `false`.
+    ///
+    /// The predicate is a generic parameter (not `&mut dyn FnMut`) so the
+    /// full-dissection instantiation inlines the always-`false` predicate
+    /// and keeps the existing fast path free of indirect calls.
+    fn dispatch_loop<'pkt, F>(
         &self,
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
         mut offset: usize,
         mut next: DispatchHint,
-    ) -> Result<(), PacketError> {
+        stop: &mut F,
+    ) -> Result<(), PacketError>
+    where
+        F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
+    {
         // Track whether the previous iteration made no progress (consumed 0
         // bytes).  Thin dispatchers like `RoutingDissector` legitimately return
         // `bytes_consumed = 0` once to redirect via a different DispatchHint,
@@ -566,31 +790,14 @@ impl DissectorRegistry {
         let mut stalled = false;
 
         loop {
-            let dissector = match &next {
-                DispatchHint::End => break,
-                DispatchHint::ByEtherType(et) => self.get_by_ethertype(*et),
-                DispatchHint::ByIpProtocol(p) => self.get_by_ip_protocol(*p),
-                DispatchHint::ByTcpPort(src, dst) => {
-                    let (low, high) = ((*src).min(*dst), (*src).max(*dst));
-                    self.get_by_tcp_port(low)
-                        .or_else(|| self.get_by_tcp_port(high))
-                }
-                DispatchHint::ByUdpPort(src, dst) => {
-                    let (low, high) = ((*src).min(*dst), (*src).max(*dst));
-                    self.get_by_udp_port(low)
-                        .or_else(|| self.get_by_udp_port(high))
-                }
-                DispatchHint::BySctpPort(src, dst) => {
-                    let (low, high) = ((*src).min(*dst), (*src).max(*dst));
-                    self.get_by_sctp_port(low)
-                        .or_else(|| self.get_by_sctp_port(high))
-                }
-                DispatchHint::ByContentType(ct) => self.get_by_content_type(ct),
-                DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
-                DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
-            };
+            // Early-termination check on the pending hint. Covers the
+            // initial hint and the `continue` paths from the middleware
+            // blocks below.
+            if stop(buf, &next) {
+                break;
+            }
 
-            let Some(dissector) = dissector else {
+            let Some(dissector) = self.lookup_dissector(&next) else {
                 break;
             };
 
@@ -616,35 +823,20 @@ impl DissectorRegistry {
 
             offset += result.bytes_consumed;
 
+            // Early-termination check on the dissector's own hint, before
+            // the reassembly / tunnel middleware below runs. This is what
+            // lets `dissect_summary` stop right after the transport layer
+            // without paying for TCP reassembly or inner-packet dissection.
+            if stop(buf, &result.next) {
+                break;
+            }
+
             // Embedded payload middleware: when a dissector signals that the
             // next dissector's input is at a specific range within the original
             // packet (e.g., SCTP DATA chunk user data), dispatch directly to
             // that range instead of using the normal offset-based slicing.
             if let Some(ref payload_range) = result.embedded_payload {
-                let upper = match &result.next {
-                    DispatchHint::End => None,
-                    DispatchHint::ByEtherType(et) => self.get_by_ethertype(*et),
-                    DispatchHint::ByIpProtocol(p) => self.get_by_ip_protocol(*p),
-                    DispatchHint::ByTcpPort(src, dst) => {
-                        let (low, high) = ((*src).min(*dst), (*src).max(*dst));
-                        self.get_by_tcp_port(low)
-                            .or_else(|| self.get_by_tcp_port(high))
-                    }
-                    DispatchHint::ByUdpPort(src, dst) => {
-                        let (low, high) = ((*src).min(*dst), (*src).max(*dst));
-                        self.get_by_udp_port(low)
-                            .or_else(|| self.get_by_udp_port(high))
-                    }
-                    DispatchHint::BySctpPort(src, dst) => {
-                        let (low, high) = ((*src).min(*dst), (*src).max(*dst));
-                        self.get_by_sctp_port(low)
-                            .or_else(|| self.get_by_sctp_port(high))
-                    }
-                    DispatchHint::ByContentType(ct) => self.get_by_content_type(ct),
-                    DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
-                    DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
-                };
-                if let Some(upper) = upper {
+                if let Some(upper) = self.lookup_dissector(&result.next) {
                     let start = payload_range.start;
                     let end = payload_range.end.min(data.len());
                     if start < end {
@@ -678,8 +870,20 @@ impl DissectorRegistry {
                 padded.extend_from_slice(&decrypted.data);
 
                 // Dissect into a temporary buffer. Fields borrow from `padded`.
+                // Decrypted inner data is always dissected fully: shallow
+                // callers stop on the outer chain before reaching this point.
+                // `no_stop` is a free fn (not a closure) so this recursive
+                // instantiation does not depend on `F` and monomorphization
+                // terminates.
                 let mut tmp_buf = DissectBuffer::new();
-                self.dispatch_loop(&padded, &mut tmp_buf, virtual_start, decrypted.next)?;
+                let mut full = no_stop;
+                self.dispatch_loop(
+                    &padded,
+                    &mut tmp_buf,
+                    virtual_start,
+                    decrypted.next,
+                    &mut full,
+                )?;
 
                 // Merge tmp_buf into the main buf. Layers are cheap to copy.
                 // Fields may borrow from `padded`, so we remap Bytes/Str
