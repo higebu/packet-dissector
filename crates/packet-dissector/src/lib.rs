@@ -222,3 +222,4 @@ pub mod dissectors {
 mod tcp_reassembly;
 
 pub mod registry;
+pub mod summary;
