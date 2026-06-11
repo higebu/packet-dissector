@@ -3,6 +3,14 @@
 //! `dissect_summary` and `dissect_projected` must preserve the
 //! zero-copy / zero-allocation property of `DissectBuffer` when the buffer
 //! is reused across packets.
+//!
+//! # API Behavior Coverage
+//!
+//! | Behavior | Test |
+//! |----------|------|
+//! | `dissect_summary` is zero-allocation (UDP chain) | zero_alloc_dissect_summary_udp |
+//! | `dissect_summary` is zero-allocation (TCP chain) | zero_alloc_dissect_summary_tcp |
+//! | `dissect_projected` with a reused projection is zero-allocation | zero_alloc_dissect_projected |
 
 use packet_dissector::registry::DissectorRegistry;
 use packet_dissector::summary::FieldProjection;

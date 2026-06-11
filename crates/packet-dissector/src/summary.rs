@@ -48,6 +48,7 @@ impl DissectSummary {
 }
 
 /// A single (layer, field) target tracked by a [`FieldProjection`].
+#[derive(Debug)]
 struct ProjectionTarget {
     /// Layer short name (e.g., `"IPv4"`).
     layer: Box<str>,
@@ -78,6 +79,7 @@ struct ProjectionTarget {
 /// let mut projection = FieldProjection::new([("IPv4", "src"), ("IPv4", "dst")]);
 /// assert!(!projection.is_satisfied());
 /// ```
+#[derive(Debug)]
 pub struct FieldProjection {
     targets: Vec<ProjectionTarget>,
     /// Number of targets not yet found in the current packet.
@@ -91,6 +93,10 @@ impl FieldProjection {
     ///
     /// An empty projection is trivially satisfied, so dissection stops
     /// after the entry layer.
+    ///
+    /// Duplicate pairs are tracked as independent targets, but they match
+    /// the same field, so they are all found together in the same layer
+    /// scan — duplicates do not change when dissection stops.
     pub fn new<'a>(targets: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
         let targets: Vec<ProjectionTarget> = targets
             .into_iter()
@@ -191,6 +197,31 @@ mod tests {
         projection.reset();
         assert!(!projection.is_satisfied());
         assert!(!projection.is_found("IPv4", "src"));
+    }
+
+    #[test]
+    fn duplicate_targets_are_found_together() {
+        let mut projection = FieldProjection::new([("IPv4", "src"), ("IPv4", "src")]);
+        assert!(!projection.is_satisfied());
+
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("IPv4", None, &[], 0..20);
+        static SRC: packet_dissector_core::field::FieldDescriptor =
+            packet_dissector_core::field::FieldDescriptor::new(
+                "src",
+                "Source Address",
+                packet_dissector_core::field::FieldType::Ipv4Addr,
+            );
+        buf.push_field(
+            &SRC,
+            packet_dissector_core::field::FieldValue::Ipv4Addr([10, 0, 0, 1]),
+            12..16,
+        );
+        buf.end_layer();
+
+        // Both duplicate targets match the same field in one scan.
+        assert!(projection.scan(&buf));
+        assert!(projection.is_satisfied());
     }
 
     #[test]

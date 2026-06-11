@@ -5,6 +5,23 @@
 //! These APIs stop the dispatch loop early so that row summaries
 //! (src/dst/protocol) and targeted field extraction do not pay the cost of
 //! building the full field tree for application-layer protocols.
+//!
+//! # API Behavior Coverage
+//!
+//! | Behavior | Test |
+//! |----------|------|
+//! | Summary stops at first port-based hint (UDP) | summary_stops_before_udp_application_layer |
+//! | Summary stops at first port-based hint (TCP) | summary_stops_before_tcp_application_layer |
+//! | Summary resolves `next_protocol` from dispatch tables | summary_stops_before_udp_application_layer |
+//! | `next_protocol` is `None` for unregistered ports | summary_reports_no_next_protocol_for_unregistered_ports |
+//! | Port-less chains (ARP) dissect fully | summary_dissects_port_less_chains_fully |
+//! | Link-type entry selection (summary) | summary_with_link_type_uses_link_type_table |
+//! | Projection stops at the first satisfying layer | projection_stops_at_first_layer_when_satisfied |
+//! | Projection spanning multiple layers stops after transport | projection_stops_after_transport_layer |
+//! | Unsatisfied projection falls back to full dissect | projection_falls_back_to_full_dissect_when_unsatisfied |
+//! | Projection reset/reuse across packets | projection_is_reusable_across_packets |
+//! | Link-type entry selection (projection) | projection_with_link_type_uses_link_type_table |
+//! | Empty projection stops after the entry layer | empty_projection_stops_after_entry_layer |
 
 use packet_dissector::registry::DissectorRegistry;
 use packet_dissector::summary::FieldProjection;
