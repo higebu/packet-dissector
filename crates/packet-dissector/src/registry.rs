@@ -1801,7 +1801,8 @@ impl Default for DissectorRegistry {
         }
 
         // SDP is carried as a message body, dispatched by MIME content type
-        // from SIP (RFC 3261, Section 7.4) and HTTP.
+        // from SIP (RFC 3261, Section 7.4 —
+        // https://www.rfc-editor.org/rfc/rfc3261#section-7.4) and HTTP.
         // RFC 8866 — https://www.rfc-editor.org/rfc/rfc8866
         //
         // Note: unlike Wireshark, SDP does not set up RTP conversations from
