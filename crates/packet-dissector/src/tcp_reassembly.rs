@@ -253,17 +253,24 @@ impl DissectorRegistry {
                     // Dispatch remaining bytes to a sub-dissector when the upper
                     // dissector indicated a non-End hint (e.g., HTTP with
                     // Content-Type dispatch).
-                    if let Some(ref last) = last_result {
+                    if let Some(last) = last_result.as_mut() {
                         if !fast_remaining.is_empty() && !matches!(last.next, DispatchHint::End) {
                             let sub = match &last.next {
                                 DispatchHint::ByContentType(ct) => self.get_by_content_type(ct),
                                 _ => None,
                             };
                             if let Some(sub_dissector) = sub {
-                                if let Ok(_sub_result) =
-                                    sub_dissector.dissect(fast_remaining, buf, fast_offset)
-                                {
-                                }
+                                // A body parse error must not fail the whole
+                                // packet; the upper layers already dissected.
+                                let _ = sub_dissector.dissect(fast_remaining, buf, fast_offset);
+                                // The body was dispatched here and is terminal
+                                // for this message whether or not it parsed:
+                                // count it as consumed and signal End so the
+                                // registry dispatch loop neither dissects the
+                                // same bytes a second time nor re-reads them
+                                // via the returned offset.
+                                last.bytes_consumed += fast_remaining.len();
+                                last.next = DispatchHint::End;
                             }
                             // Whether or not the sub-dissector consumed the body,
                             // the pipelining loop is finished — return the result.

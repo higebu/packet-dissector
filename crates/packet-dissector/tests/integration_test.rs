@@ -45,6 +45,9 @@
 //! | Ethernet → IPv4 → TCP → HTTP 200 OK           | integration_ethernet_ipv4_tcp_http_response         |
 //! | Ethernet → IPv4 → UDP → SIP INVITE            | integration_ethernet_ipv4_udp_sip_invite            |
 //! | Ethernet → IPv4 → TCP → SIP 200 OK            | integration_ethernet_ipv4_tcp_sip_response          |
+//! | Ethernet → IPv4 → UDP → SIP INVITE → SDP      | integration_ethernet_ipv4_udp_sip_invite_with_sdp   |
+//! | Ethernet → IPv4 → TCP → HTTP 200 → SDP        | integration_ethernet_ipv4_tcp_http_response_sdp_body |
+//! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
@@ -2953,6 +2956,175 @@ fn integration_ethernet_ipv4_tcp_sip_response_server_to_client() {
     assert_eq!(
         buf.field_by_name(sip, "status_code").unwrap().value,
         FieldValue::U16(200)
+    );
+}
+
+/// Ethernet → IPv4 → UDP → SIP INVITE → SDP body.
+///
+/// The SIP dissector returns `DispatchHint::ByContentType("application/sdp")`
+/// (RFC 3261, Section 7.4) and the registry dispatches the body to the SDP
+/// dissector (RFC 8866).
+#[test]
+fn integration_ethernet_ipv4_udp_sip_invite_with_sdp() {
+    let registry = DissectorRegistry::default();
+
+    let sdp_body = b"v=0\r\n\
+                     o=alice 2890844526 2890844527 IN IP4 host.example.com\r\n\
+                     s=Call to Bob\r\n\
+                     c=IN IP4 198.51.100.1\r\n\
+                     t=0 0\r\n\
+                     m=audio 49170 RTP/AVP 0\r\n\
+                     a=rtpmap:0 PCMU/8000\r\n";
+    let sip_header = format!(
+        "INVITE sip:bob@example.net SIP/2.0\r\n\
+         Via: SIP/2.0/UDP pc33.example.com;branch=z9hG4bK776asdhds\r\n\
+         To: Bob <sip:bob@example.net>\r\n\
+         From: Alice <sip:alice@example.com>;tag=1928301774\r\n\
+         Call-ID: a84b4c76e66710@pc33.example.com\r\n\
+         CSeq: 314159 INVITE\r\n\
+         Contact: <sip:alice@pc33.example.com>\r\n\
+         Content-Type: application/sdp\r\n\
+         Content-Length: {}\r\n\r\n",
+        sdp_body.len()
+    );
+
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 5060, 5060);
+    pkt.extend_from_slice(sip_header.as_bytes());
+    pkt.extend_from_slice(sdp_body);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 5);
+    assert_eq!(buf.layers()[0].name, "Ethernet");
+    assert_eq!(buf.layers()[1].name, "IPv4");
+    assert_eq!(buf.layers()[2].name, "UDP");
+    assert_eq!(buf.layers()[3].name, "SIP");
+    assert_eq!(buf.layers()[4].name, "SDP");
+    assert_layers_contiguous(&buf);
+
+    let sdp = buf.layer_by_name("SDP").unwrap();
+    assert_eq!(
+        buf.field_by_name(sdp, "version").unwrap().value,
+        FieldValue::U8(0)
+    );
+    assert_eq!(
+        buf.field_by_name(sdp, "session_name").unwrap().value,
+        FieldValue::Str("Call to Bob")
+    );
+    let media = buf.field_by_name(sdp, "media_descriptions").unwrap();
+    let media_range = match &media.value {
+        FieldValue::Array(r) => r,
+        other => panic!("expected Array, got {other:?}"),
+    };
+    let media_obj = buf
+        .nested_fields(media_range)
+        .iter()
+        .find(|f| f.name() == "media_description")
+        .cloned()
+        .unwrap();
+    if let FieldValue::Object(ref r) = media_obj.value {
+        let fields = buf.nested_fields(r);
+        let port = fields.iter().find(|f| f.name() == "port").unwrap();
+        assert_eq!(port.value, FieldValue::U16(49170));
+    } else {
+        panic!("expected Object");
+    }
+}
+
+/// Ethernet → IPv4 → TCP → SIP with an invalid SDP body.
+///
+/// A body that fails to parse as SDP must not fail the whole packet: the
+/// TCP fast path counts the body as consumed and terminates the chain, so
+/// the already-dissected layers survive and no SDP layer is emitted.
+#[test]
+fn integration_ethernet_ipv4_tcp_sip_invalid_sdp_body() {
+    let registry = DissectorRegistry::default();
+
+    let body = b"this is not an sdp session description\r\n";
+    let sip_header = format!(
+        "INVITE sip:bob@example.net SIP/2.0\r\n\
+         Content-Type: application/sdp\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    );
+
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 12345, 5060, 0x18); // PSH+ACK
+    pkt.extend_from_slice(sip_header.as_bytes());
+    pkt.extend_from_slice(body);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "SIP");
+    assert!(buf.layer_by_name("SDP").is_none());
+}
+
+/// Ethernet → IPv4 → TCP → HTTP 200 → SDP body.
+///
+/// The HTTP dissector emits the same `ByContentType` dispatch hint as SIP,
+/// so an SDP body in an HTTP response is dissected without extra wiring.
+#[test]
+fn integration_ethernet_ipv4_tcp_http_response_sdp_body() {
+    let registry = DissectorRegistry::default();
+
+    let sdp_body = b"v=0\r\n\
+                     o=- 3724394400 3724394405 IN IP4 198.51.100.1\r\n\
+                     s=RTSP-style session\r\n\
+                     t=0 0\r\n\
+                     m=video 51372 RTP/AVP 99\r\n";
+    let http_header = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/sdp\r\n\
+         Content-Length: {}\r\n\r\n",
+        sdp_body.len()
+    );
+
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 2], [10, 0, 0, 1]);
+    push_tcp(&mut pkt, 80, 12345, 0x18); // PSH+ACK
+    pkt.extend_from_slice(http_header.as_bytes());
+    pkt.extend_from_slice(sdp_body);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 5);
+    assert_eq!(buf.layers()[3].name, "HTTP");
+    assert_eq!(buf.layers()[4].name, "SDP");
+    assert_layers_contiguous(&buf);
+
+    let sdp = buf.layer_by_name("SDP").unwrap();
+    assert_eq!(
+        buf.field_by_name(sdp, "session_name").unwrap().value,
+        FieldValue::Str("RTSP-style session")
     );
 }
 

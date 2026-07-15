@@ -36,6 +36,7 @@ default = [
   "http",
   "http2",
   "sip",
+  "sdp",
   "diameter",
   "nas5g",
   "ngap",
@@ -88,6 +89,7 @@ pfcp = ["dep:packet-dissector-pfcp"]
 http = ["dep:packet-dissector-http"]
 http2 = ["dep:packet-dissector-http2"]
 sip = ["dep:packet-dissector-sip"]
+sdp = ["dep:packet-dissector-sdp"]
 diameter = ["dep:packet-dissector-diameter"]
 nas5g = ["dep:packet-dissector-nas5g"]
 ngap = ["dep:packet-dissector-ngap", "nas5g"]
@@ -137,6 +139,7 @@ application = [
   "http",
   "http2",
   "sip",
+  "sdp",
   "diameter",
   "ntp",
   "radius",
@@ -177,6 +180,7 @@ packet-dissector-pfcp = { workspace = true, optional = true }
 packet-dissector-http = { workspace = true, optional = true }
 packet-dissector-http2 = { workspace = true, optional = true }
 packet-dissector-sip = { workspace = true, optional = true }
+packet-dissector-sdp = { workspace = true, optional = true }
 packet-dissector-diameter = { workspace = true, optional = true }
 packet-dissector-nas5g = { workspace = true, optional = true }
 packet-dissector-ngap = { workspace = true, optional = true }
