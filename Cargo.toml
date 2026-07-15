@@ -36,6 +36,7 @@ packet-dissector-stp = { version = "0.3.3", path = "crates/packet-dissector-stp"
 packet-dissector-http = { version = "0.3.3", path = "crates/packet-dissector-http" }
 packet-dissector-http2 = { version = "0.3.3", path = "crates/packet-dissector-http2" }
 packet-dissector-sip = { version = "0.3.3", path = "crates/packet-dissector-sip" }
+packet-dissector-sdp = { version = "0.3.3", path = "crates/packet-dissector-sdp" }
 packet-dissector-diameter = { version = "0.3.3", path = "crates/packet-dissector-diameter" }
 packet-dissector-geneve = { version = "0.3.3", path = "crates/packet-dissector-geneve" }
 packet-dissector-gre = { version = "0.3.3", path = "crates/packet-dissector-gre" }

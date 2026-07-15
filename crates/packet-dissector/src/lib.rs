@@ -140,6 +140,9 @@ pub mod dissectors {
     #[cfg(feature = "sip")]
     pub use packet_dissector_sip as sip;
 
+    #[cfg(feature = "sdp")]
+    pub use packet_dissector_sdp as sdp;
+
     #[cfg(feature = "diameter")]
     pub use packet_dissector_diameter as diameter;
 

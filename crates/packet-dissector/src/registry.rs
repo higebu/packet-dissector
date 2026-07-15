@@ -1800,6 +1800,22 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("sip", || Box::new(packet_dissector_sip::SipDissector));
         }
 
+        // SDP is carried as a message body, dispatched by MIME content type
+        // from SIP (RFC 3261, Section 7.4) and HTTP.
+        // RFC 8866 — https://www.rfc-editor.org/rfc/rfc8866
+        //
+        // Note: unlike Wireshark, SDP does not set up RTP conversations from
+        // m=/a=rtpmap lines — the registry is immutable during dissection,
+        // so RTP remains decode-as only (`register_dissector_factory("rtp")`).
+        #[cfg(feature = "sdp")]
+        {
+            assert_builtin(reg.register_by_content_type(
+                "application/sdp",
+                Box::new(packet_dissector_sdp::SdpDissector),
+            ));
+            reg.register_dissector_factory("sdp", || Box::new(packet_dissector_sdp::SdpDissector));
+        }
+
         // RADIUS runs over UDP on ports 1812 (auth) and 1813 (accounting)
         // (RFC 2865, Section 3 / RFC 2866, Section 3)
         #[cfg(feature = "radius")]
