@@ -1617,31 +1617,35 @@ fn parse_mup_route_type_data<'pkt>(
                 return;
             }
             let ep_len_bits = rest[0] as usize;
-            // Endpoint length includes TEID bits (32) + address bits
+            // Endpoint Length covers the fixed-size Endpoint Address (32 bits for IPv4,
+            // 128 for IPv6) plus the variable-length (0-4 octet) architecture-specific
+            // TEID that follows it.
             let ep_total_bytes = ep_len_bits.div_ceil(8);
             if 1 + ep_total_bytes > rest.len() {
                 return;
             }
-            // Extract address portion (endpoint length minus TEID bits)
-            let addr_bits = ep_len_bits.saturating_sub(32);
-            let addr_bytes = addr_bits.div_ceil(8);
-            if addr_bytes > 0 {
-                let addr_val = format_address(&rest[1..1 + addr_bytes], addr_bits == 128);
+            let addr_bits = if ipv6 { 128 } else { 32 };
+            let addr_bytes = addr_bits / 8;
+            let mut tlv_start = 1;
+            if addr_bytes <= rest.len().saturating_sub(1) {
+                let addr_val = format_address(&rest[1..1 + addr_bytes], ipv6);
                 buf.push_field(
                     &MUP_NLRI_CHILDREN[FD_MUP_ENDPOINT_ADDRESS],
                     addr_val,
                     rest_offset + 1..rest_offset + 1 + addr_bytes,
                 );
-            }
-            let teid_start = 1 + addr_bytes;
-            let mut tlv_start = teid_start;
-            if teid_start + 4 <= rest.len() {
-                buf.push_field(
-                    &MUP_NLRI_CHILDREN[FD_MUP_TEID],
-                    FieldValue::Bytes(&rest[teid_start..teid_start + 4]),
-                    rest_offset + teid_start..rest_offset + teid_start + 4,
-                );
-                tlv_start = teid_start + 4;
+                tlv_start = 1 + addr_bytes;
+
+                let teid_bits = ep_len_bits.saturating_sub(addr_bits);
+                let teid_bytes = teid_bits.div_ceil(8).min(4);
+                if teid_bytes > 0 && tlv_start + teid_bytes <= rest.len() {
+                    buf.push_field(
+                        &MUP_NLRI_CHILDREN[FD_MUP_TEID],
+                        FieldValue::Bytes(&rest[tlv_start..tlv_start + teid_bytes]),
+                        rest_offset + tlv_start..rest_offset + tlv_start + teid_bytes,
+                    );
+                    tlv_start += teid_bytes;
+                }
             }
             // Optional TLVs following the TEID (Section 3.1.5)
             if tlv_start < rest.len() {
@@ -3969,6 +3973,74 @@ mod tests {
         assert_eq!(
             *nested_field_value(&buf, tlv1_range, "address"),
             FieldValue::Ipv4Addr([10, 0, 0, 6])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mup_type2_st_zero_length_teid() {
+        // Endpoint Length of 32 (IPv4 AFI length only) means a zero-length TEID: the
+        // Endpoint Address is still fixed-size at the AFI length and a TLV can follow
+        // directly, with no TEID field in between.
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(85);
+        val.push(4);
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0);
+        val.push(1);
+        val.extend_from_slice(&4u16.to_be_bytes());
+        let tlv = [2u8, 4, 10, 0, 0, 8]; // Type 2: Interwork Endpoint, IPv4
+        let rt_len = 8 + 1 + 4 + tlv.len();
+        val.push(rt_len as u8);
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // RD
+        val.push(32); // Endpoint Length: 32 (address) + 0 (TEID) bits
+        val.extend_from_slice(&[10, 0, 0, 7]); // Endpoint Address
+        val.extend_from_slice(&tlv);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(&buf, &obj_range, "value")
+        else {
+            panic!("expected Object for MP_REACH");
+        };
+        let FieldValue::Array(ref entries_range) = *nested_field_value(&buf, mp_range, "nlri")
+        else {
+            panic!("expected Array for MUP NLRI");
+        };
+        let entry_objs: Vec<_> = buf
+            .nested_fields(entries_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        let entry_range = entry_objs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "endpoint_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 7])
+        );
+        assert!(
+            !buf.nested_fields(entry_range)
+                .iter()
+                .any(|f| f.name() == "teid")
+        );
+
+        let FieldValue::Array(ref tlvs_range) = *nested_field_value(&buf, entry_range, "tlvs")
+        else {
+            panic!("expected Array for tlvs");
+        };
+        let tlvs: Vec<_> = buf
+            .nested_fields(tlvs_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(tlvs.len(), 1);
+        let tlv_range = tlvs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 8])
         );
     }
 
