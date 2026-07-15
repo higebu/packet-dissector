@@ -260,15 +260,16 @@ impl DissectorRegistry {
                                 _ => None,
                             };
                             if let Some(sub_dissector) = sub {
-                                if let Ok(sub_result) =
-                                    sub_dissector.dissect(fast_remaining, buf, fast_offset)
-                                {
-                                    last.bytes_consumed +=
-                                        sub_result.bytes_consumed.min(fast_remaining.len());
-                                }
-                                // The body was dispatched here — signal End so
-                                // the registry dispatch loop does not dissect
-                                // the same bytes a second time.
+                                // A body parse error must not fail the whole
+                                // packet; the upper layers already dissected.
+                                let _ = sub_dissector.dissect(fast_remaining, buf, fast_offset);
+                                // The body was dispatched here and is terminal
+                                // for this message whether or not it parsed:
+                                // count it as consumed and signal End so the
+                                // registry dispatch loop neither dissects the
+                                // same bytes a second time nor re-reads them
+                                // via the returned offset.
+                                last.bytes_consumed += fast_remaining.len();
                                 last.next = DispatchHint::End;
                             }
                             // Whether or not the sub-dissector consumed the body,

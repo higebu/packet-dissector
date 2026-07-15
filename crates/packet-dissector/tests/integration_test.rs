@@ -47,6 +47,7 @@
 //! | Ethernet → IPv4 → TCP → SIP 200 OK            | integration_ethernet_ipv4_tcp_sip_response          |
 //! | Ethernet → IPv4 → UDP → SIP INVITE → SDP      | integration_ethernet_ipv4_udp_sip_invite_with_sdp   |
 //! | Ethernet → IPv4 → TCP → HTTP 200 → SDP        | integration_ethernet_ipv4_tcp_http_response_sdp_body |
+//! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
@@ -3039,6 +3040,44 @@ fn integration_ethernet_ipv4_udp_sip_invite_with_sdp() {
     } else {
         panic!("expected Object");
     }
+}
+
+/// Ethernet → IPv4 → TCP → SIP with an invalid SDP body.
+///
+/// A body that fails to parse as SDP must not fail the whole packet: the
+/// TCP fast path counts the body as consumed and terminates the chain, so
+/// the already-dissected layers survive and no SDP layer is emitted.
+#[test]
+fn integration_ethernet_ipv4_tcp_sip_invalid_sdp_body() {
+    let registry = DissectorRegistry::default();
+
+    let body = b"this is not an sdp session description\r\n";
+    let sip_header = format!(
+        "INVITE sip:bob@example.net SIP/2.0\r\n\
+         Content-Type: application/sdp\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    );
+
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 12345, 5060, 0x18); // PSH+ACK
+    pkt.extend_from_slice(sip_header.as_bytes());
+    pkt.extend_from_slice(body);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "SIP");
+    assert!(buf.layer_by_name("SDP").is_none());
 }
 
 /// Ethernet → IPv4 → TCP → HTTP 200 → SDP body.
