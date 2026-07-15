@@ -10,6 +10,12 @@
 //!   is immutable during dissection; RTP remains decode-as only).
 //! - `rtpmap` / `fmtp` values are exposed as raw attribute name/value
 //!   pairs, not structured fields.
+//! - Field values are exposed as zero-copy UTF-8 strings. A line whose
+//!   value is not valid UTF-8 (legal per the RFC 8866, Section 9
+//!   `byte-string`, e.g. ISO-8859-1 text selected via `a=charset:`) is
+//!   skipped rather than decoded.
+//! - `r=` / `z=` lines are kept as raw strings and are not associated
+//!   with their preceding `t=` line.
 //!
 //! ## References
 //! - RFC 8866: SDP: Session Description Protocol <https://www.rfc-editor.org/rfc/rfc8866>
@@ -83,20 +89,28 @@ const BC_BANDWIDTH: usize = 1;
 
 /// Child descriptors for each `b=` Bandwidth Information object
 /// (RFC 8866, Section 5.8 — <https://www.rfc-editor.org/rfc/rfc8866#section-5.8>).
+///
+/// `<bandwidth>` is kept verbatim as a string: the RFC gives no length
+/// limit for the digit sequence, so a fixed-width integer could not
+/// represent every valid value.
 static BANDWIDTH_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("bwtype", "Bandwidth Type", FieldType::Str),
-    FieldDescriptor::new("bandwidth", "Bandwidth", FieldType::U64),
+    FieldDescriptor::new("bandwidth", "Bandwidth", FieldType::Str),
 ];
 
 /// Child descriptor indices for [`TIME_CHILDREN`].
 const TC_START_TIME: usize = 0;
 const TC_STOP_TIME: usize = 1;
 
-/// Child descriptors for each `t=` Timing object
+/// Child descriptors for each `t=` Time Active object
 /// (RFC 8866, Section 5.9 — <https://www.rfc-editor.org/rfc/rfc8866#section-5.9>).
+///
+/// Times are kept verbatim as strings: RFC 8866, Section 5.9 — "The
+/// representation is an unbounded length field", so a fixed-width integer
+/// could not represent every valid value.
 static TIME_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("start_time", "Start Time", FieldType::U64),
-    FieldDescriptor::new("stop_time", "Stop Time", FieldType::U64),
+    FieldDescriptor::new("start_time", "Start Time", FieldType::Str),
+    FieldDescriptor::new("stop_time", "Stop Time", FieldType::Str),
 ];
 
 /// Child descriptor indices for [`ATTRIBUTE_CHILDREN`].
@@ -130,7 +144,9 @@ static MEDIA_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("proto", "Protocol", FieldType::Str),
     FieldDescriptor::new("formats", "Formats", FieldType::Str),
     FieldDescriptor::new("title", "Media Title", FieldType::Str).optional(),
-    FieldDescriptor::new("connection", "Connection Information", FieldType::Object)
+    // RFC 8866, Section 5.7 — multiple c= lines MAY appear per media
+    // description (layered encoding schemes)
+    FieldDescriptor::new("connections", "Connection Information", FieldType::Array)
         .optional()
         .with_children(CONNECTION_CHILDREN),
     FieldDescriptor::new("bandwidths", "Bandwidth Information", FieldType::Array)
@@ -165,6 +181,15 @@ static FD_BANDWIDTH_ITEM: FieldDescriptor =
 static FD_TIME_ITEM: FieldDescriptor =
     FieldDescriptor::new("time", "Time Description", FieldType::Object)
         .with_children(TIME_CHILDREN);
+
+/// Descriptor for each element of the `time_zones` Array.
+static FD_ZONE_ITEM: FieldDescriptor =
+    FieldDescriptor::new("zone", "Time Zone Adjustment", FieldType::Str);
+
+/// Descriptor for each media-level `c=` element Object.
+static FD_CONNECTION_ITEM: FieldDescriptor =
+    FieldDescriptor::new("connection", "Connection Information", FieldType::Object)
+        .with_children(CONNECTION_CHILDREN);
 
 /// Descriptor for each `a=` element Object.
 static FD_ATTRIBUTE_ITEM: FieldDescriptor =
@@ -205,14 +230,15 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("bandwidths", "Bandwidth Information", FieldType::Array)
         .optional()
         .with_children(BANDWIDTH_CHILDREN),
-    // RFC 8866, Section 5.9 — Timing ("t=")
-    FieldDescriptor::new("times", "Timing", FieldType::Array)
+    // RFC 8866, Section 5.9 — Time Active ("t=")
+    FieldDescriptor::new("times", "Time Active", FieldType::Array)
         .optional()
         .with_children(TIME_CHILDREN),
     // RFC 8866, Section 5.10 — Repeat Times ("r="), kept as raw strings
     FieldDescriptor::new("repeat_times", "Repeat Times", FieldType::Array).optional(),
-    // RFC 8866, Section 5.11 — Time Zone Adjustment ("z="), kept as a raw string
-    FieldDescriptor::new("time_zones", "Time Zone Adjustment", FieldType::Str).optional(),
+    // RFC 8866, Section 5.11 — Time Zone Adjustment ("z="), kept as raw
+    // strings; one z= per time description may appear
+    FieldDescriptor::new("time_zones", "Time Zone Adjustment", FieldType::Array).optional(),
     // RFC 8866, Section 5.13 — Session Attributes ("a=")
     FieldDescriptor::new("session_attributes", "Session Attributes", FieldType::Array)
         .optional()
@@ -228,8 +254,10 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// Parses an SDP session description (RFC 8866). The message is identified
 /// by its mandatory first line `v=0`; parsing of the remaining lines is
 /// lenient (Postel's Law): unknown type characters (e.g. the obsolete `k=`
-/// line or extensions) are skipped, and malformed *optional* lines are
-/// skipped rather than failing the layer.
+/// line or extensions), structurally broken lines (missing `=`, non-UTF-8
+/// values), and malformed *optional* lines are skipped rather than failing
+/// the layer. Only the `v=` line and `m=` lines — which define the message
+/// identity and structure — are hard errors when malformed.
 pub struct SdpDissector;
 
 impl Dissector for SdpDissector {
@@ -390,11 +418,23 @@ fn validate_message(data: &[u8]) -> Result<u8, PacketError> {
     }
 
     for (start, content) in raw {
-        let line = parse_line(start, content)?;
-        // A malformed m= line is an error: it defines the structure of
-        // everything that follows (RFC 8866, Section 5.14).
-        if line.kind == b'm' {
-            parse_media_line(line.value)?;
+        match parse_line(start, content) {
+            Ok(line) => {
+                // A malformed m= line is an error: it defines the structure
+                // of everything that follows (RFC 8866, Section 5.14).
+                if line.kind == b'm' {
+                    parse_media_line(line.value)?;
+                }
+            }
+            Err(e) => {
+                // Structurally broken lines are skipped (Postel's Law)
+                // unless they are m= lines, whose subfields are ASCII
+                // tokens and whose loss would misattribute every
+                // following line to the wrong section.
+                if content.first() == Some(&b'm') && content.get(1) == Some(&b'=') {
+                    return Err(e);
+                }
+            }
         }
     }
 
@@ -405,17 +445,32 @@ fn validate_message(data: &[u8]) -> Result<u8, PacketError> {
 // Token helpers
 // ---------------------------------------------------------------------------
 
-/// Split the next whitespace-delimited token off `s`, returning
-/// `(token, rest)`. Returns `None` when no token remains.
+/// Split the next SP-delimited token off `s`, returning `(token, rest)`.
+/// Returns `None` when no token remains.
+///
+/// Only the ASCII space (0x20) separates subfields: the RFC 8866,
+/// Section 9 `non-ws-string` permits `%x80-FF` bytes, which include
+/// Unicode whitespace codepoints that must stay inside a token.
 fn take_token(s: &str) -> Option<(&str, &str)> {
-    let s = s.trim_start();
+    let s = s.trim_start_matches(' ');
     if s.is_empty() {
         return None;
     }
-    match s.find(char::is_whitespace) {
+    match s.find(' ') {
         Some(i) => Some((&s[..i], &s[i..])),
         None => Some((s, "")),
     }
+}
+
+/// Iterate the SP-separated subfields of a line value (empty tokens from
+/// repeated spaces are skipped leniently).
+fn sp_tokens(value: &str) -> impl Iterator<Item = &str> + Clone {
+    value.split(' ').filter(|t| !t.is_empty())
+}
+
+/// Returns `true` when `s` is a non-empty ASCII digit sequence.
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +535,13 @@ fn parse_session_section<'pkt>(data: &'pkt [u8], buf: &mut DissectBuffer<'pkt>, 
         &FD_REPEAT_ITEM,
         offset,
     );
-    push_scalar(buf, session_lines(data), b'z', FD_TIME_ZONES, offset);
+    push_str_array(
+        buf,
+        session_lines(data).filter(|l| l.kind == b'z'),
+        &FIELD_DESCRIPTORS[FD_TIME_ZONES],
+        &FD_ZONE_ITEM,
+        offset,
+    );
     push_attributes(
         buf,
         session_lines(data),
@@ -511,7 +572,7 @@ fn push_scalar<'pkt, I>(
 /// Push the `o=` Origin object. A line with the wrong number of tokens is
 /// skipped (Postel's Law).
 fn push_origin<'pkt>(buf: &mut DissectBuffer<'pkt>, line: &Line<'pkt>, offset: usize) {
-    let mut tokens = line.value.split_whitespace();
+    let mut tokens = sp_tokens(line.value);
     let (Some(username), Some(sess_id), Some(sess_version)) =
         (tokens.next(), tokens.next(), tokens.next())
     else {
@@ -545,6 +606,17 @@ fn push_origin<'pkt>(buf: &mut DissectBuffer<'pkt>, line: &Line<'pkt>, offset: u
     buf.end_container(obj_idx);
 }
 
+/// Parse a `c=` line value into its three subfields
+/// (RFC 8866, Section 5.7 — <https://www.rfc-editor.org/rfc/rfc8866#section-5.7>).
+fn connection_tokens(value: &str) -> Option<(&str, &str, &str)> {
+    let mut tokens = sp_tokens(value);
+    let (nettype, addrtype, address) = (tokens.next()?, tokens.next()?, tokens.next()?);
+    if tokens.next().is_some() {
+        return None;
+    }
+    Some((nettype, addrtype, address))
+}
+
 /// Push a `c=` Connection Information object under the given descriptor.
 /// A line with the wrong number of tokens is skipped (Postel's Law).
 fn push_connection<'pkt>(
@@ -553,15 +625,9 @@ fn push_connection<'pkt>(
     descriptor: &'static FieldDescriptor,
     offset: usize,
 ) {
-    let mut tokens = line.value.split_whitespace();
-    let (Some(nettype), Some(addrtype), Some(address)) =
-        (tokens.next(), tokens.next(), tokens.next())
-    else {
+    let Some((nettype, addrtype, address)) = connection_tokens(line.value) else {
         return;
     };
-    if tokens.next().is_some() {
-        return;
-    }
 
     let range = line_range(line, offset);
     let obj_idx = buf.begin_container(descriptor, FieldValue::Object(0..0), range.clone());
@@ -577,6 +643,29 @@ fn push_connection<'pkt>(
         );
     }
     buf.end_container(obj_idx);
+}
+
+/// Push an Array of media-level `c=` Connection Information objects.
+///
+/// RFC 8866, Section 5.7 — multiple `c=` lines MAY appear per media
+/// description (layered encoding schemes). Malformed lines are skipped.
+fn push_connections<'pkt, I>(
+    buf: &mut DissectBuffer<'pkt>,
+    lines: I,
+    array_desc: &'static FieldDescriptor,
+    offset: usize,
+) where
+    I: Iterator<Item = Line<'pkt>> + Clone,
+{
+    let items = lines.filter(|l| l.kind == b'c' && connection_tokens(l.value).is_some());
+    let Some(range) = items_range(items.clone(), offset) else {
+        return;
+    };
+    let array_idx = buf.begin_container(array_desc, FieldValue::Array(0..0), range);
+    for line in items {
+        push_connection(buf, &line, &FD_CONNECTION_ITEM, offset);
+    }
+    buf.end_container(array_idx);
 }
 
 /// Compute the byte range covering the first through last item lines.
@@ -621,12 +710,15 @@ fn push_str_array<'pkt, I>(
 
 /// Parse a `b=` line value: `<bwtype>:<bandwidth>`
 /// (RFC 8866, Section 5.8 — <https://www.rfc-editor.org/rfc/rfc8866#section-5.8>).
-fn parse_bandwidth(value: &str) -> Option<(&str, u64)> {
+///
+/// `<bandwidth>` is validated as digits but kept verbatim — the RFC gives
+/// no length limit, so parsing into a fixed-width integer could drop a
+/// valid line.
+fn parse_bandwidth(value: &str) -> Option<(&str, &str)> {
     let (bwtype, bandwidth) = value.split_once(':')?;
-    if bwtype.is_empty() {
+    if bwtype.is_empty() || !is_digits(bandwidth) {
         return None;
     }
-    let bandwidth = bandwidth.trim().parse::<u64>().ok()?;
     Some((bwtype, bandwidth))
 }
 
@@ -658,7 +750,7 @@ fn push_bandwidths<'pkt, I>(
         );
         buf.push_field(
             &BANDWIDTH_CHILDREN[BC_BANDWIDTH],
-            FieldValue::U64(bandwidth),
+            FieldValue::Str(bandwidth),
             r,
         );
         buf.end_container(obj_idx);
@@ -668,11 +760,14 @@ fn push_bandwidths<'pkt, I>(
 
 /// Parse a `t=` line value: `<start-time> <stop-time>`
 /// (RFC 8866, Section 5.9 — <https://www.rfc-editor.org/rfc/rfc8866#section-5.9>).
-fn parse_timing(value: &str) -> Option<(u64, u64)> {
-    let mut tokens = value.split_whitespace();
-    let start = tokens.next()?.parse::<u64>().ok()?;
-    let stop = tokens.next()?.parse::<u64>().ok()?;
-    if tokens.next().is_some() {
+///
+/// Times are validated as digits but kept verbatim — "The representation
+/// is an unbounded length field", so parsing into a fixed-width integer
+/// could drop a valid line.
+fn parse_timing(value: &str) -> Option<(&str, &str)> {
+    let mut tokens = sp_tokens(value);
+    let (start, stop) = (tokens.next()?, tokens.next()?);
+    if tokens.next().is_some() || !is_digits(start) || !is_digits(stop) {
         return None;
     }
     Some((start, stop))
@@ -698,10 +793,10 @@ where
         let obj_idx = buf.begin_container(&FD_TIME_ITEM, FieldValue::Object(0..0), r.clone());
         buf.push_field(
             &TIME_CHILDREN[TC_START_TIME],
-            FieldValue::U64(start),
+            FieldValue::Str(start),
             r.clone(),
         );
-        buf.push_field(&TIME_CHILDREN[TC_STOP_TIME], FieldValue::U64(stop), r);
+        buf.push_field(&TIME_CHILDREN[TC_STOP_TIME], FieldValue::Str(stop), r);
         buf.end_container(obj_idx);
     }
     buf.end_container(array_idx);
@@ -772,8 +867,8 @@ fn parse_media_line(value: &str) -> Result<MediaLine<'_>, PacketError> {
     let (media, rest) = take_token(value).ok_or(MALFORMED)?;
     let (port_spec, rest) = take_token(rest).ok_or(MALFORMED)?;
     let (proto, rest) = take_token(rest).ok_or(MALFORMED)?;
-    // RFC 8866, Section 5.14 — at least one <fmt> is required
-    let formats = rest.trim();
+    // RFC 8866, Section 9 — ABNF `1*(SP fmt)`: at least one <fmt> is required
+    let formats = rest.trim_matches(' ');
     if formats.is_empty() {
         return Err(MALFORMED);
     }
@@ -879,9 +974,7 @@ fn parse_media_sections<'pkt>(data: &'pkt [u8], buf: &mut DissectBuffer<'pkt>, o
                 line_range(&line, offset),
             );
         }
-        if let Some(line) = section.clone().find(|l| l.kind == b'c') {
-            push_connection(buf, &line, &MEDIA_CHILDREN[MC_CONNECTION], offset);
-        }
+        push_connections(buf, section.clone(), &MEDIA_CHILDREN[MC_CONNECTION], offset);
         push_bandwidths(buf, section.clone(), &MEDIA_CHILDREN[MC_BANDWIDTHS], offset);
         push_attributes(buf, section, &MEDIA_CHILDREN[MC_ATTRIBUTES], offset);
 
@@ -910,10 +1003,13 @@ mod tests {
     // | 5.6         | Email (e=) / Phone (p=)        | parse_sdp_emails_and_phones             |
     // | 5.7         | Connection Information (c=)    | parse_sdp_full_session                  |
     // | 5.7         | Media-level connection         | parse_sdp_full_session                  |
+    // | 5.7         | Multiple media-level c=        | parse_sdp_media_multiple_connections    |
     // | 5.8         | Bandwidth (b=)                 | parse_sdp_full_session                  |
     // | 5.8         | Malformed bandwidth skipped    | parse_sdp_malformed_optional_lines      |
-    // | 5.9         | Timing (t=)                    | parse_sdp_minimal_session               |
+    // | 5.8         | Unbounded bandwidth value      | parse_sdp_unbounded_time_and_bandwidth  |
+    // | 5.9         | Time Active (t=)               | parse_sdp_minimal_session               |
     // | 5.9         | Malformed timing skipped       | parse_sdp_malformed_optional_lines      |
+    // | 5.9         | Unbounded time value           | parse_sdp_unbounded_time_and_bandwidth  |
     // | 5.10        | Repeat Times (r=)              | parse_sdp_repeat_and_zone               |
     // | 5.11        | Time Zone Adjustment (z=)      | parse_sdp_repeat_and_zone               |
     // | 5.12        | Obsolete key line (k=) skipped | parse_sdp_unknown_lines_skipped         |
@@ -924,10 +1020,12 @@ mod tests {
     // | 5.14        | Malformed media line           | parse_sdp_malformed_media_line          |
     // | 5.14        | Media port out of range        | parse_sdp_media_port_out_of_range       |
     // | 5           | LF-only / missing final EOL    | parse_sdp_lf_only_no_trailing_newline   |
+    // | 9           | non-ws-string with %x80-FF     | parse_sdp_origin_with_unicode_space     |
     // | -           | Truncated input                | parse_sdp_truncated                     |
     // | -           | First line not v=              | parse_sdp_missing_version               |
-    // | -           | Line without '='               | parse_sdp_line_missing_equals           |
-    // | -           | Non-UTF-8 line                 | parse_sdp_non_utf8_line                 |
+    // | -           | Line without '=' skipped       | parse_sdp_line_missing_equals_skipped   |
+    // | -           | Non-UTF-8 line skipped         | parse_sdp_non_utf8_line_skipped         |
+    // | -           | Non-UTF-8 m= line rejected     | parse_sdp_non_utf8_media_line           |
     // | -           | bytes_consumed / End hint      | parse_sdp_consumes_all_and_ends         |
     // | -           | Offset handling                | parse_sdp_with_offset                   |
     // | -           | Dissector metadata             | dissector_metadata                      |
@@ -995,14 +1093,15 @@ mod tests {
         assert_eq!(children[4].value, FieldValue::Str("IP4"));
         assert_eq!(children[5].value, FieldValue::Str("host.example.com"));
 
-        // RFC 8866, Section 5.9 — t= start/stop times
+        // RFC 8866, Section 5.9 — t= start/stop times (kept verbatim: the
+        // ABNF `time` is an unbounded-length numeric field)
         let times = buf.field_by_name(layer, "times").unwrap();
         let objects = array_objects(&buf, times, "time");
         assert_eq!(objects.len(), 1);
         if let FieldValue::Object(ref r) = objects[0].value {
             let f = buf.nested_fields(r);
-            assert_eq!(f[0].value, FieldValue::U64(0));
-            assert_eq!(f[1].value, FieldValue::U64(0));
+            assert_eq!(f[0].value, FieldValue::Str("0"));
+            assert_eq!(f[1].value, FieldValue::Str("0"));
         }
 
         assert!(buf.field_by_name(layer, "media_descriptions").is_none());
@@ -1062,7 +1161,7 @@ mod tests {
         if let FieldValue::Object(ref r) = bw_objects[0].value {
             let f = buf.nested_fields(r);
             assert_eq!(f[0].value, FieldValue::Str("CT"));
-            assert_eq!(f[1].value, FieldValue::U64(64));
+            assert_eq!(f[1].value, FieldValue::Str("64"));
         }
 
         // RFC 8866, Section 5.14 — two media descriptions
@@ -1080,7 +1179,7 @@ mod tests {
             assert_eq!(by_name("formats").unwrap().value, FieldValue::Str("0"));
             assert!(by_name("num_ports").is_none());
             assert!(by_name("title").is_none());
-            assert!(by_name("connection").is_none());
+            assert!(by_name("connections").is_none());
         }
 
         // video section: media-level i=, c=, b=, a=
@@ -1094,8 +1193,15 @@ mod tests {
                 by_name("title").unwrap().value,
                 FieldValue::Str("Video feed")
             );
-            let conn = by_name("connection").unwrap();
-            if let FieldValue::Object(ref cr) = conn.value {
+            let conns = by_name("connections").unwrap();
+            let conn_range = conns.value.as_container_range().unwrap();
+            let conn_obj = buf
+                .nested_fields(conn_range)
+                .iter()
+                .find(|x| x.value.is_object())
+                .cloned()
+                .unwrap();
+            if let FieldValue::Object(ref cr) = conn_obj.value {
                 let cf = buf.nested_fields(cr);
                 assert_eq!(cf[2].value, FieldValue::Str("198.51.100.2"));
             } else {
@@ -1108,7 +1214,7 @@ mod tests {
             if let FieldValue::Object(ref br) = bw_obj.value {
                 let bf = buf.nested_fields(br);
                 assert_eq!(bf[0].value, FieldValue::Str("AS"));
-                assert_eq!(bf[1].value, FieldValue::U64(256));
+                assert_eq!(bf[1].value, FieldValue::Str("256"));
             }
             let attrs = by_name("attributes").unwrap();
             let attr_range = attrs.value.as_container_range().unwrap();
@@ -1179,24 +1285,121 @@ mod tests {
 
     #[test]
     fn parse_sdp_repeat_and_zone() {
+        // RFC 8866, Section 9 — each time-description may carry its own
+        // repeat-description with a zone-field, so multiple z= lines can
+        // appear in one session description.
         let data = b"v=0\r\n\
                      s=repeats\r\n\
                      t=3724394400 3724398000\r\n\
                      r=604800 3600 0 90000\r\n\
-                     z=3730928400 -1h 3749680800 0\r\n";
+                     z=3730928400 -1h 3749680800 0\r\n\
+                     t=3730000000 3730003600\r\n\
+                     r=86400 1800 0\r\n\
+                     z=3749680800 0\r\n";
         let buf = dissect(data).unwrap();
         let layer = buf.layer_by_name("SDP").unwrap();
 
         let repeats = buf.field_by_name(layer, "repeat_times").unwrap();
         let range = repeats.value.as_container_range().unwrap();
         let items = buf.nested_fields(range);
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0].value, FieldValue::Str("604800 3600 0 90000"));
+        assert_eq!(items[1].value, FieldValue::Str("86400 1800 0"));
 
+        let zones = buf.field_by_name(layer, "time_zones").unwrap();
+        let range = zones.value.as_container_range().unwrap();
+        let items = buf.nested_fields(range);
+        assert_eq!(items.len(), 2);
         assert_eq!(
-            buf.field_by_name(layer, "time_zones").unwrap().value,
+            items[0].value,
             FieldValue::Str("3730928400 -1h 3749680800 0")
         );
+        assert_eq!(items[1].value, FieldValue::Str("3749680800 0"));
+    }
+
+    #[test]
+    fn parse_sdp_unbounded_time_and_bandwidth() {
+        // RFC 8866, Section 5.9 — "The representation is an unbounded
+        // length field"; Section 5.8 gives no length limit for <bandwidth>.
+        // Values beyond u64 must not be dropped.
+        let data = b"v=0\r\n\
+                     s=big numbers\r\n\
+                     b=CT:99999999999999999999999\r\n\
+                     t=111111111111111111111 222222222222222222222\r\n";
+        let buf = dissect(data).unwrap();
+        let layer = buf.layer_by_name("SDP").unwrap();
+
+        let bws = buf.field_by_name(layer, "bandwidths").unwrap();
+        let bw_objects = array_objects(&buf, bws, "bandwidth_info");
+        assert_eq!(bw_objects.len(), 1);
+        if let FieldValue::Object(ref r) = bw_objects[0].value {
+            let f = buf.nested_fields(r);
+            assert_eq!(f[1].value, FieldValue::Str("99999999999999999999999"));
+        }
+
+        let times = buf.field_by_name(layer, "times").unwrap();
+        let objects = array_objects(&buf, times, "time");
+        assert_eq!(objects.len(), 1);
+        if let FieldValue::Object(ref r) = objects[0].value {
+            let f = buf.nested_fields(r);
+            assert_eq!(f[0].value, FieldValue::Str("111111111111111111111"));
+            assert_eq!(f[1].value, FieldValue::Str("222222222222222222222"));
+        }
+    }
+
+    #[test]
+    fn parse_sdp_origin_with_unicode_space() {
+        // RFC 8866, Section 9 — o= subfields are non-ws-string =
+        // 1*(VCHAR/%x80-FF): bytes in %x80-FF (e.g. U+00A0 NO-BREAK SPACE)
+        // are legal inside a username. Only the ASCII SP separates fields.
+        let data = "v=0\r\n\
+                    o=al\u{00A0}ice 1 2 IN IP4 host.example.com\r\n\
+                    s=nbsp\r\n"
+            .as_bytes();
+        let buf = dissect(data).unwrap();
+        let layer = buf.layer_by_name("SDP").unwrap();
+
+        let origin = buf.field_by_name(layer, "origin").unwrap();
+        let origin_range = match &origin.value {
+            FieldValue::Object(r) => r,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        let children = buf.nested_fields(origin_range);
+        assert_eq!(children[0].value, FieldValue::Str("al\u{00A0}ice"));
+        assert_eq!(children[5].value, FieldValue::Str("host.example.com"));
+    }
+
+    #[test]
+    fn parse_sdp_media_multiple_connections() {
+        // RFC 8866, Section 5.7 — "Multiple addresses or "c=" lines MAY be
+        // specified on a per media description basis" (layered encoding).
+        let data = b"v=0\r\n\
+                     s=layered\r\n\
+                     m=video 49170/2 RTP/AVP 31\r\n\
+                     c=IN IP4 233.252.0.1/127\r\n\
+                     c=IN IP4 233.252.0.2/127\r\n";
+        let buf = dissect(data).unwrap();
+        let layer = buf.layer_by_name("SDP").unwrap();
+
+        let media = buf.field_by_name(layer, "media_descriptions").unwrap();
+        let sections = array_objects(&buf, media, "media_description");
+        assert_eq!(sections.len(), 1);
+        if let FieldValue::Object(ref r) = sections[0].value {
+            let f = buf.nested_fields(r);
+            let conns = f.iter().find(|x| x.name() == "connections").unwrap();
+            let conn_range = conns.value.as_container_range().unwrap();
+            let objects: Vec<_> = buf
+                .nested_fields(conn_range)
+                .iter()
+                .filter(|x| x.value.is_object() && x.name() == "connection")
+                .cloned()
+                .collect();
+            assert_eq!(objects.len(), 2);
+            if let FieldValue::Object(ref cr) = objects[1].value {
+                let cf = buf.nested_fields(cr);
+                assert_eq!(cf[2].value, FieldValue::Str("233.252.0.2/127"));
+            }
+        }
     }
 
     #[test]
@@ -1321,14 +1524,40 @@ mod tests {
     }
 
     #[test]
-    fn parse_sdp_line_missing_equals() {
-        let data = b"v=0\r\nsession name without equals\r\n";
-        assert!(matches!(dissect_err(data), PacketError::InvalidHeader(_)));
+    fn parse_sdp_line_missing_equals_skipped() {
+        // A structurally broken non-m= line is skipped (Postel's Law),
+        // not a reason to reject the whole session description.
+        let data = b"v=0\r\njunk line without equals\r\ns=still parsed\r\n";
+        let buf = dissect(data).unwrap();
+        let layer = buf.layer_by_name("SDP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "session_name").unwrap().value,
+            FieldValue::Str("still parsed")
+        );
     }
 
     #[test]
-    fn parse_sdp_non_utf8_line() {
-        let data = b"v=0\r\ns=\xff\xfe\r\n";
+    fn parse_sdp_non_utf8_line_skipped() {
+        // RFC 8866, Section 9 — text = byte-string permits any byte except
+        // NUL/CR/LF (e.g. ISO-8859-1 via a=charset). Such a line must not
+        // reject the whole message; the (undecodable) line is skipped.
+        let data = b"v=0\r\ns=\xff\xfe\r\ni=utf8 info\r\n";
+        let buf = dissect(data).unwrap();
+        let layer = buf.layer_by_name("SDP").unwrap();
+        assert!(buf.field_by_name(layer, "session_name").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "session_information")
+                .unwrap()
+                .value,
+            FieldValue::Str("utf8 info")
+        );
+    }
+
+    #[test]
+    fn parse_sdp_non_utf8_media_line() {
+        // m= subfields are ASCII tokens; a non-UTF-8 m= line is malformed
+        // and rejects the message like any other malformed m= line.
+        let data = b"v=0\r\ns=x\r\nm=audio 49170 RTP/AVP \xff\r\n";
         assert!(matches!(dissect_err(data), PacketError::InvalidHeader(_)));
     }
 
