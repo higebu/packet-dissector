@@ -253,17 +253,23 @@ impl DissectorRegistry {
                     // Dispatch remaining bytes to a sub-dissector when the upper
                     // dissector indicated a non-End hint (e.g., HTTP with
                     // Content-Type dispatch).
-                    if let Some(ref last) = last_result {
+                    if let Some(last) = last_result.as_mut() {
                         if !fast_remaining.is_empty() && !matches!(last.next, DispatchHint::End) {
                             let sub = match &last.next {
                                 DispatchHint::ByContentType(ct) => self.get_by_content_type(ct),
                                 _ => None,
                             };
                             if let Some(sub_dissector) = sub {
-                                if let Ok(_sub_result) =
+                                if let Ok(sub_result) =
                                     sub_dissector.dissect(fast_remaining, buf, fast_offset)
                                 {
+                                    last.bytes_consumed +=
+                                        sub_result.bytes_consumed.min(fast_remaining.len());
                                 }
+                                // The body was dispatched here — signal End so
+                                // the registry dispatch loop does not dissect
+                                // the same bytes a second time.
+                                last.next = DispatchHint::End;
                             }
                             // Whether or not the sub-dissector consumed the body,
                             // the pipelining loop is finished — return the result.
