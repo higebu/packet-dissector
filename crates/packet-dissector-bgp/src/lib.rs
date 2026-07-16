@@ -1626,7 +1626,6 @@ fn parse_mup_route_type_data<'pkt>(
             }
             let addr_bits = if ipv6 { 128 } else { 32 };
             let addr_bytes = addr_bits / 8;
-            let mut tlv_start = 1;
             if addr_bytes <= rest.len().saturating_sub(1) {
                 let addr_val = format_address(&rest[1..1 + addr_bytes], ipv6);
                 buf.push_field(
@@ -1634,22 +1633,26 @@ fn parse_mup_route_type_data<'pkt>(
                     addr_val,
                     rest_offset + 1..rest_offset + 1 + addr_bytes,
                 );
-                tlv_start = 1 + addr_bytes;
 
+                let teid_start = 1 + addr_bytes;
                 let teid_bits = ep_len_bits.saturating_sub(addr_bits);
                 let teid_bytes = teid_bits.div_ceil(8).min(4);
-                if teid_bytes > 0 && tlv_start + teid_bytes <= rest.len() {
+                if teid_bytes > 0 && teid_start + teid_bytes <= rest.len() {
                     buf.push_field(
                         &MUP_NLRI_CHILDREN[FD_MUP_TEID],
-                        FieldValue::Bytes(&rest[tlv_start..tlv_start + teid_bytes]),
-                        rest_offset + tlv_start..rest_offset + tlv_start + teid_bytes,
+                        FieldValue::Bytes(&rest[teid_start..teid_start + teid_bytes]),
+                        rest_offset + teid_start..rest_offset + teid_start + teid_bytes,
                     );
-                    tlv_start += teid_bytes;
                 }
             }
-            // Optional TLVs following the TEID (Section 3.1.5)
-            if tlv_start < rest.len() {
-                parse_mup_st_tlvs(buf, &rest[tlv_start..], rest_offset + tlv_start);
+            // Optional TLVs follow the full endpoint block (Section 3.1.5). Use
+            // ep_total_bytes (derived directly from the wire Endpoint Length field,
+            // and already bounds-checked above) as the authoritative boundary so a
+            // malformed/oversized declared TEID length can't cause TLV parsing to
+            // start inside the endpoint blob.
+            let ep_end = 1 + ep_total_bytes;
+            if ep_end < rest.len() {
+                parse_mup_st_tlvs(buf, &rest[ep_end..], rest_offset + ep_end);
             }
         }
         _ => {
@@ -4041,6 +4044,81 @@ mod tests {
         assert_eq!(
             *nested_field_value(&buf, tlv_range, "address"),
             FieldValue::Ipv4Addr([10, 0, 0, 8])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mup_type2_st_oversized_teid_length() {
+        // Endpoint Length declares 72 bits: 32 (IPv4 address) + 40 (a malformed,
+        // oversized TEID — the max is 4 octets / 32 bits). The TLV boundary must be
+        // derived from the full declared Endpoint Length (9 octets after the length
+        // byte), not from the accumulated address + capped-TEID bytes, otherwise the
+        // trailing TLV gets parsed starting one byte early, inside the endpoint blob.
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(85);
+        val.push(4);
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0);
+        val.push(1);
+        val.extend_from_slice(&4u16.to_be_bytes());
+        let tlv = [2u8, 4, 10, 0, 0, 10]; // Type 2: Interwork Endpoint, IPv4
+        let rt_len = 8 + 1 + 4 + 5 + tlv.len();
+        val.push(rt_len as u8);
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // RD
+        val.push(72); // Endpoint Length: 32 (address) + 40 (oversized TEID) bits
+        val.extend_from_slice(&[10, 0, 0, 9]); // Endpoint Address
+        val.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]); // 5-octet declared TEID area
+        val.extend_from_slice(&tlv);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(&buf, &obj_range, "value")
+        else {
+            panic!("expected Object for MP_REACH");
+        };
+        let FieldValue::Array(ref entries_range) = *nested_field_value(&buf, mp_range, "nlri")
+        else {
+            panic!("expected Array for MUP NLRI");
+        };
+        let entry_objs: Vec<_> = buf
+            .nested_fields(entries_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        let entry_range = entry_objs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "endpoint_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 9])
+        );
+        // TEID is capped to the first 4 octets of the declared (oversized) TEID area.
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "teid"),
+            FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04])
+        );
+
+        let FieldValue::Array(ref tlvs_range) = *nested_field_value(&buf, entry_range, "tlvs")
+        else {
+            panic!("expected Array for tlvs");
+        };
+        let tlvs: Vec<_> = buf
+            .nested_fields(tlvs_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(tlvs.len(), 1);
+        let tlv_range = tlvs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "type"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 10])
         );
     }
 
