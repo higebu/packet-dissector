@@ -17,7 +17,7 @@
 //! - RFC 9012 (Tunnel Encapsulation / Color): <https://www.rfc-editor.org/rfc/rfc9012>
 //! - RFC 9072 (Extended Optional Parameters Length): <https://www.rfc-editor.org/rfc/rfc9072>
 //! - RFC 9252 (SRv6 BGP Services): <https://www.rfc-editor.org/rfc/rfc9252>
-//! - draft-ietf-bess-mup-safi-00 (MUP SAFI): <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+//! - draft-ietf-bess-mup-safi-01 (MUP SAFI): <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 //!
 //! # RFC 4271 (BGP-4) Coverage
 //!
@@ -110,12 +110,15 @@
 //! | 4 | MP_UNREACH_NLRI (IPv4) | `parse_bgp_update_mp_unreach_ipv4` |
 //! | 3 | IPv6 NLRI prefix CIDR formatting | `format_nlri_ipv6_prefix_cidr` |
 //!
-//! # draft-ietf-bess-mup-safi-00 Coverage
+//! # draft-ietf-bess-mup-safi-01 Coverage
 //!
 //! | Section | Description | Test |
 //! |---------|-------------|------|
 //! | 3 | MUP NLRI (Interwork Segment Discovery) | `parse_bgp_update_mup_interwork_segment_discovery` |
 //! | 3.3 | Type 1 ST (3GPP 5G) | `parse_bgp_update_mup_type1_st` |
+//! | 3.1.4/3.3 | Type 2 ST (3GPP 5G) | `parse_bgp_update_mup_type2_st` |
+//! | 3.1.5 | ST Route TLVs (3gpp-5g Session Parameters, Interwork Endpoint, Source Address) | `parse_bgp_update_mup_type1_st`, `parse_bgp_update_mup_type2_st` |
+//! | 3.2 | MUP Extended Community sub-types (2-Octet AS / IPv4 / 4-Octet AS, Direct/Interwork Segment) | `mup_extended_community_type_names`, `format_ext_community_mup_values` |
 //!
 //! # RFC 8092 Coverage
 //!
@@ -728,6 +731,8 @@ fn well_known_community_name(v: u32) -> Option<&'static str> {
 ///
 /// RFC 4360 — <https://www.rfc-editor.org/rfc/rfc4360>
 /// RFC 9012 — <https://www.rfc-editor.org/rfc/rfc9012>
+/// draft-ietf-bess-mup-safi-01, Section 3.2 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 fn extended_community_type_name(type_high: u8, sub_type: u8) -> Option<&'static str> {
     let base_type = type_high & 0x3F;
     match (base_type, sub_type) {
@@ -737,7 +742,12 @@ fn extended_community_type_name(type_high: u8, sub_type: u8) -> Option<&'static 
         (0x01, 0x03) => Some("Route Origin (IPv4)"),
         (0x03, 0x0B) => Some("Color"),
         (0x06, _) => Some("EVPN"),
-        (0x0C, 0x00) => Some("MUP Direct Segment Identifier"),
+        (0x0C, 0x00) => Some("MUP Direct Segment (2-Octet AS)"),
+        (0x0C, 0x01) => Some("MUP Direct Segment (IPv4 Address)"),
+        (0x0C, 0x02) => Some("MUP Direct Segment (4-Octet AS)"),
+        (0x0C, 0x03) => Some("MUP Interwork Segment (2-Octet AS)"),
+        (0x0C, 0x04) => Some("MUP Interwork Segment (IPv4 Address)"),
+        (0x0C, 0x05) => Some("MUP Interwork Segment (4-Octet AS)"),
         _ => None,
     }
 }
@@ -1356,7 +1366,7 @@ fn parse_attr_value<'pkt>(
 
 /// Returns a human-readable name for MUP route types.
 ///
-/// draft-ietf-bess-mup-safi-00, Section 3 —
+/// draft-ietf-bess-mup-safi-01, Section 3 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 fn mup_route_type_name(v: u16) -> Option<&'static str> {
     match v {
@@ -1370,7 +1380,7 @@ fn mup_route_type_name(v: u16) -> Option<&'static str> {
 
 /// Returns a human-readable name for MUP architecture types.
 ///
-/// draft-ietf-bess-mup-safi-00, Section 3
+/// draft-ietf-bess-mup-safi-01, Section 3
 fn mup_architecture_type_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("3gpp-5g"),
@@ -1378,9 +1388,22 @@ fn mup_architecture_type_name(v: u8) -> Option<&'static str> {
     }
 }
 
+/// Returns a human-readable name for MUP ST Route TLV types.
+///
+/// draft-ietf-bess-mup-safi-01, Section 3.1.5 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+fn mup_st_tlv_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("3gpp-5g Session Parameters"),
+        2 => Some("Interwork Endpoint"),
+        3 => Some("Source Address"),
+        _ => None,
+    }
+}
+
 /// Parses a sequence of MUP NLRI entries into the buffer.
 ///
-/// draft-ietf-bess-mup-safi-00, Section 3 —
+/// draft-ietf-bess-mup-safi-01, Section 3 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 ///
 /// Each MUP NLRI: Architecture Type (1) + Route Type (2) + Length (1) + Route Type specific data.
@@ -1434,7 +1457,7 @@ fn parse_mup_nlri<'pkt>(
 
 /// Parses route-type-specific data for MUP NLRI entries.
 ///
-/// draft-ietf-bess-mup-safi-00, Sections 3.1–3.4
+/// draft-ietf-bess-mup-safi-01, Sections 3.1–3.5
 fn parse_mup_route_type_data<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     route_type: u16,
@@ -1558,10 +1581,12 @@ fn parse_mup_route_type_data<'pkt>(
                         arch_offset + ep_start..arch_offset + ep_start + ep_addr_bytes,
                     );
 
-                    // Optional Source Address
+                    // Optional Source Address, followed by optional TLVs (Section 3.1.5)
                     let src_start = ep_start + ep_addr_bytes;
+                    let mut tlv_start = src_start;
                     if src_start < arch_data.len() {
                         let src_addr_bits = arch_data[src_start] as usize;
+                        tlv_start = src_start + 1;
                         if src_addr_bits > 0 {
                             let src_addr_bytes = src_addr_bits / 8;
                             let src_data_start = src_start + 1;
@@ -1576,8 +1601,12 @@ fn parse_mup_route_type_data<'pkt>(
                                     arch_offset + src_data_start
                                         ..arch_offset + src_data_start + src_addr_bytes,
                                 );
+                                tlv_start = src_data_start + src_addr_bytes;
                             }
                         }
+                    }
+                    if tlv_start < arch_data.len() {
+                        parse_mup_st_tlvs(buf, &arch_data[tlv_start..], arch_offset + tlv_start);
                     }
                 }
             }
@@ -1588,29 +1617,42 @@ fn parse_mup_route_type_data<'pkt>(
                 return;
             }
             let ep_len_bits = rest[0] as usize;
-            // Endpoint length includes TEID bits (32) + address bits
+            // Endpoint Length covers the fixed-size Endpoint Address (32 bits for IPv4,
+            // 128 for IPv6) plus the variable-length (0-4 octet) architecture-specific
+            // TEID that follows it.
             let ep_total_bytes = ep_len_bits.div_ceil(8);
             if 1 + ep_total_bytes > rest.len() {
                 return;
             }
-            // Extract address portion (endpoint length minus TEID bits)
-            let addr_bits = ep_len_bits.saturating_sub(32);
-            let addr_bytes = addr_bits.div_ceil(8);
-            if addr_bytes > 0 {
-                let addr_val = format_address(&rest[1..1 + addr_bytes], addr_bits == 128);
+            let addr_bits = if ipv6 { 128 } else { 32 };
+            let addr_bytes = addr_bits / 8;
+            if addr_bytes <= rest.len().saturating_sub(1) {
+                let addr_val = format_address(&rest[1..1 + addr_bytes], ipv6);
                 buf.push_field(
                     &MUP_NLRI_CHILDREN[FD_MUP_ENDPOINT_ADDRESS],
                     addr_val,
                     rest_offset + 1..rest_offset + 1 + addr_bytes,
                 );
+
+                let teid_start = 1 + addr_bytes;
+                let teid_bits = ep_len_bits.saturating_sub(addr_bits);
+                let teid_bytes = teid_bits.div_ceil(8).min(4);
+                if teid_bytes > 0 && teid_start + teid_bytes <= rest.len() {
+                    buf.push_field(
+                        &MUP_NLRI_CHILDREN[FD_MUP_TEID],
+                        FieldValue::Bytes(&rest[teid_start..teid_start + teid_bytes]),
+                        rest_offset + teid_start..rest_offset + teid_start + teid_bytes,
+                    );
+                }
             }
-            let teid_start = 1 + addr_bytes;
-            if teid_start + 4 <= rest.len() {
-                buf.push_field(
-                    &MUP_NLRI_CHILDREN[FD_MUP_TEID],
-                    FieldValue::Bytes(&rest[teid_start..teid_start + 4]),
-                    rest_offset + teid_start..rest_offset + teid_start + 4,
-                );
+            // Optional TLVs follow the full endpoint block (Section 3.1.5). Use
+            // ep_total_bytes (derived directly from the wire Endpoint Length field,
+            // and already bounds-checked above) as the authoritative boundary so a
+            // malformed/oversized declared TEID length can't cause TLV parsing to
+            // start inside the endpoint blob.
+            let ep_end = 1 + ep_total_bytes;
+            if ep_end < rest.len() {
+                parse_mup_st_tlvs(buf, &rest[ep_end..], rest_offset + ep_end);
             }
         }
         _ => {
@@ -1623,6 +1665,91 @@ fn parse_mup_route_type_data<'pkt>(
             }
         }
     }
+}
+
+/// Parses trailing TLVs on ST routes into the `tlvs` array.
+///
+/// draft-ietf-bess-mup-safi-01, Section 3.1.5 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+///
+/// Each TLV: 1-byte Type + 1-byte Length + variable Value. Unknown types (or a value that
+/// doesn't match the type's expected length) are stored as raw bytes rather than rejected.
+fn parse_mup_st_tlvs<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], base_offset: usize) {
+    let array_idx = buf.begin_container(
+        &MUP_NLRI_CHILDREN[FD_MUP_TLVS],
+        FieldValue::Array(0..0),
+        base_offset..base_offset + data.len(),
+    );
+    let mut pos = 0;
+
+    while pos + 2 <= data.len() {
+        let tlv_type = data[pos];
+        let tlv_len = data[pos + 1] as usize;
+        let abs = base_offset + pos;
+
+        if pos + 2 + tlv_len > data.len() {
+            break;
+        }
+
+        let value = &data[pos + 2..pos + 2 + tlv_len];
+        let total = 2 + tlv_len;
+        let obj_idx = buf.begin_container(
+            &MUP_ST_TLV_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + total,
+        );
+
+        buf.push_field(
+            &MUP_ST_TLV_CHILDREN[FD_MUP_TLV_TYPE],
+            FieldValue::U8(tlv_type),
+            abs..abs + 1,
+        );
+        buf.push_field(
+            &MUP_ST_TLV_CHILDREN[FD_MUP_TLV_LENGTH],
+            FieldValue::U8(tlv_len as u8),
+            abs + 1..abs + 2,
+        );
+
+        let value_offset = abs + 2;
+        match (tlv_type, value.len()) {
+            // 3gpp-5g Session Parameters TLV: TEID (4) + QFI (1)
+            (1, 5) => {
+                buf.push_field(
+                    &MUP_ST_TLV_CHILDREN[FD_MUP_TLV_TEID],
+                    FieldValue::Bytes(&value[..4]),
+                    value_offset..value_offset + 4,
+                );
+                buf.push_field(
+                    &MUP_ST_TLV_CHILDREN[FD_MUP_TLV_QFI],
+                    FieldValue::U8(value[4]),
+                    value_offset + 4..value_offset + 5,
+                );
+            }
+            // Interwork Endpoint TLV / Source Address TLV: IPv4 or IPv6 address
+            (2 | 3, 4 | 16) => {
+                let addr_val = format_address(value, value.len() == 16);
+                buf.push_field(
+                    &MUP_ST_TLV_CHILDREN[FD_MUP_TLV_ADDRESS],
+                    addr_val,
+                    value_offset..value_offset + value.len(),
+                );
+            }
+            _ => {
+                if !value.is_empty() {
+                    buf.push_field(
+                        &MUP_ST_TLV_CHILDREN[FD_MUP_TLV_VALUE],
+                        FieldValue::Bytes(value),
+                        value_offset..value_offset + value.len(),
+                    );
+                }
+            }
+        }
+
+        buf.end_container(obj_idx);
+        pos += total;
+    }
+
+    buf.end_container(array_idx);
 }
 
 /// Writes a BGP IPv4 NLRI prefix as a JSON-quoted CIDR string (e.g., `"192.168.1.0/24"`).
@@ -1727,15 +1854,62 @@ fn format_aggregator(
     }
 }
 
+/// Writes the Global Administrator : Local Administrator portion (bytes 2..8) of an
+/// RFC 4360/RFC 5668-style Extended Community.
+///
+/// `kind`: 0 = 2-Octet AS Specific, 1 = IPv4 Address Specific, 2 = 4-Octet AS Specific.
+fn write_ext_community_admin_value(
+    kind: u8,
+    bytes: &[u8],
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    match kind {
+        // 2-Octet AS Specific
+        0 => {
+            let asn = u16::from_be_bytes([bytes[2], bytes[3]]) as u32;
+            let val = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            write!(w, "\"{}:{}\"", asn, val)
+        }
+        // IPv4 Address Specific
+        1 => {
+            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
+            write!(
+                w,
+                "\"{}.{}.{}.{}:{}\"",
+                bytes[2], bytes[3], bytes[4], bytes[5], val
+            )
+        }
+        // 4-Octet AS Specific
+        _ => {
+            let asn = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
+            write!(w, "\"{}:{}\"", asn, val)
+        }
+    }
+}
+
+/// Writes an Extended Community's raw bytes as a `"0x..."` hex string.
+fn write_ext_community_hex(bytes: &[u8], w: &mut dyn std::io::Write) -> std::io::Result<()> {
+    write!(w, "\"0x")?;
+    for b in bytes {
+        write!(w, "{b:02x}")?;
+    }
+    write!(w, "\"")
+}
+
 /// Writes a BGP Extended Community as a human-readable string.
 ///
 /// 8-byte value: Type (1) + Sub-Type (1) + Value (6).
 /// - Type 0x00/0x40: 2-Octet AS — `"<AS>:<value>"`
 /// - Type 0x01/0x41: IPv4 Address — `"<IPv4>:<value>"`
 /// - Type 0x02/0x42: 4-Octet AS — `"<AS>:<value>"`
+/// - Type 0x0C (MUP): Sub-Type selects 2-Octet AS / IPv4 Address / 4-Octet AS Specific
+///   formatting for both Direct Segment (0x00-0x02) and Interwork Segment (0x03-0x05).
 /// - Other types: hex representation.
 ///
 /// RFC 4360, Section 3 — <https://www.rfc-editor.org/rfc/rfc4360#section-3>
+/// draft-ietf-bess-mup-safi-01, Section 3.2 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 fn format_ext_community(
     value: &FieldValue<'_>,
     _ctx: &FormatContext<'_>,
@@ -1747,34 +1921,16 @@ fn format_ext_community(
     };
     let type_high = bytes[0];
     match type_high {
-        // 2-Octet AS Specific
-        0x00 | 0x40 => {
-            let asn = u16::from_be_bytes([bytes[2], bytes[3]]) as u32;
-            let val = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-            write!(w, "\"{}:{}\"", asn, val)
-        }
-        // IPv4 Address Specific
-        0x01 | 0x41 => {
-            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
-            write!(
-                w,
-                "\"{}.{}.{}.{}:{}\"",
-                bytes[2], bytes[3], bytes[4], bytes[5], val
-            )
-        }
-        // 4-Octet AS Specific
-        0x02 | 0x42 => {
-            let asn = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
-            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
-            write!(w, "\"{}:{}\"", asn, val)
-        }
-        _ => {
-            write!(w, "\"0x")?;
-            for b in bytes {
-                write!(w, "{b:02x}")?;
-            }
-            write!(w, "\"")
-        }
+        0x00 | 0x40 => write_ext_community_admin_value(0, bytes, w),
+        0x01 | 0x41 => write_ext_community_admin_value(1, bytes, w),
+        0x02 | 0x42 => write_ext_community_admin_value(2, bytes, w),
+        0x0C => match bytes[1] {
+            0x00 | 0x03 => write_ext_community_admin_value(0, bytes, w),
+            0x01 | 0x04 => write_ext_community_admin_value(1, bytes, w),
+            0x02 | 0x05 => write_ext_community_admin_value(2, bytes, w),
+            _ => write_ext_community_hex(bytes, w),
+        },
+        _ => write_ext_community_hex(bytes, w),
     }
 }
 
@@ -2239,6 +2395,7 @@ const FD_MUP_TEID: usize = 6;
 const FD_MUP_QFI: usize = 7;
 const FD_MUP_ENDPOINT_ADDRESS: usize = 8;
 const FD_MUP_SOURCE_ADDRESS: usize = 9;
+const FD_MUP_TLVS: usize = 10;
 
 /// Child field descriptors for MUP NLRI entry objects.
 static MUP_NLRI_CHILDREN: &[FieldDescriptor] = &[
@@ -2278,7 +2435,48 @@ static MUP_NLRI_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("qfi", "QFI", FieldType::U8).optional(),
     FieldDescriptor::new("endpoint_address", "Endpoint Address", FieldType::Bytes).optional(),
     FieldDescriptor::new("source_address", "Source Address", FieldType::Bytes).optional(),
+    FieldDescriptor::new("tlvs", "TLVs", FieldType::Array)
+        .optional()
+        .with_children(MUP_ST_TLV_CHILDREN),
 ];
+
+/// Field descriptor indices for [`MUP_ST_TLV_CHILDREN`].
+const FD_MUP_TLV_TYPE: usize = 0;
+const FD_MUP_TLV_LENGTH: usize = 1;
+const FD_MUP_TLV_TEID: usize = 2;
+const FD_MUP_TLV_QFI: usize = 3;
+const FD_MUP_TLV_ADDRESS: usize = 4;
+const FD_MUP_TLV_VALUE: usize = 5;
+
+/// Child field descriptors for MUP ST Route TLV entries.
+///
+/// draft-ietf-bess-mup-safi-01, Section 3.1.5 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+static MUP_ST_TLV_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor {
+        name: "type",
+        display_name: "Type",
+        field_type: FieldType::U8,
+        optional: false,
+        children: None,
+        display_fn: Some(|v, _siblings| match v {
+            FieldValue::U8(t) => mup_st_tlv_type_name(*t),
+            _ => None,
+        }),
+        format_fn: None,
+    },
+    FieldDescriptor::new("length", "Length", FieldType::U8),
+    FieldDescriptor::new("teid", "TEID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_teid),
+    FieldDescriptor::new("qfi", "QFI", FieldType::U8).optional(),
+    FieldDescriptor::new("address", "Address", FieldType::Bytes).optional(),
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+];
+
+/// Object descriptor for MUP ST Route TLV entries.
+static MUP_ST_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("tlv", "TLV", FieldType::Object).with_children(MUP_ST_TLV_CHILDREN);
 
 /// Field descriptor indices for [`PREFIX_SID_TLV_CHILDREN`].
 const FD_PSID_TYPE: usize = 0;
@@ -3617,6 +3815,314 @@ mod tests {
     }
 
     #[test]
+    fn parse_bgp_update_mup_type1_st_tlvs() {
+        // Same Type 1 ST fields as `parse_bgp_update_mup_type1_st`, plus a Source Address
+        // Length of 0 (no inline source address) followed by a trailing Source Address TLV.
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(85);
+        val.push(4);
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0);
+        val.push(1);
+        val.extend_from_slice(&3u16.to_be_bytes());
+        let tlv = [3u8, 4, 10, 0, 0, 9]; // Type 3: Source Address TLV, IPv4
+        let rt_len = 8 + 1 + 4 + 4 + 1 + 1 + 4 + 1 + tlv.len();
+        val.push(rt_len as u8);
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        val.push(32);
+        val.extend_from_slice(&[10, 1, 1, 1]);
+        val.extend_from_slice(&0x12345678u32.to_be_bytes());
+        val.push(9);
+        val.push(32);
+        val.extend_from_slice(&[10, 0, 0, 2]);
+        val.push(0); // Source Address Length = 0 (not carried)
+        val.extend_from_slice(&tlv);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(&buf, &obj_range, "value")
+        else {
+            panic!("expected Object for MP_REACH");
+        };
+        let FieldValue::Array(ref entries_range) = *nested_field_value(&buf, mp_range, "nlri")
+        else {
+            panic!("expected Array for MUP NLRI");
+        };
+        let entry_objs: Vec<_> = buf
+            .nested_fields(entries_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        let entry_range = entry_objs[0].value.as_container_range().unwrap();
+
+        let FieldValue::Array(ref tlvs_range) = *nested_field_value(&buf, entry_range, "tlvs")
+        else {
+            panic!("expected Array for tlvs");
+        };
+        let tlvs: Vec<_> = buf
+            .nested_fields(tlvs_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(tlvs.len(), 1);
+        let tlv_range = tlvs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "type"),
+            FieldValue::U8(3)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(tlv_range, "type_name"),
+            Some("Source Address")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 9])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mup_type2_st() {
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(85);
+        val.push(4);
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0);
+        val.push(1);
+        val.extend_from_slice(&4u16.to_be_bytes());
+        let tlv1 = [1u8, 5, 0x11, 0x22, 0x33, 0x44, 7]; // Type 1: 3gpp-5g Session Parameters
+        let tlv2 = [2u8, 4, 10, 0, 0, 6]; // Type 2: Interwork Endpoint, IPv4
+        let rt_len = 8 + 1 + 4 + 4 + tlv1.len() + tlv2.len();
+        val.push(rt_len as u8);
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // RD
+        val.push(64); // Endpoint Length: 32 (address) + 32 (TEID) bits
+        val.extend_from_slice(&[10, 0, 0, 5]); // Endpoint Address
+        val.extend_from_slice(&0xAABBCCDDu32.to_be_bytes()); // TEID
+        val.extend_from_slice(&tlv1);
+        val.extend_from_slice(&tlv2);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(&buf, &obj_range, "value")
+        else {
+            panic!("expected Object for MP_REACH");
+        };
+        let FieldValue::Array(ref entries_range) = *nested_field_value(&buf, mp_range, "nlri")
+        else {
+            panic!("expected Array for MUP NLRI");
+        };
+        let entry_objs: Vec<_> = buf
+            .nested_fields(entries_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        let entry_range = entry_objs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "endpoint_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 5])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "teid"),
+            FieldValue::Bytes(&0xAABBCCDDu32.to_be_bytes())
+        );
+
+        let FieldValue::Array(ref tlvs_range) = *nested_field_value(&buf, entry_range, "tlvs")
+        else {
+            panic!("expected Array for tlvs");
+        };
+        let tlvs: Vec<_> = buf
+            .nested_fields(tlvs_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(tlvs.len(), 2);
+
+        let tlv0_range = tlvs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, tlv0_range, "type"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(tlv0_range, "type_name"),
+            Some("3gpp-5g Session Parameters")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, tlv0_range, "teid"),
+            FieldValue::Bytes(&[0x11, 0x22, 0x33, 0x44])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, tlv0_range, "qfi"),
+            FieldValue::U8(7)
+        );
+
+        let tlv1_range = tlvs[1].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, tlv1_range, "type"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(tlv1_range, "type_name"),
+            Some("Interwork Endpoint")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, tlv1_range, "address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 6])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mup_type2_st_zero_length_teid() {
+        // Endpoint Length of 32 (IPv4 AFI length only) means a zero-length TEID: the
+        // Endpoint Address is still fixed-size at the AFI length and a TLV can follow
+        // directly, with no TEID field in between.
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(85);
+        val.push(4);
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0);
+        val.push(1);
+        val.extend_from_slice(&4u16.to_be_bytes());
+        let tlv = [2u8, 4, 10, 0, 0, 8]; // Type 2: Interwork Endpoint, IPv4
+        let rt_len = 8 + 1 + 4 + tlv.len();
+        val.push(rt_len as u8);
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // RD
+        val.push(32); // Endpoint Length: 32 (address) + 0 (TEID) bits
+        val.extend_from_slice(&[10, 0, 0, 7]); // Endpoint Address
+        val.extend_from_slice(&tlv);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(&buf, &obj_range, "value")
+        else {
+            panic!("expected Object for MP_REACH");
+        };
+        let FieldValue::Array(ref entries_range) = *nested_field_value(&buf, mp_range, "nlri")
+        else {
+            panic!("expected Array for MUP NLRI");
+        };
+        let entry_objs: Vec<_> = buf
+            .nested_fields(entries_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        let entry_range = entry_objs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "endpoint_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 7])
+        );
+        assert!(
+            !buf.nested_fields(entry_range)
+                .iter()
+                .any(|f| f.name() == "teid")
+        );
+
+        let FieldValue::Array(ref tlvs_range) = *nested_field_value(&buf, entry_range, "tlvs")
+        else {
+            panic!("expected Array for tlvs");
+        };
+        let tlvs: Vec<_> = buf
+            .nested_fields(tlvs_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(tlvs.len(), 1);
+        let tlv_range = tlvs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 8])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mup_type2_st_oversized_teid_length() {
+        // Endpoint Length declares 72 bits: 32 (IPv4 address) + 40 (a malformed,
+        // oversized TEID — the max is 4 octets / 32 bits). The TLV boundary must be
+        // derived from the full declared Endpoint Length (9 octets after the length
+        // byte), not from the accumulated address + capped-TEID bytes, otherwise the
+        // trailing TLV gets parsed starting one byte early, inside the endpoint blob.
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(85);
+        val.push(4);
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0);
+        val.push(1);
+        val.extend_from_slice(&4u16.to_be_bytes());
+        let tlv = [2u8, 4, 10, 0, 0, 10]; // Type 2: Interwork Endpoint, IPv4
+        let rt_len = 8 + 1 + 4 + 5 + tlv.len();
+        val.push(rt_len as u8);
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // RD
+        val.push(72); // Endpoint Length: 32 (address) + 40 (oversized TEID) bits
+        val.extend_from_slice(&[10, 0, 0, 9]); // Endpoint Address
+        val.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]); // 5-octet declared TEID area
+        val.extend_from_slice(&tlv);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(&buf, &obj_range, "value")
+        else {
+            panic!("expected Object for MP_REACH");
+        };
+        let FieldValue::Array(ref entries_range) = *nested_field_value(&buf, mp_range, "nlri")
+        else {
+            panic!("expected Array for MUP NLRI");
+        };
+        let entry_objs: Vec<_> = buf
+            .nested_fields(entries_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        let entry_range = entry_objs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "endpoint_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 9])
+        );
+        // TEID is capped to the first 4 octets of the declared (oversized) TEID area.
+        assert_eq!(
+            *nested_field_value(&buf, entry_range, "teid"),
+            FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04])
+        );
+
+        let FieldValue::Array(ref tlvs_range) = *nested_field_value(&buf, entry_range, "tlvs")
+        else {
+            panic!("expected Array for tlvs");
+        };
+        let tlvs: Vec<_> = buf
+            .nested_fields(tlvs_range)
+            .iter()
+            .filter(|f| f.value.is_object())
+            .collect();
+        assert_eq!(tlvs.len(), 1);
+        let tlv_range = tlvs[0].value.as_container_range().unwrap();
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "type"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, tlv_range, "address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 10])
+        );
+    }
+
+    #[test]
     fn parse_bgp_update_mup_extended_community() {
         let mut val = vec![0x0C, 0x00];
         val.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
@@ -4565,6 +5071,96 @@ mod tests {
         assert_eq!(
             call_format_fn(format_ext_community, &FieldValue::U8(0)),
             "\"\""
+        );
+    }
+
+    #[test]
+    fn mup_extended_community_type_names() {
+        assert_eq!(
+            extended_community_type_name(0x0C, 0x00),
+            Some("MUP Direct Segment (2-Octet AS)")
+        );
+        assert_eq!(
+            extended_community_type_name(0x0C, 0x01),
+            Some("MUP Direct Segment (IPv4 Address)")
+        );
+        assert_eq!(
+            extended_community_type_name(0x0C, 0x02),
+            Some("MUP Direct Segment (4-Octet AS)")
+        );
+        assert_eq!(
+            extended_community_type_name(0x0C, 0x03),
+            Some("MUP Interwork Segment (2-Octet AS)")
+        );
+        assert_eq!(
+            extended_community_type_name(0x0C, 0x04),
+            Some("MUP Interwork Segment (IPv4 Address)")
+        );
+        assert_eq!(
+            extended_community_type_name(0x0C, 0x05),
+            Some("MUP Interwork Segment (4-Octet AS)")
+        );
+        // Unknown sub-type → None
+        assert_eq!(extended_community_type_name(0x0C, 0x06), None);
+    }
+
+    #[test]
+    fn format_ext_community_mup_values() {
+        // Sub-Type 0x00: 2-Octet AS Specific, Direct Segment — AS 65001, value 100
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x0C, 0x00, 0xFD, 0xE9, 0, 0, 0, 100])
+            ),
+            "\"65001:100\""
+        );
+        // Sub-Type 0x01: IPv4 Address Specific, Direct Segment — 10.0.0.1:100
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x0C, 0x01, 10, 0, 0, 1, 0, 100])
+            ),
+            "\"10.0.0.1:100\""
+        );
+        // Sub-Type 0x02: 4-Octet AS Specific, Direct Segment — AS 65001, value 100
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x0C, 0x02, 0, 0, 0xFD, 0xE9, 0, 100])
+            ),
+            "\"65001:100\""
+        );
+        // Sub-Type 0x03: 2-Octet AS Specific, Interwork Segment — AS 65002, value 200
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x0C, 0x03, 0xFD, 0xEA, 0, 0, 0, 200])
+            ),
+            "\"65002:200\""
+        );
+        // Sub-Type 0x04: IPv4 Address Specific, Interwork Segment — 10.0.0.2:200
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x0C, 0x04, 10, 0, 0, 2, 0, 200])
+            ),
+            "\"10.0.0.2:200\""
+        );
+        // Sub-Type 0x05: 4-Octet AS Specific, Interwork Segment — AS 65002, value 200
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x0C, 0x05, 0, 0, 0xFD, 0xEA, 0, 200])
+            ),
+            "\"65002:200\""
+        );
+        // Unknown sub-type → hex fallback
+        assert_eq!(
+            call_format_fn(
+                format_ext_community,
+                &FieldValue::Bytes(&[0x0C, 0x99, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
+            ),
+            "\"0x0c99010203040506\""
         );
     }
 
