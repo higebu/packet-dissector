@@ -33,6 +33,11 @@ jobs:
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
+      - name: Publish crates missing from crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: ./scripts/publish-missing-crates.sh
+
       - name: Run release-plz (release)
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
         with:
