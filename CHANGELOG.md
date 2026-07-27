@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.4] - 2026-07-27
+
+### 🚀 Features
+
+- *(bgp)* Follow draft-ietf-bess-mup-safi-01
+- *(sdp)* Add SDP (RFC 8866) dissector
+
+### 🐛 Bug Fixes
+
+- *(sdp)* Align parsing with RFC 8866 ABNF
+- *(bgp)* Correct Type 2 ST endpoint address/TEID field order
+- *(bgp)* Derive Type 2 ST TLV boundary from declared Endpoint Length
+- *(tcp)* End dispatch after content-type body sub-dissection
+- *(tcp)* Count content-type body as consumed on parse failure
+
+### 📚 Documentation
+
+- *(registry)* Add missing RFC 3261 link
 ## [0.3.3] - 2026-06-11
 
 ### 🚀 Features
