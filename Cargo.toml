@@ -67,7 +67,7 @@ packet-dissector-stun = { version = "0.3.4", path = "crates/packet-dissector-stu
 packet-dissector-test-alloc = { path = "crates/packet-dissector-test-alloc" }
 aes = "0.9"
 cbc = "0.2"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 thiserror = "2"
 criterion = { version = "0.8", features = ["html_reports"] }
 serde = { version = "1", features = ["derive"] }

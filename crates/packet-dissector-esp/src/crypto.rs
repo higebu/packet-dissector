@@ -357,7 +357,7 @@ fn decrypt_gcm(
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes[..4].copy_from_slice(salt);
     nonce_bytes[4..12].copy_from_slice(iv);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = &Nonce::from(nonce_bytes);
 
     // RFC 4106, Section 5 — AAD = SPI(4) || Seq(4)
     let mut aad = [0u8; 8];
@@ -667,7 +667,7 @@ mod tests {
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[..4].copy_from_slice(&salt);
         nonce_bytes[4..].copy_from_slice(&packet_iv);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
 
         // Build AAD
         let mut aad = [0u8; 8];
@@ -884,7 +884,7 @@ mod tests {
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[..4].copy_from_slice(&salt);
         nonce_bytes[4..].copy_from_slice(&packet_iv);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
 
         let mut aad = [0u8; 8];
         aad[..4].copy_from_slice(&spi.to_be_bytes());
@@ -934,7 +934,7 @@ mod tests {
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[..4].copy_from_slice(&salt);
         nonce_bytes[4..].copy_from_slice(&packet_iv);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
 
         let mut aad = [0u8; 8];
         aad[..4].copy_from_slice(&spi.to_be_bytes());
