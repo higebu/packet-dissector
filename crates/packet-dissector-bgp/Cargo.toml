@@ -8,7 +8,7 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "bgp"]
 categories = ["network-programming", "parser-implementations"]
-description = "BGP-4 (RFC 4271, RFC 4760, RFC 6793) dissector for packet-dissector"
+description = "BGP-4 (RFC 4271, RFC 4760, RFC 6793, RFC 7911) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }

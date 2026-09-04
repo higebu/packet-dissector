@@ -11,6 +11,7 @@
 //! - RFC 6793 (4-octet AS Numbers): <https://www.rfc-editor.org/rfc/rfc6793>
 //! - RFC 7313 (Enhanced Route Refresh): <https://www.rfc-editor.org/rfc/rfc7313>
 //! - RFC 8092 (Large Communities): <https://www.rfc-editor.org/rfc/rfc8092>
+//! - RFC 7911 (ADD-PATH / Path Identifier): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8203 (Hard Reset Cease subcode): <https://www.rfc-editor.org/rfc/rfc8203>
 //! - RFC 8654 (Extended Message): <https://www.rfc-editor.org/rfc/rfc8654>
 //! - RFC 8669 (BGP Prefix-SID): <https://www.rfc-editor.org/rfc/rfc8669>
@@ -43,6 +44,8 @@
 //! | 4.1 | Multiple messages per segment | `parse_bgp_multiple_messages` |
 //! | 4.2+4.4 | OPEN followed by KEEPALIVE | `parse_bgp_open_followed_by_keepalive` |
 //! | 4.3 | Unknown attribute (raw bytes) | `parse_bgp_update_unknown_attribute` |
+//! | 4.3 | Malformed NLRI handling | `parse_bgp_update_malformed_nlri_is_dropped` |
+//! | 4.1/5.1 | Message type, AFI/SAFI, attribute, ORIGIN, AS_PATH segment and community name tables | `name_lookup_tables` |
 //!
 //! # RFC 6793 (4-octet AS Numbers) Coverage
 //!
@@ -119,6 +122,21 @@
 //! | 3.1.4/3.3 | Type 2 ST (3GPP 5G) | `parse_bgp_update_mup_type2_st` |
 //! | 3.1.5 | ST Route TLVs (3gpp-5g Session Parameters, Interwork Endpoint, Source Address) | `parse_bgp_update_mup_type1_st`, `parse_bgp_update_mup_type2_st` |
 //! | 3.2 | MUP Extended Community sub-types (2-Octet AS / IPv4 / 4-Octet AS, Direct/Interwork Segment) | `mup_extended_community_type_names`, `format_ext_community_mup_values` |
+//! | 3 | Route Type / Architecture Type name tables | `name_lookup_tables` |
+//! | 3 | Truncated MUP entry handling | `parse_bgp_update_mup_truncated_entry_is_dropped` |
+//!
+//! # RFC 7911 (ADD-PATH) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | 3 | ADD-PATH detection heuristic (IPv4) | `detect_add_path_prefixes_ipv4` |
+//! | 3 | ADD-PATH detection heuristic (IPv6) | `detect_add_path_prefixes_ipv6` |
+//! | 3 | ADD-PATH detection heuristic (MUP SAFI) | `detect_add_path_mup_blocks` |
+//! | 3 | Path Identifier in NLRI + withdrawn routes | `parse_bgp_update_add_path_nlri_and_withdrawn` |
+//! | 3 | Path Identifier in MP_REACH_NLRI (IPv6) | `parse_bgp_update_mp_reach_ipv6_add_path` |
+//! | 3 | Path Identifier in MP_REACH_NLRI (MUP) | `parse_bgp_update_mp_reach_mup_add_path` |
+//! | 3 | Plain encoding preferred when unambiguous | `parse_bgp_update_mup_without_add_path_stays_plain` |
+//! | 3 | Schema exposes `path_id` / polymorphic `value` | `field_schema_exposes_nlri_and_path_attribute_value_children` |
 //!
 //! # RFC 8092 Coverage
 //!
@@ -173,6 +191,29 @@ const MIN_UPDATE_SIZE: usize = 23;
 
 /// ROUTE-REFRESH message size: 19-byte header + 4-byte body (RFC 2918).
 const ROUTE_REFRESH_SIZE: usize = 23;
+
+/// Size of the RFC 7911 ADD-PATH Path Identifier prepended to an NLRI entry.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+const PATH_ID_SIZE: usize = 4;
+
+/// MUP NLRI fixed header size: Architecture Type (1) + Route Type (2) + Length (1).
+///
+/// draft-ietf-bess-mup-safi-01, Section 3 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+const MUP_NLRI_HEADER_SIZE: usize = 4;
+
+/// The only MUP Architecture Type defined by draft-ietf-bess-mup-safi-01: 3gpp-5g.
+const MUP_ARCHITECTURE_TYPE_3GPP_5G: u8 = 1;
+
+/// Lowest MUP Route Type defined by draft-ietf-bess-mup-safi-01, Section 3.
+const MUP_ROUTE_TYPE_MIN: u16 = 1;
+
+/// Highest MUP Route Type defined by draft-ietf-bess-mup-safi-01, Section 3.
+const MUP_ROUTE_TYPE_MAX: u16 = 4;
+
+/// SAFI value for BGP-MUP (draft-ietf-bess-mup-safi-01).
+const SAFI_MUP: u8 = 85;
 
 /// BGP message type: OPEN (RFC 4271, Section 4.1).
 const MSG_OPEN: u8 = 1;
@@ -551,10 +592,123 @@ fn parse_route_refresh<'pkt>(
     Ok(())
 }
 
-/// Parses a sequence of BGP prefixes (prefix_len + prefix bytes).
+/// Returns `true` when an IPv4/IPv6 NLRI block carries RFC 7911 ADD-PATH
+/// Path Identifiers.
+///
+/// BGP dissection here is stateless: the ADD-PATH capability is negotiated in
+/// OPEN messages (RFC 7911, Section 4) and this dissector does not track session
+/// state across messages, so the encoding must be inferred from the NLRI block
+/// itself.
+///
+/// The heuristic mirrors Wireshark's `detect_add_path_prefix46()` in
+/// `epan/dissectors/packet-bgp.c`. The block is treated as ADD-PATH iff:
+///
+/// 1. it parses exactly as a sequence of
+///    `[Path Identifier (4)][Length (1)][Prefix (ceil(Length/8))]` entries, and
+/// 2. it does *not* also parse exactly as a sequence of plain
+///    `[Length (1)][Prefix (ceil(Length/8))]` entries, or a plain parse yields a
+///    zero-length prefix (`0/0`) that is not the sole entry of the block — in
+///    practice the leading octets are then really a Path Identifier.
+///
+/// Plain encoding wins when both readings are valid.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_prefixes(data: &[u8], max_bits: usize) -> bool {
+    // (1) Must parse completely and validly as ADD-PATH prefixes.
+    let mut pos = 0;
+    while pos < data.len() {
+        // Both the 4-octet Path Identifier and the Length octet must be present.
+        let Some(&prefix_bits) = data.get(pos + PATH_ID_SIZE) else {
+            return false;
+        };
+        if prefix_bits as usize > max_bits {
+            return false;
+        }
+        pos += PATH_ID_SIZE + 1 + (prefix_bits as usize).div_ceil(8);
+        if pos > data.len() {
+            return false;
+        }
+    }
+
+    // (2) Must not parse completely and validly as plain prefixes.
+    let mut pos = 0;
+    while pos < data.len() {
+        let prefix_bits = data[pos] as usize;
+        if prefix_bits > max_bits {
+            return true;
+        }
+        pos += 1 + prefix_bits.div_ceil(8);
+        if pos > data.len() {
+            return true;
+        }
+        // A zero-length prefix sharing the block with other data is much more
+        // likely to be the tail of a Path Identifier than a real default route.
+        if prefix_bits == 0 && data.len() > 1 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns `true` when a MUP (SAFI 85) NLRI block carries RFC 7911 ADD-PATH
+/// Path Identifiers.
+///
+/// The MUP analogue of [`detect_add_path_prefixes`]: the block is ADD-PATH iff
+/// it parses exactly as MUP entries each preceded by a 4-octet Path Identifier,
+/// and does not parse exactly as plain MUP entries. Plain wins when both are
+/// valid.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+/// draft-ietf-bess-mup-safi-01, Section 3 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+fn detect_add_path_mup(data: &[u8]) -> bool {
+    mup_block_parses(data, PATH_ID_SIZE) && !mup_block_parses(data, 0)
+}
+
+/// Returns `true` when `data` parses exactly as a sequence of MUP NLRI entries,
+/// each preceded by `path_id_len` octets of Path Identifier.
+///
+/// An entry is considered valid when it declares the only defined Architecture
+/// Type (1, 3gpp-5g), a defined Route Type (1-4), and a Length that keeps the
+/// walk inside the block. The block is valid when the entries consume it exactly.
+///
+/// draft-ietf-bess-mup-safi-01, Section 3 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+fn mup_block_parses(data: &[u8], path_id_len: usize) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        let entry = pos + path_id_len;
+        if entry + MUP_NLRI_HEADER_SIZE > data.len() {
+            return false;
+        }
+        if data[entry] != MUP_ARCHITECTURE_TYPE_3GPP_5G {
+            return false;
+        }
+        let route_type = read_be_u16(data, entry + 1).unwrap_or_default();
+        if !(MUP_ROUTE_TYPE_MIN..=MUP_ROUTE_TYPE_MAX).contains(&route_type) {
+            return false;
+        }
+        pos = entry + MUP_NLRI_HEADER_SIZE + data[entry + 3] as usize;
+        if pos > data.len() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Parses a sequence of BGP prefixes into one Object per entry.
 ///
 /// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
-/// Each prefix: 1-byte length (in bits) + ceil(length/8) bytes of prefix.
+/// Each prefix: 1-byte length (in bits) + ceil(length/8) bytes of prefix, pushed
+/// as `{ "prefix": "10.0.0.0/24" }`.
+///
+/// When the block is detected as RFC 7911 ADD-PATH (see
+/// [`detect_add_path_prefixes`]) each entry is preceded by a 4-octet Path
+/// Identifier and is pushed as `{ "path_id": 5, "prefix": "10.0.0.0/24" }`.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+///
 /// When `ipv6` is true, formats as IPv6; otherwise as IPv4.
 fn parse_prefixes<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
@@ -570,9 +724,16 @@ fn parse_prefixes<'pkt>(
     } else {
         &PREFIX_ENTRY_IPV4_DESCRIPTOR
     };
+    let id_len = if detect_add_path_prefixes(data, max_bits) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
 
-    while pos < data.len() {
-        let prefix_bits = data[pos] as usize;
+    // The Length octet sits right after the (optional) Path Identifier, so an
+    // entry needs at least `id_len + 1` octets to exist at all.
+    while pos + id_len < data.len() {
+        let prefix_bits = data[pos + id_len] as usize;
 
         // Validate prefix length against address family maximum.
         if prefix_bits > max_bits {
@@ -580,18 +741,34 @@ fn parse_prefixes<'pkt>(
         }
 
         let prefix_bytes = prefix_bits.div_ceil(8);
+        let entry_len = id_len + 1 + prefix_bytes;
 
-        if pos + 1 + prefix_bytes > data.len() {
+        if pos + entry_len > data.len() {
             break;
         }
 
         let abs = base_offset + pos;
-        let entry_len = 1 + prefix_bytes;
-        buf.push_field(
-            descriptor,
-            FieldValue::Bytes(&data[pos..pos + entry_len]),
+        let obj_idx = buf.begin_container(
+            &NLRI_ENTRY_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
             abs..abs + entry_len,
         );
+
+        if id_len != 0 {
+            buf.push_field(
+                &IP_NLRI_ENTRY_CHILDREN[FD_NLRI_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+
+        buf.push_field(
+            descriptor,
+            FieldValue::Bytes(&data[pos + id_len..pos + entry_len]),
+            abs + id_len..abs + entry_len,
+        );
+
+        buf.end_container(obj_idx);
 
         pos += entry_len;
     }
@@ -1407,6 +1584,12 @@ fn mup_st_tlv_type_name(v: u8) -> Option<&'static str> {
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 ///
 /// Each MUP NLRI: Architecture Type (1) + Route Type (2) + Length (1) + Route Type specific data.
+///
+/// When the block is detected as RFC 7911 ADD-PATH (see [`detect_add_path_mup`])
+/// every entry is preceded by a 4-octet Path Identifier, emitted as a leading
+/// `path_id` field.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
 fn parse_mup_nlri<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -1414,20 +1597,26 @@ fn parse_mup_nlri<'pkt>(
     ipv6: bool,
 ) {
     let mut pos = 0;
+    let id_len = if detect_add_path_mup(data) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
 
-    while pos + 4 <= data.len() {
-        let arch_type = data[pos];
-        let route_type = read_be_u16(data, pos + 1).unwrap_or_default();
-        let rt_len = data[pos + 3] as usize;
-        let header_len = 4;
+    while pos + id_len + MUP_NLRI_HEADER_SIZE <= data.len() {
+        let entry = pos + id_len;
+        let arch_type = data[entry];
+        let route_type = read_be_u16(data, entry + 1).unwrap_or_default();
+        let rt_len = data[entry + 3] as usize;
 
-        if pos + header_len + rt_len > data.len() {
+        if entry + MUP_NLRI_HEADER_SIZE + rt_len > data.len() {
             break;
         }
 
         let abs = base_offset + pos;
-        let rt_data = &data[pos + header_len..pos + header_len + rt_len];
-        let total = header_len + rt_len;
+        let entry_abs = base_offset + entry;
+        let rt_data = &data[entry + MUP_NLRI_HEADER_SIZE..entry + MUP_NLRI_HEADER_SIZE + rt_len];
+        let total = id_len + MUP_NLRI_HEADER_SIZE + rt_len;
 
         let obj_idx = buf.begin_container(
             &MUP_NLRI_OBJECT_DESCRIPTOR,
@@ -1435,18 +1624,26 @@ fn parse_mup_nlri<'pkt>(
             abs..abs + total,
         );
 
+        if id_len != 0 {
+            buf.push_field(
+                &MUP_NLRI_CHILDREN[FD_MUP_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+
         buf.push_field(
             &MUP_NLRI_CHILDREN[FD_MUP_ARCH_TYPE],
             FieldValue::U8(arch_type),
-            abs..abs + 1,
+            entry_abs..entry_abs + 1,
         );
         buf.push_field(
             &MUP_NLRI_CHILDREN[FD_MUP_ROUTE_TYPE],
             FieldValue::U16(route_type),
-            abs + 1..abs + 3,
+            entry_abs + 1..entry_abs + 3,
         );
 
-        let rt_offset = abs + header_len;
+        let rt_offset = entry_abs + MUP_NLRI_HEADER_SIZE;
         parse_mup_route_type_data(buf, route_type, rt_data, rt_offset, ipv6);
 
         buf.end_container(obj_idx);
@@ -2086,7 +2283,7 @@ fn parse_mp_reach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], of
     let nlri_start = nh_end + 1;
     if nlri_start < data.len() {
         let nlri_data = &data[nlri_start..];
-        let is_mup = safi == 85;
+        let is_mup = safi == SAFI_MUP;
         let is_ip = afi == 1 || afi == 2;
         if is_mup || is_ip {
             let array_idx = buf.begin_container(
@@ -2138,7 +2335,7 @@ fn parse_mp_unreach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], 
     let wr_start = 3;
     if wr_start < data.len() {
         let wr_data = &data[wr_start..];
-        let is_mup = safi == 85;
+        let is_mup = safi == SAFI_MUP;
         let is_ip = afi == 1 || afi == 2;
         if is_mup || is_ip {
             let array_idx = buf.begin_container(
@@ -2288,7 +2485,10 @@ static PATH_ATTR_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// Descriptor for IPv4 prefix entries with CIDR format (e.g., `"192.168.1.0/24"`).
 ///
 /// Raw bytes: `[prefix_len_bits, prefix_octets...]` per RFC 4271, Section 4.3.
-static PREFIX_ENTRY_IPV4_DESCRIPTOR: FieldDescriptor =
+static PREFIX_ENTRY_IPV4_DESCRIPTOR: FieldDescriptor = PREFIX_ENTRY_IPV4_FIELD;
+
+/// Const form of [`PREFIX_ENTRY_IPV4_DESCRIPTOR`], for use in child descriptor lists.
+const PREFIX_ENTRY_IPV4_FIELD: FieldDescriptor =
     FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes)
         .with_format_fn(format_nlri_ipv4_prefix);
 
@@ -2298,6 +2498,72 @@ static PREFIX_ENTRY_IPV4_DESCRIPTOR: FieldDescriptor =
 static PREFIX_ENTRY_IPV6_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes)
         .with_format_fn(format_nlri_ipv6_prefix);
+
+/// Schema entry for the RFC 7911 ADD-PATH Path Identifier of an NLRI entry.
+///
+/// Present only when the NLRI block was detected as ADD-PATH encoded, hence
+/// optional.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+const PATH_ID_FIELD: FieldDescriptor =
+    FieldDescriptor::new("path_id", "Path Identifier", FieldType::U32).optional();
+
+/// Schema entry for the prefix inside an NLRI entry object.
+///
+/// The `format_fn` renders the CIDR string. The address-family specific runtime
+/// descriptors ([`PREFIX_ENTRY_IPV4_DESCRIPTOR`] / [`PREFIX_ENTRY_IPV6_DESCRIPTOR`])
+/// are what actually serialise a value; this entry only advertises the field in
+/// the schema, so the IPv4 formatter stands in for both families.
+const NLRI_PREFIX_FIELD: FieldDescriptor = PREFIX_ENTRY_IPV4_FIELD.optional();
+
+/// Field descriptor index for [`IP_NLRI_ENTRY_CHILDREN`] (index 1 is `prefix`,
+/// pushed through the address-family specific `PREFIX_ENTRY_*` descriptors).
+const FD_NLRI_PATH_ID: usize = 0;
+
+/// Child field descriptors for plain IPv4/IPv6 NLRI entry objects.
+///
+/// Each entry of a `nlri` / `withdrawn_routes` array is an object
+/// `{ "prefix": "10.0.0.0/24" }`, gaining a leading `path_id` when the block is
+/// ADD-PATH encoded.
+///
+/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+const IP_NLRI_ENTRY_FIELDS: [FieldDescriptor; 2] = [PATH_ID_FIELD, NLRI_PREFIX_FIELD];
+
+/// Slice form of [`IP_NLRI_ENTRY_FIELDS`].
+static IP_NLRI_ENTRY_CHILDREN: &[FieldDescriptor] = &IP_NLRI_ENTRY_FIELDS;
+
+/// Object descriptor for NLRI / withdrawn route entries.
+static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("nlri_entry", "NLRI Entry", FieldType::Object)
+        .with_children(IP_NLRI_ENTRY_CHILDREN);
+
+/// Union of every field that can appear in an NLRI entry object inside an
+/// MP_REACH_NLRI / MP_UNREACH_NLRI attribute value.
+///
+/// The element shape depends on the SAFI: SAFI 85 (BGP-MUP) yields MUP entries,
+/// every other supported SAFI yields plain prefix entries. All fields are
+/// therefore optional.
+///
+/// RFC 4760 — <https://www.rfc-editor.org/rfc/rfc4760>
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+/// draft-ietf-bess-mup-safi-01 —
+/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 12] = [
+    PATH_ID_FIELD,
+    NLRI_PREFIX_FIELD,
+    // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
+    MUP_NLRI_FIELDS[FD_MUP_ARCH_TYPE].optional(),
+    MUP_NLRI_FIELDS[FD_MUP_ROUTE_TYPE].optional(),
+    MUP_NLRI_FIELDS[FD_MUP_VALUE],
+    MUP_NLRI_FIELDS[FD_MUP_RD],
+    MUP_NLRI_FIELDS[FD_MUP_ADDRESS],
+    MUP_NLRI_FIELDS[FD_MUP_TEID],
+    MUP_NLRI_FIELDS[FD_MUP_QFI],
+    MUP_NLRI_FIELDS[FD_MUP_ENDPOINT_ADDRESS],
+    MUP_NLRI_FIELDS[FD_MUP_SOURCE_ADDRESS],
+    MUP_NLRI_FIELDS[FD_MUP_TLVS],
+];
 
 /// Object descriptor for AS_PATH segment entries.
 static AS_PATH_SEG_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -2369,7 +2635,7 @@ const FD_APS_SEGMENT_TYPE: usize = 0;
 const FD_APS_AS_NUMBERS: usize = 1;
 
 /// Child field descriptors for AS_PATH segment objects.
-static AS_PATH_SEG_CHILDREN: &[FieldDescriptor] = &[
+const AS_PATH_SEG_FIELDS: [FieldDescriptor; 2] = [
     FieldDescriptor {
         name: "segment_type",
         display_name: "Segment Type",
@@ -2385,20 +2651,31 @@ static AS_PATH_SEG_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("as_numbers", "AS Numbers", FieldType::Array),
 ];
 
+/// Slice form of [`AS_PATH_SEG_FIELDS`].
+static AS_PATH_SEG_CHILDREN: &[FieldDescriptor] = &AS_PATH_SEG_FIELDS;
+
 /// Field descriptor indices for [`MUP_NLRI_CHILDREN`].
-const FD_MUP_ARCH_TYPE: usize = 0;
-const FD_MUP_ROUTE_TYPE: usize = 1;
-const FD_MUP_VALUE: usize = 2;
-const FD_MUP_RD: usize = 3;
-const FD_MUP_ADDRESS: usize = 5;
-const FD_MUP_TEID: usize = 6;
-const FD_MUP_QFI: usize = 7;
-const FD_MUP_ENDPOINT_ADDRESS: usize = 8;
-const FD_MUP_SOURCE_ADDRESS: usize = 9;
-const FD_MUP_TLVS: usize = 10;
+const FD_MUP_PATH_ID: usize = 0;
+const FD_MUP_ARCH_TYPE: usize = 1;
+const FD_MUP_ROUTE_TYPE: usize = 2;
+const FD_MUP_VALUE: usize = 3;
+const FD_MUP_RD: usize = 4;
+// Index 5 is `prefix`, pushed through the address-family specific
+// `PREFIX_ENTRY_*` descriptors.
+const FD_MUP_ADDRESS: usize = 6;
+const FD_MUP_TEID: usize = 7;
+const FD_MUP_QFI: usize = 8;
+const FD_MUP_ENDPOINT_ADDRESS: usize = 9;
+const FD_MUP_SOURCE_ADDRESS: usize = 10;
+const FD_MUP_TLVS: usize = 11;
 
 /// Child field descriptors for MUP NLRI entry objects.
-static MUP_NLRI_CHILDREN: &[FieldDescriptor] = &[
+///
+/// The leading `path_id` is only emitted when the enclosing NLRI block is
+/// RFC 7911 ADD-PATH encoded (RFC 7911, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc7911#section-3>).
+const MUP_NLRI_FIELDS: [FieldDescriptor; 12] = [
+    PATH_ID_FIELD,
     FieldDescriptor {
         name: "architecture_type",
         display_name: "Architecture Type",
@@ -2427,7 +2704,7 @@ static MUP_NLRI_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("rd", "Route Distinguisher", FieldType::Bytes)
         .optional()
         .with_format_fn(format_route_distinguisher),
-    FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes).optional(),
+    NLRI_PREFIX_FIELD,
     FieldDescriptor::new("address", "Address", FieldType::Bytes).optional(),
     FieldDescriptor::new("teid", "TEID", FieldType::Bytes)
         .optional()
@@ -2437,8 +2714,11 @@ static MUP_NLRI_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("source_address", "Source Address", FieldType::Bytes).optional(),
     FieldDescriptor::new("tlvs", "TLVs", FieldType::Array)
         .optional()
-        .with_children(MUP_ST_TLV_CHILDREN),
+        .with_children(&MUP_ST_TLV_FIELDS),
 ];
+
+/// Slice form of [`MUP_NLRI_FIELDS`].
+static MUP_NLRI_CHILDREN: &[FieldDescriptor] = &MUP_NLRI_FIELDS;
 
 /// Field descriptor indices for [`MUP_ST_TLV_CHILDREN`].
 const FD_MUP_TLV_TYPE: usize = 0;
@@ -2452,7 +2732,7 @@ const FD_MUP_TLV_VALUE: usize = 5;
 ///
 /// draft-ietf-bess-mup-safi-01, Section 3.1.5 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-static MUP_ST_TLV_CHILDREN: &[FieldDescriptor] = &[
+const MUP_ST_TLV_FIELDS: [FieldDescriptor; 6] = [
     FieldDescriptor {
         name: "type",
         display_name: "Type",
@@ -2474,6 +2754,9 @@ static MUP_ST_TLV_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
 ];
 
+/// Slice form of [`MUP_ST_TLV_FIELDS`].
+static MUP_ST_TLV_CHILDREN: &[FieldDescriptor] = &MUP_ST_TLV_FIELDS;
+
 /// Object descriptor for MUP ST Route TLV entries.
 static MUP_ST_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("tlv", "TLV", FieldType::Object).with_children(MUP_ST_TLV_CHILDREN);
@@ -2491,19 +2774,22 @@ const FD_PSID_VALUE: usize = 6;
 ///
 /// RFC 8669 — <https://www.rfc-editor.org/rfc/rfc8669>
 /// RFC 9252 — <https://www.rfc-editor.org/rfc/rfc9252>
-static PREFIX_SID_TLV_CHILDREN: &[FieldDescriptor] = &[
+const PREFIX_SID_TLV_FIELDS: [FieldDescriptor; 7] = [
     FieldDescriptor::new("type", "Type", FieldType::U8),
     FieldDescriptor::new("length", "Length", FieldType::U16),
     FieldDescriptor::new("flags", "Flags", FieldType::U16).optional(),
     FieldDescriptor::new("label_index", "Label Index", FieldType::U32).optional(),
     FieldDescriptor::new("srgb_entries", "SRGB Entries", FieldType::Array)
         .optional()
-        .with_children(SRGB_ENTRY_CHILDREN),
+        .with_children(&SRGB_ENTRY_FIELDS),
     FieldDescriptor::new("sub_tlvs", "Sub-TLVs", FieldType::Array)
         .optional()
-        .with_children(SRV6_SID_INFO_CHILDREN),
+        .with_children(&SRV6_SID_INFO_FIELDS),
     FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
 ];
+
+/// Slice form of [`PREFIX_SID_TLV_FIELDS`].
+static PREFIX_SID_TLV_CHILDREN: &[FieldDescriptor] = &PREFIX_SID_TLV_FIELDS;
 
 /// Field descriptor indices for [`SRGB_ENTRY_CHILDREN`].
 const FD_SRGB_BASE: usize = 0;
@@ -2512,10 +2798,13 @@ const FD_SRGB_RANGE: usize = 1;
 /// Child field descriptors for SRGB entries in Originator SRGB TLV.
 ///
 /// RFC 8669, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc8669#section-3.2>
-static SRGB_ENTRY_CHILDREN: &[FieldDescriptor] = &[
+const SRGB_ENTRY_FIELDS: [FieldDescriptor; 2] = [
     FieldDescriptor::new("base", "SRGB Base", FieldType::U32),
     FieldDescriptor::new("range", "SRGB Range", FieldType::U32),
 ];
+
+/// Slice form of [`SRGB_ENTRY_FIELDS`].
+static SRGB_ENTRY_CHILDREN: &[FieldDescriptor] = &SRGB_ENTRY_FIELDS;
 
 /// Field descriptor indices for [`SRV6_SID_INFO_CHILDREN`].
 const FD_SRV6_SI_TYPE: usize = 0;
@@ -2529,7 +2818,7 @@ const FD_SRV6_SI_VALUE: usize = 6;
 /// Child field descriptors for SRv6 SID Information Sub-TLV.
 ///
 /// RFC 9252, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9252#section-3.1>
-static SRV6_SID_INFO_CHILDREN: &[FieldDescriptor] = &[
+const SRV6_SID_INFO_FIELDS: [FieldDescriptor; 7] = [
     FieldDescriptor::new("type", "Type", FieldType::U8),
     FieldDescriptor::new("length", "Length", FieldType::U16),
     FieldDescriptor::new("srv6_sid", "SRv6 SID", FieldType::Ipv6Addr).optional(),
@@ -2537,9 +2826,12 @@ static SRV6_SID_INFO_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("endpoint_behavior", "Endpoint Behavior", FieldType::U16).optional(),
     FieldDescriptor::new("sid_structure", "SID Structure", FieldType::Object)
         .optional()
-        .with_children(SRV6_SID_STRUCTURE_CHILDREN),
+        .with_children(&SRV6_SID_STRUCTURE_FIELDS),
     FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
 ];
+
+/// Slice form of [`SRV6_SID_INFO_FIELDS`].
+static SRV6_SID_INFO_CHILDREN: &[FieldDescriptor] = &SRV6_SID_INFO_FIELDS;
 
 /// Field descriptor indices for [`SRV6_SID_STRUCTURE_CHILDREN`].
 const FD_SRV6_SS_LBL: usize = 0;
@@ -2552,7 +2844,7 @@ const FD_SRV6_SS_TO: usize = 5;
 /// Child field descriptors for SRv6 SID Structure Sub-Sub-TLV.
 ///
 /// RFC 9252, Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc9252#section-3.2.1>
-static SRV6_SID_STRUCTURE_CHILDREN: &[FieldDescriptor] = &[
+const SRV6_SID_STRUCTURE_FIELDS: [FieldDescriptor; 6] = [
     FieldDescriptor::new(
         "locator_block_length",
         "Locator Block Length",
@@ -2573,6 +2865,9 @@ static SRV6_SID_STRUCTURE_CHILDREN: &[FieldDescriptor] = &[
     ),
 ];
 
+/// Slice form of [`SRV6_SID_STRUCTURE_FIELDS`].
+static SRV6_SID_STRUCTURE_CHILDREN: &[FieldDescriptor] = &SRV6_SID_STRUCTURE_FIELDS;
+
 /// Field descriptor indices for [`MP_CHILDREN`].
 const FD_MP_AFI: usize = 0;
 const FD_MP_SAFI: usize = 1;
@@ -2582,9 +2877,17 @@ const FD_MP_NLRI: usize = 4;
 const FD_MP_WITHDRAWN_ROUTES: usize = 5;
 
 /// Child field descriptors for MP_REACH_NLRI / MP_UNREACH_NLRI objects.
-static MP_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("afi", "AFI", FieldType::U16),
-    FieldDescriptor::new("safi", "SAFI", FieldType::U8),
+///
+/// RFC 4760, Sections 3-4 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+const MP_FIELDS: [FieldDescriptor; 6] = [
+    FieldDescriptor::new("afi", "AFI", FieldType::U16).with_display_fn(|v, _siblings| match v {
+        FieldValue::U16(a) => afi_name(*a),
+        _ => None,
+    }),
+    FieldDescriptor::new("safi", "SAFI", FieldType::U8).with_display_fn(|v, _siblings| match v {
+        FieldValue::U8(s) => safi_name(*s),
+        _ => None,
+    }),
     FieldDescriptor::new("next_hop", "Next Hop", FieldType::Bytes).optional(),
     FieldDescriptor::new(
         "next_hop_link_local",
@@ -2592,9 +2895,16 @@ static MP_CHILDREN: &[FieldDescriptor] = &[
         FieldType::Bytes,
     )
     .optional(),
-    FieldDescriptor::new("nlri", "NLRI", FieldType::Array).optional(),
-    FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array).optional(),
+    FieldDescriptor::new("nlri", "NLRI", FieldType::Array)
+        .optional()
+        .with_children(&NLRI_ENTRY_FIELDS),
+    FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array)
+        .optional()
+        .with_children(&NLRI_ENTRY_FIELDS),
 ];
+
+/// Slice form of [`MP_FIELDS`].
+static MP_CHILDREN: &[FieldDescriptor] = &MP_FIELDS;
 
 /// Field descriptor indices for [`OPT_PARAM_CHILDREN`].
 const FD_OPT_CODE: usize = 0;
@@ -2653,7 +2963,45 @@ static PATH_ATTR_CHILDREN: &[FieldDescriptor] = &[
         format_fn: None,
     },
     FieldDescriptor::new("attr_length", "Attribute Length", FieldType::U16),
-    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+    FieldDescriptor::new("value", "Value", FieldType::Any)
+        .optional()
+        .with_children(PATH_ATTR_VALUE_CHILDREN),
+];
+
+/// Union of every field that can appear inside a structured path attribute
+/// `value`.
+///
+/// A path attribute `value` is [`FieldType::Any`]: its runtime shape is selected
+/// by the sibling `type_code`. It is an Object for MP_REACH_NLRI /
+/// MP_UNREACH_NLRI (RFC 4760), an Array of TLV objects for BGP Prefix-SID
+/// (RFC 8669 / RFC 9252), an Array of segment objects for AS_PATH / AS4_PATH
+/// (RFC 4271, Section 5.1.2), an Array of scalars for COMMUNITIES /
+/// CLUSTER_LIST / EXTENDED COMMUNITIES / LARGE_COMMUNITY, a scalar for ORIGIN /
+/// MULTI_EXIT_DISC / LOCAL_PREF, an IPv4 address for NEXT_HOP / ORIGINATOR_ID,
+/// and raw bytes for unknown attributes.
+///
+/// This list is the union of the sub-fields of every *object* shape, so that a
+/// schema walker can discover them. Every entry is optional because none of them
+/// is present for all `type_code` values.
+static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &[
+    // MP_REACH_NLRI / MP_UNREACH_NLRI object fields (RFC 4760).
+    MP_FIELDS[FD_MP_AFI].optional(),
+    MP_FIELDS[FD_MP_SAFI].optional(),
+    MP_FIELDS[FD_MP_NEXT_HOP],
+    MP_FIELDS[FD_MP_NEXT_HOP_LINK_LOCAL],
+    MP_FIELDS[FD_MP_NLRI],
+    MP_FIELDS[FD_MP_WITHDRAWN_ROUTES],
+    // BGP Prefix-SID TLV element fields (RFC 8669, RFC 9252).
+    PREFIX_SID_TLV_FIELDS[FD_PSID_TYPE].optional(),
+    PREFIX_SID_TLV_FIELDS[FD_PSID_LENGTH].optional(),
+    PREFIX_SID_TLV_FIELDS[FD_PSID_FLAGS],
+    PREFIX_SID_TLV_FIELDS[FD_PSID_LABEL_INDEX],
+    PREFIX_SID_TLV_FIELDS[FD_PSID_SRGB_ENTRIES],
+    PREFIX_SID_TLV_FIELDS[FD_PSID_SUB_TLVS],
+    PREFIX_SID_TLV_FIELDS[FD_PSID_VALUE],
+    // AS_PATH / AS4_PATH segment fields (RFC 4271, Section 5.1.2; RFC 6793).
+    AS_PATH_SEG_FIELDS[FD_APS_SEGMENT_TYPE].optional(),
+    AS_PATH_SEG_FIELDS[FD_APS_AS_NUMBERS].optional(),
 ];
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
@@ -2810,7 +3158,9 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::U16,
     )
     .optional(),
-    FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array).optional(),
+    FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array)
+        .optional()
+        .with_children(IP_NLRI_ENTRY_CHILDREN),
     FieldDescriptor::new(
         "total_path_attribute_length",
         "Total Path Attribute Length",
@@ -2820,7 +3170,9 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("path_attributes", "Path Attributes", FieldType::Array)
         .optional()
         .with_children(PATH_ATTR_CHILDREN),
-    FieldDescriptor::new("nlri", "NLRI", FieldType::Array).optional(),
+    FieldDescriptor::new("nlri", "NLRI", FieldType::Array)
+        .optional()
+        .with_children(IP_NLRI_ENTRY_CHILDREN),
 ];
 
 /// Parses a single BGP message from the start of `data` and appends one layer.
@@ -3350,10 +3702,14 @@ mod tests {
         let FieldValue::Array(ref arr_range) = wr.value else {
             panic!("expected Array");
         };
-        let arr = buf.nested_fields(arr_range);
-        assert_eq!(arr.len(), 1);
-        // Prefix stored as raw bytes: [prefix_len, prefix_bytes...]
-        assert_eq!(arr[0].value, FieldValue::Bytes(&[8, 10]));
+        let entries = nlri_entry_ranges(&buf, arr_range);
+        assert_eq!(entries.len(), 1);
+        // Each entry is an object; the prefix is raw bytes [prefix_len, octets...]
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "prefix"),
+            FieldValue::Bytes(&[8, 10])
+        );
+        assert!(nested_field_by_name_opt(&buf, &entries[0], "path_id").is_none());
         assert!(buf.field_by_name(layer, "nlri").is_none());
     }
 
@@ -3404,10 +3760,13 @@ mod tests {
         let FieldValue::Array(ref nlri_range) = nlri_field.value else {
             panic!("expected Array");
         };
-        let nlri_entries = buf.nested_fields(nlri_range);
+        let nlri_entries = nlri_entry_ranges(&buf, nlri_range);
         assert_eq!(nlri_entries.len(), 1);
         // Prefix stored as raw bytes: [prefix_len=24, 192, 168, 1]
-        assert_eq!(nlri_entries[0].value, FieldValue::Bytes(&[24, 192, 168, 1]));
+        assert_eq!(
+            *nested_field_value(&buf, &nlri_entries[0], "prefix"),
+            FieldValue::Bytes(&[24, 192, 168, 1])
+        );
     }
 
     /// Helper: extract the first path attribute's child range from a dissected UPDATE.
@@ -3622,12 +3981,550 @@ mod tests {
         else {
             panic!("expected Array for NLRI");
         };
-        let prefixes = buf.nested_fields(prefixes_range);
+        let prefixes = nlri_entry_ranges(&buf, prefixes_range);
         assert_eq!(prefixes.len(), 1);
         assert_eq!(
-            prefixes[0].value,
+            *nested_field_value(&buf, &prefixes[0], "prefix"),
             FieldValue::Bytes(&[48, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01])
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // RFC 7911 (ADD-PATH) — https://www.rfc-editor.org/rfc/rfc7911#section-3
+    // ---------------------------------------------------------------------
+
+    /// Helper: look up a named field inside a range, returning `None` if absent.
+    fn nested_field_by_name_opt<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        range: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Option<&'a Field<'pkt>> {
+        buf.nested_fields(range).iter().find(|f| f.name() == name)
+    }
+
+    /// Helper: collect the child ranges of the entry objects in an NLRI array.
+    fn nlri_entry_ranges(
+        buf: &DissectBuffer<'_>,
+        range: &core::ops::Range<u32>,
+    ) -> Vec<core::ops::Range<u32>> {
+        buf.nested_fields(range)
+            .iter()
+            .filter_map(|f| f.value.as_container_range().cloned())
+            .collect()
+    }
+
+    /// Helper: the `nlri` array range of the first path attribute's MP value.
+    fn mp_nlri_range(buf: &DissectBuffer<'_>, name: &str) -> core::ops::Range<u32> {
+        let obj_range = first_pa_obj_range(buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(buf, &obj_range, "value") else {
+            panic!("expected Object for MP_REACH/MP_UNREACH value");
+        };
+        let FieldValue::Array(ref arr) = *nested_field_value(buf, mp_range, name) else {
+            panic!("expected Array for {name}");
+        };
+        arr.clone()
+    }
+
+    #[test]
+    fn detect_add_path_prefixes_ipv4() {
+        // Plain: 24/192.168.1 — parses as plain, so not ADD-PATH.
+        assert!(!detect_add_path_prefixes(&[24, 192, 168, 1], 32));
+        // ADD-PATH: path_id=1, 24/10.0.0 — a plain read would see prefix_len=0
+        // followed by more data, which flags ADD-PATH.
+        assert!(detect_add_path_prefixes(&[0, 0, 0, 1, 24, 10, 0, 0], 32));
+        // Two ADD-PATH entries for the same prefix.
+        let two = [0, 0, 0, 1, 24, 10, 0, 0, 0, 0, 0, 2, 24, 10, 0, 0];
+        assert!(detect_add_path_prefixes(&two, 32));
+        // Empty block: nothing to decide, treat as plain.
+        assert!(!detect_add_path_prefixes(&[], 32));
+        // Truncated Path Identifier cannot be ADD-PATH.
+        assert!(!detect_add_path_prefixes(&[0, 0, 0], 32));
+        // Prefix length beyond the address family maximum in both readings.
+        assert!(!detect_add_path_prefixes(&[200, 1, 2, 3, 4], 32));
+        // Ambiguous: a single default route (0/0) stays plain.
+        assert!(!detect_add_path_prefixes(&[0], 32));
+        // Path Identifier 0x10000001 + 10.0.0.0/8: the plain reading runs past
+        // the end of the block, so only the ADD-PATH reading is complete.
+        assert!(detect_add_path_prefixes(&[0x10, 0, 0, 1, 8, 10], 32));
+        // Path Identifier 0xFF000001 + 192.168.1.0/24: the plain reading hits a
+        // prefix length above the IPv4 maximum.
+        assert!(detect_add_path_prefixes(
+            &[0xFF, 0, 0, 1, 24, 192, 168, 1],
+            32
+        ));
+        // Declared prefix longer than the remaining data: only the ADD-PATH
+        // reading is complete, so it wins.
+        assert!(detect_add_path_prefixes(&[0, 0, 0, 7, 8, 10], 32));
+    }
+
+    #[test]
+    fn detect_add_path_prefixes_ipv6() {
+        // 2001:db8::/32 as a plain prefix.
+        assert!(!detect_add_path_prefixes(
+            &[32, 0x20, 0x01, 0x0d, 0xb8],
+            128
+        ));
+        // Same prefix with path_id 7 prepended.
+        assert!(detect_add_path_prefixes(
+            &[0, 0, 0, 7, 32, 0x20, 0x01, 0x0d, 0xb8],
+            128
+        ));
+    }
+
+    #[test]
+    fn detect_add_path_mup_blocks() {
+        // Plain MUP entry: arch=1, route_type=1, len=1, one octet of data.
+        let plain = [1, 0, 1, 1, 0xAA];
+        assert!(!detect_add_path_mup(&plain));
+        // Same entry with a 4-octet Path Identifier prepended.
+        let mut add_path = vec![0, 0, 0, 5];
+        add_path.extend_from_slice(&plain);
+        assert!(detect_add_path_mup(&add_path));
+        // Empty block: treat as plain.
+        assert!(!detect_add_path_mup(&[]));
+        // Unknown architecture type in both readings.
+        assert!(!detect_add_path_mup(&[9, 0, 1, 0]));
+        // Route type out of range in both readings.
+        assert!(!detect_add_path_mup(&[1, 0, 9, 0]));
+        // Truncated: neither reading consumes the block exactly.
+        assert!(!detect_add_path_mup(&[1, 0, 1]));
+        // Declared length overruns the block in both readings.
+        assert!(!detect_add_path_mup(&[1, 0, 1, 200, 0]));
+        // Path Identifier 0x01000000: the ADD-PATH reading is exact while the
+        // plain reading sees Route Type 0, which is undefined.
+        assert!(detect_add_path_mup(&[1, 0, 0, 0, 1, 0, 1, 1, 0xAA]));
+        // Path Identifier 0x010100C8: the plain reading has a valid header but
+        // its declared Length runs past the end of the block.
+        assert!(detect_add_path_mup(&[1, 0, 1, 200, 1, 0, 1, 1, 0xAA]));
+    }
+
+    #[test]
+    fn parse_bgp_update_add_path_nlri_and_withdrawn() {
+        // RFC 7911, Section 3 — Path Identifier prepended to each NLRI entry.
+        // Withdrawn: path_id 1 and 2 for 10.0.0.0/8.
+        // NLRI: path_id 1 and 2 for 192.168.1.0/24.
+        let withdrawn = [0, 0, 0, 1, 8, 10, 0, 0, 0, 2, 8, 10];
+        let nlri = [0, 0, 0, 1, 24, 192, 168, 1, 0, 0, 0, 2, 24, 192, 168, 1];
+
+        let mut raw = vec![0xFF; 16];
+        let total_len = 19 + 2 + withdrawn.len() + 2 + nlri.len();
+        raw.extend_from_slice(&(total_len as u16).to_be_bytes());
+        raw.push(2); // Type = UPDATE
+        raw.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&withdrawn);
+        raw.extend_from_slice(&0u16.to_be_bytes()); // Total Path Attribute Length = 0
+        raw.extend_from_slice(&nlri);
+
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+
+        let wr = buf.field_by_name(layer, "withdrawn_routes").unwrap();
+        let FieldValue::Array(ref wr_range) = wr.value else {
+            panic!("expected Array for withdrawn_routes");
+        };
+        let wr_entries = nlri_entry_ranges(&buf, wr_range);
+        assert_eq!(wr_entries.len(), 2);
+        for (i, expected_id) in [1u32, 2u32].iter().enumerate() {
+            assert_eq!(
+                *nested_field_value(&buf, &wr_entries[i], "path_id"),
+                FieldValue::U32(*expected_id)
+            );
+            assert_eq!(
+                *nested_field_value(&buf, &wr_entries[i], "prefix"),
+                FieldValue::Bytes(&[8, 10])
+            );
+        }
+
+        let nlri_field = buf.field_by_name(layer, "nlri").unwrap();
+        let FieldValue::Array(ref nlri_range) = nlri_field.value else {
+            panic!("expected Array for nlri");
+        };
+        let nlri_entries = nlri_entry_ranges(&buf, nlri_range);
+        assert_eq!(nlri_entries.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &nlri_entries[0], "path_id"),
+            FieldValue::U32(1)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &nlri_entries[1], "path_id"),
+            FieldValue::U32(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &nlri_entries[1], "prefix"),
+            FieldValue::Bytes(&[24, 192, 168, 1])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_ipv6_add_path() {
+        // RFC 4760 MP_REACH_NLRI carrying RFC 7911 ADD-PATH NLRI.
+        let mut val = Vec::new();
+        val.extend_from_slice(&2u16.to_be_bytes()); // AFI = IPv6
+        val.push(1); // SAFI = Unicast
+        val.push(16); // Next Hop length
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        val.push(0); // Reserved
+        // path_id 1, 2001:db8:1::/48
+        val.extend_from_slice(&1u32.to_be_bytes());
+        val.push(48);
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        // path_id 2, same prefix
+        val.extend_from_slice(&2u32.to_be_bytes());
+        val.push(48);
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let nlri_range = mp_nlri_range(&buf, "nlri");
+        let entries = nlri_entry_ranges(&buf, &nlri_range);
+        assert_eq!(entries.len(), 2);
+        for (i, expected_id) in [1u32, 2u32].iter().enumerate() {
+            assert_eq!(
+                *nested_field_value(&buf, &entries[i], "path_id"),
+                FieldValue::U32(*expected_id)
+            );
+            assert_eq!(
+                *nested_field_value(&buf, &entries[i], "prefix"),
+                FieldValue::Bytes(&[48, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01])
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_mup_add_path() {
+        // MUP (SAFI 85) Interwork Segment Discovery entries with ADD-PATH
+        // Path Identifiers (RFC 7911, Section 3).
+        let mut entry = Vec::new();
+        entry.push(1); // Architecture Type = 3gpp-5g
+        entry.extend_from_slice(&1u16.to_be_bytes()); // Route Type = 1
+        entry.push(12); // Length: RD(8) + prefix_len(1) + prefix(3)
+        entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // RD
+        entry.push(24);
+        entry.extend_from_slice(&[192, 168, 1]);
+
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes()); // AFI = IPv4
+        val.push(85); // SAFI = BGP-MUP
+        val.push(4); // Next Hop length
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0); // Reserved
+        val.extend_from_slice(&7u32.to_be_bytes());
+        val.extend_from_slice(&entry);
+        val.extend_from_slice(&8u32.to_be_bytes());
+        val.extend_from_slice(&entry);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let nlri_range = mp_nlri_range(&buf, "nlri");
+        let entries = nlri_entry_ranges(&buf, &nlri_range);
+        assert_eq!(entries.len(), 2);
+        for (i, expected_id) in [7u32, 8u32].iter().enumerate() {
+            assert_eq!(
+                *nested_field_value(&buf, &entries[i], "path_id"),
+                FieldValue::U32(*expected_id)
+            );
+            assert_eq!(
+                *nested_field_value(&buf, &entries[i], "architecture_type"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(
+                *nested_field_value(&buf, &entries[i], "route_type"),
+                FieldValue::U16(1)
+            );
+            assert_eq!(
+                *nested_field_value(&buf, &entries[i], "prefix"),
+                FieldValue::Bytes(&[24, 192, 168, 1])
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_mup_without_add_path_stays_plain() {
+        // The same MUP entry without Path Identifiers must not be misread as
+        // ADD-PATH (plain wins when both readings are valid).
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(85);
+        val.push(4);
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0);
+        val.push(1);
+        val.extend_from_slice(&1u16.to_be_bytes());
+        val.push(12);
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        val.push(24);
+        val.extend_from_slice(&[192, 168, 1]);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let nlri_range = mp_nlri_range(&buf, "nlri");
+        let entries = nlri_entry_ranges(&buf, &nlri_range);
+        assert_eq!(entries.len(), 1);
+        assert!(nested_field_by_name_opt(&buf, &entries[0], "path_id").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "prefix"),
+            FieldValue::Bytes(&[24, 192, 168, 1])
+        );
+    }
+
+    #[test]
+    fn name_lookup_tables() {
+        // The `display_fn` name tables are only reached through serialization,
+        // so exercise every arm (and the unknown fallback) directly.
+
+        // RFC 4271, Section 4.1 / RFC 2918.
+        assert_eq!(msg_type_name(MSG_OPEN), Some("OPEN"));
+        assert_eq!(msg_type_name(MSG_UPDATE), Some("UPDATE"));
+        assert_eq!(msg_type_name(MSG_NOTIFICATION), Some("NOTIFICATION"));
+        assert_eq!(msg_type_name(MSG_KEEPALIVE), Some("KEEPALIVE"));
+        assert_eq!(msg_type_name(MSG_ROUTE_REFRESH), Some("ROUTE-REFRESH"));
+        assert_eq!(msg_type_name(0), None);
+
+        // IANA Address Family Numbers.
+        assert_eq!(afi_name(1), Some("IPv4"));
+        assert_eq!(afi_name(2), Some("IPv6"));
+        assert_eq!(afi_name(25), Some("L2VPN"));
+        assert_eq!(afi_name(0), None);
+
+        // IANA SAFI Namespace.
+        for (v, expected) in [
+            (1u8, "Unicast"),
+            (2, "Multicast"),
+            (4, "MPLS Labels"),
+            (65, "VPLS"),
+            (70, "EVPN"),
+            (71, "BGP-LS"),
+            (73, "SR Policy"),
+            (SAFI_MUP, "BGP-MUP"),
+            (128, "MPLS-labeled VPN"),
+            (129, "Multicast VPN"),
+            (132, "Route Target Constraints"),
+            (133, "FlowSpec"),
+            (134, "L3VPN FlowSpec"),
+        ] {
+            assert_eq!(safi_name(v), Some(expected), "SAFI {v}");
+        }
+        assert_eq!(safi_name(0), None);
+
+        // IANA BGP Path Attributes.
+        for (v, expected) in [
+            (1u8, "ORIGIN"),
+            (2, "AS_PATH"),
+            (3, "NEXT_HOP"),
+            (4, "MULTI_EXIT_DISC"),
+            (5, "LOCAL_PREF"),
+            (6, "ATOMIC_AGGREGATE"),
+            (7, "AGGREGATOR"),
+            (8, "COMMUNITIES"),
+            (9, "ORIGINATOR_ID"),
+            (10, "CLUSTER_LIST"),
+            (14, "MP_REACH_NLRI"),
+            (15, "MP_UNREACH_NLRI"),
+            (16, "EXTENDED COMMUNITIES"),
+            (17, "AS4_PATH"),
+            (18, "AS4_AGGREGATOR"),
+            (22, "PMSI_TUNNEL"),
+            (23, "Tunnel Encapsulation"),
+            (26, "AIGP"),
+            (29, "BGP-LS Attribute"),
+            (32, "LARGE_COMMUNITY"),
+            (33, "BGPsec_Path"),
+            (35, "Only to Customer (OTC)"),
+            (40, "BGP Prefix-SID"),
+        ] {
+            assert_eq!(path_attr_type_name(v), Some(expected), "attribute {v}");
+        }
+        assert_eq!(path_attr_type_name(0), None);
+
+        // RFC 4271, Section 5.1.1.
+        assert_eq!(origin_name(0), Some("IGP"));
+        assert_eq!(origin_name(1), Some("EGP"));
+        assert_eq!(origin_name(2), Some("INCOMPLETE"));
+        assert_eq!(origin_name(3), None);
+
+        // RFC 4271, Section 5.1.2 / RFC 5065.
+        assert_eq!(as_path_segment_type_name(1), Some("AS_SET"));
+        assert_eq!(as_path_segment_type_name(2), Some("AS_SEQUENCE"));
+        assert_eq!(as_path_segment_type_name(3), Some("AS_CONFED_SEQUENCE"));
+        assert_eq!(as_path_segment_type_name(4), Some("AS_CONFED_SET"));
+        assert_eq!(as_path_segment_type_name(0), None);
+
+        // IANA BGP Well-known Communities (RFC 1997 and successors).
+        for (v, expected) in [
+            (0xFFFF_0000u32, "GRACEFUL_SHUTDOWN"),
+            (0xFFFF_0001, "ACCEPT_OWN"),
+            (0xFFFF_0002, "ROUTE_FILTER_TRANSLATED_v4"),
+            (0xFFFF_0003, "ROUTE_FILTER_v4"),
+            (0xFFFF_0004, "ROUTE_FILTER_TRANSLATED_v6"),
+            (0xFFFF_0005, "ROUTE_FILTER_v6"),
+            (0xFFFF_0006, "LLGR_STALE"),
+            (0xFFFF_0007, "NO_LLGR"),
+            (0xFFFF_029A, "BLACKHOLE"),
+            (0xFFFF_FF01, "NO_EXPORT"),
+            (0xFFFF_FF02, "NO_ADVERTISE"),
+            (0xFFFF_FF03, "NO_EXPORT_SUBCONFED"),
+            (0xFFFF_FF04, "NOPEER"),
+        ] {
+            assert_eq!(
+                well_known_community_name(v),
+                Some(expected),
+                "community {v}"
+            );
+        }
+        assert_eq!(well_known_community_name(0), None);
+
+        // draft-ietf-bess-mup-safi-01, Section 3.
+        assert_eq!(mup_route_type_name(1), Some("Interwork Segment Discovery"));
+        assert_eq!(mup_route_type_name(2), Some("Direct Segment Discovery"));
+        assert_eq!(mup_route_type_name(3), Some("Type 1 Session Transformed"));
+        assert_eq!(mup_route_type_name(4), Some("Type 2 Session Transformed"));
+        assert_eq!(mup_route_type_name(0), None);
+        assert_eq!(
+            mup_architecture_type_name(MUP_ARCHITECTURE_TYPE_3GPP_5G),
+            Some("3gpp-5g")
+        );
+        assert_eq!(mup_architecture_type_name(0), None);
+        assert_eq!(mup_st_tlv_type_name(0), None);
+    }
+
+    #[test]
+    fn parse_bgp_update_malformed_nlri_is_dropped() {
+        // Postel's law: malformed NLRI blocks stop the walk without panicking
+        // and, when no entry could be decoded, no `nlri` field is emitted.
+
+        // Prefix length above the IPv4 maximum (RFC 4271, Section 4.3).
+        let data = build_update(&[], &[200, 1, 2, 3, 4]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert!(buf.field_by_name(&buf.layers()[0], "nlri").is_none());
+
+        // Prefix declared longer than the remaining data.
+        let data = build_update(&[], &[24, 192, 168]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert!(buf.field_by_name(&buf.layers()[0], "nlri").is_none());
+
+        // A valid prefix followed by a truncated one: the first is kept.
+        let data = build_update(&[], &[8, 10, 24, 192, 168]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let nlri = buf.field_by_name(&buf.layers()[0], "nlri").unwrap();
+        let FieldValue::Array(ref range) = nlri.value else {
+            panic!("expected Array for nlri");
+        };
+        let entries = nlri_entry_ranges(&buf, range);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "prefix"),
+            FieldValue::Bytes(&[8, 10])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mup_truncated_entry_is_dropped() {
+        // MUP entry whose declared Route Type Length runs past the end of the
+        // NLRI block: the walk stops and the empty array placeholder is removed.
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes()); // AFI = IPv4
+        val.push(85); // SAFI = BGP-MUP
+        val.push(4); // Next Hop length
+        val.extend_from_slice(&[10, 0, 0, 1]);
+        val.push(0); // Reserved
+        val.push(1); // Architecture Type
+        val.extend_from_slice(&1u16.to_be_bytes()); // Route Type
+        val.push(200); // Length, far beyond the remaining data
+        val.push(0xAA);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(&buf, &obj_range, "value")
+        else {
+            panic!("expected Object for MP_REACH");
+        };
+        assert!(nested_field_by_name_opt(&buf, mp_range, "nlri").is_none());
+    }
+
+    #[test]
+    fn field_schema_exposes_nlri_and_path_attribute_value_children() {
+        /// Recursively look up a descriptor by name.
+        fn find<'a>(descs: &'a [FieldDescriptor], name: &str) -> Option<&'a FieldDescriptor> {
+            descs.iter().find(|d| d.name == name)
+        }
+
+        let descs = BgpDissector.field_descriptors();
+
+        // Top-level `nlri` / `withdrawn_routes` expose `path_id` and `prefix`.
+        for name in ["nlri", "withdrawn_routes"] {
+            let d = find(descs, name).unwrap_or_else(|| panic!("{name} descriptor missing"));
+            assert_eq!(d.field_type, FieldType::Array);
+            let children = d
+                .children
+                .unwrap_or_else(|| panic!("{name} has no children"));
+            let path_id = find(children, "path_id").expect("path_id missing");
+            assert_eq!(path_id.field_type, FieldType::U32);
+            assert!(path_id.optional);
+            assert!(find(children, "prefix").is_some());
+        }
+
+        // `path_attributes.value` is polymorphic and lists the union of every
+        // structured shape it can take.
+        let pa = find(descs, "path_attributes").expect("path_attributes missing");
+        let pa_children = pa.children.expect("path_attributes has no children");
+        let value = find(pa_children, "value").expect("value missing");
+        assert_eq!(value.field_type, FieldType::Any);
+        assert!(value.optional);
+        let value_children = value.children.expect("value has no children");
+        for name in [
+            "afi",
+            "safi",
+            "next_hop",
+            "next_hop_link_local",
+            "nlri",
+            "withdrawn_routes",
+            "label_index",
+            "srgb_entries",
+            "sub_tlvs",
+            "segment_type",
+            "as_numbers",
+        ] {
+            let child =
+                find(value_children, name).unwrap_or_else(|| panic!("{name} missing from union"));
+            assert!(child.optional, "{name} in a union must be optional");
+        }
+
+        // `value.nlri` reaches the MUP entry fields, including `route_type`.
+        let mp_nlri = find(value_children, "nlri").expect("nlri missing");
+        let entry_children = mp_nlri.children.expect("nlri has no children");
+        for name in [
+            "path_id",
+            "prefix",
+            "route_type",
+            "architecture_type",
+            "rd",
+            "teid",
+            "qfi",
+            "endpoint_address",
+            "source_address",
+            "address",
+        ] {
+            let child = find(entry_children, name)
+                .unwrap_or_else(|| panic!("{name} missing from NLRI entry union"));
+            assert!(child.optional, "{name} in a union must be optional");
+        }
     }
 
     #[test]
@@ -4484,10 +5381,10 @@ mod tests {
         let FieldValue::Array(ref wr_range) = wr_field.value else {
             panic!("expected Array");
         };
-        let prefixes = buf.nested_fields(wr_range);
+        let prefixes = nlri_entry_ranges(&buf, wr_range);
         assert_eq!(prefixes.len(), 1);
         assert_eq!(
-            prefixes[0].value,
+            *nested_field_value(&buf, &prefixes[0], "prefix"),
             FieldValue::Bytes(&[32, 0x20, 0x01, 0x0d, 0xb8])
         );
     }
@@ -4517,9 +5414,12 @@ mod tests {
         let FieldValue::Array(ref wr_range) = wr_field.value else {
             panic!("expected Array");
         };
-        let prefixes = buf.nested_fields(wr_range);
+        let prefixes = nlri_entry_ranges(&buf, wr_range);
         assert_eq!(prefixes.len(), 1);
-        assert_eq!(prefixes[0].value, FieldValue::Bytes(&[8, 10]));
+        assert_eq!(
+            *nested_field_value(&buf, &prefixes[0], "prefix"),
+            FieldValue::Bytes(&[8, 10])
+        );
     }
 
     #[test]
