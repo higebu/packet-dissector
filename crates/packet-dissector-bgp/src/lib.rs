@@ -7,18 +7,27 @@
 //! - RFC 4360 (Extended Communities): <https://www.rfc-editor.org/rfc/rfc4360>
 //! - RFC 4456 (Route Reflection): <https://www.rfc-editor.org/rfc/rfc4456>
 //! - RFC 4486 (Cease NOTIFICATION subcodes): <https://www.rfc-editor.org/rfc/rfc4486>
+//! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
 //! - RFC 4760 (Multiprotocol Extensions): <https://www.rfc-editor.org/rfc/rfc4760>
+//! - RFC 5492 (Capabilities Advertisement with BGP-4): <https://www.rfc-editor.org/rfc/rfc5492>
 //! - RFC 6793 (4-octet AS Numbers): <https://www.rfc-editor.org/rfc/rfc6793>
 //! - RFC 7313 (Enhanced Route Refresh): <https://www.rfc-editor.org/rfc/rfc7313>
+//! - RFC 7911 (ADD-PATH Capability): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8092 (Large Communities): <https://www.rfc-editor.org/rfc/rfc8092>
 //! - RFC 7911 (ADD-PATH / Path Identifier): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8203 (Hard Reset Cease subcode): <https://www.rfc-editor.org/rfc/rfc8203>
 //! - RFC 8654 (Extended Message): <https://www.rfc-editor.org/rfc/rfc8654>
 //! - RFC 8669 (BGP Prefix-SID): <https://www.rfc-editor.org/rfc/rfc8669>
+//! - RFC 8950 (Extended Next Hop Encoding Capability): <https://www.rfc-editor.org/rfc/rfc8950>
 //! - RFC 9012 (Tunnel Encapsulation / Color): <https://www.rfc-editor.org/rfc/rfc9012>
 //! - RFC 9072 (Extended Optional Parameters Length): <https://www.rfc-editor.org/rfc/rfc9072>
+//! - RFC 9234 (BGP Role Capability): <https://www.rfc-editor.org/rfc/rfc9234>
 //! - RFC 9252 (SRv6 BGP Services): <https://www.rfc-editor.org/rfc/rfc9252>
+//! - RFC 9494 (Long-Lived Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc9494>
+//! - IANA Capability Codes: <https://www.iana.org/assignments/capability-codes/capability-codes.xhtml>
+//! - draft-abraitis-idr-addpath-paths-limit-04 (PATHS-LIMIT Capability): <https://datatracker.ietf.org/doc/draft-abraitis-idr-addpath-paths-limit/>
 //! - draft-ietf-bess-mup-safi-01 (MUP SAFI): <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+//! - draft-walton-bgp-hostname-capability-02 (FQDN Capability): <https://datatracker.ietf.org/doc/draft-walton-bgp-hostname-capability/>
 //!
 //! # RFC 4271 (BGP-4) Coverage
 //!
@@ -54,6 +63,7 @@
 //! | 3 | AGGREGATOR (4-byte AS) | `parse_bgp_update_aggregator_4byte_as` |
 //! | 3 | AS4_PATH | `parse_bgp_update_as4_path` |
 //! | 3 | AS4_AGGREGATOR | `parse_bgp_update_as4_aggregator` |
+//! | 3 | 4-octet AS Number Capability (asn) | `parse_bgp_open_capability_as4` |
 //!
 //! # RFC 1997 Coverage
 //!
@@ -112,6 +122,24 @@
 //! | 4 | MP_UNREACH_NLRI (IPv6) | `parse_bgp_update_mp_unreach_ipv6` |
 //! | 4 | MP_UNREACH_NLRI (IPv4) | `parse_bgp_update_mp_unreach_ipv4` |
 //! | 3 | IPv6 NLRI prefix CIDR formatting | `format_nlri_ipv6_prefix_cidr` |
+//! | 8 | Multiprotocol Extensions Capability (afi/safi) | `parse_bgp_open_capability_multiprotocol` |
+//!
+//! # BGP OPEN Capability Decoding Coverage
+//!
+//! | RFC / Draft Section | Description | Test |
+//! |----------------------|-------------|------|
+//! | RFC 7911 §4 | ADD-PATH Capability (afi_safis, send_receive) | `parse_bgp_open_capability_add_path` |
+//! | RFC 7911 §4 | ADD-PATH truncated value (raw kept, not decoded) | `parse_bgp_open_capability_add_path_truncated` |
+//! | draft-abraitis-idr-addpath-paths-limit-04 §3 | PATHS-LIMIT Capability (afi_safis, paths_limit) | `parse_bgp_open_capability_paths_limit` |
+//! | RFC 4724 §3 | Graceful Restart Capability with AFI/SAFI list | `parse_bgp_open_capability_graceful_restart_with_afi_safi` |
+//! | RFC 4724 §3 | Graceful Restart Capability without AFI/SAFI list | `parse_bgp_open_capability_graceful_restart_without_afi_safi` |
+//! | RFC 9494 §3.1 | Long-Lived Graceful Restart Capability (afi_safis, stale_time) | `parse_bgp_open_capability_llgr` |
+//! | RFC 8950 §4 | Extended Next Hop Encoding Capability (2-octet safi) | `parse_bgp_open_capability_extended_next_hop` |
+//! | RFC 9234 §4.1 | BGP Role Capability (role_name) | `parse_bgp_open_capability_role` |
+//! | draft-walton-bgp-hostname-capability-02 §3 | FQDN Capability (hostname, domain_name) | `parse_bgp_open_capability_fqdn` |
+//! | IANA Capability Codes | Unknown capability code (no code_name / decoded fields) | `parse_bgp_open_capability_unknown_code` |
+//! | IANA Capability Codes | Zero-length capabilities (Route Refresh, Extended Message, Enhanced RR, deprecated RR) | `parse_bgp_open_capability_zero_length_code_names` |
+//! | RFC 5492 | `optional_parameters` / `afi_safis` schema union | `bgp_optional_parameters_schema_has_afi_safis_send_receive` |
 //!
 //! # draft-ietf-bess-mup-safi-01 Coverage
 //!
@@ -226,6 +254,37 @@ const MSG_KEEPALIVE: u8 = 4;
 /// BGP message type: ROUTE-REFRESH (RFC 2918).
 const MSG_ROUTE_REFRESH: u8 = 5;
 
+/// BGP OPEN Capability Code: Multiprotocol Extensions (RFC 4760, Section 8).
+const CAP_MULTIPROTOCOL: u8 = 1;
+/// BGP OPEN Capability Code: Route Refresh Capability for BGP-4 (RFC 2918).
+const CAP_ROUTE_REFRESH: u8 = 2;
+/// BGP OPEN Capability Code: Extended Next Hop Encoding (RFC 8950, Section 4).
+const CAP_EXTENDED_NEXT_HOP: u8 = 5;
+/// BGP OPEN Capability Code: BGP Extended Message (RFC 8654).
+const CAP_EXTENDED_MESSAGE: u8 = 6;
+/// BGP OPEN Capability Code: BGP Role (RFC 9234, Section 4.1).
+const CAP_ROLE: u8 = 9;
+/// BGP OPEN Capability Code: Graceful Restart Capability (RFC 4724, Section 3).
+const CAP_GRACEFUL_RESTART: u8 = 64;
+/// BGP OPEN Capability Code: Support for 4-octet AS number capability
+/// (RFC 6793, Section 3).
+const CAP_AS4: u8 = 65;
+/// BGP OPEN Capability Code: ADD-PATH Capability (RFC 7911, Section 4).
+const CAP_ADD_PATH: u8 = 69;
+/// BGP OPEN Capability Code: Enhanced Route Refresh Capability (RFC 7313).
+const CAP_ENHANCED_ROUTE_REFRESH: u8 = 70;
+/// BGP OPEN Capability Code: Long-Lived Graceful Restart (LLGR) Capability
+/// (RFC 9494, Section 3.1).
+const CAP_LLGR: u8 = 71;
+/// BGP OPEN Capability Code: FQDN Capability
+/// (draft-walton-bgp-hostname-capability-02, Section 3).
+const CAP_FQDN: u8 = 73;
+/// BGP OPEN Capability Code: PATHS-LIMIT Capability
+/// (draft-abraitis-idr-addpath-paths-limit-04, Section 3).
+const CAP_PATHS_LIMIT: u8 = 76;
+/// BGP OPEN Capability Code: Route Refresh Capability (deprecated, pre-RFC 2918).
+const CAP_ROUTE_REFRESH_DEPRECATED: u8 = 128;
+
 /// Returns a human-readable name for BGP message types.
 ///
 /// RFC 4271, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.1>
@@ -271,6 +330,62 @@ fn safi_name(v: u8) -> Option<&'static str> {
         132 => Some("Route Target Constraints"),
         133 => Some("FlowSpec"),
         134 => Some("L3VPN FlowSpec"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for BGP OPEN Capability Codes.
+///
+/// IANA "Capability Codes" registry —
+/// <https://www.iana.org/assignments/capability-codes/capability-codes.xhtml>
+fn capability_code_name(v: u8) -> Option<&'static str> {
+    match v {
+        CAP_MULTIPROTOCOL => Some("Multiprotocol Extensions for BGP-4"),
+        CAP_ROUTE_REFRESH => Some("Route Refresh Capability for BGP-4"),
+        3 => Some("Outbound Route Filtering Capability"),
+        CAP_EXTENDED_NEXT_HOP => Some("Extended Next Hop Encoding"),
+        CAP_EXTENDED_MESSAGE => Some("BGP Extended Message"),
+        7 => Some("BGPsec Capability"),
+        8 => Some("Multiple Labels Capability"),
+        CAP_ROLE => Some("BGP Role"),
+        CAP_GRACEFUL_RESTART => Some("Graceful Restart Capability"),
+        CAP_AS4 => Some("Support for 4-octet AS number capability"),
+        67 => Some("Support for Dynamic Capability (capability specific)"),
+        68 => Some("Multisession BGP Capability"),
+        CAP_ADD_PATH => Some("ADD-PATH Capability"),
+        CAP_ENHANCED_ROUTE_REFRESH => Some("Enhanced Route Refresh Capability"),
+        CAP_LLGR => Some("Long-Lived Graceful Restart (LLGR) Capability"),
+        CAP_FQDN => Some("FQDN Capability"),
+        74 => Some("BFD Strict-Mode Capability"),
+        75 => Some("Software Version Capability"),
+        CAP_PATHS_LIMIT => Some("PATHS-LIMIT Capability"),
+        CAP_ROUTE_REFRESH_DEPRECATED => Some("Prestandard Route Refresh (deprecated)"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for the BGP Role Capability's Role value.
+///
+/// RFC 9234, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9234#section-4.1>
+fn role_name(v: u8) -> Option<&'static str> {
+    match v {
+        0 => Some("Provider"),
+        1 => Some("RS"),
+        2 => Some("RS-Client"),
+        3 => Some("Customer"),
+        4 => Some("Peer"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for the ADD-PATH / PATHS-LIMIT Send/Receive value.
+///
+/// RFC 7911, Section 4 — <https://www.rfc-editor.org/rfc/rfc7911#section-4>
+fn add_path_send_receive_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("receive"),
+        2 => Some("send"),
+        3 => Some("send-receive"),
         _ => None,
     }
 }
@@ -342,6 +457,7 @@ fn parse_optional_parameters<'pkt>(
                         FieldValue::Bytes(cap_value),
                         cap_abs + 2..cap_abs + 2 + cap_len,
                     );
+                    parse_capability_value(buf, cap_code, cap_value, cap_abs + 2);
                 }
 
                 buf.end_container(obj_idx);
@@ -369,6 +485,413 @@ fn parse_optional_parameters<'pkt>(
         }
 
         pos += hdr_size + param_len;
+    }
+}
+
+/// Dispatches to a per-capability decoder that pushes structured child
+/// fields (siblings of `code`/`length`/`value`) inside the current
+/// capability object, based on the IANA Capability Code.
+///
+/// `value` is the capability's raw Capability Value field; `offset` is its
+/// absolute byte offset within the packet. Unknown codes and malformed /
+/// truncated values are silently skipped — the raw `value` field pushed by
+/// the caller remains the only representation in that case.
+fn parse_capability_value<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    code: u8,
+    value: &'pkt [u8],
+    offset: usize,
+) {
+    match code {
+        CAP_MULTIPROTOCOL => parse_cap_multiprotocol(buf, value, offset),
+        CAP_EXTENDED_NEXT_HOP => parse_cap_extended_next_hop(buf, value, offset),
+        CAP_ROLE => parse_cap_role(buf, value, offset),
+        CAP_GRACEFUL_RESTART => parse_cap_graceful_restart(buf, value, offset),
+        CAP_AS4 => parse_cap_as4(buf, value, offset),
+        CAP_ADD_PATH => parse_cap_add_path(buf, value, offset),
+        CAP_LLGR => parse_cap_llgr(buf, value, offset),
+        CAP_FQDN => parse_cap_fqdn(buf, value, offset),
+        CAP_PATHS_LIMIT => parse_cap_paths_limit(buf, value, offset),
+        // Route Refresh / Enhanced Route Refresh / Extended Message /
+        // deprecated Route Refresh carry no Capability Value beyond
+        // `code_name`; other/unknown codes are left as raw `value` only.
+        _ => {}
+    }
+}
+
+/// Parses the Multiprotocol Extensions Capability Value (`afi`, `safi`).
+///
+/// RFC 4760, Section 8 — <https://www.rfc-editor.org/rfc/rfc4760#section-8>
+///
+///   AFI (2 octets) + Reserved (1 octet) + SAFI (1 octet).
+fn parse_cap_multiprotocol<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    if value.len() < 4 {
+        return;
+    }
+    let afi = read_be_u16(value, 0).unwrap_or_default();
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI],
+        FieldValue::U16(afi),
+        offset..offset + 2,
+    );
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_SAFI],
+        FieldValue::U8(value[3]),
+        offset + 3..offset + 4,
+    );
+}
+
+/// Parses the Support for 4-octet AS Number Capability Value (`asn`).
+///
+/// RFC 6793, Section 3 — <https://www.rfc-editor.org/rfc/rfc6793#section-3>
+fn parse_cap_as4<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    if value.len() < 4 {
+        return;
+    }
+    let asn = read_be_u32(value, 0).unwrap_or_default();
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_ASN],
+        FieldValue::U32(asn),
+        offset..offset + 4,
+    );
+}
+
+/// Parses the BGP Role Capability Value (`role`).
+///
+/// RFC 9234, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9234#section-4.1>
+fn parse_cap_role<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    let Some(&role) = value.first() else {
+        return;
+    };
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_ROLE],
+        FieldValue::U8(role),
+        offset..offset + 1,
+    );
+}
+
+/// Parses the ADD-PATH Capability Value into `afi_safis`.
+///
+/// RFC 7911, Section 4 — <https://www.rfc-editor.org/rfc/rfc7911#section-4>
+///
+///   Zero or more 4-byte tuples: AFI (2) + SAFI (1) + Send/Receive (1).
+/// A `value` whose length is not a positive multiple of 4 (e.g. truncated)
+/// is left undecoded.
+fn parse_cap_add_path<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    if value.is_empty() || value.len() % 4 != 0 {
+        return;
+    }
+    let array_idx = buf.begin_container(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI_SAFIS],
+        FieldValue::Array(0..0),
+        offset..offset + value.len(),
+    );
+    let mut pos = 0;
+    while pos + 4 <= value.len() {
+        let abs = offset + pos;
+        let afi = read_be_u16(value, pos).unwrap_or_default();
+        let safi = value[pos + 2];
+        let send_receive = value[pos + 3];
+
+        let obj_idx = buf.begin_container(
+            &AFI_SAFI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + 4,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_AFI],
+            FieldValue::U16(afi),
+            abs..abs + 2,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_SAFI],
+            FieldValue::U16(u16::from(safi)),
+            abs + 2..abs + 3,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_SEND_RECEIVE],
+            FieldValue::U8(send_receive),
+            abs + 3..abs + 4,
+        );
+        buf.end_container(obj_idx);
+
+        pos += 4;
+    }
+    buf.end_container(array_idx);
+}
+
+/// Parses the PATHS-LIMIT Capability Value into `afi_safis`.
+///
+/// draft-abraitis-idr-addpath-paths-limit-04, Section 3 —
+/// <https://datatracker.ietf.org/doc/draft-abraitis-idr-addpath-paths-limit/>
+///
+///   Zero or more 5-byte tuples: AFI (2) + SAFI (1) + Paths Limit (2).
+fn parse_cap_paths_limit<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    if value.is_empty() || value.len() % 5 != 0 {
+        return;
+    }
+    let array_idx = buf.begin_container(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI_SAFIS],
+        FieldValue::Array(0..0),
+        offset..offset + value.len(),
+    );
+    let mut pos = 0;
+    while pos + 5 <= value.len() {
+        let abs = offset + pos;
+        let afi = read_be_u16(value, pos).unwrap_or_default();
+        let safi = value[pos + 2];
+        let paths_limit = read_be_u16(value, pos + 3).unwrap_or_default();
+
+        let obj_idx = buf.begin_container(
+            &AFI_SAFI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + 5,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_AFI],
+            FieldValue::U16(afi),
+            abs..abs + 2,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_SAFI],
+            FieldValue::U16(u16::from(safi)),
+            abs + 2..abs + 3,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_PATHS_LIMIT],
+            FieldValue::U16(paths_limit),
+            abs + 3..abs + 5,
+        );
+        buf.end_container(obj_idx);
+
+        pos += 5;
+    }
+    buf.end_container(array_idx);
+}
+
+/// Parses the Graceful Restart Capability Value (`restart_flags`,
+/// `restart_time`, and an optional `afi_safis` list).
+///
+/// RFC 4724, Section 3 — <https://www.rfc-editor.org/rfc/rfc4724#section-3>
+///
+///   Restart Flags (4 bits) + Restart Time (12 bits), then zero or more
+/// 4-byte tuples: AFI (2) + SAFI (1) + Flags (1).
+fn parse_cap_graceful_restart<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+) {
+    if value.len() < 2 {
+        return;
+    }
+    let restart_flags = value[0] >> 4;
+    let restart_time = (u16::from(value[0] & 0x0F) << 8) | u16::from(value[1]);
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_RESTART_FLAGS],
+        FieldValue::U8(restart_flags),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_RESTART_TIME],
+        FieldValue::U16(restart_time),
+        offset..offset + 2,
+    );
+
+    let tuples = &value[2..];
+    if tuples.is_empty() || tuples.len() % 4 != 0 {
+        return;
+    }
+    let array_idx = buf.begin_container(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI_SAFIS],
+        FieldValue::Array(0..0),
+        offset + 2..offset + value.len(),
+    );
+    let mut pos = 0;
+    while pos + 4 <= tuples.len() {
+        let abs = offset + 2 + pos;
+        let afi = read_be_u16(tuples, pos).unwrap_or_default();
+        let safi = tuples[pos + 2];
+        let flags = tuples[pos + 3];
+
+        let obj_idx = buf.begin_container(
+            &AFI_SAFI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + 4,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_AFI],
+            FieldValue::U16(afi),
+            abs..abs + 2,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_SAFI],
+            FieldValue::U16(u16::from(safi)),
+            abs + 2..abs + 3,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_FLAGS],
+            FieldValue::U8(flags),
+            abs + 3..abs + 4,
+        );
+        buf.end_container(obj_idx);
+
+        pos += 4;
+    }
+    buf.end_container(array_idx);
+}
+
+/// Parses the Long-Lived Graceful Restart (LLGR) Capability Value into
+/// `afi_safis`.
+///
+/// RFC 9494, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9494#section-3.1>
+///
+///   Zero or more 7-byte tuples: AFI (2) + SAFI (1) + Flags (1) +
+/// Long-Lived Stale Time (3, u24).
+fn parse_cap_llgr<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    if value.is_empty() || value.len() % 7 != 0 {
+        return;
+    }
+    let array_idx = buf.begin_container(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI_SAFIS],
+        FieldValue::Array(0..0),
+        offset..offset + value.len(),
+    );
+    let mut pos = 0;
+    while pos + 7 <= value.len() {
+        let abs = offset + pos;
+        let afi = read_be_u16(value, pos).unwrap_or_default();
+        let safi = value[pos + 2];
+        let flags = value[pos + 3];
+        let stale_time = read_be_u24(value, pos + 4).unwrap_or_default();
+
+        let obj_idx = buf.begin_container(
+            &AFI_SAFI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + 7,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_AFI],
+            FieldValue::U16(afi),
+            abs..abs + 2,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_SAFI],
+            FieldValue::U16(u16::from(safi)),
+            abs + 2..abs + 3,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_FLAGS],
+            FieldValue::U8(flags),
+            abs + 3..abs + 4,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_STALE_TIME],
+            FieldValue::U32(stale_time),
+            abs + 4..abs + 7,
+        );
+        buf.end_container(obj_idx);
+
+        pos += 7;
+    }
+    buf.end_container(array_idx);
+}
+
+/// Parses the Extended Next Hop Encoding Capability Value into `afi_safis`.
+///
+/// RFC 8950, Section 4 — <https://www.rfc-editor.org/rfc/rfc8950#section-4>
+///
+///   Zero or more 6-byte tuples: NLRI AFI (2) + NLRI SAFI (2) +
+/// Nexthop AFI (2). Unlike the other capabilities sharing `afi_safis`, the
+/// SAFI here is a 2-octet field.
+fn parse_cap_extended_next_hop<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+) {
+    if value.is_empty() || value.len() % 6 != 0 {
+        return;
+    }
+    let array_idx = buf.begin_container(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI_SAFIS],
+        FieldValue::Array(0..0),
+        offset..offset + value.len(),
+    );
+    let mut pos = 0;
+    while pos + 6 <= value.len() {
+        let abs = offset + pos;
+        let afi = read_be_u16(value, pos).unwrap_or_default();
+        let safi = read_be_u16(value, pos + 2).unwrap_or_default();
+        let next_hop_afi = read_be_u16(value, pos + 4).unwrap_or_default();
+
+        let obj_idx = buf.begin_container(
+            &AFI_SAFI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + 6,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_AFI],
+            FieldValue::U16(afi),
+            abs..abs + 2,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_SAFI],
+            FieldValue::U16(safi),
+            abs + 2..abs + 4,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_NEXT_HOP_AFI],
+            FieldValue::U16(next_hop_afi),
+            abs + 4..abs + 6,
+        );
+        buf.end_container(obj_idx);
+
+        pos += 6;
+    }
+    buf.end_container(array_idx);
+}
+
+/// Parses the FQDN Capability Value (`hostname`, `domain_name`).
+///
+/// draft-walton-bgp-hostname-capability-02, Section 3 —
+/// <https://datatracker.ietf.org/doc/draft-walton-bgp-hostname-capability/>
+///
+///   Hostname Length (1) + Hostname (variable, UTF-8) +
+/// Domain Name Length (1) + Domain Name (variable, UTF-8).
+///
+/// Each string is emitted only when it decodes as valid UTF-8; a
+/// zero-length Domain Name is simply omitted.
+fn parse_cap_fqdn<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    let Some(&hostname_len) = value.first() else {
+        return;
+    };
+    let hostname_len = hostname_len as usize;
+    if 1 + hostname_len > value.len() {
+        return;
+    }
+    if let Ok(hostname) = core::str::from_utf8(&value[1..1 + hostname_len]) {
+        buf.push_field(
+            &OPT_PARAM_CHILDREN[FD_OPT_HOSTNAME],
+            FieldValue::Str(hostname),
+            offset + 1..offset + 1 + hostname_len,
+        );
+    }
+
+    let dn_len_pos = 1 + hostname_len;
+    let Some(&domain_len) = value.get(dn_len_pos) else {
+        return;
+    };
+    let domain_len = domain_len as usize;
+    if domain_len == 0 || dn_len_pos + 1 + domain_len > value.len() {
+        return;
+    }
+    if let Ok(domain_name) =
+        core::str::from_utf8(&value[dn_len_pos + 1..dn_len_pos + 1 + domain_len])
+    {
+        buf.push_field(
+            &OPT_PARAM_CHILDREN[FD_OPT_DOMAIN_NAME],
+            FieldValue::Str(domain_name),
+            offset + dn_len_pos + 1..offset + dn_len_pos + 1 + domain_len,
+        );
     }
 }
 
@@ -2906,16 +3429,126 @@ const MP_FIELDS: [FieldDescriptor; 6] = [
 /// Slice form of [`MP_FIELDS`].
 static MP_CHILDREN: &[FieldDescriptor] = &MP_FIELDS;
 
+/// Field descriptor indices for [`AFI_SAFI_CHILDREN`].
+const FD_AS_AFI: usize = 0;
+const FD_AS_SAFI: usize = 1;
+const FD_AS_SEND_RECEIVE: usize = 2;
+const FD_AS_PATHS_LIMIT: usize = 3;
+const FD_AS_FLAGS: usize = 4;
+const FD_AS_STALE_TIME: usize = 5;
+const FD_AS_NEXT_HOP_AFI: usize = 6;
+
+/// Shared child field descriptors for the elements of every `afi_safis`
+/// array (ADD-PATH, PATHS-LIMIT, Graceful Restart, LLGR, Extended Next Hop
+/// Encoding). `afi`/`safi` are common to all five; the rest are specific to
+/// one or two of them and therefore optional, so `list_fields` sees a
+/// single union of the possible shapes.
+///
+/// `safi` is always stored as [`FieldType::U16`] here — RFC 8950's Extended
+/// Next Hop Encoding uses a genuine 2-octet SAFI, while the other four
+/// capabilities use a 1-octet SAFI widened to `u16` for a uniform shape.
+static AFI_SAFI_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("afi", "AFI", FieldType::U16).with_display_fn(|v, _| match v {
+        FieldValue::U16(a) => afi_name(*a),
+        _ => None,
+    }),
+    FieldDescriptor::new("safi", "SAFI", FieldType::U16).with_display_fn(|v, _| match v {
+        FieldValue::U16(s) => u8::try_from(*s).ok().and_then(safi_name),
+        _ => None,
+    }),
+    FieldDescriptor::new("send_receive", "Send/Receive", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(sr) => add_path_send_receive_name(*sr),
+            _ => None,
+        }),
+    FieldDescriptor::new("paths_limit", "Paths Limit", FieldType::U16).optional(),
+    FieldDescriptor::new("flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("stale_time", "Long-Lived Stale Time", FieldType::U32).optional(),
+    FieldDescriptor::new("next_hop_afi", "Next Hop AFI", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(a) => afi_name(*a),
+            _ => None,
+        }),
+];
+
+/// Object descriptor for `afi_safis` array elements shared across the
+/// capabilities listed on [`AFI_SAFI_CHILDREN`].
+static AFI_SAFI_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("afi_safi", "AFI/SAFI", FieldType::Object)
+        .with_children(AFI_SAFI_CHILDREN);
+
 /// Field descriptor indices for [`OPT_PARAM_CHILDREN`].
 const FD_OPT_CODE: usize = 0;
 const FD_OPT_LENGTH: usize = 1;
 const FD_OPT_VALUE: usize = 2;
+const FD_OPT_AFI: usize = 3;
+const FD_OPT_SAFI: usize = 4;
+const FD_OPT_ASN: usize = 5;
+const FD_OPT_AFI_SAFIS: usize = 6;
+const FD_OPT_RESTART_FLAGS: usize = 7;
+const FD_OPT_RESTART_TIME: usize = 8;
+const FD_OPT_ROLE: usize = 9;
+const FD_OPT_HOSTNAME: usize = 10;
+const FD_OPT_DOMAIN_NAME: usize = 11;
+// Index 12 ("param_type") has no dedicated constant: it is only ever
+// looked up by name (schema union member for non-capability optional
+// parameters — see NON_CAP_PARAM_CHILDREN), never pushed through
+// OPT_PARAM_CHILDREN at runtime.
 
-/// Child field descriptors for capability objects inside `optional_parameters`.
+/// Child field descriptors for objects inside `optional_parameters`.
+///
+/// This is a union of two element shapes: a capability object (`code`,
+/// `length`, `value`, plus the well-known capabilities' decoded fields) and
+/// a non-capability optional parameter (`param_type`, `value`) — see
+/// [`NON_CAP_PARAM_CHILDREN`] for the descriptors actually pushed at
+/// runtime for the latter. All fields beyond `code`/`length`/`param_type`
+/// are optional since only one capability's decoded shape (if any) applies
+/// to a given element.
 static OPT_PARAM_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("code", "Code", FieldType::U8),
+    FieldDescriptor::new("code", "Code", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(c) => capability_code_name(*c),
+        _ => None,
+    }),
     FieldDescriptor::new("length", "Length", FieldType::U8),
     FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+    // Multiprotocol Extensions (RFC 4760, Section 8).
+    FieldDescriptor::new("afi", "AFI", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(a) => afi_name(*a),
+            _ => None,
+        }),
+    FieldDescriptor::new("safi", "SAFI", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(s) => safi_name(*s),
+            _ => None,
+        }),
+    // Support for 4-octet AS number capability (RFC 6793, Section 3).
+    FieldDescriptor::new("asn", "AS Number", FieldType::U32).optional(),
+    // ADD-PATH / PATHS-LIMIT / Graceful Restart / LLGR / Extended Next Hop
+    // Encoding (see AFI_SAFI_CHILDREN doc comment).
+    FieldDescriptor::new("afi_safis", "AFI/SAFIs", FieldType::Array)
+        .optional()
+        .with_children(AFI_SAFI_CHILDREN),
+    // Graceful Restart (RFC 4724, Section 3).
+    FieldDescriptor::new("restart_flags", "Restart Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("restart_time", "Restart Time", FieldType::U16).optional(),
+    // BGP Role (RFC 9234, Section 4.1).
+    FieldDescriptor::new("role", "Role", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(r) => role_name(*r),
+            _ => None,
+        }),
+    // FQDN (draft-walton-bgp-hostname-capability-02, Section 3).
+    FieldDescriptor::new("hostname", "Hostname", FieldType::Str).optional(),
+    FieldDescriptor::new("domain_name", "Domain Name", FieldType::Str).optional(),
+    // Non-capability optional parameter union member — see
+    // NON_CAP_PARAM_CHILDREN.
+    FieldDescriptor::new("param_type", "Parameter Type", FieldType::U8).optional(),
 ];
 
 /// Field descriptor indices for [`PATH_ATTR_CHILDREN`].
@@ -3305,6 +3938,33 @@ mod tests {
             .iter()
             .find(|f| f.name() == name)
             .unwrap_or_else(|| panic!("field '{}' not found", name))
+    }
+
+    /// Helper: collect only the *direct* children of an Array/Object
+    /// container range, skipping over each child container's own
+    /// descendants.
+    ///
+    /// `DissectBuffer::nested_fields` returns every field in the flat
+    /// buffer within `range`, which — for a container whose children are
+    /// themselves containers (e.g. an array of objects with their own
+    /// nested array) — includes grandchildren too. This walks `range`
+    /// one direct sibling at a time, jumping past a child's own range
+    /// when it is itself an Array/Object.
+    fn direct_children<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        range: &core::ops::Range<u32>,
+    ) -> Vec<&'a Field<'pkt>> {
+        let mut out = Vec::new();
+        let mut pos = range.start;
+        while pos < range.end {
+            let field = &buf.fields()[pos as usize];
+            out.push(field);
+            pos = match &field.value {
+                FieldValue::Array(r) | FieldValue::Object(r) => r.end.max(pos + 1),
+                _ => pos + 1,
+            };
+        }
+        out
     }
 
     /// Build a minimal BGP KEEPALIVE message (19 bytes).
@@ -6169,5 +6829,490 @@ mod tests {
         );
         // Non-Bytes variant → empty string
         assert_eq!(call_format_fn(format_teid, &FieldValue::U8(0)), "\"\"");
+    }
+
+    // -- OPEN Capability decoding ------------------------------------------
+
+    /// Helper: encode one Capability TLV as `[code, len, value...]`.
+    fn cap_tlv(code: u8, value: &[u8]) -> Vec<u8> {
+        let mut v = vec![code, value.len() as u8];
+        v.extend_from_slice(value);
+        v
+    }
+
+    /// Helper: build a BGP OPEN message with a single Capability optional
+    /// parameter (type=2) whose value is the concatenation of `caps`
+    /// (already-encoded `[code, len, value...]` TLVs, see [`cap_tlv`]).
+    fn build_open_with_caps(caps: &[u8]) -> Vec<u8> {
+        let opt_params_len = 2 + caps.len(); // param header (type+len) + cap TLVs
+        let total_len = 19 + 10 + opt_params_len;
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&(total_len as u16).to_be_bytes());
+        raw.push(1); // Type = OPEN
+        raw.push(4); // Version
+        raw.extend_from_slice(&65001u16.to_be_bytes()); // My AS
+        raw.extend_from_slice(&180u16.to_be_bytes()); // Hold Time
+        raw.extend_from_slice(&[10, 0, 0, 1]); // BGP Identifier
+        raw.push(opt_params_len as u8);
+        raw.push(2); // Param Type = Capability
+        raw.push(caps.len() as u8);
+        raw.extend_from_slice(caps);
+        raw
+    }
+
+    /// Helper: given a buffer dissected from [`build_open_with_caps`],
+    /// return the child range of its single `optional_parameters`
+    /// capability object. Returns an owned `Range<u32>` (not borrowed from
+    /// `buf`), so callers keep using `buf` and this range side by side.
+    fn single_capability_range(buf: &DissectBuffer<'_>) -> core::ops::Range<u32> {
+        let layer = &buf.layers()[0];
+        let params = buf.field_by_name(layer, "optional_parameters").unwrap();
+        let FieldValue::Array(ref arr_range) = params.value else {
+            panic!("expected Array");
+        };
+        // `build_open_with_caps` always encodes exactly one capability TLV,
+        // so the array's first direct child is that capability object.
+        // (Filtering `nested_fields` by `is_object()` would also match
+        // nested `afi_safis` entry objects further down the flat buffer.)
+        let first = buf
+            .nested_fields(arr_range)
+            .first()
+            .expect("expected at least one field in optional_parameters");
+        assert!(
+            first.value.is_object(),
+            "expected the capability object as the array's first child"
+        );
+        first.value.as_container_range().unwrap().clone()
+    }
+
+    /// Helper: look up an optional nested field by name; `None` if absent.
+    fn nested_field_opt<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        range: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Option<&'a Field<'pkt>> {
+        buf.nested_fields(range).iter().find(|f| f.name() == name)
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_multiprotocol() {
+        // Code=1, AFI=1 (IPv4), Reserved=0, SAFI=85 (BGP-MUP).
+        let caps = cap_tlv(1, &[0, 1, 0, 85]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(*nested_field_value(&buf, &range, "code"), FieldValue::U8(1));
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("Multiprotocol Extensions for BGP-4")
+        );
+        assert_eq!(*nested_field_value(&buf, &range, "afi"), FieldValue::U16(1));
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "afi_name"),
+            Some("IPv4")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "safi"),
+            FieldValue::U8(85)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "safi_name"),
+            Some("BGP-MUP")
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_as4() {
+        // Code=65, synthetic 4-octet ASN.
+        let asn: u32 = 0x1234_5678;
+        let caps = cap_tlv(65, &asn.to_be_bytes());
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("Support for 4-octet AS number capability")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "asn"),
+            FieldValue::U32(asn)
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_add_path() {
+        // Code=69, two tuples: (AFI=1,SAFI=85,SR=3) and (AFI=1,SAFI=128,SR=3).
+        let mut value = Vec::new();
+        value.extend_from_slice(&[0, 1, 85, 3]);
+        value.extend_from_slice(&[0, 1, 128, 3]);
+        let caps = cap_tlv(69, &value);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("ADD-PATH Capability")
+        );
+        let afi_safis = nested_field_by_name(&buf, &range, "afi_safis");
+        let FieldValue::Array(ref arr_range) = afi_safis.value else {
+            panic!("expected Array for afi_safis");
+        };
+        let entries = direct_children(&buf, arr_range);
+        assert_eq!(entries.len(), 2);
+
+        let e0 = entries[0].value.as_container_range().unwrap();
+        assert_eq!(*nested_field_value(&buf, e0, "afi"), FieldValue::U16(1));
+        assert_eq!(*nested_field_value(&buf, e0, "safi"), FieldValue::U16(85));
+        assert_eq!(
+            buf.resolve_nested_display_name(e0, "safi_name"),
+            Some("BGP-MUP")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e0, "send_receive"),
+            FieldValue::U8(3)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(e0, "send_receive_name"),
+            Some("send-receive")
+        );
+
+        let e1 = entries[1].value.as_container_range().unwrap();
+        assert_eq!(*nested_field_value(&buf, e1, "afi"), FieldValue::U16(1));
+        assert_eq!(*nested_field_value(&buf, e1, "safi"), FieldValue::U16(128));
+        assert_eq!(
+            buf.resolve_nested_display_name(e1, "safi_name"),
+            Some("MPLS-labeled VPN")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e1, "send_receive"),
+            FieldValue::U8(3)
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_add_path_truncated() {
+        // Code=69, length=3: not a multiple of 4, so the tuple is malformed
+        // and must be left undecoded (raw `value` kept, no `afi_safis`).
+        let caps = cap_tlv(69, &[0, 1, 85]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            *nested_field_value(&buf, &range, "value"),
+            FieldValue::Bytes(&[0, 1, 85])
+        );
+        assert!(nested_field_opt(&buf, &range, "afi_safis").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_paths_limit() {
+        // Code=76, one tuple: AFI=1, SAFI=85, Paths Limit=100.
+        let caps = cap_tlv(76, &[0, 1, 85, 0, 100]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("PATHS-LIMIT Capability")
+        );
+        let afi_safis = nested_field_by_name(&buf, &range, "afi_safis");
+        let FieldValue::Array(ref arr_range) = afi_safis.value else {
+            panic!("expected Array for afi_safis");
+        };
+        let entries = direct_children(&buf, arr_range);
+        assert_eq!(entries.len(), 1);
+        let e0 = entries[0].value.as_container_range().unwrap();
+        assert_eq!(*nested_field_value(&buf, e0, "afi"), FieldValue::U16(1));
+        assert_eq!(*nested_field_value(&buf, e0, "safi"), FieldValue::U16(85));
+        assert_eq!(
+            *nested_field_value(&buf, e0, "paths_limit"),
+            FieldValue::U16(100)
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_graceful_restart_with_afi_safi() {
+        // Code=64. Restart Flags=0b1000 (R bit set), Restart Time=120,
+        // one tuple: AFI=1, SAFI=85, Flags=0x80 (F bit set).
+        let caps = cap_tlv(64, &[0x80, 120, 0, 1, 85, 0x80]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("Graceful Restart Capability")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "restart_flags"),
+            FieldValue::U8(8)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "restart_time"),
+            FieldValue::U16(120)
+        );
+        let afi_safis = nested_field_by_name(&buf, &range, "afi_safis");
+        let FieldValue::Array(ref arr_range) = afi_safis.value else {
+            panic!("expected Array for afi_safis");
+        };
+        let entries = direct_children(&buf, arr_range);
+        assert_eq!(entries.len(), 1);
+        let e0 = entries[0].value.as_container_range().unwrap();
+        assert_eq!(*nested_field_value(&buf, e0, "afi"), FieldValue::U16(1));
+        assert_eq!(*nested_field_value(&buf, e0, "safi"), FieldValue::U16(85));
+        assert_eq!(*nested_field_value(&buf, e0, "flags"), FieldValue::U8(0x80));
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_graceful_restart_without_afi_safi() {
+        // Code=64, 2-byte value: Restart Flags=0, Restart Time=0. No
+        // AFI/SAFI list, so `afi_safis` must be absent entirely.
+        let caps = cap_tlv(64, &[0, 0]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            *nested_field_value(&buf, &range, "restart_flags"),
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "restart_time"),
+            FieldValue::U16(0)
+        );
+        assert!(nested_field_opt(&buf, &range, "afi_safis").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_llgr() {
+        // Code=71, one tuple: AFI=1, SAFI=85, Flags=0x80, Stale Time=300.
+        let mut value = vec![0, 1, 85, 0x80];
+        value.extend_from_slice(&300u32.to_be_bytes()[1..]); // u24
+        let caps = cap_tlv(71, &value);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("Long-Lived Graceful Restart (LLGR) Capability")
+        );
+        let afi_safis = nested_field_by_name(&buf, &range, "afi_safis");
+        let FieldValue::Array(ref arr_range) = afi_safis.value else {
+            panic!("expected Array for afi_safis");
+        };
+        let entries = direct_children(&buf, arr_range);
+        assert_eq!(entries.len(), 1);
+        let e0 = entries[0].value.as_container_range().unwrap();
+        assert_eq!(*nested_field_value(&buf, e0, "afi"), FieldValue::U16(1));
+        assert_eq!(*nested_field_value(&buf, e0, "safi"), FieldValue::U16(85));
+        assert_eq!(*nested_field_value(&buf, e0, "flags"), FieldValue::U8(0x80));
+        assert_eq!(
+            *nested_field_value(&buf, e0, "stale_time"),
+            FieldValue::U32(300)
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_extended_next_hop() {
+        // Code=5, one tuple: NLRI AFI=1, NLRI SAFI=1, Nexthop AFI=2.
+        let caps = cap_tlv(5, &[0, 1, 0, 1, 0, 2]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("Extended Next Hop Encoding")
+        );
+        let afi_safis = nested_field_by_name(&buf, &range, "afi_safis");
+        let FieldValue::Array(ref arr_range) = afi_safis.value else {
+            panic!("expected Array for afi_safis");
+        };
+        let entries = direct_children(&buf, arr_range);
+        assert_eq!(entries.len(), 1);
+        let e0 = entries[0].value.as_container_range().unwrap();
+        assert_eq!(*nested_field_value(&buf, e0, "afi"), FieldValue::U16(1));
+        // safi is 2 octets for this capability (unlike the others).
+        assert_eq!(*nested_field_value(&buf, e0, "safi"), FieldValue::U16(1));
+        assert_eq!(
+            buf.resolve_nested_display_name(e0, "safi_name"),
+            Some("Unicast")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e0, "next_hop_afi"),
+            FieldValue::U16(2)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(e0, "next_hop_afi_name"),
+            Some("IPv6")
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_role() {
+        // Code=9, Role=2 (RS-Client).
+        let caps = cap_tlv(9, &[2]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("BGP Role")
+        );
+        assert_eq!(*nested_field_value(&buf, &range, "role"), FieldValue::U8(2));
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "role_name"),
+            Some("RS-Client")
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_fqdn() {
+        // Code=73: Hostname="rtr1", Domain Name="lab.example".
+        let hostname = b"rtr1";
+        let domain = b"lab.example";
+        let mut value = vec![hostname.len() as u8];
+        value.extend_from_slice(hostname);
+        value.push(domain.len() as u8);
+        value.extend_from_slice(domain);
+        let caps = cap_tlv(73, &value);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("FQDN Capability")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "hostname"),
+            FieldValue::Str("rtr1")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "domain_name"),
+            FieldValue::Str("lab.example")
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_fqdn_zero_length_domain_omitted() {
+        // Hostname="rtr1", Domain Name Length=0 → domain_name omitted.
+        let hostname = b"rtr1";
+        let mut value = vec![hostname.len() as u8];
+        value.extend_from_slice(hostname);
+        value.push(0);
+        let caps = cap_tlv(73, &value);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            *nested_field_value(&buf, &range, "hostname"),
+            FieldValue::Str("rtr1")
+        );
+        assert!(nested_field_opt(&buf, &range, "domain_name").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_unknown_code() {
+        // Code=200 is unassigned in the IANA Capability Codes registry.
+        let caps = cap_tlv(200, &[1, 2, 3]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+
+        assert_eq!(
+            *nested_field_value(&buf, &range, "code"),
+            FieldValue::U8(200)
+        );
+        assert_eq!(buf.resolve_nested_display_name(&range, "code_name"), None);
+        assert_eq!(
+            *nested_field_value(&buf, &range, "value"),
+            FieldValue::Bytes(&[1, 2, 3])
+        );
+        assert!(nested_field_opt(&buf, &range, "afi").is_none());
+        assert!(nested_field_opt(&buf, &range, "afi_safis").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_zero_length_code_names() {
+        // Route Refresh (2) / BGP Extended Message (6) / Enhanced Route
+        // Refresh (70) / deprecated Route Refresh (128) carry no Capability
+        // Value: only `code`/`length` plus the resolved `code_name`.
+        let cases: [(u8, &str); 4] = [
+            (2, "Route Refresh Capability for BGP-4"),
+            (6, "BGP Extended Message"),
+            (70, "Enhanced Route Refresh Capability"),
+            (128, "Prestandard Route Refresh (deprecated)"),
+        ];
+        for (code, name) in cases {
+            let caps = cap_tlv(code, &[]);
+            let data = build_open_with_caps(&caps);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+            let range = single_capability_range(&buf);
+
+            assert_eq!(
+                *nested_field_value(&buf, &range, "length"),
+                FieldValue::U8(0)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(&range, "code_name"),
+                Some(name),
+                "code {code}"
+            );
+            assert!(nested_field_opt(&buf, &range, "value").is_none());
+        }
+    }
+
+    #[test]
+    fn bgp_optional_parameters_schema_has_afi_safis_send_receive() {
+        // `optional_parameters`'s declared children must include `afi_safis`,
+        // whose own children must include `send_receive` — the shape an LLM
+        // client needs to discover without dissecting a live packet.
+        let afi_safis = OPT_PARAM_CHILDREN
+            .iter()
+            .find(|f| f.name == "afi_safis")
+            .expect("optional_parameters children must include afi_safis");
+        let afi_safi_children = afi_safis
+            .children
+            .expect("afi_safis descriptor must declare children");
+        assert!(
+            afi_safi_children.iter().any(|f| f.name == "send_receive"),
+            "afi_safis children must include send_receive"
+        );
+        assert!(afi_safi_children.iter().any(|f| f.name == "paths_limit"));
+        assert!(afi_safi_children.iter().any(|f| f.name == "stale_time"));
+        assert!(afi_safi_children.iter().any(|f| f.name == "next_hop_afi"));
+
+        // The union also covers non-capability optional parameters.
+        let param_type = OPT_PARAM_CHILDREN
+            .iter()
+            .find(|f| f.name == "param_type")
+            .expect("optional_parameters children must include param_type");
+        assert_eq!(
+            param_type.name,
+            NON_CAP_PARAM_CHILDREN[FD_NCP_PARAM_TYPE].name
+        );
     }
 }
