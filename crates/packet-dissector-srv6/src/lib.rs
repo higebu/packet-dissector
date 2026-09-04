@@ -661,12 +661,18 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("routing_type", "Routing Type", FieldType::U8),
     FieldDescriptor::new("segments_left", "Segments Left", FieldType::U8),
     FieldDescriptor::new("last_entry", "Last Entry", FieldType::U8),
-    FieldDescriptor::new("flags", "Flags", FieldType::Object),
+    FieldDescriptor::new("flags", "Flags", FieldType::Object).with_children(FLAGS_DESCRIPTORS),
     FieldDescriptor::new("tag", "Tag", FieldType::U16),
     FieldDescriptor::new("segments", "Segment List", FieldType::Array),
-    FieldDescriptor::new("segments_structure", "Segment Structure", FieldType::Array).optional(),
-    FieldDescriptor::new("csid_containers", "CSID Containers", FieldType::Array).optional(),
-    FieldDescriptor::new("tlvs", "TLVs", FieldType::Array).optional(),
+    FieldDescriptor::new("segments_structure", "Segment Structure", FieldType::Array)
+        .optional()
+        .with_children(SID_STRUCTURE_DESCRIPTORS),
+    FieldDescriptor::new("csid_containers", "CSID Containers", FieldType::Array)
+        .optional()
+        .with_children(CSID_CONTAINER_DESCRIPTORS),
+    FieldDescriptor::new("tlvs", "TLVs", FieldType::Array)
+        .optional()
+        .with_children(TLV_DESCRIPTORS),
 ];
 
 // ---------------------------------------------------------------------------
@@ -694,7 +700,7 @@ static FD_TLV: FieldDescriptor = FieldDescriptor {
     display_name: "TLV",
     field_type: FieldType::Object,
     optional: false,
-    children: None,
+    children: Some(TLV_DESCRIPTORS),
     display_fn: Some(|v, children| match v {
         FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
             ("type", FieldValue::U8(t)) => srv6_tlv_type_name(*t),
@@ -2548,5 +2554,110 @@ mod tests {
         assert!(matches!(field.value, FieldValue::Object(_)));
         assert_eq!(field.display_name(), "TLV");
         assert_eq!(buf.resolve_container_display_name(idx as u32), Some("PadN"));
+    }
+
+    // # Field Descriptor Schema Coverage
+    //
+    // | Field               | Description                                    | Test                                              |
+    // |----------------------|------------------------------------------------|---------------------------------------------------|
+    // | flags                | children match runtime raw/o_flag fields        | srv6_flags_schema_children_match_runtime_fields    |
+    // | segments_structure   | children match runtime locator/function fields  | srv6_segments_structure_schema_children_match_runtime_fields |
+    // | (all Array/Object)   | every container descriptor declares children    | srv6_container_field_descriptors_declare_children  |
+
+    /// Look up a top-level field descriptor's declared `children` by name.
+    fn field_descriptor_children(name: &str) -> &'static [FieldDescriptor] {
+        FIELD_DESCRIPTORS
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no field descriptor named '{name}'"))
+            .children
+            .unwrap_or_else(|| panic!("field descriptor '{name}' declares no children"))
+    }
+
+    #[test]
+    fn srv6_flags_schema_children_match_runtime_fields() {
+        // Runtime: the `flags` Object pushes `raw` then `o_flag` (RFC 8754,
+        // Section 2; RFC 9259, Section 3 — see `Srv6Dissector::dissect`).
+        let data = build_srh(6, 1, &[SID_A], 0b0010_0000, 0, &[]);
+        let mut buf = DissectBuffer::new();
+        Srv6Dissector::new().dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let flags_field = buf.field_by_name(layer, "flags").unwrap();
+        let range = flags_field.value.as_container_range().unwrap();
+        let runtime_names: Vec<&str> = buf.nested_fields(range).iter().map(|f| f.name()).collect();
+        assert_eq!(runtime_names, ["raw", "o_flag"]);
+
+        let declared_names: Vec<&str> = field_descriptor_children("flags")
+            .iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(declared_names, runtime_names);
+    }
+
+    #[test]
+    fn srv6_segments_structure_schema_children_match_runtime_fields() {
+        // Runtime: each `segments_structure` entry pushes locator_block,
+        // locator_node, function, argument (RFC 8986, Section 3.1).
+        let ss = SidStructure {
+            locator_block_bits: 48,
+            locator_node_bits: 16,
+            function_bits: 16,
+            argument_bits: 48,
+            csid_flavor: CsidFlavor::Classic,
+            mobile_encoding: None,
+        };
+        let dissector = Srv6Dissector::with_sid_structure(ss);
+        let data = build_srh(6, 1, &[SID_A], 0, 0, &[]);
+        let mut buf = DissectBuffer::new();
+        dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let structure_field = buf.field_by_name(layer, "segments_structure").unwrap();
+        let entries = array_entries(&buf, structure_field);
+        assert_eq!(entries.len(), 1);
+        let entry_range = entries[0].value.as_container_range().unwrap();
+        let runtime_names: Vec<&str> = buf
+            .nested_fields(entry_range)
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert_eq!(
+            runtime_names,
+            ["locator_block", "locator_node", "function", "argument"]
+        );
+
+        let declared_names: Vec<&str> = field_descriptor_children("segments_structure")
+            .iter()
+            .map(|f| f.name)
+            .collect();
+        // Without a mobile encoding configured, `segments_structure`
+        // elements carry exactly the classic SID structure fields; the
+        // Mobile SID / Args.Mob.Session sub-fields (RFC 9433) that
+        // `push_mobile_sid` adds when a mobile encoding *is* configured
+        // are not exercised by this test.
+        assert_eq!(declared_names, runtime_names);
+    }
+
+    #[test]
+    fn srv6_container_field_descriptors_declare_children() {
+        // Every Array/Object field descriptor whose elements are themselves
+        // structured must declare `children` so schema consumers (e.g. an
+        // LLM client calling `list_fields`) can discover the element shape
+        // without dissecting a live packet. `segments` is the one
+        // exception: its elements are plain Ipv6Addr scalars, not objects.
+        for fd in FIELD_DESCRIPTORS {
+            if fd.name == "segments" {
+                continue;
+            }
+            if matches!(fd.field_type, FieldType::Array | FieldType::Object) {
+                assert!(
+                    fd.children.is_some(),
+                    "field descriptor '{}' ({:?}) is missing children",
+                    fd.name,
+                    fd.field_type
+                );
+            }
+        }
     }
 }
