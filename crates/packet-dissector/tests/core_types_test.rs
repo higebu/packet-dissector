@@ -36,6 +36,7 @@ fn field_type_all_variants_are_distinct() {
         FieldType::Str,
         FieldType::Array,
         FieldType::Object,
+        FieldType::Any,
     ];
     for (i, a) in types.iter().enumerate() {
         for (j, b) in types.iter().enumerate() {
