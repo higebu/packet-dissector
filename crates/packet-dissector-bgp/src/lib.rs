@@ -14,7 +14,6 @@
 //! - RFC 7313 (Enhanced Route Refresh): <https://www.rfc-editor.org/rfc/rfc7313>
 //! - RFC 7911 (ADD-PATH Capability): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8092 (Large Communities): <https://www.rfc-editor.org/rfc/rfc8092>
-//! - RFC 7911 (ADD-PATH / Path Identifier): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8203 (Hard Reset Cease subcode): <https://www.rfc-editor.org/rfc/rfc8203>
 //! - RFC 8654 (Extended Message): <https://www.rfc-editor.org/rfc/rfc8654>
 //! - RFC 8669 (BGP Prefix-SID): <https://www.rfc-editor.org/rfc/rfc8669>
@@ -3031,13 +3030,30 @@ static PREFIX_ENTRY_IPV6_DESCRIPTOR: FieldDescriptor =
 const PATH_ID_FIELD: FieldDescriptor =
     FieldDescriptor::new("path_id", "Path Identifier", FieldType::U32).optional();
 
-/// Schema entry for the prefix inside an NLRI entry object.
+/// Schema entry for the prefix inside a MUP/IP union NLRI entry object.
+///
+/// Used only in [`NLRI_ENTRY_FIELDS`], the MUP/IP union that describes
+/// `path_attributes.value.nlri` / `.withdrawn_routes`: a MUP (SAFI 85) entry
+/// may omit `prefix` entirely (e.g. Route Type 2 "Direct Segment Discovery",
+/// which carries `address` instead), so in that union it must be optional.
+/// For plain (non-MUP) top-level `nlri` / `withdrawn_routes` entries, where
+/// `prefix` is always present, see [`IP_NLRI_PREFIX_FIELD`] instead.
 ///
 /// The `format_fn` renders the CIDR string. The address-family specific runtime
 /// descriptors ([`PREFIX_ENTRY_IPV4_DESCRIPTOR`] / [`PREFIX_ENTRY_IPV6_DESCRIPTOR`])
 /// are what actually serialise a value; this entry only advertises the field in
 /// the schema, so the IPv4 formatter stands in for both families.
 const NLRI_PREFIX_FIELD: FieldDescriptor = PREFIX_ENTRY_IPV4_FIELD.optional();
+
+/// Schema entry for the prefix inside a plain (non-MUP) NLRI entry object.
+///
+/// Unlike [`NLRI_PREFIX_FIELD`], this is not optional: every entry of a
+/// top-level `nlri` / `withdrawn_routes` array (RFC 4271, Section 4.3) always
+/// carries a `prefix`, only `path_id` is conditional. Reuses
+/// [`PREFIX_ENTRY_IPV4_FIELD`] as-is (same name, display, and format_fn as
+/// [`NLRI_PREFIX_FIELD`]) so the IPv4 formatter stands in for both address
+/// families in the schema, exactly as documented on `NLRI_PREFIX_FIELD`.
+const IP_NLRI_PREFIX_FIELD: FieldDescriptor = PREFIX_ENTRY_IPV4_FIELD;
 
 /// Field descriptor index for [`IP_NLRI_ENTRY_CHILDREN`] (index 1 is `prefix`,
 /// pushed through the address-family specific `PREFIX_ENTRY_*` descriptors).
@@ -3051,7 +3067,7 @@ const FD_NLRI_PATH_ID: usize = 0;
 ///
 /// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
 /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
-const IP_NLRI_ENTRY_FIELDS: [FieldDescriptor; 2] = [PATH_ID_FIELD, NLRI_PREFIX_FIELD];
+const IP_NLRI_ENTRY_FIELDS: [FieldDescriptor; 2] = [PATH_ID_FIELD, IP_NLRI_PREFIX_FIELD];
 
 /// Slice form of [`IP_NLRI_ENTRY_FIELDS`].
 static IP_NLRI_ENTRY_CHILDREN: &[FieldDescriptor] = &IP_NLRI_ENTRY_FIELDS;
@@ -4662,15 +4678,75 @@ mod tests {
         buf.nested_fields(range).iter().find(|f| f.name() == name)
     }
 
-    /// Helper: collect the child ranges of the entry objects in an NLRI array.
+    /// Helper: collect the ranges of the direct entry objects in an NLRI array.
+    ///
+    /// Built on [`direct_children`] rather than `nested_fields` directly:
+    /// `nested_fields` flattens every descendant field in `range`, so for a
+    /// MUP entry carrying its own nested `tlvs` array, the nested TLV
+    /// object(s) would otherwise be miscounted as additional entries.
+    /// `direct_children` stops at each child container's own range, so only
+    /// the entry objects themselves are returned.
     fn nlri_entry_ranges(
         buf: &DissectBuffer<'_>,
         range: &core::ops::Range<u32>,
     ) -> Vec<core::ops::Range<u32>> {
-        buf.nested_fields(range)
+        direct_children(buf, range)
             .iter()
             .filter_map(|f| f.value.as_container_range().cloned())
             .collect()
+    }
+
+    /// RFC 7911 (ADD-PATH) regression: a MUP (SAFI 85) NLRI entry that itself
+    /// carries a nested `tlvs` array must still count as exactly one entry.
+    ///
+    /// `nlri_entry_ranges` used to collect every container inside the array
+    /// range — grandchildren included — so a single MUP entry with one nested
+    /// TLV object was miscounted as two entries.
+    ///
+    /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+    /// draft-ietf-bess-mup-safi-01, Section 3 —
+    /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
+    #[test]
+    fn nlri_entry_ranges_counts_direct_entries_only_with_mup_tlvs() {
+        // Type 1 ST MUP entry (Architecture Type 1, Route Type 3) with a
+        // Source Address Length of 0 followed by a trailing Source Address
+        // TLV (Type 3), i.e. the same shape as `parse_bgp_update_mup_type1_st_tlvs`.
+        let mut val = Vec::new();
+        val.extend_from_slice(&1u16.to_be_bytes()); // AFI = IPv4
+        val.push(85); // SAFI = MUP
+        val.push(4); // Next Hop Length
+        val.extend_from_slice(&[10, 0, 0, 1]); // Next Hop
+        val.push(0); // Reserved
+        val.push(1); // Architecture Type = 3gpp-5g
+        val.extend_from_slice(&3u16.to_be_bytes()); // Route Type = Type 1 ST
+        let tlv = [3u8, 4, 10, 0, 0, 9]; // Type 3: Source Address TLV, IPv4
+        let rt_len = 8 + 1 + 4 + 4 + 1 + 1 + 4 + 1 + tlv.len();
+        val.push(rt_len as u8); // Length
+        val.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // RD
+        val.push(32); // Prefix Length
+        val.extend_from_slice(&[10, 1, 1, 1]); // Prefix
+        val.extend_from_slice(&0x12345678u32.to_be_bytes()); // TEID
+        val.push(9); // QFI
+        val.push(32); // Endpoint Address Length
+        val.extend_from_slice(&[10, 0, 0, 2]); // Endpoint Address
+        val.push(0); // Source Address Length = 0 (not carried inline)
+        val.extend_from_slice(&tlv);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let entries_range = mp_nlri_range(&buf, "nlri");
+        let entries = nlri_entry_ranges(&buf, &entries_range);
+        // Exactly one MUP entry, even though it carries a nested `tlvs` array
+        // with one TLV object of its own.
+        assert_eq!(entries.len(), 1);
+        let FieldValue::Array(ref tlvs_range) = *nested_field_value(&buf, &entries[0], "tlvs")
+        else {
+            panic!("expected Array for tlvs");
+        };
+        assert_eq!(direct_children(&buf, tlvs_range).len(), 1);
     }
 
     /// Helper: the `nlri` array range of the first path attribute's MP value.
@@ -5137,7 +5213,16 @@ mod tests {
             let path_id = find(children, "path_id").expect("path_id missing");
             assert_eq!(path_id.field_type, FieldType::U32);
             assert!(path_id.optional);
-            assert!(find(children, "prefix").is_some());
+            // Unlike `path_id`, a plain IP NLRI/withdrawn-route entry always
+            // carries a `prefix` — it is never conditional, so the schema
+            // must not mark it optional (only the MUP/IP union in
+            // `path_attributes.value.nlri` does, since a MUP entry may omit
+            // it).
+            let prefix = find(children, "prefix").expect("prefix missing");
+            assert!(
+                !prefix.optional,
+                "top-level {name}.prefix must not be optional"
+            );
         }
 
         // `path_attributes.value` is polymorphic and lists the union of every

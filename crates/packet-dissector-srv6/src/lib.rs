@@ -666,7 +666,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("segments", "Segment List", FieldType::Array),
     FieldDescriptor::new("segments_structure", "Segment Structure", FieldType::Array)
         .optional()
-        .with_children(SID_STRUCTURE_DESCRIPTORS),
+        .with_children(SID_STRUCTURE_UNION_DESCRIPTORS),
     FieldDescriptor::new("csid_containers", "CSID Containers", FieldType::Array)
         .optional()
         .with_children(CSID_CONTAINER_DESCRIPTORS),
@@ -745,33 +745,47 @@ const FD_AMS_R_FLAG: usize = 1;
 const FD_AMS_U_FLAG: usize = 2;
 const FD_AMS_PDU_SESSION_ID: usize = 3;
 
-static AMS_DESCRIPTORS: &[FieldDescriptor] = &[
+/// Const form of [`AMS_DESCRIPTORS`], for reuse in [`SID_STRUCTURE_UNION_FIELDS`].
+const AMS_FIELDS: [FieldDescriptor; 4] = [
     FieldDescriptor::new("qfi", "QFI", FieldType::U8),
     FieldDescriptor::new("r_flag", "R Flag", FieldType::U8),
     FieldDescriptor::new("u_flag", "U Flag", FieldType::U8),
     FieldDescriptor::new("pdu_session_id", "PDU Session ID", FieldType::U32),
 ];
 
+/// Slice form of [`AMS_FIELDS`].
+static AMS_DESCRIPTORS: &[FieldDescriptor] = &AMS_FIELDS;
+
 // Parent descriptor for the args_mob_session Object field
 const FD_ARGS_MOB_SESSION: usize = 0;
 
-static AMS_PARENT_DESCRIPTORS: &[FieldDescriptor] =
-    &[
+/// Const form of [`AMS_PARENT_DESCRIPTORS`], for reuse in
+/// [`SID_STRUCTURE_UNION_FIELDS`].
+const AMS_PARENT_FIELDS: [FieldDescriptor; 1] =
+    [
         FieldDescriptor::new("args_mob_session", "Args.Mob.Session", FieldType::Object)
             .optional()
             .with_children(AMS_DESCRIPTORS),
     ];
+
+/// Slice form of [`AMS_PARENT_FIELDS`].
+static AMS_PARENT_DESCRIPTORS: &[FieldDescriptor] = &AMS_PARENT_FIELDS;
 
 // Mobile SID sub-field descriptors (embedded_ipv4, group_id, limit_rate)
 const FD_MOBILE_EMBEDDED_IPV4: usize = 0;
 const FD_MOBILE_GROUP_ID: usize = 1;
 const FD_MOBILE_LIMIT_RATE: usize = 2;
 
-static MOBILE_DESCRIPTORS: &[FieldDescriptor] = &[
+/// Const form of [`MOBILE_DESCRIPTORS`], for reuse in
+/// [`SID_STRUCTURE_UNION_FIELDS`].
+const MOBILE_FIELDS: [FieldDescriptor; 3] = [
     FieldDescriptor::new("embedded_ipv4", "Embedded IPv4", FieldType::Ipv4Addr).optional(),
     FieldDescriptor::new("group_id", "Group ID", FieldType::Bytes).optional(),
     FieldDescriptor::new("limit_rate", "Limit Rate", FieldType::Bytes).optional(),
 ];
+
+/// Slice form of [`MOBILE_FIELDS`].
+static MOBILE_DESCRIPTORS: &[FieldDescriptor] = &MOBILE_FIELDS;
 
 /// Writes a SID structure sub-field as a JSON-quoted hex string (e.g., `"20010db8"`).
 ///
@@ -803,7 +817,9 @@ const FD_SID_LOCATOR_NODE: usize = 1;
 const FD_SID_FUNCTION: usize = 2;
 const FD_SID_ARGUMENT: usize = 3;
 
-static SID_STRUCTURE_DESCRIPTORS: &[FieldDescriptor] = &[
+/// Const form of [`SID_STRUCTURE_DESCRIPTORS`], for reuse in
+/// [`SID_STRUCTURE_UNION_FIELDS`].
+const SID_STRUCTURE_FIELDS: [FieldDescriptor; 4] = [
     FieldDescriptor::new("locator_block", "Locator Block", FieldType::Bytes)
         .with_format_fn(format_sid_hex),
     FieldDescriptor::new("locator_node", "Locator Node", FieldType::Bytes)
@@ -811,6 +827,47 @@ static SID_STRUCTURE_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("function", "Function", FieldType::Bytes).with_format_fn(format_sid_hex),
     FieldDescriptor::new("argument", "Argument", FieldType::Bytes).with_format_fn(format_sid_hex),
 ];
+
+/// Slice form of [`SID_STRUCTURE_FIELDS`], used to push the classic SID
+/// structure fields at runtime (RFC 8986, Section 3.1).
+static SID_STRUCTURE_DESCRIPTORS: &[FieldDescriptor] = &SID_STRUCTURE_FIELDS;
+
+/// Union of every field that can appear in a `segments_structure` entry
+/// object: the always-present classic SID structure fields
+/// ([`SID_STRUCTURE_FIELDS`], RFC 8986, Section 3.1) plus the Mobile SID /
+/// Args.Mob.Session fields ([`MOBILE_FIELDS`], [`AMS_PARENT_FIELDS`],
+/// RFC 9433) that [`push_mobile_sid`] additionally pushes when a
+/// [`SidStructure::mobile_encoding`] is configured.
+///
+/// The mobile fields are optional: which of them (if any) is pushed depends
+/// on the configured [`MobileSidEncoding`] variant and its bit-width
+/// parameters (e.g. `embedded_ipv4` is only pushed when `ipv4da_bits > 0`,
+/// and `args_mob_session` only when the available bits meet
+/// [`ARGS_MOB_SESSION_MIN_BITS`]). `args_mob_session` carries its own
+/// `children` ([`AMS_FIELDS`]) for the nested QFI / R-flag / U-flag /
+/// PDU Session ID fields (Section 6.1, Figure 8).
+///
+/// This mirrors the `NLRI_ENTRY_FIELDS` union pattern in
+/// `packet-dissector-bgp`: a const array of reused descriptors (rather than
+/// duplicated `display_fn`/`format_fn` definitions) plus a `static` slice
+/// alias for use as `children`.
+///
+/// RFC 8986, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc8986#section-3.1>
+/// RFC 9433, Sections 6.1, 6.5–6.8 — <https://www.rfc-editor.org/rfc/rfc9433#section-6>
+const SID_STRUCTURE_UNION_FIELDS: [FieldDescriptor; 8] = [
+    SID_STRUCTURE_FIELDS[FD_SID_LOCATOR_BLOCK],
+    SID_STRUCTURE_FIELDS[FD_SID_LOCATOR_NODE],
+    SID_STRUCTURE_FIELDS[FD_SID_FUNCTION],
+    SID_STRUCTURE_FIELDS[FD_SID_ARGUMENT],
+    MOBILE_FIELDS[FD_MOBILE_EMBEDDED_IPV4],
+    MOBILE_FIELDS[FD_MOBILE_GROUP_ID],
+    MOBILE_FIELDS[FD_MOBILE_LIMIT_RATE],
+    AMS_PARENT_FIELDS[FD_ARGS_MOB_SESSION],
+];
+
+/// Slice form of [`SID_STRUCTURE_UNION_FIELDS`], attached as the `children`
+/// of the top-level `segments_structure` field descriptor.
+static SID_STRUCTURE_UNION_DESCRIPTORS: &[FieldDescriptor] = &SID_STRUCTURE_UNION_FIELDS;
 
 // Flags sub-field descriptors
 const FD_FLAGS_RAW: usize = 0;
@@ -2597,8 +2654,9 @@ mod tests {
 
     #[test]
     fn srv6_segments_structure_schema_children_match_runtime_fields() {
-        // Runtime: each `segments_structure` entry pushes locator_block,
-        // locator_node, function, argument (RFC 8986, Section 3.1).
+        // Runtime (no mobile encoding): each `segments_structure` entry
+        // pushes locator_block, locator_node, function, argument
+        // (RFC 8986, Section 3.1).
         let ss = SidStructure {
             locator_block_bits: 48,
             locator_node_bits: 16,
@@ -2616,9 +2674,7 @@ mod tests {
         let structure_field = buf.field_by_name(layer, "segments_structure").unwrap();
         let entries = array_entries(&buf, structure_field);
         assert_eq!(entries.len(), 1);
-        let entry_range = entries[0].value.as_container_range().unwrap();
-        let runtime_names: Vec<&str> = buf
-            .nested_fields(entry_range)
+        let runtime_names: Vec<&str> = array_entries(&buf, entries[0])
             .iter()
             .map(|f| f.name())
             .collect();
@@ -2627,16 +2683,87 @@ mod tests {
             ["locator_block", "locator_node", "function", "argument"]
         );
 
-        let declared_names: Vec<&str> = field_descriptor_children("segments_structure")
+        let declared = field_descriptor_children("segments_structure");
+        let declared_names: Vec<&str> = declared.iter().map(|f| f.name).collect();
+        // `segments_structure`'s schema is a union of the always-present
+        // classic SID structure fields and the Mobile SID / Args.Mob.Session
+        // fields (RFC 9433) exercised by the mobile-encoded case below, so
+        // every runtime field name here must be declared, but the declared
+        // set need not match exactly.
+        for name in &runtime_names {
+            assert!(
+                declared_names.contains(name),
+                "runtime field '{name}' missing from segments_structure schema: {declared_names:?}"
+            );
+        }
+
+        // Runtime (mobile encoding, RFC 9433 End.M.GTP4.E, Section 6.6,
+        // Figure 9): additionally pushes `embedded_ipv4` and a nested
+        // `args_mob_session` object with qfi / r_flag / u_flag /
+        // pdu_session_id (Section 6.1, Figure 8).
+        let mobile_ss = SidStructure {
+            locator_block_bits: 32,
+            locator_node_bits: 8,
+            function_bits: 8,
+            argument_bits: 16,
+            csid_flavor: CsidFlavor::Classic,
+            mobile_encoding: Some(MobileSidEncoding::EndMGtp4E {
+                ipv4da_bits: 32,
+                args_mob_session_bits: ARGS_MOB_SESSION_MIN_BITS,
+            }),
+        };
+        let mobile_dissector = Srv6Dissector::with_sid_structure(mobile_ss);
+        let mut mobile_buf = DissectBuffer::new();
+        mobile_dissector.dissect(&data, &mut mobile_buf, 0).unwrap();
+
+        let mobile_layer = &mobile_buf.layers()[0];
+        let mobile_structure_field = mobile_buf
+            .field_by_name(mobile_layer, "segments_structure")
+            .unwrap();
+        let mobile_entries = array_entries(&mobile_buf, mobile_structure_field);
+        assert_eq!(mobile_entries.len(), 1);
+        let mobile_runtime_names: Vec<&str> = array_entries(&mobile_buf, mobile_entries[0])
             .iter()
-            .map(|f| f.name)
+            .map(|f| f.name())
             .collect();
-        // Without a mobile encoding configured, `segments_structure`
-        // elements carry exactly the classic SID structure fields; the
-        // Mobile SID / Args.Mob.Session sub-fields (RFC 9433) that
-        // `push_mobile_sid` adds when a mobile encoding *is* configured
-        // are not exercised by this test.
-        assert_eq!(declared_names, runtime_names);
+        assert_eq!(
+            mobile_runtime_names,
+            [
+                "locator_block",
+                "locator_node",
+                "function",
+                "argument",
+                "embedded_ipv4",
+                "args_mob_session",
+            ]
+        );
+        for name in &mobile_runtime_names {
+            assert!(
+                declared_names.contains(name),
+                "mobile-encoded runtime field '{name}' missing from segments_structure schema: {declared_names:?}"
+            );
+        }
+
+        // The nested `args_mob_session` children pushed at runtime must also
+        // be declared in the schema.
+        let ams_field = nested_field_by_name(&mobile_buf, mobile_entries[0], "args_mob_session")
+            .expect("args_mob_session missing at runtime");
+        let ams_runtime_names: Vec<&str> = array_entries(&mobile_buf, ams_field)
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert_eq!(
+            ams_runtime_names,
+            ["qfi", "r_flag", "u_flag", "pdu_session_id"]
+        );
+        let ams_declared = declared
+            .iter()
+            .find(|f| f.name == "args_mob_session")
+            .expect("args_mob_session missing from segments_structure schema")
+            .children
+            .expect("args_mob_session schema entry declares no children");
+        let ams_declared_names: Vec<&str> = ams_declared.iter().map(|f| f.name).collect();
+        assert_eq!(ams_declared_names, ams_runtime_names);
     }
 
     #[test]

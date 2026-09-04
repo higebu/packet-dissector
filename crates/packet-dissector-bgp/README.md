@@ -40,6 +40,17 @@ Wireshark's `detect_add_path_prefix46()`: the block must parse exactly as
 `[path_id][length][prefix]` entries and must *not* also parse exactly as plain
 `[length][prefix]` entries. Plain encoding wins when both readings are valid.
 
+This heuristic has two known misclassification classes, both shared with
+Wireshark's implementation:
+
+- **False positive**: a plain block whose first entry is `0/0` (or `::/0`)
+  followed by more prefixes is classified as ADD-PATH when it also parses as
+  `[path_id][length][prefix]` — a leading default route is treated as too
+  ambiguous to trust as a plain reading.
+- **False negative**: a block that parses validly both ways is treated as
+  plain, so a genuine ADD-PATH block can be missed when its bytes happen to
+  also parse as valid plain prefixes.
+
 The `value` of a path attribute is polymorphic — its shape is selected by the
 sibling `type_code` — so it is declared as `FieldType::Any` in the field schema,
 with `children` listing the union of every sub-field it can contain:
