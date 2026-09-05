@@ -122,6 +122,10 @@
 //! | 4 | MP_UNREACH_NLRI (IPv4) | `parse_bgp_update_mp_unreach_ipv4` |
 //! | 3 | IPv6 NLRI prefix CIDR formatting | `format_nlri_ipv6_prefix_cidr` |
 //! | 8 | Multiprotocol Extensions Capability (afi/safi) | `parse_bgp_open_capability_multiprotocol` |
+//! | 3 | UPDATE top-level afi/safi mirrors first MP_REACH_NLRI | `parse_bgp_update_top_level_afi_safi_from_mp_reach` |
+//! | 4 | UPDATE top-level afi/safi mirrors MP_UNREACH_NLRI when it is the only MP attribute | `parse_bgp_update_top_level_afi_safi_from_mp_unreach_only` |
+//! | 3/4 | UPDATE top-level afi/safi: first MP attribute in attribute order wins | `parse_bgp_update_top_level_afi_safi_first_attribute_wins` |
+//! | 3/4 | Plain IPv4 unicast UPDATE (no MP attribute) has no top-level afi/safi | `parse_bgp_update_plain_ipv4_unicast_has_no_top_level_afi_safi` |
 //!
 //! # BGP OPEN Capability Decoding Coverage
 //!
@@ -1336,7 +1340,7 @@ fn parse_path_attribute<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     base_offset: usize,
-) -> Option<usize> {
+) -> Option<(usize, Option<MpAfiSafi>)> {
     if data.len() < 3 {
         return None;
     }
@@ -1384,11 +1388,11 @@ fn parse_path_attribute<'pkt>(
     );
 
     let val_offset = base_offset + header_len;
-    parse_attr_value(buf, type_code, value_data, val_offset);
+    let mp_afi_safi = parse_attr_value(buf, type_code, value_data, val_offset);
 
     buf.end_container(obj_idx);
 
-    Some(total_len)
+    Some((total_len, mp_afi_safi))
 }
 
 /// Returns a human-readable name for ORIGIN values.
@@ -1881,7 +1885,7 @@ fn parse_attr_value<'pkt>(
     type_code: u8,
     data: &'pkt [u8],
     offset: usize,
-) {
+) -> Option<MpAfiSafi> {
     match type_code {
         // ORIGIN (RFC 4271, Section 5.1.1)
         1 if data.len() == 1 => {
@@ -1985,11 +1989,11 @@ fn parse_attr_value<'pkt>(
         }
         // MP_REACH_NLRI (RFC 4760, Section 3)
         14 if data.len() >= 5 => {
-            parse_mp_reach_nlri(buf, data, offset);
+            return Some(parse_mp_reach_nlri(buf, data, offset));
         }
         // MP_UNREACH_NLRI (RFC 4760, Section 4)
         15 if data.len() >= 3 => {
-            parse_mp_unreach_nlri(buf, data, offset);
+            return Some(parse_mp_unreach_nlri(buf, data, offset));
         }
         // EXTENDED_COMMUNITIES (RFC 4360) — sequence of 8-byte values
         16 if data.len() % 8 == 0 => {
@@ -2061,6 +2065,7 @@ fn parse_attr_value<'pkt>(
             }
         }
     }
+    None
 }
 
 /// Returns a human-readable name for MUP route types.
@@ -2736,10 +2741,33 @@ fn format_teid(
     write!(w, "\"0x{val:08x}\"")
 }
 
+/// The (AFI, SAFI) decoded from a single MP_REACH_NLRI / MP_UNREACH_NLRI path
+/// attribute value, with the absolute offset of the 2-octet AFI field (the
+/// 1-octet SAFI immediately follows it).
+///
+/// Used by [`parse_update`] to mirror the *first* MP_REACH_NLRI / MP_UNREACH_NLRI
+/// attribute's address family as top-level `afi`/`safi` layer fields, so a
+/// consumer can filter on the address family of an UPDATE without reaching
+/// into `path_attributes`.
+///
+/// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+/// RFC 4760, Section 4 — <https://www.rfc-editor.org/rfc/rfc4760#section-4>
+#[derive(Clone, Copy)]
+struct MpAfiSafi {
+    afi: u16,
+    safi: u8,
+    /// Absolute offset of the 2-octet AFI field within the packet.
+    offset: usize,
+}
+
 /// Parses MP_REACH_NLRI attribute value.
 ///
 /// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
-fn parse_mp_reach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+fn parse_mp_reach_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> MpAfiSafi {
     let afi = read_be_u16(data, 0).unwrap_or_default();
     let safi = data[2];
     let nh_len = data[3] as usize;
@@ -2765,7 +2793,7 @@ fn parse_mp_reach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], of
     let nh_end = nh_start + nh_len;
     if nh_end > data.len() {
         buf.end_container(obj_idx);
-        return;
+        return MpAfiSafi { afi, safi, offset };
     }
 
     // Parse Next Hop based on AFI
@@ -2828,12 +2856,18 @@ fn parse_mp_reach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], of
     }
 
     buf.end_container(obj_idx);
+
+    MpAfiSafi { afi, safi, offset }
 }
 
 /// Parses MP_UNREACH_NLRI attribute value.
 ///
 /// RFC 4760, Section 4 — <https://www.rfc-editor.org/rfc/rfc4760#section-4>
-fn parse_mp_unreach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+fn parse_mp_unreach_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> MpAfiSafi {
     let afi = read_be_u16(data, 0).unwrap_or_default();
     let safi = data[2];
 
@@ -2880,6 +2914,8 @@ fn parse_mp_unreach_nlri<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], 
     }
 
     buf.end_container(obj_idx);
+
+    MpAfiSafi { afi, safi, offset }
 }
 
 /// Parses UPDATE message body and appends fields.
@@ -2948,6 +2984,7 @@ fn parse_update<'pkt>(
     }
 
     // Parse path attributes
+    let mut first_mp_afi_safi: Option<MpAfiSafi> = None;
     if path_attr_len > 0 {
         let array_idx = buf.begin_container(
             &FIELD_DESCRIPTORS[FD_PATH_ATTRIBUTES],
@@ -2958,9 +2995,12 @@ fn parse_update<'pkt>(
         let mut pos = 0;
         let attr_data = &data[pa_start..pa_end];
         while pos < attr_data.len() {
-            if let Some(consumed) =
+            if let Some((consumed, mp_afi_safi)) =
                 parse_path_attribute(buf, &attr_data[pos..], offset + pa_start + pos)
             {
+                if first_mp_afi_safi.is_none() {
+                    first_mp_afi_safi = mp_afi_safi;
+                }
                 pos += consumed;
             } else {
                 break;
@@ -2971,6 +3011,28 @@ fn parse_update<'pkt>(
         } else {
             buf.end_container(array_idx);
         }
+    }
+
+    // Mirror the AFI/SAFI of the first MP_REACH_NLRI / MP_UNREACH_NLRI
+    // attribute (in attribute order) as top-level `afi`/`safi` fields, so a
+    // consumer can filter on the address family of an UPDATE without
+    // reaching into `path_attributes`. Plain IPv4 unicast UPDATEs carry no
+    // MP attribute and get no top-level afi/safi — only what is on the wire
+    // is decoded.
+    //
+    // RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+    // RFC 4760, Section 4 — <https://www.rfc-editor.org/rfc/rfc4760#section-4>
+    if let Some(mp) = first_mp_afi_safi {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_AFI],
+            FieldValue::U16(mp.afi),
+            mp.offset..mp.offset + 2,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_SAFI],
+            FieldValue::U8(mp.safi),
+            mp.offset + 2..mp.offset + 3,
+        );
     }
 
     // Parse NLRI (remaining bytes after path attributes)
@@ -3669,7 +3731,10 @@ const FD_OPTIONAL_PARAMETERS: usize = 9;
 const FD_ERROR_CODE: usize = 10;
 const FD_ERROR_SUBCODE: usize = 11;
 const FD_DATA: usize = 12;
-// ROUTE-REFRESH fields (RFC 2918, RFC 7313)
+// ROUTE-REFRESH fields (RFC 2918, RFC 7313). `FD_AFI`/`FD_SAFI` are reused at
+// the UPDATE layer top level to mirror the first MP_REACH_NLRI /
+// MP_UNREACH_NLRI attribute's address family (RFC 4760, Sections 3/4) — see
+// `parse_update`.
 const FD_AFI: usize = 13;
 const FD_SAFI: usize = 14;
 const FD_MESSAGE_SUBTYPE: usize = 15;
@@ -3762,7 +3827,18 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         format_fn: None,
     },
     FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
-    // ROUTE-REFRESH fields (RFC 2918)
+    // Top-level `afi`/`safi`:
+    // - ROUTE-REFRESH (RFC 2918, Section 3) — decoded directly from the
+    //   message body.
+    // - UPDATE (RFC 4271, Section 4.3) — mirrors the AFI/SAFI of the first
+    //   MP_REACH_NLRI (RFC 4760, Section 3 —
+    //   <https://www.rfc-editor.org/rfc/rfc4760#section-3>) or
+    //   MP_UNREACH_NLRI (RFC 4760, Section 4 —
+    //   <https://www.rfc-editor.org/rfc/rfc4760#section-4>) path attribute, in
+    //   attribute order, so a consumer can filter on address family without
+    //   reaching into `path_attributes`. Absent for a plain IPv4 unicast
+    //   UPDATE, which carries no MP attribute — only what is on the wire is
+    //   decoded, IPv4 unicast is never synthesised.
     FieldDescriptor {
         name: "afi",
         display_name: "AFI",
@@ -6165,6 +6241,128 @@ mod tests {
             *nested_field_value(&buf, &prefixes[0], "prefix"),
             FieldValue::Bytes(&[8, 10])
         );
+    }
+
+    // -------------------------------------------------------------------
+    // RFC 4760 top-level `afi`/`safi` mirroring for UPDATE messages
+    // (https://www.rfc-editor.org/rfc/rfc4760#section-3,
+    // https://www.rfc-editor.org/rfc/rfc4760#section-4).
+    // -------------------------------------------------------------------
+
+    /// Helper: look up a *direct* (top-level, not nested in a container)
+    /// layer field by name, or `None` if it is absent at the top level (it
+    /// may still exist nested inside `path_attributes`).
+    fn direct_layer_field<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        name: &str,
+    ) -> Option<&'a Field<'pkt>> {
+        let layer = &buf.layers()[0];
+        direct_children(buf, &layer.field_range)
+            .into_iter()
+            .find(|f| f.name() == name)
+    }
+
+    #[test]
+    fn parse_bgp_update_top_level_afi_safi_from_mp_reach() {
+        // UPDATE with a single MP_REACH_NLRI (IPv6 unicast): top-level
+        // afi/safi must mirror it directly, not just the nested MP_REACH
+        // object fields.
+        let mut val = Vec::new();
+        val.extend_from_slice(&2u16.to_be_bytes()); // AFI = IPv6
+        val.push(1); // SAFI = unicast
+        val.push(16); // Next Hop length
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        val.push(0); // Reserved
+        val.push(48);
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+
+        let attr = build_attr(0x80 | 0x10, 14, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let afi = direct_layer_field(&buf, "afi").expect("top-level afi");
+        assert_eq!(afi.value, FieldValue::U16(2));
+        let safi = direct_layer_field(&buf, "safi").expect("top-level safi");
+        assert_eq!(safi.value, FieldValue::U8(1));
+
+        // `afi_name`/`safi_name` display_fn companions must still resolve.
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.resolve_display_name(layer, "afi_name"), Some("IPv6"));
+        assert_eq!(
+            buf.resolve_display_name(layer, "safi_name"),
+            Some("Unicast")
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_top_level_afi_safi_from_mp_unreach_only() {
+        // UPDATE with only an MP_UNREACH_NLRI: top-level afi/safi are taken
+        // from it.
+        let mut val = Vec::new();
+        val.extend_from_slice(&2u16.to_be_bytes()); // AFI = IPv6
+        val.push(1); // SAFI = unicast
+        val.push(32);
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
+        let attr = build_attr(0x80 | 0x10, 15, &val);
+        let data = build_update(&attr, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let afi = direct_layer_field(&buf, "afi").expect("top-level afi");
+        assert_eq!(afi.value, FieldValue::U16(2));
+        let safi = direct_layer_field(&buf, "safi").expect("top-level safi");
+        assert_eq!(safi.value, FieldValue::U8(1));
+    }
+
+    #[test]
+    fn parse_bgp_update_top_level_afi_safi_first_attribute_wins() {
+        // UPDATE with MP_UNREACH_NLRI (IPv4 unicast) followed by MP_REACH_NLRI
+        // (IPv4 BGP-MUP, SAFI 85): the first attribute in attribute order
+        // determines the top-level afi/safi, regardless of type.
+        let mut unreach_val = Vec::new();
+        unreach_val.extend_from_slice(&1u16.to_be_bytes()); // AFI = IPv4
+        unreach_val.push(1); // SAFI = unicast
+        unreach_val.push(8);
+        unreach_val.push(10);
+        let unreach_attr = build_attr(0x80 | 0x10, 15, &unreach_val);
+
+        let mut reach_val = Vec::new();
+        reach_val.extend_from_slice(&1u16.to_be_bytes()); // AFI = IPv4
+        reach_val.push(85); // SAFI = BGP-MUP
+        reach_val.push(4); // Next Hop length
+        reach_val.extend_from_slice(&[10, 0, 0, 1]);
+        reach_val.push(0); // Reserved
+        let reach_attr = build_attr(0x80 | 0x10, 14, &reach_val);
+
+        let mut attrs = unreach_attr;
+        attrs.extend_from_slice(&reach_attr);
+
+        let data = build_update(&attrs, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let afi = direct_layer_field(&buf, "afi").expect("top-level afi");
+        assert_eq!(afi.value, FieldValue::U16(1));
+        // MP_UNREACH_NLRI came first, so its SAFI (unicast = 1) wins over the
+        // later MP_REACH_NLRI's SAFI (BGP-MUP = 85).
+        let safi = direct_layer_field(&buf, "safi").expect("top-level safi");
+        assert_eq!(safi.value, FieldValue::U8(1));
+    }
+
+    #[test]
+    fn parse_bgp_update_plain_ipv4_unicast_has_no_top_level_afi_safi() {
+        // A plain IPv4 unicast UPDATE (no MP_REACH_NLRI / MP_UNREACH_NLRI
+        // attribute) must not get synthesised top-level afi/safi — only what
+        // is on the wire is decoded.
+        let attr = build_attr(0x40, 1, &[0]); // ORIGIN = IGP
+        let nlri = [24, 192, 168, 1]; // 192.168.1.0/24
+        let data = build_update(&attr, &nlri);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert!(direct_layer_field(&buf, "afi").is_none());
+        assert!(direct_layer_field(&buf, "safi").is_none());
     }
 
     #[test]
