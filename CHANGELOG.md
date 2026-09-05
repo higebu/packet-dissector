@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.4.0] - 2026-09-05
+
+### 🚀 Features
+
+- *(srv6)* Describe flags children
+- *(bgp)* Decode OPEN capabilities
+- *(core)* Add FieldType::Any for values whose type varies at runtime
+
+### 🐛 Bug Fixes
+
+- *(bgp,srv6)* Address review findings on NLRI schema and SRv6 children
+
+### 💼 Other
+
+- Merge branch 'bgp-capabilities' into feat/bgp-addpath-capabilities
 ## [0.3.5] - 2026-07-29
 
 ### 🐛 Bug Fixes
