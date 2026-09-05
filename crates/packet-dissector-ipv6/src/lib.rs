@@ -24,12 +24,21 @@
 
 mod ext;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::lookup::ip_protocol_name;
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_ipv6_addr};
+
+/// Specification references for the IPv6 dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 8200",
+    "Internet Protocol, Version 6 (IPv6) Specification",
+    "https://www.rfc-editor.org/rfc/rfc8200",
+)];
 
 pub use ext::{
     DestinationOptionsDissector, FragmentDissector, GenericRoutingDissector, HopByHopDissector,
@@ -108,6 +117,14 @@ impl Dissector for Ipv6Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -509,5 +526,17 @@ mod tests {
         Ipv6Dissector.dissect(&data, &mut buf, 0).unwrap();
         let layer = buf.layer_by_name("IPv6").unwrap();
         assert_eq!(buf.layer_fields(layer).len(), 8);
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = Ipv6Dissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

@@ -16,11 +16,77 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+
+/// Specification references for the ICMP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 792",
+        "Internet Control Message Protocol",
+        "https://www.rfc-editor.org/rfc/rfc792",
+    ),
+    SpecReference::new(
+        "RFC 950",
+        "Internet Standard Subnetting Procedure",
+        "https://www.rfc-editor.org/rfc/rfc950",
+    ),
+    SpecReference::new(
+        "RFC 1191",
+        "Path MTU discovery",
+        "https://www.rfc-editor.org/rfc/rfc1191",
+    ),
+    SpecReference::new(
+        "RFC 1256",
+        "ICMP Router Discovery Messages",
+        "https://www.rfc-editor.org/rfc/rfc1256",
+    ),
+    SpecReference::new(
+        "RFC 2521",
+        "ICMP Security Failures Messages",
+        "https://www.rfc-editor.org/rfc/rfc2521",
+    ),
+    SpecReference::new(
+        "RFC 4065",
+        "Instructions for Seamoby and Experimental Mobility Protocol IANA Allocations",
+        "https://www.rfc-editor.org/rfc/rfc4065",
+    ),
+    SpecReference::new(
+        "RFC 4884",
+        "Extended ICMP to Support Multi-Part Messages",
+        "https://www.rfc-editor.org/rfc/rfc4884",
+    ),
+    SpecReference::new(
+        "RFC 4950",
+        "ICMP Extensions for Multiprotocol Label Switching",
+        "https://www.rfc-editor.org/rfc/rfc4950",
+    ),
+    SpecReference::new(
+        "RFC 5837",
+        "Extending ICMP for Interface and Next-Hop Identification",
+        "https://www.rfc-editor.org/rfc/rfc5837",
+    ),
+    SpecReference::new(
+        "RFC 6633",
+        "Deprecation of ICMP Source Quench Messages",
+        "https://www.rfc-editor.org/rfc/rfc6633",
+    ),
+    SpecReference::new(
+        "RFC 6918",
+        "Formally Deprecating Some ICMPv4 Message Types",
+        "https://www.rfc-editor.org/rfc/rfc6918",
+    ),
+    SpecReference::new(
+        "RFC 8335",
+        "PROBE: A Utility for Probing Interfaces",
+        "https://www.rfc-editor.org/rfc/rfc8335",
+    ),
+];
 
 /// Returns a human-readable name for well-known ICMP type values.
 fn icmp_type_name(v: u8) -> Option<&'static str> {
@@ -710,6 +776,14 @@ impl Dissector for IcmpDissector {
     }
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -2202,5 +2276,17 @@ mod tests {
         assert_eq!(rfc4884_extension_offset(200, 0), None);
         // Not enough trailing bytes for even an Extension Header -> None.
         assert_eq!(rfc4884_extension_offset(100, 32), None);
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = IcmpDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

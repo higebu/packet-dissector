@@ -21,11 +21,52 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+
+/// Specification references for the IKE dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2408",
+        "Internet Security Association and Key Management Protocol (ISAKMP)",
+        "https://www.rfc-editor.org/rfc/rfc2408",
+    ),
+    SpecReference::new(
+        "RFC 7296",
+        "Internet Key Exchange Protocol Version 2 (IKEv2)",
+        "https://www.rfc-editor.org/rfc/rfc7296",
+    ),
+    SpecReference::new(
+        "RFC 3948",
+        "UDP Encapsulation of IPsec ESP Packets",
+        "https://www.rfc-editor.org/rfc/rfc3948",
+    ),
+    SpecReference::new(
+        "RFC 5723",
+        "Internet Key Exchange Protocol Version 2 (IKEv2) Session Resumption",
+        "https://www.rfc-editor.org/rfc/rfc5723",
+    ),
+    SpecReference::new(
+        "RFC 6467",
+        "Secure Password Framework for Internet Key Exchange Version 2 (IKEv2)",
+        "https://www.rfc-editor.org/rfc/rfc6467",
+    ),
+    SpecReference::new(
+        "RFC 9242",
+        "Intermediate Exchange in the Internet Key Exchange Protocol Version 2 (IKEv2)",
+        "https://www.rfc-editor.org/rfc/rfc9242",
+    ),
+    SpecReference::new(
+        "RFC 9370",
+        "Multiple Key Exchanges in the Internet Key Exchange Protocol Version 2 (IKEv2)",
+        "https://www.rfc-editor.org/rfc/rfc9370",
+    ),
+];
 
 /// IKE header size: 28 bytes (fixed).
 ///
@@ -285,6 +326,14 @@ impl Dissector for IkeDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1223,5 +1272,17 @@ mod tests {
             buf.resolve_container_display_name(idx as u32),
             Some("Security Association")
         );
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = IkeDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

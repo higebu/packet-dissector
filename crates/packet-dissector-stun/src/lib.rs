@@ -5,7 +5,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -263,6 +265,13 @@ fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectB
 /// STUN dissector.
 pub struct StunDissector;
 
+/// Specification references for the STUN dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 8489",
+    "Session Traversal Utilities for NAT (STUN)",
+    "https://www.rfc-editor.org/rfc/rfc8489",
+)];
+
 impl Dissector for StunDissector {
     fn name(&self) -> &'static str {
         "Session Traversal Utilities for NAT"
@@ -274,6 +283,14 @@ impl Dissector for StunDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -893,5 +910,16 @@ mod tests {
         let mut buf = DissectBuffer::new();
         StunDissector.dissect(&data, &mut buf, 0).unwrap();
         assert!(buf.field_by_name(&buf.layers()[0], "attributes").is_none());
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = StunDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(StunDissector.layer(), Some(ProtocolLayer::Application));
     }
 }

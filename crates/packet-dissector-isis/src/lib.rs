@@ -18,13 +18,84 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{
     FieldDescriptor, FieldType, FieldValue, FormatContext, MacAddr, format_utf8_lossy,
 };
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u32};
+
+/// Specification references for the IS-IS dissector.
+///
+/// ISO/IEC 10589:2002 (the base IS-IS protocol) is not published with a
+/// stable public URL and is therefore omitted here; see the crate-level
+/// doc comment for the full citation list.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 1195",
+        "Use of OSI IS-IS for routing in TCP/IP and dual environments",
+        "https://www.rfc-editor.org/rfc/rfc1195",
+    ),
+    SpecReference::new(
+        "RFC 5120",
+        "M-ISIS: Multi Topology (MT) Routing in Intermediate System to \
+         Intermediate Systems (IS-ISs)",
+        "https://www.rfc-editor.org/rfc/rfc5120",
+    ),
+    SpecReference::new(
+        "RFC 5301",
+        "Dynamic Hostname Exchange Mechanism for IS-IS",
+        "https://www.rfc-editor.org/rfc/rfc5301",
+    ),
+    SpecReference::new(
+        "RFC 5302",
+        "Domain-Wide Prefix Distribution with Two-Level IS-IS",
+        "https://www.rfc-editor.org/rfc/rfc5302",
+    ),
+    SpecReference::new(
+        "RFC 5303",
+        "Three-Way Handshake for IS-IS Point-to-Point Adjacencies",
+        "https://www.rfc-editor.org/rfc/rfc5303",
+    ),
+    SpecReference::new(
+        "RFC 5304",
+        "IS-IS Cryptographic Authentication",
+        "https://www.rfc-editor.org/rfc/rfc5304",
+    ),
+    SpecReference::new(
+        "RFC 5305",
+        "IS-IS Extensions for Traffic Engineering",
+        "https://www.rfc-editor.org/rfc/rfc5305",
+    ),
+    SpecReference::new(
+        "RFC 5308",
+        "Routing IPv6 with IS-IS",
+        "https://www.rfc-editor.org/rfc/rfc5308",
+    ),
+    SpecReference::new(
+        "RFC 5310",
+        "IS-IS Generic Cryptographic Authentication",
+        "https://www.rfc-editor.org/rfc/rfc5310",
+    ),
+    SpecReference::new(
+        "RFC 7981",
+        "IS-IS Extensions for Advertising Router Information",
+        "https://www.rfc-editor.org/rfc/rfc7981",
+    ),
+    SpecReference::new(
+        "RFC 8706",
+        "Restart Signaling for IS-IS",
+        "https://www.rfc-editor.org/rfc/rfc8706",
+    ),
+    SpecReference::new(
+        "IANA IS-IS TLV Codepoints",
+        "IS-IS TLV Codepoints registry",
+        "https://www.iana.org/assignments/isis-tlv-codepoints/isis-tlv-codepoints.xhtml",
+    ),
+];
 
 // ---------------------------------------------------------------------------
 // Constants — ISO/IEC 10589:2002, Section 9
@@ -1251,6 +1322,14 @@ impl Dissector for IsisDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -3953,5 +4032,17 @@ mod tests {
         assert!(matches!(field.value, FieldValue::Object(_)));
         assert_eq!(field.display_name(), "Protocol");
         assert_eq!(buf.resolve_container_display_name(idx as u32), Some("IPv4"));
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = IsisDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

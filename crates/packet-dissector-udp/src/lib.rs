@@ -7,7 +7,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -32,6 +34,20 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// UDP dissector.
 pub struct UdpDissector;
 
+/// Specification references for the UDP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 768",
+        "User Datagram Protocol",
+        "https://www.rfc-editor.org/rfc/rfc768",
+    ),
+    SpecReference::new(
+        "RFC 9868",
+        "Transport Options for UDP",
+        "https://www.rfc-editor.org/rfc/rfc9868",
+    ),
+];
+
 impl Dissector for UdpDissector {
     fn name(&self) -> &'static str {
         "User Datagram Protocol"
@@ -43,6 +59,14 @@ impl Dissector for UdpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Transport)
     }
 
     fn dissect<'pkt>(
@@ -354,5 +378,16 @@ mod tests {
         for fd in fds {
             assert_eq!(fd.field_type, FieldType::U16);
         }
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = UdpDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(UdpDissector.layer(), Some(ProtocolLayer::Transport));
     }
 }

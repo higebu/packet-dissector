@@ -8,7 +8,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -123,6 +125,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         .with_children(CHUNK_CHILD_FIELDS),
 ];
 
+/// Specification references for the SCTP dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 9260",
+    "Stream Control Transmission Protocol",
+    "https://www.rfc-editor.org/rfc/rfc9260",
+)];
+
 /// SCTP dissector.
 pub struct SctpDissector;
 
@@ -137,6 +146,14 @@ impl Dissector for SctpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Transport)
     }
 
     fn dissect<'pkt>(
@@ -700,5 +717,16 @@ mod tests {
         assert!(matches!(field.value, FieldValue::Object(_)));
         assert_eq!(field.display_name(), "Chunk");
         assert_eq!(buf.resolve_container_display_name(idx as u32), Some("INIT"));
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = SctpDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(SctpDissector.layer(), Some(ProtocolLayer::Transport));
     }
 }

@@ -56,7 +56,9 @@ pub mod ipcp;
 pub mod lcp;
 pub mod pap;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::util::read_be_u16;
@@ -343,6 +345,40 @@ fn protocol_name(proto: u16) -> Option<&'static str> {
 /// PPP frame dissector.
 pub struct PppDissector;
 
+/// Specification references for the PPP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 1661",
+        "The Point-to-Point Protocol (PPP)",
+        "https://www.rfc-editor.org/rfc/rfc1661",
+    ),
+    SpecReference::new(
+        "RFC 2153",
+        "PPP Vendor Extensions",
+        "https://www.rfc-editor.org/rfc/rfc2153",
+    ),
+    SpecReference::new(
+        "RFC 1332",
+        "The PPP Internet Protocol Control Protocol (IPCP)",
+        "https://www.rfc-editor.org/rfc/rfc1332",
+    ),
+    SpecReference::new(
+        "RFC 1334",
+        "PPP Authentication Protocols",
+        "https://www.rfc-editor.org/rfc/rfc1334",
+    ),
+    SpecReference::new(
+        "RFC 1877",
+        "PPP Internet Protocol Control Protocol Extensions for Name Server Addresses",
+        "https://www.rfc-editor.org/rfc/rfc1877",
+    ),
+    SpecReference::new(
+        "RFC 1994",
+        "PPP Challenge Handshake Authentication Protocol (CHAP)",
+        "https://www.rfc-editor.org/rfc/rfc1994",
+    ),
+];
+
 impl Dissector for PppDissector {
     fn name(&self) -> &'static str {
         "Point-to-Point Protocol"
@@ -352,6 +388,14 @@ impl Dissector for PppDissector {
     }
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Link)
     }
 
     fn dissect<'pkt>(
@@ -577,5 +621,17 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let result = PppDissector.dissect(&[0x00], &mut buf, 0);
         assert!(matches!(result, Err(PacketError::Truncated { .. })));
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = PppDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Link));
     }
 }

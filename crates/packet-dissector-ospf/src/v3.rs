@@ -3,7 +3,9 @@
 //! ## References
 //! - RFC 5340: <https://www.rfc-editor.org/rfc/rfc5340>
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -262,6 +264,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// OSPFv3 dissector.
 pub struct Ospfv3Dissector;
 
+/// Specification references for the OSPFv3 dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 5340",
+    "OSPF for IPv6",
+    "https://www.rfc-editor.org/rfc/rfc5340",
+)];
+
 impl Dissector for Ospfv3Dissector {
     fn name(&self) -> &'static str {
         "Open Shortest Path First v3"
@@ -273,6 +282,14 @@ impl Dissector for Ospfv3Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -954,5 +971,17 @@ mod tests {
             matches!(err, PacketError::InvalidHeader(_)),
             "expected InvalidHeader, got {err:?}",
         );
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = Ospfv3Dissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

@@ -350,3 +350,86 @@ pub trait Dissector: Send {
         offset: usize,
     ) -> Result<DissectResult, PacketError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dissector that overrides nothing beyond the required methods, so it
+    /// exercises the [`Dissector::references`] / [`Dissector::layer`] defaults.
+    struct DefaultsDissector;
+
+    impl Dissector for DefaultsDissector {
+        fn name(&self) -> &'static str {
+            "Defaults"
+        }
+
+        fn short_name(&self) -> &'static str {
+            "defaults"
+        }
+
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+
+        fn dissect<'pkt>(
+            &self,
+            _data: &'pkt [u8],
+            _buf: &mut DissectBuffer<'pkt>,
+            _offset: usize,
+        ) -> Result<DissectResult, PacketError> {
+            Ok(DissectResult::new(0, DispatchHint::End))
+        }
+    }
+
+    #[test]
+    fn protocol_layer_as_str_covers_every_variant() {
+        assert_eq!(ProtocolLayer::Link.as_str(), "link");
+        assert_eq!(ProtocolLayer::Network.as_str(), "network");
+        assert_eq!(ProtocolLayer::Transport.as_str(), "transport");
+        assert_eq!(ProtocolLayer::Tunnel.as_str(), "tunnel");
+        assert_eq!(ProtocolLayer::Application.as_str(), "application");
+    }
+
+    #[test]
+    fn protocol_layer_display_matches_as_str() {
+        for layer in [
+            ProtocolLayer::Link,
+            ProtocolLayer::Network,
+            ProtocolLayer::Transport,
+            ProtocolLayer::Tunnel,
+            ProtocolLayer::Application,
+        ] {
+            assert_eq!(layer.to_string(), layer.as_str());
+        }
+    }
+
+    #[test]
+    fn spec_reference_new_stores_all_parts() {
+        const REFERENCE: SpecReference = SpecReference::new(
+            "RFC 4271",
+            "A Border Gateway Protocol 4 (BGP-4)",
+            "https://www.rfc-editor.org/rfc/rfc4271",
+        );
+
+        assert_eq!(REFERENCE.id, "RFC 4271");
+        assert_eq!(REFERENCE.title, "A Border Gateway Protocol 4 (BGP-4)");
+        assert_eq!(REFERENCE.url, "https://www.rfc-editor.org/rfc/rfc4271");
+        assert_eq!(
+            REFERENCE,
+            SpecReference {
+                id: "RFC 4271",
+                title: "A Border Gateway Protocol 4 (BGP-4)",
+                url: "https://www.rfc-editor.org/rfc/rfc4271",
+            }
+        );
+    }
+
+    #[test]
+    fn dissector_defaults_report_no_references_and_no_layer() {
+        let dissector = DefaultsDissector;
+
+        assert!(dissector.references().is_empty());
+        assert_eq!(dissector.layer(), None);
+    }
+}

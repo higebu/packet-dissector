@@ -5,7 +5,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -48,6 +50,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// VXLAN dissector.
 pub struct VxlanDissector;
 
+/// Specification references for the VXLAN dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 7348",
+    "Virtual eXtensible Local Area Network (VXLAN): A Framework for Overlaying Virtualized Layer 2 Networks over Layer 3 Networks",
+    "https://www.rfc-editor.org/rfc/rfc7348",
+)];
+
 impl Dissector for VxlanDissector {
     fn name(&self) -> &'static str {
         "Virtual eXtensible Local Area Network"
@@ -59,6 +68,14 @@ impl Dissector for VxlanDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
     }
 
     fn dissect<'pkt>(
@@ -264,5 +281,16 @@ mod tests {
         assert_eq!(descs[FD_RESERVED].name, "reserved");
         assert_eq!(descs[FD_VNI].name, "vni");
         assert_eq!(descs[FD_RESERVED2].name, "reserved2");
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = VxlanDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(VxlanDissector.layer(), Some(ProtocolLayer::Tunnel));
     }
 }

@@ -16,7 +16,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -104,6 +106,50 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// start-line begins with `"SIP/"` (response) or a method token (request).
 pub struct SipDissector;
 
+/// Specification references for the SIP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 3261",
+        "SIP: Session Initiation Protocol",
+        "https://www.rfc-editor.org/rfc/rfc3261",
+    ),
+    SpecReference::new(
+        "RFC 3262",
+        "Reliability of Provisional Responses in Session Initiation Protocol (SIP)",
+        "https://www.rfc-editor.org/rfc/rfc3262",
+    ),
+    SpecReference::new(
+        "RFC 3265",
+        "Session Initiation Protocol (SIP)-Specific Event Notification",
+        "https://www.rfc-editor.org/rfc/rfc3265",
+    ),
+    SpecReference::new(
+        "RFC 3311",
+        "The Session Initiation Protocol (SIP) UPDATE Method",
+        "https://www.rfc-editor.org/rfc/rfc3311",
+    ),
+    SpecReference::new(
+        "RFC 3428",
+        "Session Initiation Protocol (SIP) Extension for Instant Messaging",
+        "https://www.rfc-editor.org/rfc/rfc3428",
+    ),
+    SpecReference::new(
+        "RFC 3515",
+        "The Session Initiation Protocol (SIP) Refer Method",
+        "https://www.rfc-editor.org/rfc/rfc3515",
+    ),
+    SpecReference::new(
+        "RFC 3903",
+        "Session Initiation Protocol (SIP) Extension for Event State Publication",
+        "https://www.rfc-editor.org/rfc/rfc3903",
+    ),
+    SpecReference::new(
+        "RFC 6086",
+        "Session Initiation Protocol (SIP) INFO Method and Package Framework",
+        "https://www.rfc-editor.org/rfc/rfc6086",
+    ),
+];
+
 impl Dissector for SipDissector {
     fn name(&self) -> &'static str {
         "Session Initiation Protocol"
@@ -115,6 +161,14 @@ impl Dissector for SipDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -912,5 +966,16 @@ mod tests {
         assert!(matches!(field.value, FieldValue::Object(_)));
         assert_eq!(field.display_name(), "Header");
         assert_eq!(buf.resolve_container_display_name(idx as u32), None);
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = SipDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(SipDissector.layer(), Some(ProtocolLayer::Application));
     }
 }

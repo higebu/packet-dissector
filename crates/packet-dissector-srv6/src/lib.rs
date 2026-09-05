@@ -9,7 +9,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
@@ -878,6 +880,35 @@ static FLAGS_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("o_flag", "O Flag", FieldType::U8),
 ];
 
+/// Specification references for the SRv6 dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 8754",
+        "IPv6 Segment Routing Header (SRH)",
+        "https://www.rfc-editor.org/rfc/rfc8754",
+    ),
+    SpecReference::new(
+        "RFC 8986",
+        "Segment Routing over IPv6 (SRv6) Network Programming",
+        "https://www.rfc-editor.org/rfc/rfc8986",
+    ),
+    SpecReference::new(
+        "RFC 9259",
+        "Operations, Administration, and Maintenance (OAM) in Segment Routing over IPv6 (SRv6)",
+        "https://www.rfc-editor.org/rfc/rfc9259",
+    ),
+    SpecReference::new(
+        "RFC 9800",
+        "Compressed SRv6 Segment List Encoding",
+        "https://www.rfc-editor.org/rfc/rfc9800",
+    ),
+    SpecReference::new(
+        "RFC 9433",
+        "Segment Routing over IPv6 for the Mobile User Plane",
+        "https://www.rfc-editor.org/rfc/rfc9433",
+    ),
+];
+
 impl Dissector for Srv6Dissector {
     fn name(&self) -> &'static str {
         "IPv6 Segment Routing Header"
@@ -889,6 +920,14 @@ impl Dissector for Srv6Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -2786,5 +2825,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let dissector = Srv6Dissector::new();
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

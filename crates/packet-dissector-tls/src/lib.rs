@@ -17,7 +17,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
 use packet_dissector_core::packet::DissectBuffer;
@@ -713,6 +715,55 @@ fn parse_server_hello<'pkt>(body: &'pkt [u8], offset: usize, buf: &mut DissectBu
 /// TLS record layer dissector.
 pub struct TlsDissector;
 
+/// Specification references for the TLS dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 5246",
+        "The Transport Layer Security (TLS) Protocol Version 1.2",
+        "https://www.rfc-editor.org/rfc/rfc5246",
+    ),
+    SpecReference::new(
+        "RFC 8446",
+        "The Transport Layer Security (TLS) Protocol Version 1.3",
+        "https://www.rfc-editor.org/rfc/rfc8446",
+    ),
+    SpecReference::new(
+        "RFC 6066",
+        "Transport Layer Security (TLS) Extensions: Extension Definitions",
+        "https://www.rfc-editor.org/rfc/rfc6066",
+    ),
+    SpecReference::new(
+        "RFC 6520",
+        "Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS) Heartbeat Extension",
+        "https://www.rfc-editor.org/rfc/rfc6520",
+    ),
+    SpecReference::new(
+        "RFC 7301",
+        "Transport Layer Security (TLS) Application-Layer Protocol Negotiation Extension",
+        "https://www.rfc-editor.org/rfc/rfc7301",
+    ),
+    SpecReference::new(
+        "RFC 7366",
+        "Encrypt-then-MAC for Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS)",
+        "https://www.rfc-editor.org/rfc/rfc7366",
+    ),
+    SpecReference::new(
+        "RFC 7905",
+        "ChaCha20-Poly1305 Cipher Suites for Transport Layer Security (TLS)",
+        "https://www.rfc-editor.org/rfc/rfc7905",
+    ),
+    SpecReference::new(
+        "RFC 8449",
+        "Record Size Limit Extension for TLS",
+        "https://www.rfc-editor.org/rfc/rfc8449",
+    ),
+    SpecReference::new(
+        "RFC 8879",
+        "TLS Certificate Compression",
+        "https://www.rfc-editor.org/rfc/rfc8879",
+    ),
+];
+
 impl Dissector for TlsDissector {
     fn name(&self) -> &'static str {
         "Transport Layer Security"
@@ -724,6 +775,14 @@ impl Dissector for TlsDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1739,5 +1798,16 @@ mod tests {
             buf.resolve_container_display_name(idx as u32),
             Some("server_name")
         );
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = TlsDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(TlsDissector.layer(), Some(ProtocolLayer::Application));
     }
 }

@@ -8,7 +8,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::lookup::ip_protocol_name;
@@ -65,6 +67,30 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// IPv4 dissector.
 pub struct Ipv4Dissector;
 
+/// Specification references for the IPv4 dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 791",
+        "Internet Protocol",
+        "https://www.rfc-editor.org/rfc/rfc791",
+    ),
+    SpecReference::new(
+        "RFC 2474",
+        "Definition of the Differentiated Services Field (DS Field) in the IPv4 and IPv6 Headers",
+        "https://www.rfc-editor.org/rfc/rfc2474",
+    ),
+    SpecReference::new(
+        "RFC 3168",
+        "The Addition of Explicit Congestion Notification (ECN) to IP",
+        "https://www.rfc-editor.org/rfc/rfc3168",
+    ),
+    SpecReference::new(
+        "RFC 6864",
+        "Updated Specification of the IPv4 ID Field",
+        "https://www.rfc-editor.org/rfc/rfc6864",
+    ),
+];
+
 impl Dissector for Ipv4Dissector {
     fn name(&self) -> &'static str {
         "Internet Protocol version 4"
@@ -76,6 +102,14 @@ impl Dissector for Ipv4Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -263,5 +297,32 @@ impl Dissector for Ipv4Dissector {
             header_len,
             DispatchHint::ByIpProtocol(protocol),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
+        }
+
+        assert_layer_and_references(&Ipv4Dissector);
     }
 }

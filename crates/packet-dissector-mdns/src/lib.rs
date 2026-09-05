@@ -20,7 +20,7 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DissectResult, Dissector};
+use packet_dissector_core::dissector::{DissectResult, Dissector, ProtocolLayer, SpecReference};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::FieldDescriptor;
 use packet_dissector_core::packet::DissectBuffer;
@@ -35,6 +35,25 @@ use packet_dissector_dns::{DnsDissector, dissect_as_mdns};
 /// `qu` on each question and `cache_flush` on each non-OPT resource record.
 pub struct MdnsDissector;
 
+/// Specification references for the mDNS dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 6762",
+        "Multicast DNS",
+        "https://www.rfc-editor.org/rfc/rfc6762",
+    ),
+    SpecReference::new(
+        "RFC 1035",
+        "Domain Names - Implementation and Specification",
+        "https://www.rfc-editor.org/rfc/rfc1035",
+    ),
+    SpecReference::new(
+        "RFC 6891",
+        "Extension Mechanisms for DNS (EDNS(0))",
+        "https://www.rfc-editor.org/rfc/rfc6891",
+    ),
+];
+
 impl Dissector for MdnsDissector {
     fn name(&self) -> &'static str {
         "Multicast Domain Name System"
@@ -46,6 +65,14 @@ impl Dissector for MdnsDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         DnsDissector.field_descriptors()
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -385,5 +412,17 @@ mod tests {
     fn name_and_short_name() {
         assert_eq!(MdnsDissector.name(), "Multicast Domain Name System");
         assert_eq!(MdnsDissector.short_name(), "mDNS");
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = MdnsDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

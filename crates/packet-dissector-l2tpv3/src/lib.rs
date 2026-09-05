@@ -14,11 +14,33 @@
 mod avp;
 mod message_type;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+
+/// Specification references for the L2TPv3 dissectors.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 3931",
+        "Layer Two Tunneling Protocol - Version 3 (L2TPv3)",
+        "https://www.rfc-editor.org/rfc/rfc3931",
+    ),
+    SpecReference::new(
+        "RFC 5641",
+        "Layer 2 Tunneling Protocol Version 3 (L2TPv3) Extended Circuit Status Values",
+        "https://www.rfc-editor.org/rfc/rfc5641",
+    ),
+    SpecReference::new(
+        "RFC 9601",
+        "Propagating Explicit Congestion Notification across IP Tunnel Headers \
+         Separated by a Shim",
+        "https://www.rfc-editor.org/rfc/rfc9601",
+    ),
+];
 
 use avp::AVP_CHILD_FIELDS;
 
@@ -117,6 +139,14 @@ impl Dissector for L2tpv3Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         IP_FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
     }
 
     fn dissect<'pkt>(
@@ -404,6 +434,14 @@ impl Dissector for L2tpv3UdpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         UDP_FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
     }
 
     fn dissect<'pkt>(
@@ -1054,5 +1092,29 @@ mod tests {
         assert_eq!(descs[UDP_FD_SESSION_ID].name, "session_id");
         assert_eq!(descs[UDP_FD_MESSAGE_TYPE].name, "message_type");
         assert_eq!(descs[UDP_FD_AVPS].name, "avps");
+    }
+
+    #[test]
+    fn test_references_and_layer_ip() {
+        let dissector = L2tpv3Dissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Tunnel));
+    }
+
+    #[test]
+    fn test_references_and_layer_udp() {
+        let dissector = L2tpv3UdpDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Tunnel));
     }
 }

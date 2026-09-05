@@ -23,7 +23,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -260,6 +262,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// identity and structure — are hard errors when malformed.
 pub struct SdpDissector;
 
+/// Specification references for the SDP dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 8866",
+    "SDP: Session Description Protocol",
+    "https://www.rfc-editor.org/rfc/rfc8866",
+)];
+
 impl Dissector for SdpDissector {
     fn name(&self) -> &'static str {
         "Session Description Protocol"
@@ -271,6 +280,14 @@ impl Dissector for SdpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1622,5 +1639,16 @@ mod tests {
         assert_eq!(d.name(), "Session Description Protocol");
         assert_eq!(d.short_name(), "SDP");
         assert!(!d.field_descriptors().is_empty());
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = SdpDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(SdpDissector.layer(), Some(ProtocolLayer::Application));
     }
 }

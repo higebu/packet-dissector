@@ -13,7 +13,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
@@ -157,6 +159,40 @@ const FD_TRANSMIT_TIMESTAMP: usize = 12;
 /// NTP dissector.
 pub struct NtpDissector;
 
+/// Specification references for the NTP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 5905",
+        "Network Time Protocol Version 4: Protocol and Algorithms Specification",
+        "https://www.rfc-editor.org/rfc/rfc5905",
+    ),
+    SpecReference::new(
+        "RFC 7822",
+        "Network Time Protocol Version 4 (NTPv4) Extension Fields",
+        "https://www.rfc-editor.org/rfc/rfc7822",
+    ),
+    SpecReference::new(
+        "RFC 8573",
+        "Message Authentication Code for the Network Time Protocol",
+        "https://www.rfc-editor.org/rfc/rfc8573",
+    ),
+    SpecReference::new(
+        "RFC 9109",
+        "Network Time Protocol Version 4: Port Randomization",
+        "https://www.rfc-editor.org/rfc/rfc9109",
+    ),
+    SpecReference::new(
+        "RFC 9748",
+        "Updating the NTP Registries",
+        "https://www.rfc-editor.org/rfc/rfc9748",
+    ),
+    SpecReference::new(
+        "RFC 9769",
+        "NTP Interleaved Modes",
+        "https://www.rfc-editor.org/rfc/rfc9769",
+    ),
+];
+
 /// Field descriptors for the NTP dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor {
@@ -219,6 +255,14 @@ impl Dissector for NtpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -797,5 +841,17 @@ mod tests {
                 "KoD code {code} missing description"
             );
         }
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = NtpDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

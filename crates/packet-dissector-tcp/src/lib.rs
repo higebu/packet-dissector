@@ -9,7 +9,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector, TcpStreamContext};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference, TcpStreamContext,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -296,6 +298,13 @@ impl Default for TcpDissector {
     }
 }
 
+/// Specification references for the TCP dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 9293",
+    "Transmission Control Protocol (TCP)",
+    "https://www.rfc-editor.org/rfc/rfc9293",
+)];
+
 impl Dissector for TcpDissector {
     fn name(&self) -> &'static str {
         "Transmission Control Protocol"
@@ -307,6 +316,14 @@ impl Dissector for TcpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Transport)
     }
 
     fn dissect<'pkt>(
@@ -518,5 +535,17 @@ mod tests {
             tcp_flags_name(0xFF),
             "FIN, SYN, RST, PSH, ACK, URG, ECE, CWR"
         );
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let dissector = TcpDissector::new();
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Transport));
     }
 }

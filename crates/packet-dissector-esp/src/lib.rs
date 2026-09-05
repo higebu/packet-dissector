@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use packet_dissector_core::dissector::{DecryptedPayload, DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DecryptedPayload, DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::lookup::ip_protocol_name;
@@ -167,6 +169,25 @@ impl Default for EspDissector {
     }
 }
 
+/// Specification references for the ESP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 4303",
+        "IP Encapsulating Security Payload (ESP)",
+        "https://www.rfc-editor.org/rfc/rfc4303",
+    ),
+    SpecReference::new(
+        "RFC 3602",
+        "The AES-CBC Cipher Algorithm and Its Use with IPsec",
+        "https://www.rfc-editor.org/rfc/rfc3602",
+    ),
+    SpecReference::new(
+        "RFC 4106",
+        "The Use of Galois/Counter Mode (GCM) in IPsec Encapsulating Security Payload (ESP)",
+        "https://www.rfc-editor.org/rfc/rfc4106",
+    ),
+];
+
 impl Dissector for EspDissector {
     fn name(&self) -> &'static str {
         "Encapsulating Security Payload"
@@ -178,6 +199,14 @@ impl Dissector for EspDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -656,5 +685,27 @@ mod tests {
         let dp = result.decrypted_payload.unwrap();
         assert_eq!(dp.next, DispatchHint::ByIpProtocol(4));
         assert_eq!(dp.data, vec![0x45, 0x00]);
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
+        }
+
+        assert_layer_and_references(&EspDissector::new());
     }
 }

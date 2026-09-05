@@ -13,7 +13,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{
     FieldDescriptor, FieldType, FieldValue, MacAddr, format_utf8_lossy,
@@ -1146,6 +1148,55 @@ fn parse_options<'pkt>(
     Ok((cursor - pos, overload))
 }
 
+/// Specification references for the DHCP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2131",
+        "Dynamic Host Configuration Protocol",
+        "https://www.rfc-editor.org/rfc/rfc2131",
+    ),
+    SpecReference::new(
+        "RFC 2132",
+        "DHCP Options and BOOTP Vendor Extensions",
+        "https://www.rfc-editor.org/rfc/rfc2132",
+    ),
+    SpecReference::new(
+        "RFC 3396",
+        "Encoding Long Options in the Dynamic Host Configuration Protocol (DHCPv4)",
+        "https://www.rfc-editor.org/rfc/rfc3396",
+    ),
+    SpecReference::new(
+        "RFC 4361",
+        "Node-specific Client Identifiers for Dynamic Host Configuration Protocol Version Four (DHCPv4)",
+        "https://www.rfc-editor.org/rfc/rfc4361",
+    ),
+    SpecReference::new(
+        "RFC 3046",
+        "DHCP Relay Agent Information Option",
+        "https://www.rfc-editor.org/rfc/rfc3046",
+    ),
+    SpecReference::new(
+        "RFC 3397",
+        "Dynamic Host Configuration Protocol (DHCP) Domain Search Option",
+        "https://www.rfc-editor.org/rfc/rfc3397",
+    ),
+    SpecReference::new(
+        "RFC 3442",
+        "The Classless Static Route Option for Dynamic Host Configuration Protocol (DHCP) version 4",
+        "https://www.rfc-editor.org/rfc/rfc3442",
+    ),
+    SpecReference::new(
+        "RFC 6842",
+        "Client Identifier Option in DHCP Server Replies",
+        "https://www.rfc-editor.org/rfc/rfc6842",
+    ),
+    SpecReference::new(
+        "RFC 1035",
+        "Domain names - implementation and specification",
+        "https://www.rfc-editor.org/rfc/rfc1035",
+    ),
+];
+
 impl Dissector for DhcpDissector {
     fn name(&self) -> &'static str {
         "Dynamic Host Configuration Protocol"
@@ -1157,6 +1208,14 @@ impl Dissector for DhcpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -3448,5 +3507,27 @@ mod tests {
         let mut buf = DissectBuffer::new();
         d.dissect(&pkt, &mut buf, 0).unwrap();
         assert!(buf.field_by_name(&buf.layers()[0], "file").is_none());
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+        }
+
+        assert_layer_and_references(&DhcpDissector);
     }
 }

@@ -9,11 +9,28 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, MacAddr};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::read_be_u16;
+
+/// Specification references for the LACP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "IEEE 802.1AX",
+        "IEEE Standard for Local and Metropolitan Area Networks - Link Aggregation \
+         (IEEE 802.1AX-2020)",
+        "https://standards.ieee.org/ieee/802.1AX/6734/",
+    ),
+    SpecReference::new(
+        "IEEE 802.3",
+        "IEEE Standard for Ethernet, Annex 43B (Slow Protocols) (IEEE 802.3-2022)",
+        "https://standards.ieee.org/ieee/802.3/10422/",
+    ),
+];
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_SUBTYPE: usize = 0;
@@ -268,6 +285,14 @@ impl Dissector for LacpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Link)
     }
 
     fn dissect<'pkt>(
@@ -922,5 +947,17 @@ mod tests {
     fn field_descriptors_not_empty() {
         let descriptors = LacpDissector.field_descriptors();
         assert!(!descriptors.is_empty());
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = LacpDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Link));
     }
 }

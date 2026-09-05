@@ -10,11 +10,21 @@ pub mod ie_parsers;
 pub mod message_type;
 pub mod pco;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u32};
+
+/// Specification references for the GTPv2-C dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "3GPP TS 29.274",
+    "3GPP Evolved Packet System (EPS); Evolved General Packet Radio Service (GPRS) \
+     Tunnelling Protocol for Control plane (GTPv2-C); Stage 3",
+    "https://www.3gpp.org/ftp/Specs/archive/29_series/29.274/",
+)];
 
 /// Minimum GTPv2-C header size (without TEID).
 ///
@@ -84,6 +94,14 @@ impl Dissector for Gtpv2cDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -454,5 +472,17 @@ mod tests {
             buf.resolve_display_name(layer, "message_type_name"),
             Some("Echo Request")
         );
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = Gtpv2cDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

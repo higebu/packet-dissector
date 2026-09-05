@@ -33,7 +33,9 @@
 
 mod avp;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
 use packet_dissector_core::packet::DissectBuffer;
@@ -394,6 +396,55 @@ fn parse_avps<'pkt>(
 /// Diameter dissector.
 pub struct DiameterDissector;
 
+/// Specification references for the Diameter dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 6733",
+        "Diameter Base Protocol",
+        "https://www.rfc-editor.org/rfc/rfc6733",
+    ),
+    SpecReference::new(
+        "RFC 4006",
+        "Diameter Credit-Control Application",
+        "https://www.rfc-editor.org/rfc/rfc4006",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.212",
+        "Policy and Charging Control (PCC); Reference points",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.212/",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.214",
+        "Policy and Charging Control over Rx reference point",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.214/",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.229",
+        "Cx and Dx interfaces based on the Diameter protocol; Protocol details",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.229/",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.272",
+        "Evolved Packet System (EPS); Mobility Management Entity (MME) and Serving GPRS Support Node (SGSN) related interfaces based on Diameter protocol",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.272/",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.273",
+        "Evolved Packet System (EPS); 3GPP EPS AAA interfaces",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.273/",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.329",
+        "Sh Interface based on the Diameter protocol; Protocol details",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.329/",
+    ),
+    SpecReference::new(
+        "3GPP TS 32.299",
+        "Telecommunication management; Charging management; Diameter charging applications",
+        "https://www.3gpp.org/ftp/Specs/archive/32_series/32.299/",
+    ),
+];
+
 impl Dissector for DiameterDissector {
     fn name(&self) -> &'static str {
         "Diameter"
@@ -405,6 +456,14 @@ impl Dissector for DiameterDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1358,5 +1417,27 @@ mod tests {
                 Some("DIAMETER_ERROR_UNKNOWN_EPS_SUBSCRIPTION")
             );
         }
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+        }
+
+        assert_layer_and_references(&DiameterDissector);
     }
 }
