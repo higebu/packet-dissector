@@ -44,7 +44,7 @@ static REFERENCES: &[SpecReference] = &[
     ),
     SpecReference::new(
         "RFC 1035",
-        "Domain Names - Implementation and Specification",
+        "Domain names - implementation and specification",
         "https://www.rfc-editor.org/rfc/rfc1035",
     ),
     SpecReference::new(

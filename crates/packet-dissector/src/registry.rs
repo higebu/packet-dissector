@@ -1389,6 +1389,31 @@ impl Dissector for OspfDispatcher {
 #[cfg(any(feature = "http", feature = "http2"))]
 struct HttpDispatcher;
 
+/// Specifications behind both versions the HTTP dispatcher routes to.
+#[cfg(all(feature = "http", feature = "http2"))]
+static HTTP_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 9110",
+        "HTTP Semantics",
+        "https://www.rfc-editor.org/rfc/rfc9110",
+    ),
+    SpecReference::new(
+        "RFC 9112",
+        "HTTP/1.1",
+        "https://www.rfc-editor.org/rfc/rfc9112",
+    ),
+    SpecReference::new(
+        "RFC 9113",
+        "HTTP/2",
+        "https://www.rfc-editor.org/rfc/rfc9113",
+    ),
+    SpecReference::new(
+        "RFC 7541",
+        "HPACK: Header Compression for HTTP/2",
+        "https://www.rfc-editor.org/rfc/rfc7541",
+    ),
+];
+
 #[cfg(any(feature = "http", feature = "http2"))]
 impl Dissector for HttpDispatcher {
     fn name(&self) -> &'static str {
@@ -1404,7 +1429,11 @@ impl Dissector for HttpDispatcher {
     }
 
     fn references(&self) -> &'static [SpecReference] {
-        #[cfg(feature = "http")]
+        #[cfg(all(feature = "http", feature = "http2"))]
+        {
+            HTTP_REFERENCES
+        }
+        #[cfg(all(feature = "http", not(feature = "http2")))]
         {
             packet_dissector_http::HttpDissector.references()
         }
@@ -1446,6 +1475,31 @@ impl Dissector for HttpDispatcher {
 #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
 struct L2tpDispatcher;
 
+/// Specifications behind both versions the L2TP dispatcher routes to.
+#[cfg(all(feature = "l2tp", feature = "l2tpv3"))]
+static L2TP_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2661",
+        "Layer Two Tunneling Protocol \"L2TP\"",
+        "https://www.rfc-editor.org/rfc/rfc2661",
+    ),
+    SpecReference::new(
+        "RFC 3931",
+        "Layer Two Tunneling Protocol - Version 3 (L2TPv3)",
+        "https://www.rfc-editor.org/rfc/rfc3931",
+    ),
+    SpecReference::new(
+        "RFC 5641",
+        "Layer 2 Tunneling Protocol Version 3 (L2TPv3) Extended Circuit Status Values",
+        "https://www.rfc-editor.org/rfc/rfc5641",
+    ),
+    SpecReference::new(
+        "RFC 9601",
+        "Propagating Explicit Congestion Notification across IP Tunnel Headers Separated by a Shim",
+        "https://www.rfc-editor.org/rfc/rfc9601",
+    ),
+];
+
 #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
 impl Dissector for L2tpDispatcher {
     fn name(&self) -> &'static str {
@@ -1461,7 +1515,11 @@ impl Dissector for L2tpDispatcher {
     }
 
     fn references(&self) -> &'static [SpecReference] {
-        #[cfg(feature = "l2tp")]
+        #[cfg(all(feature = "l2tp", feature = "l2tpv3"))]
+        {
+            L2TP_REFERENCES
+        }
+        #[cfg(all(feature = "l2tp", not(feature = "l2tpv3")))]
         {
             packet_dissector_l2tp::L2tpDissector.references()
         }

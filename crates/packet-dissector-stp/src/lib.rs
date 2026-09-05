@@ -2,11 +2,11 @@
 //!
 //! Parses Spanning Tree Protocol (STP) and Rapid Spanning Tree Protocol (RSTP)
 //! Bridge Protocol Data Units (BPDUs) as defined in IEEE 802.1D-2004 and
-//! IEEE 802.1w-2004.
+//! IEEE 802.1w-2001.
 //!
 //! ## References
 //! - IEEE 802.1D-2004 (STP): <https://standards.ieee.org/ieee/802.1D/2486/>
-//! - IEEE 802.1w-2004 (RSTP, incorporated into IEEE 802.1D-2004):
+//! - IEEE 802.1w-2001 (RSTP, incorporated into IEEE 802.1D-2004):
 //!   <https://standards.ieee.org/ieee/802.1w/1039/>
 //!
 //! ## BPDU Types
@@ -99,7 +99,7 @@ const MIN_BPDU_SIZE: usize = 4;
 const CONFIG_BPDU_SIZE: usize = 35;
 
 /// RST BPDU size: 36 bytes.
-/// IEEE 802.1w-2004 (incorporated into IEEE 802.1D-2004), Section 9.3.3:
+/// IEEE 802.1w-2001 (incorporated into IEEE 802.1D-2004), Section 9.3.3:
 /// Configuration BPDU (35) + Version 1 Length (1) = 36.
 const RST_BPDU_SIZE: usize = 36;
 
@@ -139,7 +139,7 @@ static REFERENCES: &[SpecReference] = &[
         "https://standards.ieee.org/ieee/802.1D/2486/",
     ),
     SpecReference::new(
-        "IEEE 802.1w-2004",
+        "IEEE 802.1w-2001",
         "Rapid Reconfiguration (RSTP), incorporated into IEEE 802.1D-2004",
         "https://standards.ieee.org/ieee/802.1w/1039/",
     ),

@@ -34,7 +34,6 @@ fn all_protocol_info_matches_all_field_schemas() {
 
 /// Every registered dissector must declare the specifications it implements
 /// and its position in the dissection stack.
-#[cfg(feature = "default")]
 #[test]
 fn every_registered_dissector_declares_references_and_layer() {
     let registry = DissectorRegistry::default();
