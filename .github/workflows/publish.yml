@@ -39,7 +39,7 @@ jobs:
         run: ./scripts/publish-missing-crates.sh
 
       - name: Run release-plz (release)
-        uses: release-plz/action@b5543c19b03be9bd48852d20ca89f478b7723260 # v0.5
+        uses: release-plz/action@aec534bbd8631793b9b3b8f1ee6cd886c322e17f # v0.5
         with:
           command: release
         env:
@@ -60,7 +60,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Run release-plz (release-pr)
-        uses: release-plz/action@b5543c19b03be9bd48852d20ca89f478b7723260 # v0.5
+        uses: release-plz/action@aec534bbd8631793b9b3b8f1ee6cd886c322e17f # v0.5
         with:
           command: release-pr
         env:
