@@ -41,3 +41,32 @@ fn zero_alloc_dissect_bgp_open() {
     });
     assert_eq!(allocs, 0, "BGP open dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_update_add_path() {
+    // UPDATE with RFC 7911 ADD-PATH withdrawn routes and NLRI
+    // (https://www.rfc-editor.org/rfc/rfc7911#section-3), which exercises the
+    // per-entry Object containers and the ADD-PATH detection heuristic.
+    let withdrawn = [0, 0, 0, 1, 8, 10, 0, 0, 0, 2, 8, 10];
+    let nlri = [0, 0, 0, 1, 24, 192, 168, 1, 0, 0, 0, 2, 24, 192, 168, 1];
+
+    let mut raw = vec![0xFF; 16]; // Marker
+    let total_len = 19 + 2 + withdrawn.len() + 2 + nlri.len();
+    raw.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+    raw.push(2); // Type = UPDATE
+    raw.extend_from_slice(&(withdrawn.len() as u16).to_be_bytes());
+    raw.extend_from_slice(&withdrawn);
+    raw.extend_from_slice(&0u16.to_be_bytes()); // Total Path Attribute Length
+    raw.extend_from_slice(&nlri);
+
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP ADD-PATH update dissect allocated {allocs} times"
+    );
+}

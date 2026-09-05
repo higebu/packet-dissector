@@ -42,6 +42,26 @@ pub enum FieldType {
     Array,
     /// An ordered collection of named fields.
     Object,
+    /// A value whose type varies at runtime.
+    ///
+    /// The concrete type depends on a sibling discriminator — for example the
+    /// BGP path attribute `type_code` selects whether the sibling `value` is an
+    /// object (`MP_REACH_NLRI`), an array (`AS_PATH`, `COMMUNITIES`), a scalar
+    /// (`ORIGIN`, `MULTI_EXIT_DISC`), an address (`NEXT_HOP`) or raw bytes
+    /// (unknown attributes) — so the value may be any [`FieldValue`] variant.
+    ///
+    /// When such a value is an [`Object`](FieldValue::Object), or an
+    /// [`Array`](FieldValue::Array) of objects, the descriptor's
+    /// [`children`](FieldDescriptor::children) lists the union of sub-fields
+    /// that can appear across all runtime shapes. Every child of such a union
+    /// is necessarily [`optional`](FieldDescriptor::optional).
+    ///
+    /// This is a schema-only variant: [`FieldValue::field_type`] never returns
+    /// it, because a concrete value always has a concrete type.
+    ///
+    /// Adding this variant is a semver-breaking change for downstream code that
+    /// matches exhaustively on [`FieldType`].
+    Any,
 }
 
 /// A function that converts a raw field value to a display string.
@@ -691,6 +711,45 @@ mod tests {
         let data = [0x0a, 0x1b, 0xff];
         let v = FieldValue::Bytes(&data);
         assert_eq!(v.as_bytes(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn any_field_type_is_schema_only() {
+        // `Any` describes a descriptor whose value type varies at runtime; no
+        // `FieldValue` ever maps to it.
+        static DESC: FieldDescriptor =
+            FieldDescriptor::new("value", "Value", FieldType::Any).optional();
+        assert_eq!(DESC.field_type, FieldType::Any);
+        assert!(DESC.optional);
+
+        for value in [
+            FieldValue::U8(1),
+            FieldValue::U32(1),
+            FieldValue::Bytes(&[0x01]),
+            FieldValue::Ipv4Addr([10, 0, 0, 1]),
+            FieldValue::Array(0..1),
+            FieldValue::Object(0..1),
+        ] {
+            assert_ne!(value.field_type(), FieldType::Any);
+        }
+
+        // Distinct from every other variant.
+        for other in [
+            FieldType::U8,
+            FieldType::U16,
+            FieldType::U32,
+            FieldType::U64,
+            FieldType::I32,
+            FieldType::Bytes,
+            FieldType::Ipv4Addr,
+            FieldType::Ipv6Addr,
+            FieldType::MacAddr,
+            FieldType::Str,
+            FieldType::Array,
+            FieldType::Object,
+        ] {
+            assert_ne!(FieldType::Any, other);
+        }
     }
 
     #[test]
