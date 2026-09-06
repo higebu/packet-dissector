@@ -5,11 +5,20 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+
+/// Specification references for the GTPv1-U dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "3GPP TS 29.281",
+    "General Packet Radio System (GPRS) Tunnelling Protocol User Plane (GTPv1-U)",
+    "https://www.3gpp.org/ftp/Specs/archive/29_series/29.281/",
+)];
 
 /// Map a GTPv1-U message type code to its name.
 ///
@@ -164,6 +173,14 @@ impl Dissector for Gtpv1uDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
     }
 
     fn dissect<'pkt>(
@@ -1005,5 +1022,17 @@ mod tests {
         // Field ranges should be offset-adjusted
         assert_eq!(buf.field_by_name(layer, "version").unwrap().range, 42..43);
         assert_eq!(buf.field_by_name(layer, "teid").unwrap().range, 46..50);
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = Gtpv1uDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Tunnel));
     }
 }

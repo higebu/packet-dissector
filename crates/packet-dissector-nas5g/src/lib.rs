@@ -12,7 +12,9 @@
 
 pub mod message_type;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -328,6 +330,20 @@ fn push_5gsm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usiz
 /// 3GPP TS 24.501: <https://www.3gpp.org/ftp/Specs/archive/24_series/24.501/>
 pub struct Nas5gDissector;
 
+/// Specification references for the 5G NAS dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "3GPP TS 24.501",
+        "Non-Access-Stratum (NAS) protocol for 5G System (5GS); Stage 3",
+        "https://www.3gpp.org/ftp/Specs/archive/24_series/24.501/",
+    ),
+    SpecReference::new(
+        "3GPP TS 24.007",
+        "Mobile radio interface signalling layer 3; General aspects",
+        "https://www.3gpp.org/ftp/Specs/archive/24_series/24.007/",
+    ),
+];
+
 impl Dissector for Nas5gDissector {
     fn name(&self) -> &'static str {
         "5G NAS"
@@ -335,6 +351,14 @@ impl Dissector for Nas5gDissector {
 
     fn short_name(&self) -> &'static str {
         "NAS-5G"
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
@@ -671,5 +695,17 @@ mod tests {
     fn field_descriptors_accessible() {
         let d = Nas5gDissector;
         assert_eq!(d.field_descriptors().len(), 8);
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = Nas5gDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

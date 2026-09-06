@@ -14,11 +14,27 @@
 
 mod hpack;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u32};
+
+/// Specification references for the HTTP/2 dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 9113",
+        "HTTP/2",
+        "https://www.rfc-editor.org/rfc/rfc9113",
+    ),
+    SpecReference::new(
+        "RFC 7541",
+        "HPACK: Header Compression for HTTP/2",
+        "https://www.rfc-editor.org/rfc/rfc7541",
+    ),
+];
 
 /// HTTP/2 connection preface sent by the client.
 /// RFC 9113, Section 3.4 — <https://www.rfc-editor.org/rfc/rfc9113#section-3.4>
@@ -252,6 +268,14 @@ impl Dissector for Http2Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1642,5 +1666,17 @@ mod tests {
 
         let frag_field = buf.field_by_name(layer, "header_block_fragment").unwrap();
         assert_eq!(frag_field.range, (id_base + 4)..(id_base + 6));
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = Http2Dissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

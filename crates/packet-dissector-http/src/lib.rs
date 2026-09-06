@@ -10,11 +10,27 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{intern_content_type, slice_offset, str_offset, trim_ows};
+
+/// Specification references for the HTTP/1.1 dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 9112",
+        "HTTP/1.1",
+        "https://www.rfc-editor.org/rfc/rfc9112",
+    ),
+    SpecReference::new(
+        "RFC 9110",
+        "HTTP Semantics",
+        "https://www.rfc-editor.org/rfc/rfc9110",
+    ),
+];
 
 /// Maximum number of HTTP headers to parse.
 const MAX_HEADERS: usize = 64;
@@ -107,6 +123,14 @@ impl Dissector for HttpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -882,5 +906,17 @@ mod tests {
         assert_eq!(d.name(), "HyperText Transfer Protocol");
         assert_eq!(d.short_name(), "HTTP");
         assert!(!d.field_descriptors().is_empty());
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = HttpDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

@@ -2,11 +2,11 @@
 //!
 //! Parses Spanning Tree Protocol (STP) and Rapid Spanning Tree Protocol (RSTP)
 //! Bridge Protocol Data Units (BPDUs) as defined in IEEE 802.1D-2004 and
-//! IEEE 802.1w-2004.
+//! IEEE 802.1w-2001.
 //!
 //! ## References
 //! - IEEE 802.1D-2004 (STP): <https://standards.ieee.org/ieee/802.1D/2486/>
-//! - IEEE 802.1w-2004 (RSTP, incorporated into IEEE 802.1D-2004):
+//! - IEEE 802.1w-2001 (RSTP, incorporated into IEEE 802.1D-2004):
 //!   <https://standards.ieee.org/ieee/802.1w/1039/>
 //!
 //! ## BPDU Types
@@ -19,7 +19,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, MacAddr};
 use packet_dissector_core::packet::DissectBuffer;
@@ -97,7 +99,7 @@ const MIN_BPDU_SIZE: usize = 4;
 const CONFIG_BPDU_SIZE: usize = 35;
 
 /// RST BPDU size: 36 bytes.
-/// IEEE 802.1w-2004 (incorporated into IEEE 802.1D-2004), Section 9.3.3:
+/// IEEE 802.1w-2001 (incorporated into IEEE 802.1D-2004), Section 9.3.3:
 /// Configuration BPDU (35) + Version 1 Length (1) = 36.
 const RST_BPDU_SIZE: usize = 36;
 
@@ -129,6 +131,20 @@ fn bpdu_type_name(v: u8) -> Option<&'static str> {
 /// and Topology Change Notification BPDUs (type 0x80).
 pub struct StpDissector;
 
+/// Specification references for the STP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "IEEE 802.1D-2004",
+        "Media Access Control (MAC) Bridges",
+        "https://standards.ieee.org/ieee/802.1D/2486/",
+    ),
+    SpecReference::new(
+        "IEEE 802.1w-2001",
+        "Rapid Reconfiguration (RSTP), incorporated into IEEE 802.1D-2004",
+        "https://standards.ieee.org/ieee/802.1w/1039/",
+    ),
+];
+
 impl Dissector for StpDissector {
     fn name(&self) -> &'static str {
         "Spanning Tree Protocol"
@@ -140,6 +156,14 @@ impl Dissector for StpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Link)
     }
 
     fn dissect<'pkt>(
@@ -752,5 +776,16 @@ mod tests {
             buf.field_by_name(layer, "protocol_id").unwrap().range,
             17..19
         );
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = StpDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(StpDissector.layer(), Some(ProtocolLayer::Link));
     }
 }

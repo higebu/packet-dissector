@@ -18,11 +18,55 @@
 //! - RFC 6275, Section 6.1: Mobility Header:
 //!   <https://www.rfc-editor.org/rfc/rfc6275#section-6.1>
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+
+/// Specification references for [`HopByHopDissector`].
+static HOP_BY_HOP_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 8200",
+        "Internet Protocol, Version 6 (IPv6) Specification",
+        "https://www.rfc-editor.org/rfc/rfc8200#section-4.3",
+    ),
+    SpecReference::new(
+        "RFC 9673",
+        "IPv6 Hop-by-Hop Options Processing Procedures",
+        "https://www.rfc-editor.org/rfc/rfc9673",
+    ),
+];
+
+/// Specification references for [`DestinationOptionsDissector`].
+static DESTINATION_OPTIONS_REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 8200",
+    "Internet Protocol, Version 6 (IPv6) Specification",
+    "https://www.rfc-editor.org/rfc/rfc8200#section-4.6",
+)];
+
+/// Specification references for [`RoutingDissector`] and [`GenericRoutingDissector`].
+static ROUTING_REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 8200",
+    "Internet Protocol, Version 6 (IPv6) Specification",
+    "https://www.rfc-editor.org/rfc/rfc8200#section-4.4",
+)];
+
+/// Specification references for [`FragmentDissector`].
+static FRAGMENT_REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 8200",
+    "Internet Protocol, Version 6 (IPv6) Specification",
+    "https://www.rfc-editor.org/rfc/rfc8200#section-4.5",
+)];
+
+/// Specification references for [`MobilityDissector`].
+static MOBILITY_REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 6275",
+    "Mobility Support in IPv6",
+    "https://www.rfc-editor.org/rfc/rfc6275#section-6.1",
+)];
 
 /// Minimum bytes needed to read Next Header + Hdr Ext Len for a TLV-style
 /// extension header (Hop-by-Hop or Destination Options).
@@ -86,6 +130,14 @@ impl Dissector for HopByHopDissector {
         TLV_FIELD_DESCRIPTORS
     }
 
+    fn references(&self) -> &'static [SpecReference] {
+        HOP_BY_HOP_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -116,6 +168,14 @@ impl Dissector for DestinationOptionsDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         TLV_FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        DESTINATION_OPTIONS_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -232,6 +292,14 @@ impl Dissector for RoutingDissector {
         &[]
     }
 
+    fn references(&self) -> &'static [SpecReference] {
+        ROUTING_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
+    }
+
     fn dissect(
         &self,
         data: &[u8],
@@ -293,6 +361,14 @@ impl Dissector for GenericRoutingDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         GENERIC_ROUTING_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        ROUTING_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -421,6 +497,14 @@ impl Dissector for FragmentDissector {
         FRAGMENT_DESCRIPTORS
     }
 
+    fn references(&self) -> &'static [SpecReference] {
+        FRAGMENT_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -545,6 +629,14 @@ impl Dissector for MobilityDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         MOBILITY_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        MOBILITY_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -1136,5 +1228,50 @@ mod tests {
         let layer = buf.layer_by_name("IPv6 Mobility").unwrap();
         // payload_proto, header_len, mh_type, reserved, checksum, message_data
         assert_eq!(buf.layer_fields(layer).len(), 6);
+    }
+
+    fn assert_references_and_layer(refs: &'static [SpecReference], layer: Option<ProtocolLayer>) {
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(layer, Some(ProtocolLayer::Network));
+    }
+
+    #[test]
+    fn hop_by_hop_references_and_layer() {
+        let d = HopByHopDissector;
+        assert_references_and_layer(d.references(), d.layer());
+    }
+
+    #[test]
+    fn destination_options_references_and_layer() {
+        let d = DestinationOptionsDissector;
+        assert_references_and_layer(d.references(), d.layer());
+    }
+
+    #[test]
+    fn routing_dispatcher_references_and_layer() {
+        let d = RoutingDissector;
+        assert_references_and_layer(d.references(), d.layer());
+    }
+
+    #[test]
+    fn generic_routing_references_and_layer() {
+        let d = GenericRoutingDissector;
+        assert_references_and_layer(d.references(), d.layer());
+    }
+
+    #[test]
+    fn fragment_references_and_layer() {
+        let d = FragmentDissector;
+        assert_references_and_layer(d.references(), d.layer());
+    }
+
+    #[test]
+    fn mobility_references_and_layer() {
+        let d = MobilityDissector;
+        assert_references_and_layer(d.references(), d.layer());
     }
 }

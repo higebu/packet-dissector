@@ -35,7 +35,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{
     FieldDescriptor, FieldType, FieldValue, MacAddr, format_utf8_lossy,
@@ -289,6 +291,13 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("oid", "Object Identifier", FieldType::Bytes).optional(),
 ];
 
+/// Specification references for the LLDP dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "IEEE 802.1AB-2016",
+    "IEEE Standard for Local and Metropolitan Area Networks--Station and Media Access Control Connectivity Discovery",
+    "https://standards.ieee.org/ieee/802.1AB/6047/",
+)];
+
 /// LLDP dissector.
 pub struct LldpDissector;
 
@@ -303,6 +312,14 @@ impl Dissector for LldpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Link)
     }
 
     fn dissect<'pkt>(
@@ -1213,5 +1230,17 @@ mod tests {
             buf.resolve_container_display_name(idx as u32),
             Some("Chassis ID")
         );
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = LldpDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Link));
     }
 }

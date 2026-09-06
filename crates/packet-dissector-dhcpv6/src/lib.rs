@@ -12,7 +12,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
 use packet_dissector_core::packet::DissectBuffer;
@@ -248,6 +250,30 @@ fn dhcpv6_msg_type_name(v: u8) -> Option<&'static str> {
 /// DHCPv6 dissector.
 pub struct Dhcpv6Dissector;
 
+/// Specification references for the DHCPv6 dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 9915",
+        "Dynamic Host Configuration Protocol for IPv6 (DHCPv6)",
+        "https://www.rfc-editor.org/rfc/rfc9915",
+    ),
+    SpecReference::new(
+        "RFC 8415",
+        "Dynamic Host Configuration Protocol for IPv6 (DHCPv6)",
+        "https://www.rfc-editor.org/rfc/rfc8415",
+    ),
+    SpecReference::new(
+        "RFC 3646",
+        "DNS Configuration options for Dynamic Host Configuration Protocol for IPv6 (DHCPv6)",
+        "https://www.rfc-editor.org/rfc/rfc3646",
+    ),
+    SpecReference::new(
+        "RFC 4704",
+        "The Dynamic Host Configuration Protocol for IPv6 (DHCPv6) Client Fully Qualified Domain Name (FQDN) Option",
+        "https://www.rfc-editor.org/rfc/rfc4704",
+    ),
+];
+
 impl Dissector for Dhcpv6Dissector {
     fn name(&self) -> &'static str {
         "Dynamic Host Configuration Protocol for IPv6"
@@ -259,6 +285,14 @@ impl Dissector for Dhcpv6Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -2906,5 +2940,27 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let err = d.dissect(&pkt, &mut buf, 0).unwrap_err();
         assert!(matches!(err, PacketError::Truncated { .. }));
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+        }
+
+        assert_layer_and_references(&Dhcpv6Dissector);
     }
 }

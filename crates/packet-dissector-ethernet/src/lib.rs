@@ -15,7 +15,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, MacAddr};
 use packet_dissector_core::packet::DissectBuffer;
@@ -104,6 +106,30 @@ fn ethertype_name(v: u16) -> Option<&'static str> {
 /// Ethernet II frame dissector.
 pub struct EthernetDissector;
 
+/// Specification references for the Ethernet dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "IEEE 802.3-2022",
+        "IEEE Standard for Ethernet",
+        "https://standards.ieee.org/ieee/802.3/10422/",
+    ),
+    SpecReference::new(
+        "IEEE 802.1Q-2022",
+        "IEEE Standard for Local and Metropolitan Area Networks—Bridges and Bridged Networks",
+        "https://standards.ieee.org/ieee/802.1Q/10323/",
+    ),
+    SpecReference::new(
+        "IEEE 802.2-1998",
+        "IEEE Standard for Information Technology—Local and Metropolitan Area Networks—Part 2: Logical Link Control",
+        "https://standards.ieee.org/ieee/802.2/1048/",
+    ),
+    SpecReference::new(
+        "IANA IEEE 802 Numbers",
+        "IEEE 802 Numbers (EtherType registry)",
+        "https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml",
+    ),
+];
+
 impl Dissector for EthernetDissector {
     fn name(&self) -> &'static str {
         "Ethernet II"
@@ -115,6 +141,14 @@ impl Dissector for EthernetDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Link)
     }
 
     fn dissect<'pkt>(
@@ -269,5 +303,32 @@ impl Dissector for EthernetDissector {
         });
 
         Ok(DissectResult::new(header_len, dispatch_hint))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Link));
+        }
+
+        assert_layer_and_references(&EthernetDissector);
     }
 }

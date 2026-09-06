@@ -16,11 +16,73 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32, read_ipv6_addr};
+
+/// Specification references for the ICMPv6 dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 4443",
+        "Internet Control Message Protocol (ICMPv6) for the Internet Protocol \
+         Version 6 (IPv6) Specification",
+        "https://www.rfc-editor.org/rfc/rfc4443",
+    ),
+    SpecReference::new(
+        "RFC 4861",
+        "Neighbor Discovery for IP version 6 (IPv6)",
+        "https://www.rfc-editor.org/rfc/rfc4861",
+    ),
+    SpecReference::new(
+        "RFC 2710",
+        "Multicast Listener Discovery (MLD) for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc2710",
+    ),
+    SpecReference::new(
+        "RFC 3810",
+        "Multicast Listener Discovery Version 2 (MLDv2) for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc3810",
+    ),
+    SpecReference::new(
+        "RFC 4286",
+        "Multicast Router Discovery",
+        "https://www.rfc-editor.org/rfc/rfc4286",
+    ),
+    SpecReference::new(
+        "RFC 6275",
+        "Mobility Support in IPv6",
+        "https://www.rfc-editor.org/rfc/rfc6275",
+    ),
+    SpecReference::new(
+        "RFC 4191",
+        "Default Router Preferences and More-Specific Routes",
+        "https://www.rfc-editor.org/rfc/rfc4191",
+    ),
+    SpecReference::new(
+        "RFC 8106",
+        "IPv6 Router Advertisement Options for DNS Configuration",
+        "https://www.rfc-editor.org/rfc/rfc8106",
+    ),
+    SpecReference::new(
+        "RFC 8781",
+        "Discovering PREF64 in Router Advertisements",
+        "https://www.rfc-editor.org/rfc/rfc8781",
+    ),
+    SpecReference::new(
+        "RFC 8335",
+        "PROBE: A Utility for Probing Interfaces",
+        "https://www.rfc-editor.org/rfc/rfc8335",
+    ),
+    SpecReference::new(
+        "RFC 4884",
+        "Extended ICMP to Support Multi-Part Messages",
+        "https://www.rfc-editor.org/rfc/rfc4884",
+    ),
+];
 
 /// Returns a human-readable name for well-known ICMPv6 type values.
 ///
@@ -774,6 +836,14 @@ impl Dissector for Icmpv6Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -1531,5 +1601,17 @@ mod tests {
             buf.resolve_container_display_name(opt_idx),
             Some("Source Link-Layer Address"),
         );
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = Icmpv6Dissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

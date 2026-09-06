@@ -10,7 +10,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -49,6 +51,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("protocol_type", "Protocol Type", FieldType::U16),
 ];
 
+/// Specification references for the Linux cooked capture v1 (SLL) dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "LINKTYPE_LINUX_SLL",
+    "LINKTYPE_LINUX_SLL",
+    "https://www.tcpdump.org/linktypes/LINKTYPE_LINUX_SLL.html",
+)];
+
 /// Linux cooked capture v1 (SLL) dissector.
 ///
 /// Handles `LINKTYPE_LINUX_SLL` (113) frames.
@@ -65,6 +74,14 @@ impl Dissector for LinuxSllDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Link)
     }
 
     fn dissect<'pkt>(
@@ -376,5 +393,17 @@ mod tests {
         let result = dissector.dissect(&data, &mut buf, 0).unwrap();
 
         assert_eq!(result.next, DispatchHint::ByEtherType(0x5678));
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = LinuxSllDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Link));
     }
 }

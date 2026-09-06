@@ -31,6 +31,14 @@ ADD-PATH is inferred per NLRI block with the same heuristic as Wireshark's
 `detect_add_path_prefix46()` (see the `detect_add_path_prefixes` docs for its
 limits), because the negotiating OPEN is not tracked.
 
+Every `nlri` / `withdrawn_routes` array — top level and inside
+`MP_REACH_NLRI` / `MP_UNREACH_NLRI` — declares the same entry `children`: the
+union of the plain prefix fields and the
+[BGP-MUP](https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/) (SAFI 85)
+fields. The element shape depends on the SAFI, so every member of that union is
+optional, and a path such as `BGP.nlri.route_type` resolves against either
+array.
+
 A path attribute `value` is declared `FieldType::Any`; its `children` list the
 union of sub-fields it can contain (MP_REACH/MP_UNREACH, Prefix-SID TLVs,
 AS_PATH segments).

@@ -9,7 +9,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -65,6 +67,25 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// GRE dissector.
 pub struct GreDissector;
 
+/// Specification references for the GRE dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2784",
+        "Generic Routing Encapsulation (GRE)",
+        "https://www.rfc-editor.org/rfc/rfc2784",
+    ),
+    SpecReference::new(
+        "RFC 2890",
+        "Key and Sequence Number Extensions to GRE",
+        "https://www.rfc-editor.org/rfc/rfc2890",
+    ),
+    SpecReference::new(
+        "RFC 9601",
+        "Propagating Explicit Congestion Notification across IP Tunnel Headers Separated by a Shim",
+        "https://www.rfc-editor.org/rfc/rfc9601",
+    ),
+];
+
 impl Dissector for GreDissector {
     fn name(&self) -> &'static str {
         "Generic Routing Encapsulation"
@@ -76,6 +97,14 @@ impl Dissector for GreDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
     }
 
     fn dissect<'pkt>(
@@ -620,5 +649,27 @@ mod tests {
         assert_eq!(descs[FD_RESERVED1].name, "reserved1");
         assert_eq!(descs[FD_KEY].name, "key");
         assert_eq!(descs[FD_SEQUENCE_NUMBER].name, "sequence_number");
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Tunnel));
+        }
+
+        assert_layer_and_references(&GreDissector);
     }
 }

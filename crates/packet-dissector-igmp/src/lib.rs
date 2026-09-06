@@ -8,11 +8,38 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_ipv4_addr};
+
+/// Specification references for the IGMP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 1112",
+        "Host extensions for IP multicasting",
+        "https://www.rfc-editor.org/rfc/rfc1112",
+    ),
+    SpecReference::new(
+        "RFC 2236",
+        "Internet Group Management Protocol, Version 2",
+        "https://www.rfc-editor.org/rfc/rfc2236",
+    ),
+    SpecReference::new(
+        "RFC 9776",
+        "Internet Group Management Protocol, Version 3",
+        "https://www.rfc-editor.org/rfc/rfc9776",
+    ),
+    SpecReference::new(
+        "RFC 4604",
+        "Using Internet Group Management Protocol Version 3 (IGMPv3) and Multicast \
+         Listener Discovery Protocol Version 2 (MLDv2) for Source-Specific Multicast",
+        "https://www.rfc-editor.org/rfc/rfc4604",
+    ),
+];
 
 /// Returns a human-readable name for well-known IGMP type values.
 ///
@@ -421,6 +448,14 @@ impl Dissector for IgmpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -1250,5 +1285,17 @@ mod tests {
             buf.resolve_container_display_name(idx as u32),
             Some("MODE_IS_INCLUDE")
         );
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = IgmpDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

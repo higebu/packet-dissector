@@ -12,7 +12,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -275,6 +277,30 @@ static FD_VERSION_ENTRY: FieldDescriptor =
 /// QUIC packet header dissector.
 pub struct QuicDissector;
 
+/// Specification references for the QUIC dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 8999",
+        "Version-Independent Properties of QUIC",
+        "https://www.rfc-editor.org/rfc/rfc8999",
+    ),
+    SpecReference::new(
+        "RFC 9000",
+        "QUIC: A UDP-Based Multiplexed and Secure Transport",
+        "https://www.rfc-editor.org/rfc/rfc9000",
+    ),
+    SpecReference::new(
+        "RFC 9001",
+        "Using TLS to Secure QUIC",
+        "https://www.rfc-editor.org/rfc/rfc9001",
+    ),
+    SpecReference::new(
+        "RFC 9369",
+        "QUIC Version 2",
+        "https://www.rfc-editor.org/rfc/rfc9369",
+    ),
+];
+
 impl Dissector for QuicDissector {
     fn name(&self) -> &'static str {
         "QUIC"
@@ -286,6 +312,14 @@ impl Dissector for QuicDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Transport)
     }
 
     fn dissect<'pkt>(
@@ -1522,5 +1556,17 @@ mod tests {
             buf.resolve_display_name(layer, "header_form_name"),
             Some("Short Header")
         );
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = QuicDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Transport));
     }
 }

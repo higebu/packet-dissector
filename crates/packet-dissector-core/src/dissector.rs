@@ -233,6 +233,69 @@ impl DissectResult {
     }
 }
 
+/// A specification a dissector is implemented against.
+///
+/// `id` is the document identifier as commonly cited (`"RFC 4271"`,
+/// `"3GPP TS 29.281"`, `"IEEE 802.1Q"`), `title` its title, and `url` a
+/// direct link to the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpecReference {
+    /// Document identifier, e.g. `"RFC 4271"` or `"3GPP TS 29.281"`.
+    pub id: &'static str,
+    /// Document title, e.g. `"A Border Gateway Protocol 4 (BGP-4)"`.
+    pub title: &'static str,
+    /// Direct link to the document.
+    pub url: &'static str,
+}
+
+impl SpecReference {
+    /// Create a reference in a `const` context.
+    pub const fn new(id: &'static str, title: &'static str, url: &'static str) -> Self {
+        Self { id, title, url }
+    }
+}
+
+/// Where a protocol sits in the dissection stack.
+///
+/// This describes the position of the layer a dissector produces relative
+/// to its neighbours, not a strict OSI classification: tunnelling protocols
+/// that carry another link or network layer (GTP-U, VXLAN, GRE, ...) are
+/// [`Tunnel`](Self::Tunnel) regardless of the transport they run over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ProtocolLayer {
+    /// Link layer (Ethernet, PPP, LLDP, STP, ...).
+    Link,
+    /// Network layer (IPv4, IPv6, ARP, ICMP, MPLS, IPv6 extension headers, ...).
+    Network,
+    /// Transport layer (TCP, UDP, SCTP, QUIC, ...).
+    Transport,
+    /// Encapsulation carrying another link or network layer (GTP-U, VXLAN, GRE, ...).
+    Tunnel,
+    /// Application layer (DNS, HTTP, BGP, Diameter, ...).
+    Application,
+}
+
+impl ProtocolLayer {
+    /// Lowercase machine-readable name (`"link"`, `"network"`, `"transport"`,
+    /// `"tunnel"`, `"application"`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Link => "link",
+            Self::Network => "network",
+            Self::Transport => "transport",
+            Self::Tunnel => "tunnel",
+            Self::Application => "application",
+        }
+    }
+}
+
+impl core::fmt::Display for ProtocolLayer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Trait that all protocol dissectors must implement.
 ///
 /// The `Send` bound allows the registry to be moved to another thread (e.g.
@@ -257,6 +320,21 @@ pub trait Dissector: Send {
     /// conditional ones (marked with [`FieldDescriptor::optional`] = `true`).
     fn field_descriptors(&self) -> &'static [FieldDescriptor];
 
+    /// Specifications this dissector is implemented against.
+    ///
+    /// Defaults to an empty slice; dissectors should list the RFCs, 3GPP
+    /// technical specifications or other standards they decode.
+    fn references(&self) -> &'static [SpecReference] {
+        &[]
+    }
+
+    /// Position of this protocol in the dissection stack.
+    ///
+    /// Defaults to `None`; dissectors should override it.
+    fn layer(&self) -> Option<ProtocolLayer> {
+        None
+    }
+
     /// Dissect the given bytes and append a protocol layer to the buffer.
     ///
     /// `offset` is the byte offset in the original packet where this layer starts.
@@ -271,4 +349,87 @@ pub trait Dissector: Send {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dissector that overrides nothing beyond the required methods, so it
+    /// exercises the [`Dissector::references`] / [`Dissector::layer`] defaults.
+    struct DefaultsDissector;
+
+    impl Dissector for DefaultsDissector {
+        fn name(&self) -> &'static str {
+            "Defaults"
+        }
+
+        fn short_name(&self) -> &'static str {
+            "defaults"
+        }
+
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+
+        fn dissect<'pkt>(
+            &self,
+            _data: &'pkt [u8],
+            _buf: &mut DissectBuffer<'pkt>,
+            _offset: usize,
+        ) -> Result<DissectResult, PacketError> {
+            Ok(DissectResult::new(0, DispatchHint::End))
+        }
+    }
+
+    #[test]
+    fn protocol_layer_as_str_covers_every_variant() {
+        assert_eq!(ProtocolLayer::Link.as_str(), "link");
+        assert_eq!(ProtocolLayer::Network.as_str(), "network");
+        assert_eq!(ProtocolLayer::Transport.as_str(), "transport");
+        assert_eq!(ProtocolLayer::Tunnel.as_str(), "tunnel");
+        assert_eq!(ProtocolLayer::Application.as_str(), "application");
+    }
+
+    #[test]
+    fn protocol_layer_display_matches_as_str() {
+        for layer in [
+            ProtocolLayer::Link,
+            ProtocolLayer::Network,
+            ProtocolLayer::Transport,
+            ProtocolLayer::Tunnel,
+            ProtocolLayer::Application,
+        ] {
+            assert_eq!(layer.to_string(), layer.as_str());
+        }
+    }
+
+    #[test]
+    fn spec_reference_new_stores_all_parts() {
+        const REFERENCE: SpecReference = SpecReference::new(
+            "RFC 4271",
+            "A Border Gateway Protocol 4 (BGP-4)",
+            "https://www.rfc-editor.org/rfc/rfc4271",
+        );
+
+        assert_eq!(REFERENCE.id, "RFC 4271");
+        assert_eq!(REFERENCE.title, "A Border Gateway Protocol 4 (BGP-4)");
+        assert_eq!(REFERENCE.url, "https://www.rfc-editor.org/rfc/rfc4271");
+        assert_eq!(
+            REFERENCE,
+            SpecReference {
+                id: "RFC 4271",
+                title: "A Border Gateway Protocol 4 (BGP-4)",
+                url: "https://www.rfc-editor.org/rfc/rfc4271",
+            }
+        );
+    }
+
+    #[test]
+    fn dissector_defaults_report_no_references_and_no_layer() {
+        let dissector = DefaultsDissector;
+
+        assert!(dissector.references().is_empty());
+        assert_eq!(dissector.layer(), None);
+    }
 }

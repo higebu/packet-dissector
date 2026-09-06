@@ -20,7 +20,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
@@ -1340,6 +1342,85 @@ static DNS_FIELD_DESCRIPTORS: &[FieldDescriptor] =
 static DNS_TCP_FIELD_DESCRIPTORS: &[FieldDescriptor] =
     dns_field_descriptors!(tcp_length_optional: false);
 
+/// Specification references for the DNS dissectors.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 1035",
+        "Domain names - implementation and specification",
+        "https://www.rfc-editor.org/rfc/rfc1035",
+    ),
+    SpecReference::new(
+        "RFC 3596",
+        "DNS Extensions to Support IP Version 6",
+        "https://www.rfc-editor.org/rfc/rfc3596",
+    ),
+    SpecReference::new(
+        "RFC 4035",
+        "Protocol Modifications for the DNS Security Extensions",
+        "https://www.rfc-editor.org/rfc/rfc4035",
+    ),
+    SpecReference::new(
+        "RFC 6891",
+        "Extension Mechanisms for DNS (EDNS(0))",
+        "https://www.rfc-editor.org/rfc/rfc6891",
+    ),
+    SpecReference::new(
+        "RFC 7766",
+        "DNS Transport over TCP - Implementation Requirements",
+        "https://www.rfc-editor.org/rfc/rfc7766",
+    ),
+    SpecReference::new(
+        "RFC 7828",
+        "The edns-tcp-keepalive EDNS0 Option",
+        "https://www.rfc-editor.org/rfc/rfc7828",
+    ),
+    SpecReference::new(
+        "RFC 2782",
+        "A DNS RR for specifying the location of services (DNS SRV)",
+        "https://www.rfc-editor.org/rfc/rfc2782",
+    ),
+    SpecReference::new(
+        "RFC 3403",
+        "Dynamic Delegation Discovery System (DDDS) Part Three: The Domain Name System (DNS) Database",
+        "https://www.rfc-editor.org/rfc/rfc3403",
+    ),
+    SpecReference::new(
+        "RFC 4255",
+        "Using DNS to Securely Publish Secure Shell (SSH) Key Fingerprints",
+        "https://www.rfc-editor.org/rfc/rfc4255",
+    ),
+    SpecReference::new(
+        "RFC 6672",
+        "DNAME Redirection in the DNS",
+        "https://www.rfc-editor.org/rfc/rfc6672",
+    ),
+    SpecReference::new(
+        "RFC 6698",
+        "The DNS-Based Authentication of Named Entities (DANE) Transport Layer Security (TLS) Protocol: TLSA",
+        "https://www.rfc-editor.org/rfc/rfc6698",
+    ),
+    SpecReference::new(
+        "RFC 8659",
+        "DNS Certification Authority Authorization (CAA) Resource Record",
+        "https://www.rfc-editor.org/rfc/rfc8659",
+    ),
+    SpecReference::new(
+        "RFC 5155",
+        "DNS Security (DNSSEC) Hashed Authenticated Denial of Existence",
+        "https://www.rfc-editor.org/rfc/rfc5155",
+    ),
+    SpecReference::new(
+        "RFC 7344",
+        "Automating DNSSEC Delegation Trust Maintenance",
+        "https://www.rfc-editor.org/rfc/rfc7344",
+    ),
+    SpecReference::new(
+        "RFC 9460",
+        "Service Binding and Parameter Specification via the DNS (SVCB and HTTPS Resource Records)",
+        "https://www.rfc-editor.org/rfc/rfc9460",
+    ),
+];
+
 impl Dissector for DnsDissector {
     fn name(&self) -> &'static str {
         "Domain Name System"
@@ -1351,6 +1432,14 @@ impl Dissector for DnsDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         DNS_FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1820,6 +1909,14 @@ impl Dissector for DnsTcpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         DNS_TCP_FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -3081,5 +3178,28 @@ mod tests {
         let mut out = Vec::new();
         write_dns_name(&FieldValue::Bytes(&target), &ctx, &mut out).unwrap();
         assert_eq!(&out, b"\"example.com\"");
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+        }
+
+        assert_layer_and_references(&DnsDissector);
+        assert_layer_and_references(&DnsTcpDissector);
     }
 }

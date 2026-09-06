@@ -14,7 +14,9 @@ pub mod ie_id;
 pub mod ie_parsers;
 pub mod procedure_code;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -313,6 +315,13 @@ fn parse_ies<'pkt>(
 /// 3GPP TS 38.413: <https://www.3gpp.org/ftp/Specs/archive/38_series/38.413/>
 pub struct NgapDissector;
 
+/// Specification references for the NGAP dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "3GPP TS 38.413",
+    "NG-RAN; NG Application Protocol (NGAP)",
+    "https://www.3gpp.org/ftp/Specs/archive/38_series/38.413/",
+)];
+
 impl Dissector for NgapDissector {
     fn name(&self) -> &'static str {
         "NG Application Protocol"
@@ -324,6 +333,14 @@ impl Dissector for NgapDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -782,5 +799,17 @@ mod tests {
         let _ = IE_CHILD_FIELDS[CFD_CRITICALITY];
         let _ = IE_CHILD_FIELDS[CFD_LENGTH];
         let _ = IE_CHILD_FIELDS[CFD_VALUE];
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = NgapDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

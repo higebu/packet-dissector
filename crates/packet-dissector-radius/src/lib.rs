@@ -16,7 +16,9 @@
 
 mod attr;
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -271,6 +273,30 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
 /// RADIUS dissector.
 pub struct RadiusDissector;
 
+/// Specification references for the RADIUS dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2865",
+        "Remote Authentication Dial In User Service (RADIUS)",
+        "https://www.rfc-editor.org/rfc/rfc2865",
+    ),
+    SpecReference::new(
+        "RFC 2866",
+        "RADIUS Accounting",
+        "https://www.rfc-editor.org/rfc/rfc2866",
+    ),
+    SpecReference::new(
+        "RFC 3575",
+        "IANA Considerations for RADIUS (Remote Authentication Dial In User Service)",
+        "https://www.rfc-editor.org/rfc/rfc3575",
+    ),
+    SpecReference::new(
+        "RFC 5997",
+        "Use of Status-Server Packets in the Remote Authentication Dial In User Service (RADIUS) Protocol",
+        "https://www.rfc-editor.org/rfc/rfc5997",
+    ),
+];
+
 impl Dissector for RadiusDissector {
     fn name(&self) -> &'static str {
         "RADIUS"
@@ -282,6 +308,14 @@ impl Dissector for RadiusDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -913,5 +947,17 @@ mod tests {
         } else {
             panic!("expected Array");
         }
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = RadiusDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
     }
 }

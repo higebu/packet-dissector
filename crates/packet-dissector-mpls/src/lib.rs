@@ -21,7 +21,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -94,6 +96,50 @@ const LABEL_IMPLICIT_NULL: u32 = 3;
 /// bottom of the label stack (S=1) and MUST NOT be used with pseudowires.
 const LABEL_GAL: u32 = 13;
 
+/// Specification references for the MPLS dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 3032",
+        "MPLS Label Stack Encoding",
+        "https://www.rfc-editor.org/rfc/rfc3032",
+    ),
+    SpecReference::new(
+        "RFC 4182",
+        "Removing a Restriction on the use of MPLS Explicit NULL",
+        "https://www.rfc-editor.org/rfc/rfc4182",
+    ),
+    SpecReference::new(
+        "RFC 4928",
+        "Avoiding Equal Cost Multipath Treatment in MPLS Networks",
+        "https://www.rfc-editor.org/rfc/rfc4928",
+    ),
+    SpecReference::new(
+        "RFC 5332",
+        "MPLS Multicast Encapsulations",
+        "https://www.rfc-editor.org/rfc/rfc5332",
+    ),
+    SpecReference::new(
+        "RFC 5462",
+        "Multiprotocol Label Switching (MPLS) Label Stack Entry: \"EXP\" Field Renamed to \"Traffic Class\" Field",
+        "https://www.rfc-editor.org/rfc/rfc5462",
+    ),
+    SpecReference::new(
+        "RFC 5586",
+        "MPLS Generic Associated Channel",
+        "https://www.rfc-editor.org/rfc/rfc5586",
+    ),
+    SpecReference::new(
+        "RFC 7274",
+        "Allocating and Retiring Special-Purpose MPLS Labels",
+        "https://www.rfc-editor.org/rfc/rfc7274",
+    ),
+    SpecReference::new(
+        "RFC 9017",
+        "Special-Purpose Label Terminology",
+        "https://www.rfc-editor.org/rfc/rfc9017",
+    ),
+];
+
 /// MPLS dissector.
 ///
 /// Parses one or more 4-byte label stack entries and dispatches to the
@@ -112,6 +158,14 @@ impl Dissector for MplsDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -573,5 +627,17 @@ mod tests {
         raw2.push(0x10);
         let (_, result2) = dissect(&raw2).expect("dissect failed");
         assert_eq!(result2.next, DispatchHint::End);
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = MplsDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }

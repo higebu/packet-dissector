@@ -196,7 +196,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
@@ -1282,7 +1284,7 @@ fn parse_prefixes<'pkt>(
 
         if id_len != 0 {
             buf.push_field(
-                &IP_NLRI_ENTRY_CHILDREN[FD_NLRI_PATH_ID],
+                &NLRI_ENTRY_CHILDREN[FD_NLRI_PATH_ID],
                 FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
                 abs..abs + PATH_ID_SIZE,
             );
@@ -3094,12 +3096,11 @@ const PATH_ID_FIELD: FieldDescriptor =
 
 /// Schema entry for the prefix inside a MUP/IP union NLRI entry object.
 ///
-/// Used only in [`NLRI_ENTRY_FIELDS`], the MUP/IP union that describes
-/// `path_attributes.value.nlri` / `.withdrawn_routes`: a MUP (SAFI 85) entry
-/// may omit `prefix` entirely (e.g. Route Type 2 "Direct Segment Discovery",
+/// Used in [`NLRI_ENTRY_FIELDS`], the MUP/IP union that describes every
+/// `nlri` / `withdrawn_routes` array (top level and inside
+/// `MP_REACH_NLRI` / `MP_UNREACH_NLRI` values): a MUP (SAFI 85) entry may
+/// omit `prefix` entirely (e.g. Route Type 2 "Direct Segment Discovery",
 /// which carries `address` instead), so in that union it must be optional.
-/// For plain (non-MUP) top-level `nlri` / `withdrawn_routes` entries, where
-/// `prefix` is always present, see [`IP_NLRI_PREFIX_FIELD`] instead.
 ///
 /// The `format_fn` renders the CIDR string. The address-family specific runtime
 /// descriptors ([`PREFIX_ENTRY_IPV4_DESCRIPTOR`] / [`PREFIX_ENTRY_IPV6_DESCRIPTOR`])
@@ -3107,40 +3108,22 @@ const PATH_ID_FIELD: FieldDescriptor =
 /// the schema, so the IPv4 formatter stands in for both families.
 const NLRI_PREFIX_FIELD: FieldDescriptor = PREFIX_ENTRY_IPV4_FIELD.optional();
 
-/// Schema entry for the prefix inside a plain (non-MUP) NLRI entry object.
-///
-/// Unlike [`NLRI_PREFIX_FIELD`], this is not optional: every entry of a
-/// top-level `nlri` / `withdrawn_routes` array (RFC 4271, Section 4.3) always
-/// carries a `prefix`, only `path_id` is conditional. Reuses
-/// [`PREFIX_ENTRY_IPV4_FIELD`] as-is (same name, display, and format_fn as
-/// [`NLRI_PREFIX_FIELD`]) so the IPv4 formatter stands in for both address
-/// families in the schema, exactly as documented on `NLRI_PREFIX_FIELD`.
-const IP_NLRI_PREFIX_FIELD: FieldDescriptor = PREFIX_ENTRY_IPV4_FIELD;
-
-/// Field descriptor index for [`IP_NLRI_ENTRY_CHILDREN`] (index 1 is `prefix`,
+/// Field descriptor index for [`NLRI_ENTRY_CHILDREN`] (index 1 is `prefix`,
 /// pushed through the address-family specific `PREFIX_ENTRY_*` descriptors).
 const FD_NLRI_PATH_ID: usize = 0;
-
-/// Child field descriptors for plain IPv4/IPv6 NLRI entry objects.
-///
-/// Each entry of a `nlri` / `withdrawn_routes` array is an object
-/// `{ "prefix": "10.0.0.0/24" }`, gaining a leading `path_id` when the block is
-/// ADD-PATH encoded.
-///
-/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
-/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
-const IP_NLRI_ENTRY_FIELDS: [FieldDescriptor; 2] = [PATH_ID_FIELD, IP_NLRI_PREFIX_FIELD];
-
-/// Slice form of [`IP_NLRI_ENTRY_FIELDS`].
-static IP_NLRI_ENTRY_CHILDREN: &[FieldDescriptor] = &IP_NLRI_ENTRY_FIELDS;
 
 /// Object descriptor for NLRI / withdrawn route entries.
 static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("nlri_entry", "NLRI Entry", FieldType::Object)
-        .with_children(IP_NLRI_ENTRY_CHILDREN);
+        .with_children(NLRI_ENTRY_CHILDREN);
 
-/// Union of every field that can appear in an NLRI entry object inside an
-/// MP_REACH_NLRI / MP_UNREACH_NLRI attribute value.
+/// Union of every field that can appear in an NLRI entry object.
+///
+/// Shared by the top-level `nlri` / `withdrawn_routes` arrays (RFC 4271,
+/// Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>) and by
+/// the ones inside an MP_REACH_NLRI / MP_UNREACH_NLRI attribute value, so a
+/// consumer resolving a path such as `BGP.nlri.route_type` finds the same
+/// schema on either array.
 ///
 /// The element shape depends on the SAFI: SAFI 85 (BGP-MUP) yields MUP entries,
 /// every other supported SAFI yields plain prefix entries. All fields are
@@ -3165,6 +3148,9 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 12] = [
     MUP_NLRI_FIELDS[FD_MUP_SOURCE_ADDRESS],
     MUP_NLRI_FIELDS[FD_MUP_TLVS],
 ];
+
+/// Slice form of [`NLRI_ENTRY_FIELDS`].
+static NLRI_ENTRY_CHILDREN: &[FieldDescriptor] = &NLRI_ENTRY_FIELDS;
 
 /// Object descriptor for AS_PATH segment entries.
 static AS_PATH_SEG_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -3498,10 +3484,10 @@ const MP_FIELDS: [FieldDescriptor; 6] = [
     .optional(),
     FieldDescriptor::new("nlri", "NLRI", FieldType::Array)
         .optional()
-        .with_children(&NLRI_ENTRY_FIELDS),
+        .with_children(NLRI_ENTRY_CHILDREN),
     FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array)
         .optional()
-        .with_children(&NLRI_ENTRY_FIELDS),
+        .with_children(NLRI_ENTRY_CHILDREN),
 ];
 
 /// Slice form of [`MP_FIELDS`].
@@ -3885,7 +3871,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional(),
     FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array)
         .optional()
-        .with_children(IP_NLRI_ENTRY_CHILDREN),
+        .with_children(NLRI_ENTRY_CHILDREN),
     FieldDescriptor::new(
         "total_path_attribute_length",
         "Total Path Attribute Length",
@@ -3897,7 +3883,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         .with_children(PATH_ATTR_CHILDREN),
     FieldDescriptor::new("nlri", "NLRI", FieldType::Array)
         .optional()
-        .with_children(IP_NLRI_ENTRY_CHILDREN),
+        .with_children(NLRI_ENTRY_CHILDREN),
 ];
 
 /// Parses a single BGP message from the start of `data` and appends one layer.
@@ -3974,6 +3960,142 @@ fn dissect_one_message<'pkt>(
     Ok(consumed)
 }
 
+/// Specification references for the BGP-4 dissector.
+///
+/// Mirrors the `## References` list in this crate's module documentation.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 4271",
+        "A Border Gateway Protocol 4 (BGP-4)",
+        "https://www.rfc-editor.org/rfc/rfc4271",
+    ),
+    SpecReference::new(
+        "RFC 1997",
+        "BGP Communities Attribute",
+        "https://www.rfc-editor.org/rfc/rfc1997",
+    ),
+    SpecReference::new(
+        "RFC 2918",
+        "Route Refresh Capability for BGP-4",
+        "https://www.rfc-editor.org/rfc/rfc2918",
+    ),
+    SpecReference::new(
+        "RFC 4360",
+        "BGP Extended Communities Attribute",
+        "https://www.rfc-editor.org/rfc/rfc4360",
+    ),
+    SpecReference::new(
+        "RFC 4456",
+        "BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP)",
+        "https://www.rfc-editor.org/rfc/rfc4456",
+    ),
+    SpecReference::new(
+        "RFC 4486",
+        "Subcodes for BGP Cease Notification Message",
+        "https://www.rfc-editor.org/rfc/rfc4486",
+    ),
+    SpecReference::new(
+        "RFC 4724",
+        "Graceful Restart Mechanism for BGP",
+        "https://www.rfc-editor.org/rfc/rfc4724",
+    ),
+    SpecReference::new(
+        "RFC 4760",
+        "Multiprotocol Extensions for BGP-4",
+        "https://www.rfc-editor.org/rfc/rfc4760",
+    ),
+    SpecReference::new(
+        "RFC 5492",
+        "Capabilities Advertisement with BGP-4",
+        "https://www.rfc-editor.org/rfc/rfc5492",
+    ),
+    SpecReference::new(
+        "RFC 6793",
+        "BGP Support for Four-Octet Autonomous System (AS) Number Space",
+        "https://www.rfc-editor.org/rfc/rfc6793",
+    ),
+    SpecReference::new(
+        "RFC 7313",
+        "Enhanced Route Refresh Capability for BGP-4",
+        "https://www.rfc-editor.org/rfc/rfc7313",
+    ),
+    SpecReference::new(
+        "RFC 7911",
+        "Advertisement of Multiple Paths in BGP",
+        "https://www.rfc-editor.org/rfc/rfc7911",
+    ),
+    SpecReference::new(
+        "RFC 8092",
+        "BGP Large Communities Attribute",
+        "https://www.rfc-editor.org/rfc/rfc8092",
+    ),
+    SpecReference::new(
+        "RFC 8203",
+        "BGP Administrative Shutdown Communication",
+        "https://www.rfc-editor.org/rfc/rfc8203",
+    ),
+    SpecReference::new(
+        "RFC 8654",
+        "Extended Message Support for BGP",
+        "https://www.rfc-editor.org/rfc/rfc8654",
+    ),
+    SpecReference::new(
+        "RFC 8669",
+        "Segment Routing Prefix Segment Identifier Extensions for BGP",
+        "https://www.rfc-editor.org/rfc/rfc8669",
+    ),
+    SpecReference::new(
+        "RFC 8950",
+        "Advertising IPv4 Network Layer Reachability Information (NLRI) with an IPv6 Next Hop",
+        "https://www.rfc-editor.org/rfc/rfc8950",
+    ),
+    SpecReference::new(
+        "RFC 9012",
+        "The BGP Tunnel Encapsulation Attribute",
+        "https://www.rfc-editor.org/rfc/rfc9012",
+    ),
+    SpecReference::new(
+        "RFC 9072",
+        "Extended Optional Parameters Length for BGP OPEN Message",
+        "https://www.rfc-editor.org/rfc/rfc9072",
+    ),
+    SpecReference::new(
+        "RFC 9234",
+        "Route Leak Prevention and Detection Using Roles in UPDATE and OPEN Messages",
+        "https://www.rfc-editor.org/rfc/rfc9234",
+    ),
+    SpecReference::new(
+        "RFC 9252",
+        "BGP Overlay Services Based on Segment Routing over IPv6 (SRv6)",
+        "https://www.rfc-editor.org/rfc/rfc9252",
+    ),
+    SpecReference::new(
+        "RFC 9494",
+        "Long-Lived Graceful Restart for BGP",
+        "https://www.rfc-editor.org/rfc/rfc9494",
+    ),
+    SpecReference::new(
+        "IANA Capability Codes",
+        "BGP Capability Codes registry",
+        "https://www.iana.org/assignments/capability-codes/capability-codes.xhtml",
+    ),
+    SpecReference::new(
+        "draft-abraitis-idr-addpath-paths-limit-04",
+        "Paths Limit for Multiple Paths in BGP",
+        "https://datatracker.ietf.org/doc/draft-abraitis-idr-addpath-paths-limit/",
+    ),
+    SpecReference::new(
+        "draft-ietf-bess-mup-safi-01",
+        "BGP Extensions for the Mobile User Plane (MUP) SAFI",
+        "https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/",
+    ),
+    SpecReference::new(
+        "draft-walton-bgp-hostname-capability-02",
+        "Hostname Capability for BGP",
+        "https://datatracker.ietf.org/doc/draft-walton-bgp-hostname-capability/",
+    ),
+];
+
 /// BGP-4 dissector.
 pub struct BgpDissector;
 
@@ -3988,6 +4110,14 @@ impl Dissector for BgpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -5271,6 +5401,19 @@ mod tests {
     }
 
     #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = BgpDissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(!reference.title.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+    }
+
+    #[test]
     fn field_schema_exposes_nlri_and_path_attribute_value_children() {
         /// Recursively look up a descriptor by name.
         fn find<'a>(descs: &'a [FieldDescriptor], name: &str) -> Option<&'a FieldDescriptor> {
@@ -5279,7 +5422,10 @@ mod tests {
 
         let descs = BgpDissector.field_descriptors();
 
-        // Top-level `nlri` / `withdrawn_routes` expose `path_id` and `prefix`.
+        // Top-level `nlri` / `withdrawn_routes` expose the same MUP/IP union
+        // as the MP_REACH_NLRI / MP_UNREACH_NLRI ones, so a consumer can
+        // resolve a path such as `BGP.nlri.route_type` against either array.
+        // Every member of a union is optional.
         for name in ["nlri", "withdrawn_routes"] {
             let d = find(descs, name).unwrap_or_else(|| panic!("{name} descriptor missing"));
             assert_eq!(d.field_type, FieldType::Array);
@@ -5289,16 +5435,25 @@ mod tests {
             let path_id = find(children, "path_id").expect("path_id missing");
             assert_eq!(path_id.field_type, FieldType::U32);
             assert!(path_id.optional);
-            // Unlike `path_id`, a plain IP NLRI/withdrawn-route entry always
-            // carries a `prefix` — it is never conditional, so the schema
-            // must not mark it optional (only the MUP/IP union in
-            // `path_attributes.value.nlri` does, since a MUP entry may omit
-            // it).
-            let prefix = find(children, "prefix").expect("prefix missing");
-            assert!(
-                !prefix.optional,
-                "top-level {name}.prefix must not be optional"
-            );
+            for child_name in [
+                "path_id",
+                "prefix",
+                "route_type",
+                "architecture_type",
+                "rd",
+                "teid",
+                "qfi",
+                "endpoint_address",
+                "source_address",
+                "address",
+            ] {
+                let child = find(children, child_name)
+                    .unwrap_or_else(|| panic!("{child_name} missing from {name} union"));
+                assert!(
+                    child.optional,
+                    "{child_name} in the {name} union must be optional"
+                );
+            }
         }
 
         // `path_attributes.value` is polymorphic and lists the union of every

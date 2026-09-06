@@ -15,11 +15,28 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::read_be_u16;
+
+/// Specification references for the L2TPv2 dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2661",
+        "Layer Two Tunneling Protocol \"L2TP\"",
+        "https://www.rfc-editor.org/rfc/rfc2661",
+    ),
+    SpecReference::new(
+        "RFC 9601",
+        "Propagating Explicit Congestion Notification across IP Tunnel Headers \
+         Separated by a Shim",
+        "https://www.rfc-editor.org/rfc/rfc9601",
+    ),
+];
 
 /// Minimum L2TP header size (no optional fields).
 ///
@@ -84,6 +101,14 @@ impl Dissector for L2tpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
     }
 
     fn dissect<'pkt>(
@@ -1062,5 +1087,17 @@ mod tests {
             buf.field_by_name(layer, "session_id").unwrap().value,
             FieldValue::U16(20)
         );
+    }
+
+    #[test]
+    fn test_references_and_layer() {
+        let dissector = L2tpDissector;
+        let refs = dissector.references();
+        assert!(!refs.is_empty());
+        for r in refs {
+            assert!(!r.id.is_empty());
+            assert!(r.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Tunnel));
     }
 }

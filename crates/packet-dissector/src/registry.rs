@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use packet_dissector_core::dissector::{DispatchHint, Dissector, DissectorPlugin, DissectorTable};
+use packet_dissector_core::dissector::{
+    DispatchHint, Dissector, DissectorPlugin, DissectorTable, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::{PacketError, RegistrationError};
 use packet_dissector_core::field::{FieldDescriptor, FieldValue};
 use packet_dissector_core::packet::{AuxDataHandle, DissectBuffer};
@@ -1099,23 +1101,43 @@ pub struct ProtocolFieldSchema {
     pub fields: &'static [FieldDescriptor],
 }
 
+/// Metadata describing a single registered dissector.
+///
+/// Superset of [`ProtocolFieldSchema`], adding the specification references
+/// and the stack position the dissector declares. Marked `#[non_exhaustive]`
+/// so further metadata can be added without a breaking change; construct it
+/// only through [`DissectorRegistry::all_protocol_info`].
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct ProtocolInfo {
+    /// Full protocol name.
+    pub name: &'static str,
+    /// Short protocol name (layer key).
+    pub short_name: &'static str,
+    /// Position of the protocol in the dissection stack, if declared.
+    pub layer: Option<ProtocolLayer>,
+    /// Specifications the dissector is implemented against.
+    pub references: &'static [SpecReference],
+    /// Field descriptors for this protocol.
+    pub fields: &'static [FieldDescriptor],
+}
+
 impl DissectorRegistry {
-    /// Returns field metadata for all registered dissectors.
+    /// Visits every registered dissector exactly once, deduplicated by
+    /// `short_name`.
     ///
-    /// Each dissector is included at most once, deduplicated by `short_name`
-    /// (the same dissector type may be registered under multiple dispatch keys,
-    /// e.g., DNS on both TCP port 53 and UDP port 53).
-    pub fn all_field_schemas(&self) -> Vec<ProtocolFieldSchema> {
+    /// The same dissector type may be registered under multiple dispatch keys
+    /// (e.g., DNS on both TCP port 53 and UDP port 53); only the first
+    /// occurrence is passed to `visit`. Shared by
+    /// [`all_field_schemas`](Self::all_field_schemas) and
+    /// [`all_protocol_info`](Self::all_protocol_info) so the two cannot drift
+    /// in content or order.
+    fn for_each_unique_dissector(&self, mut visit: impl FnMut(&dyn Dissector)) {
         let mut seen = HashSet::new();
-        let mut schemas = Vec::new();
 
         let mut push = |d: &dyn Dissector| {
             if seen.insert(d.short_name()) {
-                schemas.push(ProtocolFieldSchema {
-                    name: d.name(),
-                    short_name: d.short_name(),
-                    fields: d.field_descriptors(),
-                });
+                visit(d);
             }
         };
 
@@ -1162,8 +1184,42 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+    }
 
+    /// Returns field metadata for all registered dissectors.
+    ///
+    /// Each dissector is included at most once, deduplicated by `short_name`
+    /// (the same dissector type may be registered under multiple dispatch keys,
+    /// e.g., DNS on both TCP port 53 and UDP port 53).
+    pub fn all_field_schemas(&self) -> Vec<ProtocolFieldSchema> {
+        let mut schemas = Vec::new();
+        self.for_each_unique_dissector(|d| {
+            schemas.push(ProtocolFieldSchema {
+                name: d.name(),
+                short_name: d.short_name(),
+                fields: d.field_descriptors(),
+            });
+        });
         schemas
+    }
+
+    /// Returns protocol metadata for all registered dissectors.
+    ///
+    /// Same dissectors, deduplication and order as
+    /// [`all_field_schemas`](Self::all_field_schemas), with the specification
+    /// references and stack position each dissector declares.
+    pub fn all_protocol_info(&self) -> Vec<ProtocolInfo> {
+        let mut infos = Vec::new();
+        self.for_each_unique_dissector(|d| {
+            infos.push(ProtocolInfo {
+                name: d.name(),
+                short_name: d.short_name(),
+                layer: d.layer(),
+                references: d.references(),
+                fields: d.field_descriptors(),
+            });
+        });
+        infos
     }
 }
 
@@ -1264,6 +1320,21 @@ impl DissectorRegistry {
 #[cfg(feature = "ospf")]
 struct OspfDispatcher;
 
+/// Specifications behind the versions the OSPF dispatcher routes to.
+#[cfg(feature = "ospf")]
+static OSPF_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2328",
+        "OSPF Version 2",
+        "https://www.rfc-editor.org/rfc/rfc2328",
+    ),
+    SpecReference::new(
+        "RFC 5340",
+        "OSPF for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc5340",
+    ),
+];
+
 #[cfg(feature = "ospf")]
 impl Dissector for OspfDispatcher {
     fn name(&self) -> &'static str {
@@ -1279,6 +1350,14 @@ impl Dissector for OspfDispatcher {
         // Return the union of descriptors is impractical, so return an empty slice.
         // The actual dissector's descriptors are authoritative.
         &[]
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        OSPF_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -1310,6 +1389,31 @@ impl Dissector for OspfDispatcher {
 #[cfg(any(feature = "http", feature = "http2"))]
 struct HttpDispatcher;
 
+/// Specifications behind both versions the HTTP dispatcher routes to.
+#[cfg(all(feature = "http", feature = "http2"))]
+static HTTP_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 9110",
+        "HTTP Semantics",
+        "https://www.rfc-editor.org/rfc/rfc9110",
+    ),
+    SpecReference::new(
+        "RFC 9112",
+        "HTTP/1.1",
+        "https://www.rfc-editor.org/rfc/rfc9112",
+    ),
+    SpecReference::new(
+        "RFC 9113",
+        "HTTP/2",
+        "https://www.rfc-editor.org/rfc/rfc9113",
+    ),
+    SpecReference::new(
+        "RFC 7541",
+        "HPACK: Header Compression for HTTP/2",
+        "https://www.rfc-editor.org/rfc/rfc7541",
+    ),
+];
+
 #[cfg(any(feature = "http", feature = "http2"))]
 impl Dissector for HttpDispatcher {
     fn name(&self) -> &'static str {
@@ -1322,6 +1426,25 @@ impl Dissector for HttpDispatcher {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         &[]
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        #[cfg(all(feature = "http", feature = "http2"))]
+        {
+            HTTP_REFERENCES
+        }
+        #[cfg(all(feature = "http", not(feature = "http2")))]
+        {
+            packet_dissector_http::HttpDissector.references()
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            packet_dissector_http2::Http2Dissector.references()
+        }
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1352,6 +1475,31 @@ impl Dissector for HttpDispatcher {
 #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
 struct L2tpDispatcher;
 
+/// Specifications behind both versions the L2TP dispatcher routes to.
+#[cfg(all(feature = "l2tp", feature = "l2tpv3"))]
+static L2TP_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2661",
+        "Layer Two Tunneling Protocol \"L2TP\"",
+        "https://www.rfc-editor.org/rfc/rfc2661",
+    ),
+    SpecReference::new(
+        "RFC 3931",
+        "Layer Two Tunneling Protocol - Version 3 (L2TPv3)",
+        "https://www.rfc-editor.org/rfc/rfc3931",
+    ),
+    SpecReference::new(
+        "RFC 5641",
+        "Layer 2 Tunneling Protocol Version 3 (L2TPv3) Extended Circuit Status Values",
+        "https://www.rfc-editor.org/rfc/rfc5641",
+    ),
+    SpecReference::new(
+        "RFC 9601",
+        "Propagating Explicit Congestion Notification across IP Tunnel Headers Separated by a Shim",
+        "https://www.rfc-editor.org/rfc/rfc9601",
+    ),
+];
+
 #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
 impl Dissector for L2tpDispatcher {
     fn name(&self) -> &'static str {
@@ -1364,6 +1512,25 @@ impl Dissector for L2tpDispatcher {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         &[]
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        #[cfg(all(feature = "l2tp", feature = "l2tpv3"))]
+        {
+            L2TP_REFERENCES
+        }
+        #[cfg(all(feature = "l2tp", not(feature = "l2tpv3")))]
+        {
+            packet_dissector_l2tp::L2tpDissector.references()
+        }
+        #[cfg(not(feature = "l2tp"))]
+        {
+            packet_dissector_l2tpv3::L2tpv3Dissector.references()
+        }
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
     }
 
     fn dissect<'pkt>(
@@ -2811,6 +2978,42 @@ mod tests {
         assert!(names.contains(&"llc"));
         assert!(names.contains(&"rt-fb"));
         assert!(names.contains(&"lt"));
+    }
+
+    // --- all_protocol_info ---
+
+    #[test]
+    fn all_protocol_info_mirrors_all_field_schemas_order() {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(StubDissector("entry")));
+        reg.register_by_ethertype(0x0800, Box::new(StubDissector("et")))
+            .unwrap();
+        reg.register_by_udp_port(53, Box::new(StubDissector("dns")))
+            .unwrap();
+        reg.register_by_tcp_port(53, Box::new(StubDissector("dns")))
+            .unwrap();
+
+        let infos = reg.all_protocol_info();
+        let schemas = reg.all_field_schemas();
+
+        let info_names: Vec<&str> = infos.iter().map(|i| i.short_name).collect();
+        let schema_names: Vec<&str> = schemas.iter().map(|s| s.short_name).collect();
+        assert_eq!(info_names, schema_names);
+    }
+
+    #[test]
+    fn all_protocol_info_reports_trait_defaults_for_stubs() {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(StubDissector("entry")));
+
+        let infos = reg.all_protocol_info();
+        let entry = infos
+            .iter()
+            .find(|i| i.short_name == "entry")
+            .expect("entry dissector should be present");
+        assert_eq!(entry.name, "entry");
+        assert!(entry.references.is_empty());
+        assert_eq!(entry.layer, None);
     }
 
     // --- Default registry feature-gated registrations ---

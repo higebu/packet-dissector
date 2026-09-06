@@ -12,7 +12,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, MacAddr};
 use packet_dissector_core::packet::DissectBuffer;
@@ -295,6 +297,30 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 ///   ARP Probe, ARP Announcement, or Gratuitous ARP Reply per RFC 5227.
 pub struct ArpDissector;
 
+/// Specification references for the ARP dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 826",
+        "An Ethernet Address Resolution Protocol: Or Converting Network Protocol Addresses to 48.bit Ethernet Address for Transmission on Ethernet Hardware",
+        "https://www.rfc-editor.org/rfc/rfc826",
+    ),
+    SpecReference::new(
+        "RFC 5227",
+        "IPv4 Address Conflict Detection",
+        "https://www.rfc-editor.org/rfc/rfc5227",
+    ),
+    SpecReference::new(
+        "RFC 5494",
+        "IANA Allocation Guidelines for the Address Resolution Protocol (ARP)",
+        "https://www.rfc-editor.org/rfc/rfc5494",
+    ),
+    SpecReference::new(
+        "IANA ARP Parameters",
+        "Address Resolution Protocol (ARP) Parameters",
+        "https://www.iana.org/assignments/arp-parameters/arp-parameters.xhtml",
+    ),
+];
+
 impl Dissector for ArpDissector {
     fn name(&self) -> &'static str {
         "Address Resolution Protocol"
@@ -306,6 +332,14 @@ impl Dissector for ArpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -737,5 +771,27 @@ mod tests {
         let oper = FIELD_DESCRIPTORS[FD_OPER].display_fn.unwrap();
         assert_eq!(oper(&FieldValue::U16(1), &[]), Some("REQUEST"));
         assert_eq!(oper(&FieldValue::U8(0), &[]), None);
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
+        }
+
+        assert_layer_and_references(&ArpDissector);
     }
 }

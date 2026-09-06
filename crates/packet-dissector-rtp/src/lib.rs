@@ -8,7 +8,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -59,6 +61,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("ext_data", "Extension Data", FieldType::Bytes).optional(),
 ];
 
+/// Specification references for the RTP dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 3550",
+    "RTP: A Transport Protocol for Real-Time Applications",
+    "https://www.rfc-editor.org/rfc/rfc3550",
+)];
+
 /// RTP dissector.
 pub struct RtpDissector;
 
@@ -73,6 +82,14 @@ impl Dissector for RtpDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -849,5 +866,16 @@ mod tests {
     fn name_and_short_name() {
         assert_eq!(RtpDissector.name(), "Real-time Transport Protocol");
         assert_eq!(RtpDissector.short_name(), "RTP");
+    }
+
+    #[test]
+    fn references_and_layer() {
+        let references = RtpDissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(RtpDissector.layer(), Some(ProtocolLayer::Application));
     }
 }

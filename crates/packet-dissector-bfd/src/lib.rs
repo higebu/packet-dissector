@@ -15,7 +15,9 @@
 
 #![deny(missing_docs)]
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -221,6 +223,45 @@ const FD_REQUIRED_MIN_ECHO_RX_INTERVAL: usize = 15;
 const FD_AUTH_TYPE: usize = 16;
 const FD_AUTH_DATA: usize = 17;
 
+/// Specification references for the BFD dissector.
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 5880",
+        "Bidirectional Forwarding Detection (BFD)",
+        "https://www.rfc-editor.org/rfc/rfc5880",
+    ),
+    SpecReference::new(
+        "RFC 5881",
+        "Bidirectional Forwarding Detection (BFD) for IPv4 and IPv6 (Single Hop)",
+        "https://www.rfc-editor.org/rfc/rfc5881",
+    ),
+    SpecReference::new(
+        "RFC 5883",
+        "Bidirectional Forwarding Detection (BFD) for Multihop Paths",
+        "https://www.rfc-editor.org/rfc/rfc5883",
+    ),
+    SpecReference::new(
+        "RFC 7419",
+        "Common Interval Support in Bidirectional Forwarding Detection",
+        "https://www.rfc-editor.org/rfc/rfc7419",
+    ),
+    SpecReference::new(
+        "RFC 7880",
+        "Seamless Bidirectional Forwarding Detection (S-BFD)",
+        "https://www.rfc-editor.org/rfc/rfc7880",
+    ),
+    SpecReference::new(
+        "RFC 8562",
+        "Bidirectional Forwarding Detection (BFD) for Multipoint Networks",
+        "https://www.rfc-editor.org/rfc/rfc8562",
+    ),
+    SpecReference::new(
+        "RFC 9747",
+        "Unaffiliated Bidirectional Forwarding Detection (BFD) Echo",
+        "https://www.rfc-editor.org/rfc/rfc9747",
+    ),
+];
+
 impl Dissector for BfdDissector {
     fn name(&self) -> &'static str {
         "Bidirectional Forwarding Detection"
@@ -232,6 +273,14 @@ impl Dissector for BfdDissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
     }
 
     fn dissect<'pkt>(
@@ -1159,5 +1208,27 @@ mod tests {
             }
             other => panic!("Expected InvalidHeader, got {other:?}"),
         }
+    }
+
+    /// Every dissector in this crate must cite the specifications it
+    /// implements and declare where it sits in the dissection stack.
+    #[test]
+    fn references_and_layer_are_populated() {
+        fn assert_layer_and_references(dissector: &dyn Dissector) {
+            let references = dissector.references();
+            assert!(!references.is_empty());
+            for reference in references {
+                assert!(!reference.id.is_empty());
+                assert!(!reference.title.is_empty());
+                assert!(
+                    reference.url.starts_with("https://"),
+                    "{} url must start with https://",
+                    reference.id
+                );
+            }
+            assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+        }
+
+        assert_layer_and_references(&BfdDissector);
     }
 }

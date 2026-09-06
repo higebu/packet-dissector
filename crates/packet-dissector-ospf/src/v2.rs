@@ -3,7 +3,9 @@
 //! ## References
 //! - RFC 2328: <https://www.rfc-editor.org/rfc/rfc2328>
 
-use packet_dissector_core::dissector::{DispatchHint, DissectResult, Dissector};
+use packet_dissector_core::dissector::{
+    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -271,6 +273,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// OSPFv2 dissector.
 pub struct Ospfv2Dissector;
 
+/// Specification references for the OSPFv2 dissector.
+static REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 2328",
+    "OSPF Version 2",
+    "https://www.rfc-editor.org/rfc/rfc2328",
+)];
+
 impl Dissector for Ospfv2Dissector {
     fn name(&self) -> &'static str {
         "Open Shortest Path First v2"
@@ -282,6 +291,14 @@ impl Dissector for Ospfv2Dissector {
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Network)
     }
 
     fn dissect<'pkt>(
@@ -957,5 +974,17 @@ mod tests {
             buf.resolve_container_display_name(idx as u32),
             Some("Router-LSA")
         );
+    }
+
+    #[test]
+    fn references_and_layer_are_populated() {
+        let dissector = Ospfv2Dissector;
+        let references = dissector.references();
+        assert!(!references.is_empty());
+        for reference in references {
+            assert!(!reference.id.is_empty());
+            assert!(reference.url.starts_with("https://"));
+        }
+        assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
     }
 }
