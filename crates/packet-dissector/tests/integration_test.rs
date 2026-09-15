@@ -86,6 +86,9 @@
 //! | Ethernet → IPv4 → ESP (NULL tunnel) → IPv4 → UDP             | integration_ethernet_ipv4_esp_null_ipv4_udp          |
 //! | Ethernet → IPv4 → ESP (NULL transport) → UDP                  | integration_ethernet_ipv4_esp_null_transport_udp     |
 //! | Ethernet → IPv4 → UDP(500) → IKEv2 IKE_SA_INIT              | integration_ethernet_ipv4_udp_ike_sa_init            |
+//! | Ethernet → IPv4 → UDP(4500) → ESP (NULL) → IPv4 → UDP       | integration_ethernet_ipv4_udp4500_esp_null_ipv4_udp  |
+//! | Ethernet → IPv4 → UDP(4500) → Non-ESP marker → IKEv2        | integration_ethernet_ipv4_udp4500_non_esp_marker_ike |
+//! | Ethernet → IPv4 → UDP(4500) → NAT-keepalive                 | integration_ethernet_ipv4_udp4500_nat_keepalive      |
 //! | Ethernet → IPv4 → UDP → RTP                                  | integration_ethernet_ipv4_udp_rtp                    |
 //! | Ethernet → IPv4 → UDP → QUIC Initial                          | integration_ethernet_ipv4_udp_quic_initial            |
 //! | Ethernet → IPv4 → UDP → QUIC Short Header                     | integration_ethernet_ipv4_udp_quic_short              |
@@ -5846,6 +5849,142 @@ fn integration_ethernet_ipv4_udp_ike_sa_init() {
     }
 
     assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → IPv4 → UDP(4500) → ESP (NULL, tunnel mode) → IPv4 → UDP
+///
+/// RFC 3948, Section 2.1 — UDP-encapsulated ESP for NAT traversal. The SPI
+/// field is non-zero, which distinguishes ESP from the Non-ESP marker that
+/// prefixes IKE on the same port.
+/// <https://www.rfc-editor.org/rfc/rfc3948#section-2.1>
+#[test]
+#[cfg(all(feature = "esp", feature = "udp", feature = "ipv4"))]
+fn integration_ethernet_ipv4_udp4500_esp_null_ipv4_udp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 4500, 4500);
+
+    // ESP header — SPI MUST NOT be zero (RFC 3948, Section 2.1).
+    pkt.extend_from_slice(&0x0000_5005u32.to_be_bytes());
+    pkt.extend_from_slice(&9u32.to_be_bytes());
+
+    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let inner_udp_start = push_udp(&mut pkt, 12345, 54321);
+    pkt.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+    fixup_udp_length(&mut pkt, inner_udp_start);
+    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
+
+    // ESP trailer: pad_length=0, next_header=4 (IPv4-in-IPv4)
+    pkt.push(0x00);
+    pkt.push(0x04);
+
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    // Ethernet, outer IPv4, UDP, ESP, inner IPv4, inner UDP
+    assert_eq!(buf.layers().len(), 6);
+    assert_eq!(buf.layers()[2].name, "UDP");
+    assert_eq!(buf.layers()[3].name, "ESP");
+    assert_eq!(buf.layers()[4].name, "IPv4");
+    assert_eq!(buf.layers()[5].name, "UDP");
+
+    let esp = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(esp, "spi").unwrap().value,
+        FieldValue::U32(0x0000_5005)
+    );
+    assert_eq!(
+        buf.field_by_name(esp, "next_header").unwrap().value,
+        FieldValue::U8(4)
+    );
+
+    let inner_udp = &buf.layers()[5];
+    assert_eq!(
+        buf.field_by_name(inner_udp, "src_port").unwrap().value,
+        FieldValue::U16(12345)
+    );
+}
+
+/// Ethernet → IPv4 → UDP(4500) → Non-ESP marker → IKEv2 IKE_SA_INIT
+///
+/// RFC 3948, Section 2.2 — "A Non-ESP Marker is 4 zero-valued bytes aligning
+/// with the SPI field of an ESP packet."
+/// <https://www.rfc-editor.org/rfc/rfc3948#section-2.2>
+#[test]
+#[cfg(all(feature = "ike", feature = "udp", feature = "ipv4"))]
+fn integration_ethernet_ipv4_udp4500_non_esp_marker_ike() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 4500, 4500);
+
+    pkt.extend_from_slice(&[0x00; 4]); // Non-ESP marker
+
+    // IKE header (28 bytes) + one SA payload (8 bytes)
+    pkt.extend_from_slice(&[0x01; 8]); // Initiator SPI
+    pkt.extend_from_slice(&[0x00; 8]); // Responder SPI
+    pkt.push(33); // Next Payload: SA
+    pkt.push(0x20); // Version 2.0
+    pkt.push(34); // IKE_SA_INIT
+    pkt.push(0x08); // Flags: Initiator
+    pkt.extend_from_slice(&0u32.to_be_bytes());
+    pkt.extend_from_slice(&36u32.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x08, 0xAA, 0xAA, 0xAA, 0xAA]);
+
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4); // Ethernet, IPv4, UDP, IKE
+    assert_eq!(buf.layers()[3].name, "IKE");
+
+    let ike = buf.layer_by_name("IKE").unwrap();
+    assert_eq!(
+        buf.field_by_name(ike, "initiator_spi").unwrap().value,
+        FieldValue::Bytes(&[0x01; 8])
+    );
+    assert_eq!(
+        buf.field_by_name(ike, "major_version").unwrap().value,
+        FieldValue::U8(2)
+    );
+}
+
+/// Ethernet → IPv4 → UDP(4500) → NAT-keepalive
+///
+/// RFC 3948, Section 2.3 — "The sender MUST use a one-octet-long payload with
+/// the value 0xFF." It is neither ESP nor IKE, so no further layer appears.
+/// <https://www.rfc-editor.org/rfc/rfc3948#section-2.3>
+#[test]
+#[cfg(all(feature = "esp", feature = "udp", feature = "ipv4"))]
+fn integration_ethernet_ipv4_udp4500_nat_keepalive() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 4500, 4500);
+    pkt.push(0xFF);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    // Ethernet, IPv4, UDP only — a keepalive carries no protocol payload.
+    assert_eq!(buf.layers().len(), 3);
+    assert_eq!(buf.layers()[2].name, "UDP");
+    assert!(buf.layer_by_name("ESP").is_none());
+    assert!(buf.layer_by_name("IKE").is_none());
 }
 
 /// Ethernet → IPv4 → UDP → RTP (programmatic registration, no well-known port).
