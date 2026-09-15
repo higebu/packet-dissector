@@ -17,6 +17,18 @@ use packet_dissector_core::lookup::ip_protocol_name;
 /// IP protocol number for HOPOPT (IPv6 Hop-by-Hop Options, RFC 8200).
 const IP_PROTO_HOPOPT: u8 = 0;
 
+/// IP protocol number for IPv4 (RFC 2003, IP-in-IP encapsulation).
+const IP_PROTO_IPV4: u8 = 4;
+
+/// IP protocol number for TCP (RFC 9293).
+const IP_PROTO_TCP: u8 = 6;
+
+/// IP protocol number for UDP (RFC 768).
+const IP_PROTO_UDP: u8 = 17;
+
+/// IP protocol number for IPv6 encapsulation (RFC 2473).
+const IP_PROTO_IPV6: u8 = 41;
+
 /// IP protocol number for "no next header" (RFC 8200, Section 4.7).
 ///
 /// Per RFC 4303, Section 2.6, this value is also mandated for ESP "dummy"
@@ -126,6 +138,13 @@ pub struct DecryptedEsp {
     pub next_header: u8,
     /// Pad Length value from the ESP trailer.
     pub pad_length: u8,
+    /// Length in bytes of the ICV that follows the trailer on the wire.
+    ///
+    /// Callers use this to locate the trailer's original position inside the
+    /// ESP packet: the Next Header byte sits `icv_len + 1` bytes from the end.
+    /// It is the SA's configured ICV length on the keyed paths, and the length
+    /// detected by [`try_null_decrypt`] on the heuristic path.
+    pub icv_len: usize,
 }
 
 /// Decrypt an ESP payload.
@@ -172,7 +191,117 @@ fn decrypt_null(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
         ));
     }
     let plaintext = data[..data.len() - icv_len].to_vec();
-    extract_trailer(plaintext)
+    extract_trailer(plaintext, icv_len)
+}
+
+/// ICV lengths the NULL heuristic considers, in ascending order.
+///
+/// `0` covers ESP without integrity protection. The non-zero entries are the
+/// ICV lengths of the integrity algorithms IPsec deploys in practice:
+///
+/// - 12 bytes — 96-bit ICVs: HMAC-MD5-96 (RFC 2403), HMAC-SHA-1-96
+///   (RFC 2404), AES-XCBC-MAC-96 (RFC 3566).
+/// - 16, 24, 32 bytes — HMAC-SHA-256-128, HMAC-SHA-384-192 and
+///   HMAC-SHA-512-256 (RFC 4868, Section 2.3).
+const NULL_HEURISTIC_ICV_LENS: [usize; 5] = [0, 12, 16, 24, 32];
+
+/// Validate the two bytes preceding a candidate ICV as an ESP trailer.
+///
+/// Returns `(payload_end, next_header, pad_length)` where `payload_end` is the
+/// offset at which the padding starts, i.e. the exclusive end of the inner
+/// payload. Never allocates.
+///
+/// # References
+/// - RFC 4303, Section 2.4 (Padding):
+///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.4>
+/// - RFC 4303, Section 2.5 (Pad Length):
+///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.5>
+/// - RFC 4303, Section 2.6 (Next Header):
+///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.6>
+fn null_trailer_at(data: &[u8], icv_len: usize) -> Option<(usize, u8, usize)> {
+    let trailer_end = data.len().checked_sub(icv_len)?;
+    if trailer_end < 2 {
+        return None;
+    }
+
+    let next_header = data[trailer_end - 1];
+    let pad_length = data[trailer_end - 2] as usize;
+
+    ip_protocol_name(next_header)?;
+
+    // HOPOPT matches any zero-filled trailer (extremely common in random
+    // ciphertext), and IPv6_NONXT has no dispatch target.
+    if next_header == IP_PROTO_HOPOPT || next_header == IP_PROTO_IPV6_NONXT {
+        return None;
+    }
+
+    if pad_length + 2 > trailer_end {
+        return None;
+    }
+
+    let payload_end = trailer_end - 2 - pad_length;
+    for (i, &b) in data[payload_end..trailer_end - 2].iter().enumerate() {
+        if b as usize != i + 1 {
+            return None;
+        }
+    }
+
+    Some((payload_end, next_header, pad_length))
+}
+
+/// Corroborate a candidate ESP trailer against the payload it would expose.
+///
+/// Returns `true` only when the inner header carries a self-describing length
+/// (or an equivalent structural invariant) that matches `payload` exactly.
+/// Protocols without one return `false`, which keeps the heuristic from
+/// guessing an ICV length it cannot verify.
+fn inner_header_matches(next_header: u8, payload: &[u8]) -> bool {
+    match next_header {
+        // RFC 791, Section 3.1 — Version, IHL and Total Length.
+        // <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
+        IP_PROTO_IPV4 => {
+            const MIN_IHL: usize = 5;
+            if payload.len() < MIN_IHL * 4 {
+                return false;
+            }
+            let ihl = (payload[0] & 0x0F) as usize;
+            payload[0] >> 4 == 4
+                && ihl >= MIN_IHL
+                && ihl * 4 <= payload.len()
+                && u16::from_be_bytes([payload[2], payload[3]]) as usize == payload.len()
+        }
+        // RFC 8200, Section 3 — Version and Payload Length (excludes the
+        // 40-byte fixed header).
+        // <https://www.rfc-editor.org/rfc/rfc8200#section-3>
+        IP_PROTO_IPV6 => {
+            const HEADER_LEN: usize = 40;
+            payload.len() >= HEADER_LEN
+                && payload[0] >> 4 == 6
+                && HEADER_LEN + u16::from_be_bytes([payload[4], payload[5]]) as usize
+                    == payload.len()
+        }
+        // RFC 768 — Length covers the UDP header and data.
+        // <https://www.rfc-editor.org/rfc/rfc768>
+        IP_PROTO_UDP => {
+            const HEADER_LEN: usize = 8;
+            payload.len() >= HEADER_LEN
+                && u16::from_be_bytes([payload[4], payload[5]]) as usize == payload.len()
+        }
+        // RFC 9293, Section 3.1 — Data Offset (>= 5 and within the segment)
+        // and the reserved bits sharing its byte, which are sent as zero.
+        // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
+        IP_PROTO_TCP => {
+            const MIN_DATA_OFFSET: usize = 5;
+            if payload.len() < MIN_DATA_OFFSET * 4 {
+                return false;
+            }
+            let data_offset = (payload[12] >> 4) as usize;
+            data_offset >= MIN_DATA_OFFSET
+                && data_offset * 4 <= payload.len()
+                && payload[12] & 0x0F == 0
+        }
+        _ => false,
+    }
 }
 
 /// Heuristically attempt to decode ESP payload as NULL-encrypted plaintext.
@@ -181,31 +310,41 @@ fn decrypt_null(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
 /// function treats the raw payload (everything after the 8-byte ESP header)
 /// as plaintext and tries to extract the ESP trailer. Inspired by passive
 /// capture analysers such as Wireshark, it enables inner packet dissection
-/// of unauthenticated NULL-encrypted ESP flows without pre-configuring an SA.
+/// of NULL-encrypted ESP flows without pre-configuring an SA.
+///
+/// # ICV detection
+///
+/// With `ealg=null` the payload is plaintext whether or not the SA also
+/// applies an integrity algorithm, but an ICV shifts the trailer away from
+/// the end of the packet and its length is not carried on the wire. Each
+/// candidate length (0, 12, 16, 24, 32) is therefore tried in turn:
+///
+/// - A candidate whose payload is corroborated by its own inner header
+///   (a self-describing length that matches exactly) wins immediately,
+///   at any ICV length.
+/// - An uncorroborated candidate is accepted only at `icv_len == 0`, where
+///   the trailer sits at the true end of the ESP payload and the checks
+///   below stand on their own. Guessing a non-zero ICV length without
+///   corroboration would invent a trailer position, so it is never done.
 ///
 /// # Validation
 ///
-/// Returns `None` (never allocating) unless ALL of the following hold:
+/// A candidate trailer requires ALL of:
 ///
-/// 1. `data.len() >= 2` — room for `pad_length` and `next_header`.
-/// 2. `next_header` (last byte) is a well-known IP protocol number
-///    recognised by [`ip_protocol_name`]. This rejects the vast majority
-///    of random bytes that would otherwise appear as valid trailers.
+/// 1. Room for `pad_length` and `next_header` ahead of the candidate ICV.
+/// 2. `next_header` is a well-known IP protocol number recognised by
+///    [`ip_protocol_name`]. This rejects the vast majority of random bytes
+///    that would otherwise appear as valid trailers.
 /// 3. `next_header` is not in the small set of values that are either
 ///    unlikely to appear as an ESP inner protocol or are strongly biased
 ///    towards false positives on zero-filled ciphertext: HOPOPT (0),
 ///    IPv6_NONXT (59). HOPOPT in particular matches any payload whose
 ///    final byte is `0x00`, which is extremely common in random data.
-/// 4. `pad_length + 2 <= data.len()` — the padding field does not
-///    overrun the payload.
+/// 4. The padding field does not overrun the payload.
 /// 5. Padding bytes match the monotonically increasing sequence
 ///    `1, 2, 3, ..., pad_length` mandated by RFC 4303 Section 2.4.
-///    This rule provides strong protection against false positives
-///    when `pad_length > 0`.
 ///
-/// Because authentication is never assumed for the heuristic path, this
-/// function does not account for an ICV — NULL encryption with an ICV
-/// requires an explicitly configured SA.
+/// Nothing is allocated until a candidate is accepted.
 ///
 /// # References
 /// - RFC 2410 (NULL Encryption):
@@ -216,37 +355,36 @@ fn decrypt_null(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
 ///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.5>
 /// - RFC 4303, Section 2.6 (Next Header):
 ///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.6>
+/// - RFC 4303, Section 2.8 (Integrity Check Value):
+///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.8>
 pub fn try_null_decrypt(data: &[u8]) -> Option<DecryptedEsp> {
-    if data.len() < 2 {
-        return None;
-    }
+    let mut uncorroborated = None;
 
-    let next_header = data[data.len() - 1];
-    let pad_length = data[data.len() - 2] as usize;
+    for icv_len in NULL_HEURISTIC_ICV_LENS {
+        let Some((payload_end, next_header, pad_length)) = null_trailer_at(data, icv_len) else {
+            continue;
+        };
 
-    ip_protocol_name(next_header)?;
+        if inner_header_matches(next_header, &data[..payload_end]) {
+            return Some(DecryptedEsp {
+                payload: data[..payload_end].to_vec(),
+                next_header,
+                pad_length: pad_length as u8,
+                icv_len,
+            });
+        }
 
-    // HOPOPT matches any zero-filled trailer (extremely common in random
-    // ciphertext), and IPv6_NONXT has no dispatch target.
-    if next_header == IP_PROTO_HOPOPT || next_header == IP_PROTO_IPV6_NONXT {
-        return None;
-    }
-
-    if pad_length + 2 > data.len() {
-        return None;
-    }
-
-    let pad_start = data.len() - 2 - pad_length;
-    for (i, &b) in data[pad_start..data.len() - 2].iter().enumerate() {
-        if b as usize != i + 1 {
-            return None;
+        if icv_len == 0 {
+            uncorroborated = Some((payload_end, next_header, pad_length));
         }
     }
 
+    let (payload_end, next_header, pad_length) = uncorroborated?;
     Some(DecryptedEsp {
-        payload: data[..pad_start].to_vec(),
+        payload: data[..payload_end].to_vec(),
         next_header,
         pad_length: pad_length as u8,
+        icv_len: 0,
     })
 }
 
@@ -307,7 +445,7 @@ fn decrypt_cbc(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
         }
     }
 
-    extract_trailer(buf)
+    extract_trailer(buf, icv_len)
 }
 
 /// AES-GCM decryption.
@@ -401,7 +539,7 @@ fn decrypt_gcm(
         }
     };
 
-    extract_trailer(plaintext)
+    extract_trailer(plaintext, GCM_TAG_LEN)
 }
 
 /// Extract padding, pad_length, and next_header from decrypted plaintext.
@@ -411,7 +549,7 @@ fn decrypt_gcm(
 ///
 /// RFC 4303, Section 2.4-2.6: <https://www.rfc-editor.org/rfc/rfc4303#section-2.4>
 /// Plaintext layout: [payload] [padding(0-255)] [pad_length(1)] [next_header(1)]
-fn extract_trailer(mut plaintext: Vec<u8>) -> Result<DecryptedEsp, PacketError> {
+fn extract_trailer(mut plaintext: Vec<u8>, icv_len: usize) -> Result<DecryptedEsp, PacketError> {
     if plaintext.len() < 2 {
         return Err(PacketError::InvalidHeader(
             "ESP: decrypted data too short for trailer",
@@ -435,6 +573,7 @@ fn extract_trailer(mut plaintext: Vec<u8>) -> Result<DecryptedEsp, PacketError> 
         payload: plaintext,
         next_header,
         pad_length: pad_length as u8,
+        icv_len,
     })
 }
 
@@ -551,7 +690,7 @@ mod tests {
     fn test_extract_trailer_basic() {
         // payload=[0x45, 0x00], padding=[], pad_length=0, next_header=4 (IPv4)
         let plaintext = [0x45, 0x00, 0x00, 0x04];
-        let result = extract_trailer(plaintext.to_vec()).unwrap();
+        let result = extract_trailer(plaintext.to_vec(), 0).unwrap();
         assert_eq!(result.next_header, 4);
         assert_eq!(result.pad_length, 0);
         assert_eq!(result.payload, vec![0x45, 0x00]);
@@ -561,7 +700,7 @@ mod tests {
     fn test_extract_trailer_with_padding() {
         // payload=[0x45], padding=[0x01, 0x02], pad_length=2, next_header=4
         let plaintext = [0x45, 0x01, 0x02, 0x02, 0x04];
-        let result = extract_trailer(plaintext.to_vec()).unwrap();
+        let result = extract_trailer(plaintext.to_vec(), 0).unwrap();
         assert_eq!(result.next_header, 4);
         assert_eq!(result.pad_length, 2);
         assert_eq!(result.payload, vec![0x45]);
@@ -570,7 +709,7 @@ mod tests {
     #[test]
     fn test_extract_trailer_too_short() {
         let plaintext = [0x04];
-        let err = extract_trailer(plaintext.to_vec()).unwrap_err();
+        let err = extract_trailer(plaintext.to_vec(), 0).unwrap_err();
         assert!(matches!(err, PacketError::InvalidHeader(_)));
     }
 
@@ -578,7 +717,7 @@ mod tests {
     fn test_extract_trailer_bad_pad_length() {
         // pad_length=100 but only 4 bytes total
         let plaintext = [0x45, 0x00, 100, 0x04];
-        let err = extract_trailer(plaintext.to_vec()).unwrap_err();
+        let err = extract_trailer(plaintext.to_vec(), 0).unwrap_err();
         assert!(matches!(err, PacketError::InvalidHeader(_)));
     }
 
@@ -1149,5 +1288,159 @@ mod tests {
         // next_header=59 (IPv6_NONXT) is excluded: no dispatch target.
         let data = [0x45, 0x00, 0x00, 59];
         assert!(try_null_decrypt(&data).is_none());
+    }
+
+    /// Build a minimal, well-formed inner IPv4 packet whose Total Length
+    /// field matches its own byte length, so the NULL heuristic's inner
+    /// header corroboration accepts it.
+    fn inner_ipv4(payload_len: usize) -> Vec<u8> {
+        let total = 20 + payload_len;
+        let mut pkt = vec![0u8; total];
+        pkt[0] = 0x45; // version 4, IHL 5
+        pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        pkt[9] = 17; // UDP
+        pkt
+    }
+
+    #[test]
+    fn test_try_null_decrypt_detects_12_byte_icv() {
+        // ealg=null + aalg=hmac-sha1-96: plaintext payload with a 12-byte ICV
+        // appended. The payload is plaintext, so the inner packet must be
+        // recoverable without any key.
+        let inner = inner_ipv4(8);
+        let mut data = inner.clone();
+        data.extend_from_slice(&[0, 4]); // pad_length=0, next_header=4 (IPv4)
+        data.extend_from_slice(&[0xAA; 12]); // ICV
+
+        let result = try_null_decrypt(&data).expect("12-byte ICV must be detected");
+        assert_eq!(result.next_header, 4);
+        assert_eq!(result.pad_length, 0);
+        assert_eq!(result.icv_len, 12);
+        assert_eq!(result.payload, inner);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_detects_16_byte_icv() {
+        // ealg=null + aalg=hmac-sha256-128 (16-byte ICV).
+        let inner = inner_ipv4(4);
+        let mut data = inner.clone();
+        data.extend_from_slice(&[0, 4]);
+        data.extend_from_slice(&[0xBB; 16]);
+
+        let result = try_null_decrypt(&data).expect("16-byte ICV must be detected");
+        assert_eq!(result.icv_len, 16);
+        assert_eq!(result.payload, inner);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_detects_icv_with_ipv6_inner() {
+        // next_header=41 (IPv6-in-IPv6) corroborated by the inner IPv6 header.
+        let mut inner = vec![0u8; 48];
+        inner[0] = 0x60; // version 6
+        inner[4..6].copy_from_slice(&8u16.to_be_bytes()); // payload length
+        inner[6] = 17; // next header = UDP
+        let mut data = inner.clone();
+        data.extend_from_slice(&[0, 41]);
+        data.extend_from_slice(&[0xCC; 12]);
+
+        let result = try_null_decrypt(&data).expect("IPv6 inner must be detected");
+        assert_eq!(result.next_header, 41);
+        assert_eq!(result.icv_len, 12);
+        assert_eq!(result.payload, inner);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_detects_icv_with_udp_inner() {
+        // Transport mode: next_header=17, corroborated by the UDP Length field.
+        let mut inner = vec![0u8; 16];
+        inner[0..2].copy_from_slice(&1234u16.to_be_bytes());
+        inner[2..4].copy_from_slice(&5678u16.to_be_bytes());
+        inner[4..6].copy_from_slice(&16u16.to_be_bytes()); // UDP length
+        let mut data = inner.clone();
+        data.extend_from_slice(&[0, 17]);
+        data.extend_from_slice(&[0xDD; 16]);
+
+        let result = try_null_decrypt(&data).expect("UDP inner must be detected");
+        assert_eq!(result.next_header, 17);
+        assert_eq!(result.icv_len, 16);
+        assert_eq!(result.payload, inner);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_detects_icv_with_tcp_inner() {
+        // Transport mode with next_header=6: TCP has no length field, so the
+        // corroboration relies on Data Offset and the reserved bits.
+        let mut inner = vec![0u8; 24];
+        inner[12] = 0x60; // Data Offset = 6 (24 bytes), reserved bits zero
+        let mut data = inner.clone();
+        data.extend_from_slice(&[0, 6]);
+        data.extend_from_slice(&[0xEE; 12]);
+
+        let result = try_null_decrypt(&data).expect("TCP inner must be detected");
+        assert_eq!(result.next_header, 6);
+        assert_eq!(result.icv_len, 12);
+        assert_eq!(result.payload, inner);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_rejects_tcp_inner_with_reserved_bits_set() {
+        // Same packet with a non-zero reserved nibble is not corroborated,
+        // so no ICV length is guessed.
+        let mut inner = vec![0u8; 24];
+        inner[12] = 0x6F; // Data Offset = 6, reserved bits set
+        let mut data = inner;
+        data.extend_from_slice(&[0, 6]);
+        data.extend_from_slice(&[0xEE; 12]);
+
+        assert!(try_null_decrypt(&data).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_prefers_corroborated_icv_over_loose_match() {
+        // Craft an ICV whose last two bytes would pass the loose icv_len=0
+        // checks (pad_length=0, next_header=6/TCP). The icv_len=12 candidate
+        // is corroborated by a real inner IPv4 header and must win.
+        let inner = inner_ipv4(12);
+        let mut data = inner.clone();
+        data.extend_from_slice(&[0, 4]);
+        let mut icv = [0xAAu8; 12];
+        icv[10] = 0; // would read as pad_length=0
+        icv[11] = 6; // would read as next_header=TCP
+        data.extend_from_slice(&icv);
+
+        let result = try_null_decrypt(&data).expect("corroborated candidate must win");
+        assert_eq!(result.next_header, 4);
+        assert_eq!(result.icv_len, 12);
+        assert_eq!(result.payload, inner);
+    }
+
+    #[test]
+    fn test_try_null_decrypt_icv_requires_inner_corroboration() {
+        // next_header=47 (GRE) cannot be corroborated from the inner header,
+        // so a non-zero ICV length is never guessed for it.
+        let mut data = vec![0x11; 24];
+        data.extend_from_slice(&[0, 47]);
+        data.extend_from_slice(&[0xEE; 12]);
+        assert!(try_null_decrypt(&data).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_rejects_inconsistent_inner_length() {
+        // next_header=4 but the inner Total Length does not match the payload
+        // length, and the trailing bytes are not a valid no-ICV trailer.
+        let mut inner = inner_ipv4(8);
+        inner[2..4].copy_from_slice(&999u16.to_be_bytes()); // bogus Total Length
+        let mut data = inner;
+        data.extend_from_slice(&[0, 4]);
+        data.extend_from_slice(&[0xAA; 12]);
+        assert!(try_null_decrypt(&data).is_none());
+    }
+
+    #[test]
+    fn test_try_null_decrypt_reports_zero_icv_len() {
+        // The existing no-ICV path must keep reporting icv_len = 0.
+        let data = [0x45, 0x00, 0x00, 0x04];
+        let result = try_null_decrypt(&data).unwrap();
+        assert_eq!(result.icv_len, 0);
     }
 }

@@ -1557,6 +1557,88 @@ impl Dissector for L2tpDispatcher {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UDP port 4500 dispatcher — RFC 3948 multiplexes UDP-encapsulated ESP, IKE
+// (behind a Non-ESP marker) and NAT-keepalives onto a single port.
+// ---------------------------------------------------------------------------
+
+/// Routes UDP port 4500 traffic to ESP or IKE.
+///
+/// The ESP dissector is stateful (it owns a handle to the registry's shared
+/// SA database), so this dispatcher holds an instance rather than being a
+/// unit struct like the other dispatchers.
+#[cfg(all(feature = "udp", feature = "esp"))]
+struct UdpEncapDispatcher {
+    esp: packet_dissector_esp::EspDissector,
+}
+
+#[cfg(all(feature = "udp", feature = "esp"))]
+static UDP_ENCAP_REFERENCES: &[SpecReference] = &[SpecReference::new(
+    "RFC 3948",
+    "UDP Encapsulation of IPsec ESP Packets",
+    "https://www.rfc-editor.org/rfc/rfc3948",
+)];
+
+#[cfg(all(feature = "udp", feature = "esp"))]
+impl Dissector for UdpEncapDispatcher {
+    fn name(&self) -> &'static str {
+        "UDP Encapsulation of IPsec ESP Packets"
+    }
+
+    fn short_name(&self) -> &'static str {
+        "UDPENCAP"
+    }
+
+    /// Empty: this dispatcher never emits a layer of its own, it delegates to
+    /// the ESP or IKE dissector, each of which is also registered under its
+    /// own dispatch key and so already contributes its schema.
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        &[]
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        UDP_ENCAP_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        use packet_dissector_core::dissector::DissectResult;
+
+        // RFC 3948, Section 2.3 — "The sender MUST use a one-octet-long
+        // payload with the value 0xFF."  A NAT-keepalive carries no protocol
+        // payload, so dissection ends here.
+        // <https://www.rfc-editor.org/rfc/rfc3948#section-2.3>
+        const NAT_KEEPALIVE: [u8; 1] = [0xFF];
+        if data == NAT_KEEPALIVE {
+            return Ok(DissectResult::new(data.len(), DispatchHint::End));
+        }
+
+        // RFC 3948, Section 2.2 — "A Non-ESP Marker is 4 zero-valued bytes
+        // aligning with the SPI field of an ESP packet."  Everything else is
+        // UDP-encapsulated ESP, whose SPI "MUST NOT be a zero value"
+        // (Section 2.1).
+        // <https://www.rfc-editor.org/rfc/rfc3948#section-2.2>
+        const NON_ESP_MARKER: [u8; 4] = [0, 0, 0, 0];
+        if data.len() >= NON_ESP_MARKER.len() && data[..NON_ESP_MARKER.len()] == NON_ESP_MARKER {
+            // The IKE dissector skips the marker itself.
+            #[cfg(feature = "ike")]
+            return packet_dissector_ike::IkeDissector.dissect(data, buf, offset);
+            #[cfg(not(feature = "ike"))]
+            return Ok(DissectResult::new(data.len(), DispatchHint::End));
+        }
+
+        self.esp.dissect(data, buf, offset)
+    }
+}
+
 /// Assert that a built-in dissector registration succeeds.
 ///
 /// Used only during [`DissectorRegistry::default()`] initialization where
@@ -1671,20 +1753,32 @@ impl Default for DissectorRegistry {
             assert_builtin(reg.register_by_ip_protocol(50, esp));
         }
 
-        // IKE runs over UDP on port 500 (RFC 7296) and port 4500 for NAT-T (RFC 3948)
+        // IKE runs over UDP on port 500 (RFC 7296)
         #[cfg(feature = "ike")]
         {
             #[cfg(feature = "udp")]
-            {
-                assert_builtin(
-                    reg.register_by_udp_port(500, Box::new(packet_dissector_ike::IkeDissector)),
-                );
-                assert_builtin(
-                    reg.register_by_udp_port(4500, Box::new(packet_dissector_ike::IkeDissector)),
-                );
-            }
+            assert_builtin(
+                reg.register_by_udp_port(500, Box::new(packet_dissector_ike::IkeDissector)),
+            );
             reg.register_dissector_factory("ike", || Box::new(packet_dissector_ike::IkeDissector));
         }
+
+        // UDP port 4500 carries UDP-encapsulated ESP, IKE behind a Non-ESP
+        // marker, and NAT-keepalives (RFC 3948).  Without ESP there is nothing
+        // to multiplex, so IKE takes the port on its own.
+        #[cfg(all(feature = "udp", feature = "esp"))]
+        {
+            #[cfg(feature = "esp-decrypt")]
+            let esp = packet_dissector_esp::EspDissector::with_sa_db(reg.esp_sa_db.clone());
+            #[cfg(not(feature = "esp-decrypt"))]
+            let esp = packet_dissector_esp::EspDissector::new();
+
+            assert_builtin(reg.register_by_udp_port(4500, Box::new(UdpEncapDispatcher { esp })));
+        }
+        #[cfg(all(feature = "udp", feature = "ike", not(feature = "esp")))]
+        assert_builtin(
+            reg.register_by_udp_port(4500, Box::new(packet_dissector_ike::IkeDissector)),
+        );
 
         // STP/RSTP runs over IEEE 802.2 LLC with SAP 0x42 (IEEE 802.1D-2004)
         #[cfg(feature = "stp")]
@@ -3179,10 +3273,12 @@ mod tests {
         assert!(reg.get_by_udp_port(8805).is_some());
 
         #[cfg(all(feature = "ike", feature = "udp"))]
-        {
-            assert!(reg.get_by_udp_port(500).is_some());
-            assert!(reg.get_by_udp_port(4500).is_some());
-        }
+        assert!(reg.get_by_udp_port(500).is_some());
+
+        // Port 4500 is taken by the RFC 3948 dispatcher when ESP is enabled,
+        // and by IKE alone otherwise.
+        #[cfg(all(any(feature = "ike", feature = "esp"), feature = "udp"))]
+        assert!(reg.get_by_udp_port(4500).is_some());
 
         #[cfg(all(feature = "radius", feature = "udp"))]
         {
