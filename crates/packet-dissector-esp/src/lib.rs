@@ -280,9 +280,9 @@ impl EspDissector {
     ///
     /// First looks up a configured SA in the database. When no SA is
     /// present, falls back to a heuristic NULL-encryption decode
-    /// ([`crypto::try_null_decrypt`]) so that unauthenticated plaintext
-    /// ESP flows can still be chained into the inner protocol dissector
-    /// without manual configuration.
+    /// ([`crypto::try_null_decrypt`]), which also detects the common ICV
+    /// lengths, so that plaintext ESP flows can be chained into the inner
+    /// protocol dissector without manual configuration.
     ///
     /// Returns `Some(DecryptedPayload)` on success, `None` when no decoding
     /// was possible (graceful degradation to displaying the raw encrypted
@@ -296,16 +296,14 @@ impl EspDissector {
         total_len: usize,
         buf: &mut DissectBuffer<'_>,
     ) -> Option<DecryptedPayload> {
-        // Determine the decrypted trailer and ICV length based on whether
-        // an SA is configured. Without an SA, the heuristic NULL path
-        // assumes no authentication (ICV length = 0).
-        let (result, icv_len) = match self.sa_db.get(spi) {
-            Some(sa) => {
-                let result = crypto::decrypt_esp(&sa, spi, seq, encrypted_data).ok()?;
-                (result, sa.authentication.icv_len())
-            }
-            None => (crypto::try_null_decrypt(encrypted_data)?, 0),
+        // The decoder reports the ICV length it consumed: the SA's configured
+        // length (or the AEAD tag length) on the keyed paths, and the length
+        // detected by the heuristic on the SA-less NULL path.
+        let result = match self.sa_db.get(spi) {
+            Some(sa) => crypto::decrypt_esp(&sa, spi, seq, encrypted_data).ok()?,
+            None => crypto::try_null_decrypt(encrypted_data)?,
         };
+        let icv_len = result.icv_len;
 
         // Byte ranges for trailer fields point at the ESP trailer's original
         // position in the packet (last 2 bytes before the ICV, if any).
@@ -353,6 +351,9 @@ mod tests {
     //! | 2.4         | NULL heuristic padding            | null_heuristic_with_padding     |
     //! | 2.4         | NULL heuristic bad padding        | null_heuristic_fails_bad_padding |
     //! | —           | SA overrides heuristic            | sa_takes_priority_over_heuristic |
+    //! | 2.8         | NULL heuristic detects ICV        | null_heuristic_decrypts_with_icv |
+    //! | 2.8         | Trailer ranges exclude the ICV    | trailer_ranges_exclude_icv      |
+    //! | 2.8         | AEAD trailer ranges exclude tag   | gcm_trailer_ranges_exclude_tag  |
 
     use super::*;
 
@@ -707,5 +708,149 @@ mod tests {
         }
 
         assert_layer_and_references(&EspDissector::new());
+    }
+
+    /// A well-formed inner IPv4 packet whose Total Length matches its own
+    /// length, so the NULL heuristic can corroborate a guessed ICV length.
+    fn inner_ipv4(payload_len: usize) -> Vec<u8> {
+        let total = 20 + payload_len;
+        let mut pkt = vec![0u8; total];
+        pkt[0] = 0x45;
+        pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        pkt[9] = 17; // UDP
+        pkt
+    }
+
+    #[test]
+    fn null_heuristic_decrypts_with_icv() {
+        // ealg=null with an integrity algorithm: the payload is still
+        // plaintext, so the inner packet must be recovered without an SA
+        // even though a 12-byte ICV follows the trailer.
+        let dissector = EspDissector::new();
+
+        let inner = inner_ipv4(8);
+        let mut data = vec![
+            0x00, 0x00, 0x60, 0x06, // SPI
+            0x00, 0x00, 0x00, 0x03, // seq
+        ];
+        data.extend_from_slice(&inner);
+        data.extend_from_slice(&[0x00, 0x04]); // pad_length=0, next_header=IPv4
+        data.extend_from_slice(&[0xAA; 12]); // ICV
+
+        let mut buf = DissectBuffer::new();
+        let result = dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let dp = result
+            .decrypted_payload
+            .expect("ICV must not block decoding");
+        assert_eq!(dp.next, DispatchHint::ByIpProtocol(4));
+        assert_eq!(dp.data, inner);
+
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "encrypted_data").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "next_header").unwrap().value,
+            FieldValue::U8(4)
+        );
+    }
+
+    #[test]
+    fn trailer_ranges_exclude_icv() {
+        // The trailer byte ranges must point at the trailer's real position
+        // in the packet, i.e. before the ICV, not at the last two bytes.
+        let dissector = EspDissector::new();
+
+        let inner = inner_ipv4(0);
+        let mut data = vec![0x00, 0x00, 0x60, 0x07, 0x00, 0x00, 0x00, 0x01];
+        data.extend_from_slice(&inner);
+        data.extend_from_slice(&[0x00, 0x04]);
+        data.extend_from_slice(&[0xBB; 12]);
+        let total_len = data.len();
+
+        let mut buf = DissectBuffer::new();
+        dissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let layer = &buf.layers()[0];
+        let trailer_end = total_len - 12;
+        assert_eq!(
+            buf.field_by_name(layer, "next_header").unwrap().range,
+            trailer_end - 1..trailer_end
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "pad_length").unwrap().range,
+            trailer_end - 2..trailer_end - 1
+        );
+    }
+
+    #[test]
+    fn gcm_trailer_ranges_exclude_tag() {
+        // AEAD ciphers carry their ICV as the authentication tag, which the
+        // SA's `authentication` field does not describe. The trailer ranges
+        // must still skip it.
+        use aes_gcm::aead::{Aead, KeyInit, Payload};
+        use aes_gcm::{Aes128Gcm, Nonce};
+
+        const GCM_TAG_LEN: usize = 16;
+
+        let enc_key = [0x03u8; 16];
+        let salt = [0x04u8; 4];
+        let packet_iv = [0x05u8; 8];
+        let spi: u32 = 0x7007;
+        let seq: u32 = 1;
+
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[..4].copy_from_slice(&salt);
+        nonce_bytes[4..].copy_from_slice(&packet_iv);
+        let nonce = &Nonce::from(nonce_bytes);
+
+        let mut aad = [0u8; 8];
+        aad[..4].copy_from_slice(&spi.to_be_bytes());
+        aad[4..].copy_from_slice(&seq.to_be_bytes());
+
+        // payload(4) + pad_length(0) + next_header(4 = IPv4)
+        let plaintext = vec![0x45, 0x00, 0x00, 0x28, 0x00, 0x04];
+        let ciphertext_and_tag = Aes128Gcm::new_from_slice(&enc_key)
+            .unwrap()
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &plaintext,
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&spi.to_be_bytes());
+        data.extend_from_slice(&seq.to_be_bytes());
+        data.extend_from_slice(&packet_iv);
+        data.extend_from_slice(&ciphertext_and_tag);
+        let total_len = data.len();
+
+        let dissector = EspDissector::new();
+        dissector.add_sa(
+            spi,
+            EspSa {
+                encryption: EncryptionAlgorithm::Aes128Gcm { salt },
+                enc_key: enc_key.to_vec(),
+                authentication: AuthenticationAlgorithm::None,
+                auth_key: vec![],
+            },
+        );
+
+        let mut buf = DissectBuffer::new();
+        let result = dissector.dissect(&data, &mut buf, 0).unwrap();
+        assert!(result.decrypted_payload.is_some());
+
+        let layer = &buf.layers()[0];
+        let trailer_end = total_len - GCM_TAG_LEN;
+        assert_eq!(
+            buf.field_by_name(layer, "next_header").unwrap().range,
+            trailer_end - 1..trailer_end
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "pad_length").unwrap().range,
+            trailer_end - 2..trailer_end - 1
+        );
     }
 }
