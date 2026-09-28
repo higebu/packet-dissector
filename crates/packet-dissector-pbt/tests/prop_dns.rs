@@ -15,7 +15,7 @@
 
 use packet_dissector_dns::{DnsDissector, DnsTcpDissector};
 use packet_dissector_mdns::MdnsDissector;
-use packet_dissector_pbt::generators::dns::arb_dns_message;
+use packet_dissector_pbt::generators::dns::arb_malformed_dns_message;
 use packet_dissector_pbt::invariants::check_universal;
 use proptest::prelude::*;
 
@@ -41,7 +41,7 @@ proptest! {
     /// (RFC 1035, Section 3.2.1 —
     /// <https://www.rfc-editor.org/rfc/rfc1035#section-3.2.1>).
     #[test]
-    fn dns_no_panic_on_structured_rrs(msg in arb_dns_message()) {
+    fn dns_no_panic_on_structured_rrs(msg in arb_malformed_dns_message()) {
         check_universal(&DnsDissector, &msg);
         check_universal(&MdnsDissector, &msg);
         let mut framed = (msg.len() as u16).to_be_bytes().to_vec();
