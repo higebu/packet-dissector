@@ -15,6 +15,8 @@ default = [
   "ethernet",
   "linux_sll",
   "linux_sll2",
+  "null",
+  "raw_ip",
   "arp",
   "lacp",
   "ipv4",
@@ -68,6 +70,8 @@ default = [
 ethernet = ["dep:packet-dissector-ethernet"]
 linux_sll = ["dep:packet-dissector-linux-sll"]
 linux_sll2 = ["dep:packet-dissector-linux-sll2"]
+null = ["dep:packet-dissector-null"]
+raw_ip = ["dep:packet-dissector-raw-ip"]
 arp = ["dep:packet-dissector-arp"]
 lacp = ["dep:packet-dissector-lacp"]
 ipv4 = ["dep:packet-dissector-ipv4"]
@@ -123,6 +127,8 @@ layer2 = [
   "ethernet",
   "linux_sll",
   "linux_sll2",
+  "null",
+  "raw_ip",
   "arp",
   "lacp",
   "lldp",
@@ -159,6 +165,8 @@ packet-dissector-reassembly = { workspace = true, optional = true }
 packet-dissector-ethernet = { workspace = true, optional = true }
 packet-dissector-linux-sll = { workspace = true, optional = true }
 packet-dissector-linux-sll2 = { workspace = true, optional = true }
+packet-dissector-null = { workspace = true, optional = true }
+packet-dissector-raw-ip = { workspace = true, optional = true }
 packet-dissector-arp = { workspace = true, optional = true }
 packet-dissector-lacp = { workspace = true, optional = true }
 packet-dissector-ipv4 = { workspace = true, optional = true }

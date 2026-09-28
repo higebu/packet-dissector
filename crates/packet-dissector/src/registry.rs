@@ -512,12 +512,14 @@ impl DissectorRegistry {
             .ok_or(PacketError::InvalidHeader("no entry dissector configured"))
     }
 
-    /// Resolve the entry dissector for a pcap link-layer type, falling back
-    /// to the default entry dissector.
+    /// Resolve the entry dissector for a pcap link-layer type.
+    ///
+    /// There is no fallback to the default entry dissector: a link type
+    /// without a registered dissector is reported as
+    /// [`PacketError::UnsupportedLinkType`] instead of being guessed.
     fn entry_dissector_for_link_type(&self, link_type: u32) -> Result<&dyn Dissector, PacketError> {
         self.get_by_link_type(link_type)
-            .or(self.entry.as_deref())
-            .ok_or(PacketError::InvalidHeader("no entry dissector configured"))
+            .ok_or(PacketError::UnsupportedLinkType(link_type))
     }
 
     /// Dissect a raw packet by chaining dissectors starting from the entry dissector.
@@ -536,18 +538,31 @@ impl DissectorRegistry {
 
     /// Dissect a raw packet using a link-layer type to select the entry dissector.
     ///
-    /// This method looks up the entry dissector from the `by_link_type` table
-    /// first. If no dissector is registered for the given `link_type`, it falls
-    /// back to the default entry dissector (typically Ethernet).
+    /// The entry dissector is looked up in the `by_link_type` table (see
+    /// [`register_by_link_type`](Self::register_by_link_type)). The default
+    /// entry dissector set via
+    /// [`set_entry_dissector`](Self::set_entry_dissector) is **not** used as a
+    /// fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PacketError::UnsupportedLinkType`] if no dissector is
+    /// registered for `link_type`, and any error returned by the dissectors.
     ///
     /// # Link-layer types
     ///
-    /// Common values (from <https://www.tcpdump.org/linktypes.html>):
-    /// - `1` — `LINKTYPE_ETHERNET`
-    /// - `9` — `LINKTYPE_PPP`
-    /// - `50` — `LINKTYPE_PPP_HDLC`
-    /// - `113` — `LINKTYPE_LINUX_SLL`
-    /// - `276` — `LINKTYPE_LINUX_SLL2`
+    /// Registered by [`DissectorRegistry::default()`] (values from
+    /// <https://www.tcpdump.org/linktypes.html>), subject to feature flags:
+    /// - `0` — `LINKTYPE_NULL` (`null`)
+    /// - `1` — `LINKTYPE_ETHERNET` (`ethernet`)
+    /// - `9` — `LINKTYPE_PPP` (`ppp`)
+    /// - `50` — `LINKTYPE_PPP_HDLC` (`ppp`)
+    /// - `101` — `LINKTYPE_RAW` (`raw_ip`)
+    /// - `108` — `LINKTYPE_LOOP` (`null`)
+    /// - `113` — `LINKTYPE_LINUX_SLL` (`linux_sll`)
+    /// - `228` — `LINKTYPE_IPV4` (`raw_ip`)
+    /// - `229` — `LINKTYPE_IPV6` (`raw_ip`)
+    /// - `276` — `LINKTYPE_LINUX_SLL2` (`linux_sll2`)
     pub fn dissect_with_link_type<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -1659,7 +1674,45 @@ impl Default for DissectorRegistry {
         let mut reg = Self::new();
 
         #[cfg(feature = "ethernet")]
-        reg.set_entry_dissector(Box::new(packet_dissector_ethernet::EthernetDissector));
+        {
+            reg.set_entry_dissector(Box::new(packet_dissector_ethernet::EthernetDissector));
+            // LINKTYPE_ETHERNET (1)
+            assert_builtin(
+                reg.register_by_link_type(
+                    1,
+                    Box::new(packet_dissector_ethernet::EthernetDissector),
+                ),
+            );
+        }
+
+        // LINKTYPE_NULL (0) and LINKTYPE_LOOP (108) — BSD loopback
+        // https://www.tcpdump.org/linktypes/LINKTYPE_NULL.html
+        // https://www.tcpdump.org/linktypes/LINKTYPE_LOOP.html
+        #[cfg(feature = "null")]
+        {
+            assert_builtin(
+                reg.register_by_link_type(0, Box::new(packet_dissector_null::NullDissector)),
+            );
+            assert_builtin(
+                reg.register_by_link_type(108, Box::new(packet_dissector_null::LoopDissector)),
+            );
+        }
+
+        // LINKTYPE_RAW (101), LINKTYPE_IPV4 (228), LINKTYPE_IPV6 (229) — no
+        // link-layer header
+        // https://www.tcpdump.org/linktypes/LINKTYPE_RAW.html
+        #[cfg(feature = "raw_ip")]
+        {
+            assert_builtin(
+                reg.register_by_link_type(101, Box::new(packet_dissector_raw_ip::RawIpDissector)),
+            );
+            assert_builtin(
+                reg.register_by_link_type(228, Box::new(packet_dissector_raw_ip::RawIpv4Dissector)),
+            );
+            assert_builtin(
+                reg.register_by_link_type(229, Box::new(packet_dissector_raw_ip::RawIpv6Dissector)),
+            );
+        }
 
         // Transparent Ethernet Bridging (0x6558) — used by tunneling
         // protocols (VXLAN, GRE) to encapsulate inner Ethernet frames.
@@ -3021,7 +3074,45 @@ mod tests {
         let reg = DissectorRegistry::new();
         let mut buf = DissectBuffer::new();
         let result = reg.dissect_with_link_type(&[0u8; 14], 999, &mut buf);
-        assert!(result.is_err());
+        assert_eq!(result, Err(PacketError::UnsupportedLinkType(999)));
+    }
+
+    #[test]
+    fn unregistered_link_type_does_not_fall_back_to_entry() {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(StubDissector("entry")));
+        let data = [0u8; 14];
+
+        let mut buf = DissectBuffer::new();
+        assert_eq!(
+            reg.dissect_with_link_type(&data, 147, &mut buf),
+            Err(PacketError::UnsupportedLinkType(147))
+        );
+        let mut buf = DissectBuffer::new();
+        assert_eq!(
+            reg.dissect_summary_with_link_type(&data, 147, &mut buf)
+                .map(|_| ()),
+            Err(PacketError::UnsupportedLinkType(147))
+        );
+        let mut buf = DissectBuffer::new();
+        let mut projection = crate::summary::FieldProjection::new([("entry", "x")]);
+        assert_eq!(
+            reg.dissect_projected_with_link_type(&data, 147, &mut buf, &mut projection),
+            Err(PacketError::UnsupportedLinkType(147))
+        );
+
+        // The entry dissector is still used by `dissect()`.
+        let mut buf = DissectBuffer::new();
+        assert_eq!(reg.dissect(&data, &mut buf), Ok(()));
+    }
+
+    #[test]
+    fn registered_link_type_is_used() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_link_type(147, Box::new(StubDissector("user0")))
+            .unwrap();
+        let mut buf = DissectBuffer::new();
+        assert_eq!(reg.dissect_with_link_type(&[0u8; 4], 147, &mut buf), Ok(()));
     }
 
     // --- all_field_schemas ---
@@ -3188,6 +3279,22 @@ mod tests {
         {
             assert!(reg.get_by_ethertype(0x8847).is_some());
             assert!(reg.get_by_ethertype(0x8848).is_some());
+        }
+
+        #[cfg(feature = "ethernet")]
+        assert!(reg.get_by_link_type(1).is_some());
+
+        #[cfg(feature = "null")]
+        {
+            assert!(reg.get_by_link_type(0).is_some());
+            assert!(reg.get_by_link_type(108).is_some());
+        }
+
+        #[cfg(feature = "raw_ip")]
+        {
+            assert!(reg.get_by_link_type(101).is_some());
+            assert!(reg.get_by_link_type(228).is_some());
+            assert!(reg.get_by_link_type(229).is_some());
         }
 
         #[cfg(feature = "linux_sll")]

@@ -77,6 +77,12 @@ pub mod dissectors {
     #[cfg(feature = "linux_sll2")]
     pub use packet_dissector_linux_sll2 as linux_sll2;
 
+    #[cfg(feature = "null")]
+    pub use packet_dissector_null as null;
+
+    #[cfg(feature = "raw_ip")]
+    pub use packet_dissector_raw_ip as raw_ip;
+
     #[cfg(feature = "arp")]
     pub use packet_dissector_arp as arp;
 

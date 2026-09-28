@@ -21,10 +21,12 @@
 //! | Unsatisfied projection falls back to full dissect | projection_falls_back_to_full_dissect_when_unsatisfied |
 //! | Projection reset/reuse across packets | projection_is_reusable_across_packets |
 //! | Link-type entry selection (projection) | projection_with_link_type_uses_link_type_table |
+//! | Unregistered link type is an error (projection) | projection_with_unregistered_link_type_is_error |
 //! | Empty projection stops after the entry layer | empty_projection_stops_after_entry_layer |
 
 use packet_dissector::registry::DissectorRegistry;
 use packet_dissector::summary::FieldProjection;
+use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::FieldValue;
 use packet_dissector_core::packet::DissectBuffer;
 
@@ -211,8 +213,8 @@ fn summary_with_link_type_uses_link_type_table() {
     let pkt = build_eth_ipv4_udp_dns();
     let mut buf = DissectBuffer::new();
 
-    // LINKTYPE_ETHERNET (1) is not registered in the link-type table, so it
-    // falls back to the default entry dissector — same result as above.
+    // LINKTYPE_ETHERNET (1) selects the Ethernet dissector — same result as
+    // above.
     let summary = registry
         .dissect_summary_with_link_type(&pkt, 1, &mut buf)
         .unwrap();
@@ -325,6 +327,22 @@ fn projection_with_link_type_uses_link_type_table() {
 
     assert!(projection.is_satisfied());
     assert_eq!(layer_names(&buf), ["Ethernet", "IPv4"]);
+}
+
+#[test]
+fn projection_with_unregistered_link_type_is_error() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_eth_ipv4_udp_dns();
+    let mut buf = DissectBuffer::new();
+    let mut projection = FieldProjection::new([("IPv4", "src")]);
+
+    // 147 is LINKTYPE_USER0, which has no registered dissector.
+    let err = registry
+        .dissect_projected_with_link_type(&pkt, 147, &mut buf, &mut projection)
+        .unwrap_err();
+
+    assert_eq!(err, PacketError::UnsupportedLinkType(147));
+    assert!(buf.layers().is_empty());
 }
 
 #[test]

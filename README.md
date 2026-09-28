@@ -30,7 +30,7 @@ protocols include:
 
 | Category | Protocols |
 |----------|-----------|
-| L2 | Ethernet II, Linux SLL, Linux SLL2, 802.1Q VLAN, 802.1ad QinQ (up to 2 VLAN tags), ARP, LACP, LLDP, STP |
+| L2 | Ethernet II, Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (up to 2 VLAN tags), ARP, LACP, LLDP, STP |
 | L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, IS-IS, AH, ESP, SRv6, GRE, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN |
 | Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, TLS, PPP, RADIUS, RTP, QUIC, STUN |
@@ -57,7 +57,7 @@ packet-dissector = { version = "0.3", default-features = false, features = ["lay
 
 Representative feature flags:
 
-- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `arp`, `lacp`, `lldp`, `stp`
+- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `arp`, `lacp`, `lldp`, `stp`
 - Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`
 - Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
@@ -66,7 +66,7 @@ Representative feature flags:
 
 Convenience groups:
 
-- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "arp", "lacp", "lldp", "stp", "ppp"]`
+- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "arp", "lacp", "lldp", "stp", "ppp"]`
 - `layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]`
 - `layer4 = ["tcp", "udp", "sctp"]`
 - `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun"]`
@@ -117,6 +117,30 @@ let udp = buf.layer_by_name("UDP").unwrap();
 let src_port = buf.field_by_name(udp, "src_port").unwrap();
 assert_eq!(src_port.value, FieldValue::U16(12345));
 ```
+
+## Link-Layer Types
+
+`DissectorRegistry::dissect()` always starts with the entry dissector
+(Ethernet). For pcap / pcapng input, pass the file's link-layer type to
+`dissect_with_link_type()` (or the `_summary_` / `_projected_` variants). The
+default registry handles these
+[link-layer types](https://www.tcpdump.org/linktypes.html):
+
+| Value | Name | Feature |
+|------:|------|---------|
+| 0 | `LINKTYPE_NULL` | `null` |
+| 1 | `LINKTYPE_ETHERNET` | `ethernet` |
+| 9 | `LINKTYPE_PPP` | `ppp` |
+| 50 | `LINKTYPE_PPP_HDLC` | `ppp` |
+| 101 | `LINKTYPE_RAW` | `raw_ip` |
+| 108 | `LINKTYPE_LOOP` | `null` |
+| 113 | `LINKTYPE_LINUX_SLL` | `linux_sll` |
+| 228 | `LINKTYPE_IPV4` | `raw_ip` |
+| 229 | `LINKTYPE_IPV6` | `raw_ip` |
+| 276 | `LINKTYPE_LINUX_SLL2` | `linux_sll2` |
+
+Any other link type returns `PacketError::UnsupportedLinkType`; register a
+dissector with `register_by_link_type()` to handle it.
 
 ## Adding a Custom Dissector
 

@@ -30,6 +30,11 @@ pub enum PacketError {
     /// No dissector is registered for the given protocol identifier.
     #[error("unknown protocol: {0}")]
     UnknownProtocol(u32),
+
+    /// No entry dissector is registered for the given pcap link-layer type
+    /// (`LINKTYPE_*` value, see <https://www.tcpdump.org/linktypes.html>).
+    #[error("unsupported link-layer type: {0}")]
+    UnsupportedLinkType(u32),
 }
 
 /// Errors that can occur when registering a dissector.
@@ -64,4 +69,17 @@ pub enum RegistrationError {
         /// The short name of the dissector that was attempted to register.
         new: &'static str,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_link_type_display() {
+        assert_eq!(
+            PacketError::UnsupportedLinkType(147).to_string(),
+            "unsupported link-layer type: 147"
+        );
+    }
 }
