@@ -62,6 +62,13 @@
 //! | Ethernet → IPv4 → UDP → STUN Binding Request       | integration_ethernet_ipv4_udp_stun_binding_request   |
 //! | Ethernet → IPv4 → GRE (Key) → IPv4 → UDP          | integration_ethernet_ipv4_gre_key_ipv4               |
 //! | link_type=1 (Ethernet) via dissect_with_link_type  | integration_dissect_with_link_type_ethernet          |
+//! | link_type=0 (NULL, LE/BE) → IPv4/IPv6 → UDP         | integration_link_type_null_ipv4_le, integration_link_type_null_ipv4_be, integration_link_type_null_ipv6 |
+//! | link_type=108 (LOOP) → IPv4 → UDP                   | integration_link_type_loop_ipv4                      |
+//! | link_type=101 (RAW) → IPv4/IPv6 → UDP               | integration_link_type_raw_ipv4, integration_link_type_raw_ipv6 |
+//! | link_type=228 (IPV4) → IPv4 → UDP                   | integration_link_type_ipv4                           |
+//! | link_type=229 (IPV6) → IPv6 → UDP                   | integration_link_type_ipv6                           |
+//! | link_type=228/229 with the other IP version         | integration_link_type_ipv4_ipv6_reject_other_version |
+//! | Unregistered link type is an error, not Ethernet    | integration_unregistered_link_type_is_error          |
 //! | Ethernet → LACP                                     | integration_ethernet_lacp                            |
 //! | Ethernet → LLC → STP Config BPDU                    | integration_ethernet_llc_stp_config                  |
 //! | Ethernet → LLC → STP TCN BPDU                       | integration_ethernet_llc_stp_tcn                     |
@@ -71,7 +78,7 @@
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
 //! | PPP (HDLC) → IPv4 → UDP                               | integration_ppp_ipv4_udp                              |
-//! | PPP → LCP (inline)                                     | integration_ppp_lcp_inline                            |
+//! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
 //! | Ethernet → IPv4 → UDP → GENEVE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_geneve_ipv4        |
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
 //! | Ethernet → IPv4 → UDP → L2TP → PPP → IPv4 → UDP          | ethernet_ipv4_udp_l2tp_ppp_ipv4_udp              |
@@ -3422,7 +3429,7 @@ fn integration_sll2_ipv6_tcp_syn() {
     assert_layers_contiguous(&buf);
 }
 
-/// dissect_with_link_type with link_type=1 (Ethernet) falls back to Ethernet entry.
+/// dissect_with_link_type with link_type=1 (LINKTYPE_ETHERNET).
 #[test]
 fn integration_dissect_with_link_type_ethernet() {
     let registry = DissectorRegistry::default();
@@ -3439,7 +3446,7 @@ fn integration_dissect_with_link_type_ethernet() {
     fixup_udp_length(&mut pkt, udp_start);
     fixup_ipv4_length(&mut pkt, ipv4_start);
 
-    // link_type=1 should fall back to the entry dissector (Ethernet)
+    // LINKTYPE_ETHERNET = 1
     let mut buf = DissectBuffer::new();
     registry.dissect_with_link_type(&pkt, 1, &mut buf).unwrap();
     assert_eq!(buf.layers().len(), 3);
@@ -3447,6 +3454,218 @@ fn integration_dissect_with_link_type_ethernet() {
     assert_eq!(buf.layers()[1].name, "IPv4");
     assert_eq!(buf.layers()[2].name, "UDP");
     assert_layers_contiguous(&buf);
+}
+
+// ---------------------------------------------------------------------------
+// Link types without an Ethernet header
+// https://www.tcpdump.org/linktypes.html
+// ---------------------------------------------------------------------------
+
+/// IPv4 → UDP packet with no link-layer header.
+fn build_ipv4_udp() -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ipv4(&mut pkt, 17, [127, 0, 0, 1], [127, 0, 0, 1]);
+    let udp_start = push_udp(&mut pkt, 12345, 9999);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, 0);
+    pkt
+}
+
+/// IPv6 → UDP packet with no link-layer header.
+fn build_ipv6_udp() -> Vec<u8> {
+    let mut loopback = [0u8; 16];
+    loopback[15] = 1;
+    let mut pkt = Vec::new();
+    push_ipv6(&mut pkt, 17, loopback, loopback);
+    let udp_start = push_udp(&mut pkt, 12345, 9999);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv6_payload_length(&mut pkt, 0);
+    pkt
+}
+
+fn layer_names<'a>(buf: &'a DissectBuffer<'_>) -> Vec<&'a str> {
+    buf.layers().iter().map(|l| l.name).collect()
+}
+
+/// LINKTYPE_NULL (0) with AF_INET (2) in little-endian host order (e.g. a
+/// macOS `lo0` capture).
+#[test]
+fn integration_link_type_null_ipv4_le() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = vec![0x02, 0x00, 0x00, 0x00];
+    pkt.extend_from_slice(&build_ipv4_udp());
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect_with_link_type(&pkt, 0, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Null", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let null = buf.layer_by_name("Null").unwrap();
+    assert_eq!(
+        buf.field_by_name(null, "family").unwrap().value,
+        FieldValue::U32(2)
+    );
+}
+
+/// LINKTYPE_NULL (0) with AF_INET (2) in big-endian host order.
+#[test]
+fn integration_link_type_null_ipv4_be() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = vec![0x00, 0x00, 0x00, 0x02];
+    pkt.extend_from_slice(&build_ipv4_udp());
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect_with_link_type(&pkt, 0, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Null", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// LINKTYPE_NULL (0): 24, 28 and 30 all indicate IPv6.
+#[test]
+fn integration_link_type_null_ipv6() {
+    let registry = DissectorRegistry::default();
+    for af in [24u32, 28, 30] {
+        let mut pkt = af.to_le_bytes().to_vec();
+        pkt.extend_from_slice(&build_ipv6_udp());
+
+        let mut buf = DissectBuffer::new();
+        registry.dissect_with_link_type(&pkt, 0, &mut buf).unwrap();
+        assert_eq!(layer_names(&buf), ["Null", "IPv6", "UDP"], "AF {af}");
+        assert_layers_contiguous(&buf);
+    }
+}
+
+/// LINKTYPE_LOOP (108): protocol type in big-endian order.
+#[test]
+fn integration_link_type_loop_ipv4() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = vec![0x00, 0x00, 0x00, 0x02];
+    pkt.extend_from_slice(&build_ipv4_udp());
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 108, &mut buf)
+        .unwrap();
+    assert_eq!(layer_names(&buf), ["Loop", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// LINKTYPE_RAW (101) carrying IPv4.
+#[test]
+fn integration_link_type_raw_ipv4() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_ipv4_udp();
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 101, &mut buf)
+        .unwrap();
+    assert_eq!(layer_names(&buf), ["IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// LINKTYPE_RAW (101) carrying IPv6.
+#[test]
+fn integration_link_type_raw_ipv6() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_ipv6_udp();
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 101, &mut buf)
+        .unwrap();
+    assert_eq!(layer_names(&buf), ["IPv6", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// LINKTYPE_IPV4 (228).
+#[test]
+fn integration_link_type_ipv4() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_ipv4_udp();
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 228, &mut buf)
+        .unwrap();
+    assert_eq!(layer_names(&buf), ["IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// LINKTYPE_IPV6 (229).
+#[test]
+fn integration_link_type_ipv6() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_ipv6_udp();
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 229, &mut buf)
+        .unwrap();
+    assert_eq!(layer_names(&buf), ["IPv6", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// LINKTYPE_IPV4 / LINKTYPE_IPV6: a packet of the other IP version is an
+/// error ("... should be considered errors").
+#[test]
+fn integration_link_type_ipv4_ipv6_reject_other_version() {
+    let registry = DissectorRegistry::default();
+    let v4 = build_ipv4_udp();
+    let v6 = build_ipv6_udp();
+
+    let mut buf = DissectBuffer::new();
+    let err = registry
+        .dissect_with_link_type(&v6, 228, &mut buf)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        PacketError::InvalidFieldValue {
+            field: "version",
+            value: 6
+        }
+    );
+
+    let mut buf = DissectBuffer::new();
+    let err = registry
+        .dissect_with_link_type(&v4, 229, &mut buf)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        PacketError::InvalidFieldValue {
+            field: "version",
+            value: 4
+        }
+    );
+}
+
+/// A link type with no registered dissector must be reported, not parsed
+/// as Ethernet. 147 is LINKTYPE_USER0.
+#[test]
+fn integration_unregistered_link_type_is_error() {
+    let registry = DissectorRegistry::default();
+    // A valid Ethernet frame: before the fix this was silently dissected
+    // as Ethernet regardless of the link type.
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    pkt.extend_from_slice(&build_ipv4_udp());
+
+    let mut buf = DissectBuffer::new();
+    let err = registry
+        .dissect_with_link_type(&pkt, 147, &mut buf)
+        .unwrap_err();
+    assert_eq!(err, PacketError::UnsupportedLinkType(147));
+    assert!(buf.layers().is_empty());
+
+    let mut buf = DissectBuffer::new();
+    let err = registry
+        .dissect_summary_with_link_type(&pkt, 147, &mut buf)
+        .unwrap_err();
+    assert_eq!(err, PacketError::UnsupportedLinkType(147));
+
+    // dissect() without a link type keeps using the entry dissector.
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "UDP"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -5510,7 +5729,7 @@ fn integration_ppp_ipv4_udp() {
 }
 
 // ---------------------------------------------------------------------------
-// PPP → LCP (via link_type=50, no HDLC, control protocol inline)
+// PPP → LCP (via link_type=50, LINKTYPE_PPP_HDLC, control protocol inline)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -5518,8 +5737,12 @@ fn integration_ppp_lcp_inline() {
     let registry = DissectorRegistry::default();
     let mut pkt = Vec::new();
 
-    // PPP frame without HDLC framing: Protocol=0xC021 (LCP)
-    pkt.extend_from_slice(&[0xC0, 0x21]);
+    // LINKTYPE_PPP_HDLC frames carry the RFC 1662, Section 3.1 Address and
+    // Control fields (no flag octets) —
+    // https://www.tcpdump.org/linktypes/LINKTYPE_PPP_HDLC.html
+    // https://www.rfc-editor.org/rfc/rfc1662#section-3.1
+    // Address=0xFF, Control=0x03, Protocol=0xC021 (LCP)
+    pkt.extend_from_slice(&[0xFF, 0x03, 0xC0, 0x21]);
 
     // LCP Configure-Request with MRU option
     #[rustfmt::skip]
@@ -5528,7 +5751,7 @@ fn integration_ppp_lcp_inline() {
         1, 4, 0x05, 0xDC,       // MRU=1500
     ]);
 
-    // LINKTYPE_PPP_ETHER = 50
+    // LINKTYPE_PPP_HDLC = 50
     let mut buf = DissectBuffer::new();
     registry.dissect_with_link_type(&pkt, 50, &mut buf).unwrap();
     assert_eq!(buf.layers().len(), 1); // PPP only (LCP parsed inline)

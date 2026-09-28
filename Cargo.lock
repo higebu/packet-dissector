@@ -560,11 +560,13 @@ dependencies = [
  "packet-dissector-nas5g",
  "packet-dissector-ngap",
  "packet-dissector-ntp",
+ "packet-dissector-null",
  "packet-dissector-ospf",
  "packet-dissector-pfcp",
  "packet-dissector-ppp",
  "packet-dissector-quic",
  "packet-dissector-radius",
+ "packet-dissector-raw-ip",
  "packet-dissector-reassembly",
  "packet-dissector-rtp",
  "packet-dissector-sctp",
@@ -900,6 +902,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-null"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-ospf"
 version = "0.5.0"
 dependencies = [
@@ -956,6 +967,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-radius"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-raw-ip"
 version = "0.5.0"
 dependencies = [
  "criterion",
