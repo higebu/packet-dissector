@@ -15,6 +15,8 @@ packet-dissector-core = { workspace = true }
 proptest = "1"
 
 [dev-dependencies]
+packet-dissector-dns = { workspace = true }
 packet-dissector-ipv4 = { workspace = true }
+packet-dissector-mdns = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcp = { workspace = true }

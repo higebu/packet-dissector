@@ -6,6 +6,7 @@
 //! header is always successfully parsed and the consumed length equals
 //! `IHL × 4`").
 
+pub mod dns;
 pub mod ipv4;
 pub mod sdp;
 pub mod tcp;
