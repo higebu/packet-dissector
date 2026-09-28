@@ -10,6 +10,7 @@
 
 #![deny(missing_docs)]
 
+mod aper;
 pub mod ie_id;
 pub mod ie_parsers;
 pub mod procedure_code;
@@ -648,8 +649,9 @@ mod tests {
 
     #[test]
     fn parse_ngap_with_ies() {
-        let ie_value_1 = [0x01, 0x02, 0x03]; // dummy AMF-UE-NGAP-ID value
-        let ie_value_2 = [0x04, 0x05]; // dummy RAN-UE-NGAP-ID value
+        // APER: 3-bit (AMF) / 2-bit (RAN) octet count - 1, padding, value.
+        let ie_value_1 = [0x00, 0x01]; // AMF-UE-NGAP-ID = 1
+        let ie_value_2 = [0x00, 0x2A]; // RAN-UE-NGAP-ID = 42
         let container = build_ie_container(&[
             (10, 0, &ie_value_1), // AMF-UE-NGAP-ID, reject
             (85, 0, &ie_value_2), // RAN-UE-NGAP-ID, reject
@@ -683,8 +685,11 @@ mod tests {
                 display_fn(&id_field.value, ie_fields),
                 Some("AMF-UE-NGAP-ID")
             );
-            let val_field = ie_fields.iter().find(|f| f.name() == "value").unwrap();
-            assert_eq!(val_field.value, FieldValue::Bytes(&[0x01, 0x02, 0x03]));
+            let val_field = ie_fields
+                .iter()
+                .find(|f| f.name() == "amf_ue_ngap_id")
+                .unwrap();
+            assert_eq!(val_field.value, FieldValue::U64(1));
         } else {
             panic!("expected Object");
         }
@@ -699,6 +704,11 @@ mod tests {
                 display_fn(&id_field.value, ie_fields),
                 Some("RAN-UE-NGAP-ID")
             );
+            let val_field = ie_fields
+                .iter()
+                .find(|f| f.name() == "ran_ue_ngap_id")
+                .unwrap();
+            assert_eq!(val_field.value, FieldValue::U32(42));
         } else {
             panic!("expected Object");
         }

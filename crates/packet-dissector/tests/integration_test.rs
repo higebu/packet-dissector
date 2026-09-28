@@ -6329,9 +6329,11 @@ fn integration_ethernet_ipv4_sctp_ngap() {
     }
 }
 
-/// NGAP InitialUEMessage with parsed IE values: AMF-UE-NGAP-ID (5 bytes),
-/// RAN-UE-NGAP-ID (4 bytes), NAS-PDU with plain 5GMM Registration Request,
-/// and RRCEstablishmentCause.
+/// NGAP InitialUEMessage with parsed IE values: RAN-UE-NGAP-ID, NAS-PDU
+/// with plain 5GMM Registration Request, UEContextRequest and
+/// RRCEstablishmentCause, all APER-encoded (3GPP TS 38.413, Section 9.5).
+///
+/// Values match an independent APER encoder (pycrate `NGAP_IEs`).
 #[cfg(all(feature = "sctp", feature = "ngap"))]
 #[test]
 fn integration_ngap_ie_parsing_and_nas_pdu() {
@@ -6354,8 +6356,9 @@ fn integration_ngap_ie_parsing_and_nas_pdu() {
     // IE 85: RAN-UE-NGAP-ID = 42
     container.extend_from_slice(&[0x00, 0x55]); // id = 85
     container.push(0x00); // criticality = reject
-    container.push(0x04); // length = 4
-    container.extend_from_slice(&[0x00, 0x00, 0x00, 0x2A]); // value = 42
+    container.push(0x02); // length = 2
+    // 2-bit octet count - 1 (0), padding, value 42 — ITU-T X.691, 11.5.7.4.
+    container.extend_from_slice(&[0x00, 0x2A]);
 
     // IE 38: NAS-PDU (plain 5GMM Registration Request)
     let nas_bytes = [0x7E, 0x00, 0x41]; // EPD=5GMM, plain, Registration request
@@ -6376,7 +6379,8 @@ fn integration_ngap_ie_parsing_and_nas_pdu() {
     container.extend_from_slice(&[0x00, 0x5A]); // id = 90
     container.push(0x00); // criticality = reject
     container.push(0x01); // length = 1
-    container.push(0x03); // value = 3 (mo-Signalling)
+    // Extension bit 0, 4-bit index 3 (mo-Signalling), padding — ITU-T X.691, 14.
+    container.push(0x18);
 
     // Value length determinant
     if container.len() < 128 {
