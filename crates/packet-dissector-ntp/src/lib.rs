@@ -7,9 +7,16 @@
 //! - RFC 9109 (Port Randomization): <https://www.rfc-editor.org/rfc/rfc9109>
 //! - RFC 9748 (IANA Registry updates): <https://www.rfc-editor.org/rfc/rfc9748>
 //! - RFC 9769 (Interleaved Modes): <https://www.rfc-editor.org/rfc/rfc9769>
+//! - RFC 9327 (Control Messages, mode 6; Historic):
+//!   <https://www.rfc-editor.org/rfc/rfc9327>
 //!
-//! Only the 48-octet fixed NTPv4 header (RFC 5905, Section 7.3) is dissected;
-//! extension fields and MACs are left to higher layers.
+//! The layout is selected by the Mode field:
+//!
+//! - Modes 0-5: the 48-octet fixed NTPv4 header (RFC 5905, Section 7.3).
+//!   Extension fields and MACs after the header are not dissected.
+//! - Mode 6: the NTP Control Message header and data (RFC 9327, Section 2).
+//! - Mode 7: "reserved for private use" (RFC 5905, Section 7.3); only the
+//!   Version and Mode are decoded and the rest is kept as raw data.
 
 #![deny(missing_docs)]
 
@@ -19,7 +26,7 @@ use packet_dissector_core::dissector::{
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u32, read_be_u64};
+use packet_dissector_core::util::{read_be_u16, read_be_u32, read_be_u64};
 
 /// Format NTP reference_id: stratum 0-1 as ASCII code, stratum 2+ as IPv4 address.
 ///
@@ -57,6 +64,48 @@ fn format_ntp_ref_id(
 /// integral number of 32-bit (4 octet) words in network byte order."  The
 /// fixed header is 12 words (48 octets).
 const HEADER_SIZE: usize = 48;
+
+/// NTP Control Message header size in bytes.
+///
+/// RFC 9327, Section 2 — <https://www.rfc-editor.org/rfc/rfc9327#section-2>,
+/// Figure 1: three 32-bit words precede the Data field.
+const CONTROL_HEADER_SIZE: usize = 12;
+
+/// Mode value for NTP control messages.
+///
+/// RFC 5905, Section 7.3, Figure 10 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
+const MODE_CONTROL: u8 = 6;
+
+/// Mode value reserved for private use.
+///
+/// RFC 5905, Section 7.3, Figure 10 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
+const MODE_PRIVATE: u8 = 7;
+
+/// Returns the meaning of an NTP control message operation code.
+///
+/// RFC 9327, Section 2, Table 1 —
+/// <https://www.rfc-editor.org/rfc/rfc9327#section-2>.
+fn control_opcode_name(opcode: u8) -> &'static str {
+    // Verbatim from RFC 9327, Table 1.
+    match opcode {
+        1 => "read status command/response",
+        2 => "read variables command/response",
+        3 => "write variables command/response",
+        4 => "read clock variables command/response",
+        5 => "write clock variables command/response",
+        6 => "set trap address/port command/response",
+        7 => "trap response",
+        8 => "runtime configuration command/response",
+        9 => "export configuration to file command/response",
+        10 => "retrieve remote address stats command/response",
+        11 => "retrieve ordered list command/response",
+        12 => "request client-specific nonce command/response",
+        31 => "unset trap address/port command/response",
+        _ => "reserved",
+    }
+}
 
 /// Returns a human-readable name for the Leap Indicator value.
 ///
@@ -155,6 +204,19 @@ const FD_REFERENCE_TIMESTAMP: usize = 9;
 const FD_ORIGIN_TIMESTAMP: usize = 10;
 const FD_RECEIVE_TIMESTAMP: usize = 11;
 const FD_TRANSMIT_TIMESTAMP: usize = 12;
+// RFC 9327, Section 2 — NTP Control Message (mode 6) fields.
+const FD_RESPONSE: usize = 13;
+const FD_ERROR: usize = 14;
+const FD_MORE: usize = 15;
+const FD_OPCODE: usize = 16;
+const FD_SEQUENCE: usize = 17;
+const FD_STATUS: usize = 18;
+const FD_ASSOCIATION_ID: usize = 19;
+const FD_OFFSET: usize = 20;
+const FD_COUNT: usize = 21;
+const FD_DATA: usize = 22;
+const FD_PADDING: usize = 23;
+const FD_AUTHENTICATOR: usize = 24;
 
 /// NTP dissector.
 pub struct NtpDissector;
@@ -191,6 +253,11 @@ static REFERENCES: &[SpecReference] = &[
         "NTP Interleaved Modes",
         "https://www.rfc-editor.org/rfc/rfc9769",
     ),
+    SpecReference::new(
+        "RFC 9327",
+        "Control Messages Protocol for Use with Network Time Protocol Version 4",
+        "https://www.rfc-editor.org/rfc/rfc9327",
+    ),
 ];
 
 /// Field descriptors for the NTP dissector.
@@ -199,7 +266,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         name: "leap_indicator",
         display_name: "Leap Indicator",
         field_type: FieldType::U8,
-        optional: false,
+        optional: true,
         children: None,
         display_fn: Some(|v, _siblings| match v {
             FieldValue::U8(li) => Some(leap_indicator_name(*li)),
@@ -224,7 +291,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         name: "stratum",
         display_name: "Stratum",
         field_type: FieldType::U8,
-        optional: false,
+        optional: true,
         children: None,
         display_fn: Some(|v, _siblings| match v {
             FieldValue::U8(s) => Some(stratum_name(*s)),
@@ -232,16 +299,43 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         }),
         format_fn: None,
     },
-    FieldDescriptor::new("poll", "Poll Interval", FieldType::I32),
-    FieldDescriptor::new("precision", "Precision", FieldType::I32),
-    FieldDescriptor::new("root_delay", "Root Delay", FieldType::U32),
-    FieldDescriptor::new("root_dispersion", "Root Dispersion", FieldType::U32),
+    // Fields below are present for modes 0-5 only (RFC 5905, Section 7.3).
+    FieldDescriptor::new("poll", "Poll Interval", FieldType::I32).optional(),
+    FieldDescriptor::new("precision", "Precision", FieldType::I32).optional(),
+    FieldDescriptor::new("root_delay", "Root Delay", FieldType::U32).optional(),
+    FieldDescriptor::new("root_dispersion", "Root Dispersion", FieldType::U32).optional(),
     FieldDescriptor::new("reference_id", "Reference ID", FieldType::Bytes)
+        .optional()
         .with_format_fn(format_ntp_ref_id),
-    FieldDescriptor::new("reference_timestamp", "Reference Timestamp", FieldType::U64),
-    FieldDescriptor::new("origin_timestamp", "Origin Timestamp", FieldType::U64),
-    FieldDescriptor::new("receive_timestamp", "Receive Timestamp", FieldType::U64),
-    FieldDescriptor::new("transmit_timestamp", "Transmit Timestamp", FieldType::U64),
+    FieldDescriptor::new("reference_timestamp", "Reference Timestamp", FieldType::U64).optional(),
+    FieldDescriptor::new("origin_timestamp", "Origin Timestamp", FieldType::U64).optional(),
+    FieldDescriptor::new("receive_timestamp", "Receive Timestamp", FieldType::U64).optional(),
+    FieldDescriptor::new("transmit_timestamp", "Transmit Timestamp", FieldType::U64).optional(),
+    // Fields below are present for mode 6 only (RFC 9327, Section 2).
+    FieldDescriptor::new("response", "Response Bit", FieldType::U8).optional(),
+    FieldDescriptor::new("error", "Error Bit", FieldType::U8).optional(),
+    FieldDescriptor::new("more", "More Bit", FieldType::U8).optional(),
+    FieldDescriptor {
+        name: "opcode",
+        display_name: "Operation Code",
+        field_type: FieldType::U8,
+        optional: true,
+        children: None,
+        display_fn: Some(|v, _siblings| match v {
+            FieldValue::U8(op) => Some(control_opcode_name(*op)),
+            _ => None,
+        }),
+        format_fn: None,
+    },
+    FieldDescriptor::new("sequence", "Sequence Number", FieldType::U16).optional(),
+    FieldDescriptor::new("status", "Status", FieldType::U16).optional(),
+    FieldDescriptor::new("association_id", "Association ID", FieldType::U16).optional(),
+    FieldDescriptor::new("offset", "Offset", FieldType::U16).optional(),
+    FieldDescriptor::new("count", "Count", FieldType::U16).optional(),
+    // Mode 6 Data, or the raw body of a mode 7 message.
+    FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
+    FieldDescriptor::new("padding", "Padding", FieldType::Bytes).optional(),
+    FieldDescriptor::new("authenticator", "Authenticator", FieldType::Bytes).optional(),
 ];
 
 impl Dissector for NtpDissector {
@@ -271,19 +365,31 @@ impl Dissector for NtpDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
+        let Some(&first_byte) = data.first() else {
+            return Err(PacketError::Truncated {
+                expected: 1,
+                actual: 0,
+            });
+        };
+
+        // RFC 5905, Section 7.3 — first octet: LI (2 bits) | VN (3 bits) | Mode (3 bits).
+        // https://www.rfc-editor.org/rfc/rfc5905#section-7.3
+        let li = (first_byte >> 6) & 0x03;
+        let vn = (first_byte >> 3) & 0x07;
+        let mode = first_byte & 0x07;
+
+        match mode {
+            MODE_CONTROL => return dissect_control(data, buf, offset, li, vn, mode),
+            MODE_PRIVATE => return dissect_private(data, buf, offset, vn, mode),
+            _ => {}
+        }
+
         if data.len() < HEADER_SIZE {
             return Err(PacketError::Truncated {
                 expected: HEADER_SIZE,
                 actual: data.len(),
             });
         }
-
-        // RFC 5905, Section 7.3 — first octet: LI (2 bits) | VN (3 bits) | Mode (3 bits).
-        // https://www.rfc-editor.org/rfc/rfc5905#section-7.3
-        let first_byte = data[0];
-        let li = (first_byte >> 6) & 0x03;
-        let vn = (first_byte >> 3) & 0x07;
-        let mode = first_byte & 0x07;
 
         let stratum = data[1];
         // RFC 5905, Section 7.3 — Poll and Precision are signed 8-bit integers
@@ -389,6 +495,156 @@ impl Dissector for NtpDissector {
     }
 }
 
+/// Pushes the LI / VN / Mode fields of the first octet.
+///
+/// RFC 5905, Section 7.3 — <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
+fn push_first_octet<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    li: Option<u8>,
+    vn: u8,
+    mode: u8,
+) {
+    if let Some(li) = li {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_LEAP_INDICATOR],
+            FieldValue::U8(li),
+            offset..offset + 1,
+        );
+    }
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_VERSION],
+        FieldValue::U8(vn),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MODE],
+        FieldValue::U8(mode),
+        offset..offset + 1,
+    );
+}
+
+/// Dissects an NTP Control Message (mode 6).
+///
+/// RFC 9327, Section 2 — <https://www.rfc-editor.org/rfc/rfc9327#section-2>.
+fn dissect_control<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    li: u8,
+    vn: u8,
+    mode: u8,
+) -> Result<DissectResult, PacketError> {
+    if data.len() < CONTROL_HEADER_SIZE {
+        return Err(PacketError::Truncated {
+            expected: CONTROL_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    // RFC 9327, Section 2, Figure 1 — second octet: R | E | M | opcode (5 bits).
+    let byte1 = data[1];
+    let response = (byte1 >> 7) & 0x01;
+    let error = (byte1 >> 6) & 0x01;
+    let more = (byte1 >> 5) & 0x01;
+    let opcode = byte1 & 0x1F;
+    let sequence = read_be_u16(data, 2)?;
+    let status = read_be_u16(data, 4)?;
+    let association_id = read_be_u16(data, 6)?;
+    let data_offset = read_be_u16(data, 8)?;
+    // RFC 9327, Section 2 — "Count: This is a 16-bit unsigned integer
+    // indicating the length of the data field, in octets."
+    let count = read_be_u16(data, 10)?;
+
+    let data_end = CONTROL_HEADER_SIZE + count as usize;
+    if data.len() < data_end {
+        return Err(PacketError::Truncated {
+            expected: data_end,
+            actual: data.len(),
+        });
+    }
+
+    // RFC 9327, Section 2 — "Padding (optional): Contains zero to 3 octets
+    // with a value of zero, as needed to ensure the overall control message
+    // size is a multiple of 4 octets." Anything after the padding is the
+    // optional Authenticator.
+    let padding_end = (data_end + (4 - data_end % 4) % 4).min(data.len());
+    let total = data.len();
+
+    buf.begin_layer("NTP", None, FIELD_DESCRIPTORS, offset..offset + total);
+    push_first_octet(buf, offset, Some(li), vn, mode);
+    for (fd, value) in [
+        (FD_RESPONSE, response),
+        (FD_ERROR, error),
+        (FD_MORE, more),
+        (FD_OPCODE, opcode),
+    ] {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[fd],
+            FieldValue::U8(value),
+            offset + 1..offset + 2,
+        );
+    }
+    for (fd, value, pos) in [
+        (FD_SEQUENCE, sequence, 2),
+        (FD_STATUS, status, 4),
+        (FD_ASSOCIATION_ID, association_id, 6),
+        (FD_OFFSET, data_offset, 8),
+        (FD_COUNT, count, 10),
+    ] {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[fd],
+            FieldValue::U16(value),
+            offset + pos..offset + pos + 2,
+        );
+    }
+    for (fd, range) in [
+        (FD_DATA, CONTROL_HEADER_SIZE..data_end),
+        (FD_PADDING, data_end..padding_end),
+        (FD_AUTHENTICATOR, padding_end..total),
+    ] {
+        if !range.is_empty() {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[fd],
+                FieldValue::Bytes(&data[range.clone()]),
+                offset + range.start..offset + range.end,
+            );
+        }
+    }
+    buf.end_layer();
+
+    Ok(DissectResult::new(total, DispatchHint::End))
+}
+
+/// Dissects a mode 7 message.
+///
+/// RFC 5905, Section 7.3, Figure 10 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3> — mode 7 is
+/// "reserved for private use". The format used by implementations (e.g.
+/// ntpd's `ntpdc`) is not specified in an RFC and reuses the LI bits, so
+/// only VN and Mode are decoded; the remaining octets are raw data.
+fn dissect_private<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    vn: u8,
+    mode: u8,
+) -> Result<DissectResult, PacketError> {
+    let total = data.len();
+    buf.begin_layer("NTP", None, FIELD_DESCRIPTORS, offset..offset + total);
+    push_first_octet(buf, offset, None, vn, mode);
+    if total > 1 {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_DATA],
+            FieldValue::Bytes(&data[1..]),
+            offset + 1..offset + total,
+        );
+    }
+    buf.end_layer();
+
+    Ok(DissectResult::new(total, DispatchHint::End))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +671,20 @@ mod tests {
     // | 7.3         | Dissection at non-zero offset                | test_dissect_with_offset            |
     // | ---         | Truncated header                             | test_truncated_packet               |
     // | ---         | Field descriptor count / naming              | test_field_descriptors              |
+    // | 7.3, Fig. 10| Mode 7 (reserved for private use)            | test_parse_mode7_private            |
+    // | ---         | Empty payload                                | test_empty_packet                   |
+    //
+    // # RFC 9327 (NTP Control Messages) Coverage
+    //
+    // | RFC Section | Description                                  | Test                                |
+    // |-------------|----------------------------------------------|-------------------------------------|
+    // | 2           | Header: R/E/M bits, opcode, sequence         | test_parse_mode6_request            |
+    // | 2           | Status, Association ID, Offset, Count        | test_parse_mode6_response           |
+    // | 2, Table 1  | Operation code names                         | test_mode6_opcode_names             |
+    // | 2           | Data (count octets)                          | test_parse_mode6_response           |
+    // | 2           | Padding and Authenticator                    | test_parse_mode6_padding_and_authenticator |
+    // | 2           | Truncated header (< 12 octets)               | test_mode6_truncated_header         |
+    // | 2           | Truncated data (< 12 + count octets)         | test_mode6_truncated_data           |
 
     /// Build a minimal NTP packet with the given parameters.
     #[allow(clippy::too_many_arguments)]
@@ -644,15 +914,261 @@ mod tests {
         }
     }
 
+    /// Build an NTP control message (RFC 9327, Section 2).
+    #[allow(clippy::too_many_arguments)]
+    fn build_mode6(
+        vn: u8,
+        rem_op: u8,
+        seq: u16,
+        status: u16,
+        assoc: u16,
+        off: u16,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut pkt = vec![(vn << 3) | 6, rem_op];
+        pkt.extend_from_slice(&seq.to_be_bytes());
+        pkt.extend_from_slice(&status.to_be_bytes());
+        pkt.extend_from_slice(&assoc.to_be_bytes());
+        pkt.extend_from_slice(&off.to_be_bytes());
+        pkt.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        pkt.extend_from_slice(data);
+        pkt
+    }
+
+    #[test]
+    fn test_parse_mode6_request() {
+        // `ntpq -c rv` request: LI=0, VN=2, Mode=6, opcode 2 (READVAR), seq 1.
+        let data = [0x16, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 42).unwrap();
+        assert_eq!(result.bytes_consumed, 12);
+        assert!(matches!(result.next, DispatchHint::End));
+
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.name, "NTP");
+        assert_eq!(layer.range, 42..54);
+        assert_eq!(
+            buf.field_by_name(layer, "leap_indicator").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "version").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "mode").unwrap().value,
+            FieldValue::U8(6)
+        );
+        for (name, v) in [("response", 0), ("error", 0), ("more", 0)] {
+            let f = buf.field_by_name(layer, name).unwrap();
+            assert_eq!(f.value, FieldValue::U8(v), "{name}");
+            assert_eq!(f.range, 43..44, "{name}");
+        }
+        assert_eq!(
+            buf.field_by_name(layer, "opcode").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "opcode_name"),
+            Some("read variables command/response")
+        );
+        let seq = buf.field_by_name(layer, "sequence").unwrap();
+        assert_eq!(seq.value, FieldValue::U16(1));
+        assert_eq!(seq.range, 44..46);
+        assert_eq!(
+            buf.field_by_name(layer, "count").unwrap().value,
+            FieldValue::U16(0)
+        );
+        assert!(buf.field_by_name(layer, "data").is_none());
+        assert!(buf.field_by_name(layer, "stratum").is_none());
+        assert!(buf.field_by_name(layer, "transmit_timestamp").is_none());
+    }
+
+    #[test]
+    fn test_parse_mode6_response() {
+        let text = b"version=\"ntpd 4.2.8p15\", processor=\"x86_64\", system=\"Linux\", leap=00";
+        assert_eq!(text.len(), 68);
+        // R=1, E=0, M=0, opcode 2; status 0x0618.
+        let data = build_mode6(2, 0x82, 1, 0x0618, 0, 0, text);
+        assert_eq!(data.len(), 80);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 80);
+
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "response").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "status").unwrap().value,
+            FieldValue::U16(0x0618)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "association_id").unwrap().value,
+            FieldValue::U16(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "offset").unwrap().value,
+            FieldValue::U16(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "count").unwrap().value,
+            FieldValue::U16(68)
+        );
+        let d = buf.field_by_name(layer, "data").unwrap();
+        assert_eq!(d.value, FieldValue::Bytes(text));
+        assert_eq!(d.range, 12..80);
+        assert!(buf.field_by_name(layer, "padding").is_none());
+        assert!(buf.field_by_name(layer, "authenticator").is_none());
+        assert!(buf.field_by_name(layer, "stratum").is_none());
+    }
+
+    #[test]
+    fn test_parse_mode6_padding_and_authenticator() {
+        // E=1, M=1, opcode 1; 5 data octets, 3 octets of padding and a
+        // 20-octet authenticator (key ID + MD5 digest).
+        let mut data = build_mode6(2, 0xE1, 9, 0, 3, 16, b"abcde");
+        data.extend_from_slice(&[0, 0, 0]);
+        data.extend_from_slice(&[0x5A; 20]);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 40);
+
+        let layer = &buf.layers()[0];
+        for name in ["response", "error", "more"] {
+            assert_eq!(
+                buf.field_by_name(layer, name).unwrap().value,
+                FieldValue::U8(1),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            buf.resolve_display_name(layer, "opcode_name"),
+            Some("read status command/response")
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "offset").unwrap().value,
+            FieldValue::U16(16)
+        );
+        let pad = buf.field_by_name(layer, "padding").unwrap();
+        assert_eq!(pad.value, FieldValue::Bytes(&[0, 0, 0]));
+        assert_eq!(pad.range, 17..20);
+        let auth = buf.field_by_name(layer, "authenticator").unwrap();
+        assert_eq!(auth.value, FieldValue::Bytes(&[0x5A; 20]));
+        assert_eq!(auth.range, 20..40);
+    }
+
+    #[test]
+    fn test_mode6_opcode_names() {
+        let expected = [
+            (0, "reserved"),
+            (3, "write variables command/response"),
+            (4, "read clock variables command/response"),
+            (5, "write clock variables command/response"),
+            (6, "set trap address/port command/response"),
+            (7, "trap response"),
+            (8, "runtime configuration command/response"),
+            (9, "export configuration to file command/response"),
+            (10, "retrieve remote address stats command/response"),
+            (11, "retrieve ordered list command/response"),
+            (12, "request client-specific nonce command/response"),
+            (13, "reserved"),
+            (30, "reserved"),
+            (31, "unset trap address/port command/response"),
+        ];
+        for (op, name) in expected {
+            assert_eq!(control_opcode_name(op), name, "opcode {op}");
+        }
+    }
+
+    #[test]
+    fn test_mode6_truncated_header() {
+        let data = [0x16, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0];
+        let mut buf = DissectBuffer::new();
+        let err = NtpDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 12,
+                actual: 11
+            }
+        ));
+        assert!(buf.layers().is_empty());
+    }
+
+    #[test]
+    fn test_mode6_truncated_data() {
+        let mut data = build_mode6(2, 0x82, 1, 0, 0, 0, &[b'x'; 10]);
+        data.truncate(15);
+        let mut buf = DissectBuffer::new();
+        let err = NtpDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 22,
+                actual: 15
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_mode7_private() {
+        // RFC 5905, Section 7.3, Figure 10 — mode 7 is "reserved for private
+        // use"; only VN and Mode are interpreted.
+        let data = [0x17, 0x00, 0x03, 0x2a, 0, 0, 0, 0];
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 8);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "version").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "mode").unwrap().value,
+            FieldValue::U8(7)
+        );
+        let d = buf.field_by_name(layer, "data").unwrap();
+        assert_eq!(d.value, FieldValue::Bytes(&data[1..]));
+        assert_eq!(d.range, 1..8);
+        assert!(buf.field_by_name(layer, "leap_indicator").is_none());
+        assert!(buf.field_by_name(layer, "stratum").is_none());
+
+        // A lone first octet is still a valid (empty) private message.
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data[..1], &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 1);
+        assert!(buf.field_by_name(&buf.layers()[0], "data").is_none());
+    }
+
+    #[test]
+    fn test_empty_packet() {
+        let mut buf = DissectBuffer::new();
+        let err = NtpDissector.dissect(&[], &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 1,
+                actual: 0
+            }
+        ));
+    }
+
     #[test]
     fn test_field_descriptors() {
         let descriptors = NtpDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 13);
+        assert_eq!(descriptors.len(), 25);
         assert_eq!(descriptors[0].name, "leap_indicator");
         assert_eq!(
-            descriptors[descriptors.len() - 1].name,
+            descriptors[FD_TRANSMIT_TIMESTAMP].name,
             "transmit_timestamp"
         );
+        assert_eq!(descriptors[descriptors.len() - 1].name, "authenticator");
+        // Only VN and Mode are present in every mode.
+        for (i, d) in descriptors.iter().enumerate() {
+            assert_eq!(d.optional, i != FD_VERSION && i != FD_MODE, "{}", d.name);
+        }
     }
 
     #[test]

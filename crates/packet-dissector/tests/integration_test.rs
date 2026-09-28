@@ -69,6 +69,7 @@
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
 //! | Ethernet → MPLS (2 labels) → IPv4 → UDP              | integration_ethernet_mpls_two_labels_ipv4_udp        |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
+//! | Ethernet → IPv4 → UDP → NTP (Control, mode 6)        | integration_ethernet_ipv4_udp_ntp_control_request    |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
 //! | Ethernet → IPv4 → UDP → BFD Echo (opaque payload)    | integration_ethernet_ipv4_udp_bfd_echo_opaque        |
 //! | Ethernet → IPv4 → UDP → BFD Echo (Control format)    | integration_ethernet_ipv4_udp_bfd_echo_control       |
@@ -4258,6 +4259,41 @@ fn integration_ethernet_ipv4_udp_ntp_client() {
         buf.field_by_name(ntp, "transmit_timestamp").unwrap().value,
         FieldValue::U64(0xDEAD_BEEF_CAFE_BABE)
     );
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_ntp_control_request() {
+    // RFC 9327, Section 2 — a 12-octet `ntpq -c rv` request (mode 6).
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 123);
+    pkt.extend_from_slice(&[0x16, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let registry = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let ntp = &buf.layers()[3];
+    assert_eq!(ntp.name, "NTP");
+    assert_eq!(
+        buf.field_by_name(ntp, "mode").unwrap().value,
+        FieldValue::U8(6)
+    );
+    assert_eq!(
+        buf.field_by_name(ntp, "opcode").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert!(buf.field_by_name(ntp, "stratum").is_none());
 }
 
 // ---------------------------------------------------------------------------
