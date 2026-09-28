@@ -429,6 +429,19 @@ fn parse_rdata_name(
     (rel_pos + consumed <= rdata_len).then_some(consumed)
 }
 
+/// Like [`parse_rdata_name`], for a name that is the last RDATA field: the
+/// name must end exactly at RDLENGTH, since octets after the final field are
+/// not part of any field.
+fn parse_final_rdata_name(
+    msg: &[u8],
+    rdata_offset: usize,
+    rdata_len: usize,
+    rel_pos: usize,
+) -> Option<usize> {
+    parse_rdata_name(msg, rdata_offset, rdata_len, rel_pos)
+        .filter(|&consumed| rel_pos + consumed == rdata_len)
+}
+
 /// Parse RDATA into typed fields based on the record type.
 ///
 /// `msg` is the full DNS message (needed for name compression in RDATA).
@@ -488,7 +501,7 @@ fn parse_rdata<'pkt>(
         // RFC 1035, Section 3.3.9 — MX: preference (U16) + exchange (domain name)
         TYPE_MX if rdata.len() >= 3 => {
             let preference = read_be_u16(rdata, 0).unwrap_or_default();
-            if parse_rdata_name(msg, rdata_offset, rdata.len(), 2).is_some() {
+            if parse_final_rdata_name(msg, rdata_offset, rdata.len(), 2).is_some() {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_PREFERENCE],
                     FieldValue::U16(preference),
@@ -518,7 +531,9 @@ fn parse_rdata<'pkt>(
                 if let Some(rname_len) = parse_rdata_name(msg, rdata_offset, rdata.len(), mname_len)
                 {
                     let timers_off = mname_len + rname_len;
-                    if timers_off + 20 <= rdata.len() {
+                    // MINIMUM is the last SOA field — RFC 1035, Section 3.3.13
+                    // <https://www.rfc-editor.org/rfc/rfc1035#section-3.3.13>
+                    if timers_off + 20 == rdata.len() {
                         let t = timers_off;
                         let serial = read_be_u32(rdata, t).unwrap_or_default();
                         let refresh = read_be_u32(rdata, t + 4).unwrap_or_default();
@@ -572,7 +587,7 @@ fn parse_rdata<'pkt>(
             let priority = read_be_u16(rdata, 0).unwrap_or_default();
             let weight = read_be_u16(rdata, 2).unwrap_or_default();
             let port = read_be_u16(rdata, 4).unwrap_or_default();
-            if parse_rdata_name(msg, rdata_offset, rdata.len(), 6).is_some() {
+            if parse_final_rdata_name(msg, rdata_offset, rdata.len(), 6).is_some() {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_PRIORITY],
                     FieldValue::U16(priority),
@@ -619,7 +634,7 @@ fn parse_rdata<'pkt>(
                 n += 1;
                 pos += str_len;
             }
-            if n == 3 && parse_rdata_name(msg, rdata_offset, rdata.len(), pos).is_some() {
+            if n == 3 && parse_final_rdata_name(msg, rdata_offset, rdata.len(), pos).is_some() {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_ORDER],
                     FieldValue::U16(order),
@@ -2015,6 +2030,7 @@ mod tests {
     // | RFC 1035 §3.2.1        | RRSIG signer name past RDLENGTH     | rrsig_signer_name_overrunning_rdata_falls_back |
     // | RFC 1035 §3.2.1        | SOA RNAME past RDLENGTH             | soa_rname_overrunning_rdata_falls_back |
     // | RFC 1035 §3.2.1        | Any RDATA name past RDLENGTH        | names_overrunning_rdata_fall_back_for_every_name_type |
+    // | RFC 1035 §3.3.9/§3.3.13, RFC 2782, RFC 3403 §4.1 | Octets after final RDATA field | trailing_octets_after_final_rdata_field_fall_back |
     // | RFC 4034 §5.1          | DS record                           | parse_ds_record                   |
     // | RFC 4255               | SSHFP record                        | parse_sshfp_record                |
     // | RFC 5155 §3.2          | NSEC3 record                        | parse_nsec3_record                |
@@ -2962,6 +2978,34 @@ mod tests {
             let mut rdata = prefix.to_vec();
             rdata.push(OVERRUN_NAME[0]);
             let data = answer_with_trailing(rtype, &rdata, &OVERRUN_NAME[1..]);
+            assert_raw_rdata_fallback(&data, &rdata);
+        }
+    }
+
+    #[test]
+    fn trailing_octets_after_final_rdata_field_fall_back() {
+        // RFC 1035 §3.3.9 / §3.3.13, RFC 2782, RFC 3403 §4.1 — the name (or,
+        // for SOA, MINIMUM) is the last RDATA field, so RDATA that continues
+        // past it is malformed.
+        let garbage = [0xDEu8, 0xAD];
+        let mut soa = wire_name("ns.test");
+        soa.extend_from_slice(&wire_name("admin.test"));
+        soa.extend_from_slice(&[0u8; 20]); // SERIAL .. MINIMUM
+        let cases: Vec<(u16, Vec<u8>)> = vec![
+            (TYPE_MX, [&[0u8, 10][..], &wire_name("mx.test")].concat()),
+            (
+                TYPE_SRV,
+                [&[0u8, 1, 0, 2, 0, 80][..], &wire_name("sip.test")].concat(),
+            ),
+            (
+                TYPE_NAPTR,
+                [&[0u8, 1, 0, 2, 0, 0, 0][..], &wire_name("r.test")].concat(),
+            ),
+            (TYPE_SOA, soa),
+        ];
+        for (rtype, mut rdata) in cases {
+            rdata.extend_from_slice(&garbage);
+            let data = answer_with_trailing(rtype, &rdata, &[]);
             assert_raw_rdata_fallback(&data, &rdata);
         }
     }
