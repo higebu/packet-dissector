@@ -95,6 +95,16 @@ impl DissectorRegistry {
     }
 
     /// Set the entry-point dissector (typically Ethernet).
+    ///
+    /// The entry dissector is used only by [`dissect`](Self::dissect),
+    /// [`dissect_summary`](Self::dissect_summary) and
+    /// [`dissect_projected`](Self::dissect_projected). The `*_with_link_type`
+    /// methods look the entry dissector up in the link-type table and do not
+    /// fall back to this one; register it there as well with
+    /// [`register_by_link_type`](Self::register_by_link_type) (for example
+    /// link type `1`, `LINKTYPE_ETHERNET`) or, on a
+    /// [`default`](Self::default) registry, replace the built-in entry with
+    /// [`register_by_link_type_or_replace`](Self::register_by_link_type_or_replace).
     pub fn set_entry_dissector(&mut self, dissector: Box<dyn Dissector>) {
         self.entry = Some(dissector);
     }
@@ -2229,9 +2239,10 @@ impl Default for DissectorRegistry {
         // L2TP port 1701 registration is handled by L2tpDispatcher above.
 
         // PPP — registered by link type and EtherType
-        // LINKTYPE_PPP (9), LINKTYPE_PPP_HDLC (50 — RFC 1662 HDLC-like framing),
+        // LINKTYPE_PPP (9), LINKTYPE_PPP_HDLC (50 — HDLC-like framing),
         // EtherType 0x880B (GRE-encapsulated PPP)
         // https://www.tcpdump.org/linktypes/LINKTYPE_PPP_HDLC.html
+        // RFC 1662, Section 3.1 — https://www.rfc-editor.org/rfc/rfc1662#section-3.1
         #[cfg(feature = "ppp")]
         {
             assert_builtin(
