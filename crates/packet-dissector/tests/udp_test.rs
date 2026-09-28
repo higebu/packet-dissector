@@ -11,7 +11,7 @@
 //! | Checksum field (16 bits)                     | parse_udp_basic                   |
 //! | Checksum = 0 means "not computed"            | parse_udp_no_checksum             |
 //! | Minimum Length = 8 (header only)            | parse_udp_length_too_small        |
-//! | Length must not exceed available data        | parse_udp_length_exceeds_data     |
+//! | Length > data (snaplen) accepted             | parse_udp_length_exceeds_data_accepted |
 //! | Truncated header (< 8 bytes)                 | parse_udp_truncated               |
 //! | Byte offset correctness                      | parse_udp_with_offset             |
 //! | Dissector metadata                           | udp_dissector_metadata            |
@@ -147,19 +147,21 @@ fn parse_udp_length_too_small() {
 }
 
 #[test]
-fn parse_udp_length_exceeds_data() {
-    // RFC 768: Length includes the header + data.
-    // If data buffer is shorter than the declared Length, the packet is truncated.
+fn parse_udp_length_exceeds_data_accepted() {
+    // RFC 768: Length includes the header + data. A buffer shorter than the
+    // declared Length is what a snaplen-limited capture holds, so the header
+    // is still dissected; the dispatch loop clamps the payload to the
+    // captured bytes.
     let mut data = build_udp_packet(1234, 5678, 20); // claims 20 bytes total
     data.truncate(12); // only 12 bytes available
 
     let mut buf = DissectBuffer::new();
-    let err = UdpDissector.dissect(&data, &mut buf, 0).unwrap_err();
-    assert!(matches!(
-        err,
-        packet_dissector::error::PacketError::Truncated {
-            expected: 20,
-            actual: 12
-        }
-    ));
+    let result = UdpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(result.bytes_consumed, 8);
+    assert_eq!(result.payload_len, Some(12));
+    let layer = buf.layer_by_name("UDP").unwrap();
+    assert_eq!(
+        buf.field_by_name(layer, "length").unwrap().value,
+        FieldValue::U16(20)
+    );
 }

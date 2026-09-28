@@ -29,7 +29,7 @@
 //! | —              | Truncated with options          | parse_ipv4_truncated_with_options   |
 //! | 791 §3.1       | Version must be 4               | parse_ipv4_invalid_version          |
 //! | 791 §3.1       | Total Length < IHL*4 invalid    | parse_ipv4_total_length_too_small   |
-//! | 791 §3.1       | Total Length > data truncated   | parse_ipv4_total_length_exceeds_data|
+//! | 791 §3.1       | Total Length > data (snaplen) accepted | parse_ipv4_total_length_exceeds_data_accepted |
 //! | 791 §3.1       | Payload ends at Total Length    | parse_ipv4_payload_len_from_total_length |
 //! | 791 §3.1       | Payload length excludes options | parse_ipv4_payload_len_with_options |
 //! | —              | Offset handling                 | parse_ipv4_with_offset              |
@@ -277,17 +277,26 @@ fn parse_ipv4_total_length_too_small() {
 }
 
 #[test]
-fn parse_ipv4_total_length_exceeds_data() {
-    // RFC 791, Section 3.1 — Total Length says 100 but only 20 bytes available
-    let mut data = [0u8; 20];
+fn parse_ipv4_total_length_exceeds_data_accepted() {
+    // RFC 791, Section 3.1 — Total Length is the length of the datagram; it
+    // says nothing about how much of it a capture holds. A snaplen-limited
+    // capture keeps fewer bytes, so the header is still dissected and the
+    // declared payload length is reported (the dispatch loop clamps it to the
+    // captured bytes).
+    let mut data = [0u8; 24];
     data[0] = 0x45; // Version=4, IHL=5
     data[2..4].copy_from_slice(&100u16.to_be_bytes()); // Total Length = 100
     let mut buf = DissectBuffer::new();
-    let err = Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap_err();
-    assert!(matches!(
-        err,
-        packet_dissector::error::PacketError::Truncated { .. }
-    ));
+    let result = Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.bytes_consumed, 20);
+    assert_eq!(result.payload_len, Some(80));
+    let layer = buf.layer_by_name("IPv4").unwrap();
+    assert_eq!(layer.range, 0..20);
+    assert_eq!(
+        buf.field_by_name(layer, "total_length").unwrap().value,
+        FieldValue::U16(100)
+    );
 }
 
 #[test]

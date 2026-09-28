@@ -169,15 +169,13 @@ impl Dissector for Ipv4Dissector {
             });
         }
 
-        // RFC 791, Section 3.1 — the buffer must contain at least Total Length
-        // octets; otherwise the datagram is truncated.
+        // RFC 791, Section 3.1 defines Total Length as the length of the
+        // datagram, not of the captured bytes. A buffer shorter than Total
+        // Length is what a snaplen-limited capture holds (pcap caplen < len),
+        // so it is not rejected: the header is dissected and the dispatch loop
+        // ends the payload at min(captured bytes, Total Length). Upper layers
+        // that need the missing bytes report the truncation themselves.
         // https://www.rfc-editor.org/rfc/rfc791#section-3.1
-        if data.len() < total_length as usize {
-            return Err(PacketError::Truncated {
-                expected: total_length as usize,
-                actual: data.len(),
-            });
-        }
 
         // RFC 2474, Section 3 — DSCP occupies bits 0-5 of the DS Field.
         // https://www.rfc-editor.org/rfc/rfc2474#section-3

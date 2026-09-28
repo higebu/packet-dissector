@@ -101,15 +101,13 @@ impl Dissector for UdpDissector {
         // IP transport payload as the "surplus area" used for UDP Options. The
         // dissector therefore consumes only HEADER_SIZE and bounds the payload
         // handed to the application to `length - HEADER_SIZE`, so the surplus
-        // area is not parsed as user data; only `length > data.len()` is
-        // treated as truncation.
+        // area is not parsed as user data.
         // https://www.rfc-editor.org/rfc/rfc9868#section-7
-        if (length as usize) > data.len() {
-            return Err(PacketError::Truncated {
-                expected: length as usize,
-                actual: data.len(),
-            });
-        }
+        //
+        // A buffer shorter than `length` is what a snaplen-limited capture
+        // holds, so it is not rejected: the dispatch loop ends the payload at
+        // min(captured bytes, length) and the application-layer dissector
+        // reports the truncation if it needs the missing bytes.
 
         buf.begin_layer(
             self.short_name(),
@@ -163,7 +161,7 @@ mod tests {
     // | RFC 768 §Source Port                   | Optional; value zero allowed                       | parse_source_port_zero            |
     // | RFC 768 §Checksum                      | Zero means "transmitter generated no checksum"     | parse_checksum_zero_not_computed  |
     // | RFC 768 §Length                        | length < 8 rejected as InvalidFieldValue           | parse_length_below_minimum        |
-    // | RFC 768 §Length                        | length > data.len() rejected as Truncated          | parse_length_exceeds_data         |
+    // | RFC 768 §Length                        | length > data.len() (snaplen) accepted             | parse_length_exceeds_data_accepted |
     // | RFC 9868 §7                            | data.len() > length accepted (surplus area)        | parse_surplus_area_accepted       |
     // | RFC 9868 §7                            | User data ends at length; surplus not dispatched   | payload_len_excludes_surplus_area |
     // | RFC 768 §Header                        | Truncated header (< 8 bytes) rejected              | parse_truncated_header            |
@@ -277,21 +275,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_length_exceeds_data() {
-        // RFC 768 §Length — declared length covers header+data; must not
-        // exceed the captured buffer.
+    fn parse_length_exceeds_data_accepted() {
+        // RFC 768 §Length — declared length covers header+data. A captured
+        // buffer shorter than it (snaplen truncation) is not a malformed
+        // datagram: the header is dissected and the declared payload length
+        // is reported for the dispatch loop to clamp.
         let mut data = build_udp(1234, 5678, 20, 0);
         data.truncate(12);
 
         let mut buf = DissectBuffer::new();
-        let err = UdpDissector.dissect(&data, &mut buf, 0).unwrap_err();
-        assert_eq!(
-            err,
-            PacketError::Truncated {
-                expected: 20,
-                actual: 12,
-            }
-        );
+        let result = UdpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, HEADER_SIZE);
+        assert_eq!(result.payload_len, Some(12));
+        assert!(buf.layer_by_name("UDP").is_some());
     }
 
     #[test]

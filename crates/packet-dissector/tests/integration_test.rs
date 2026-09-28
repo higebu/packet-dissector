@@ -105,6 +105,10 @@
 //! | Ethernet → IPv6 (Payload Length 0) → HBH Jumbo → probe       | integration_ethernet_ipv6_zero_payload_length_hop_by_hop_not_bounded |
 //! | Ethernet (802.3 Length) → LLC → probe + Ethernet pad         | integration_ethernet_802_3_llc_payload_bounded_by_length |
 //! | Ethernet → IPv4 → TCP SYN + Ethernet pad + trailer           | integration_ethernet_ipv4_tcp_syn_padded             |
+//! | Ethernet → IPv4 (snaplen-truncated) → TCP                    | integration_ethernet_ipv4_tcp_snaplen_truncated      |
+//! | Ethernet → IPv6 (snaplen-truncated) → TCP                    | integration_ethernet_ipv6_tcp_snaplen_truncated      |
+//! | Ethernet → IPv4 → UDP → DNS (cut by snaplen)                 | integration_ethernet_ipv4_udp_dns_snaplen_truncated  |
+//! | Ethernet → IPv4 (snaplen-truncated) → probe                  | integration_ethernet_ipv4_snaplen_payload_ends_at_capture |
 
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
@@ -7195,4 +7199,104 @@ fn integration_ethernet_ipv4_tcp_syn_padded() {
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "TCP"]);
     assert_layers_end_within(&buf, datagram_end);
+}
+
+// ---------------------------------------------------------------------------
+// Snaplen truncation: a capture that holds fewer bytes than the IPv4 Total
+// Length / UDP Length is valid capture data, not a malformed datagram.
+//
+// RFC 791, Section 3.1 — https://www.rfc-editor.org/rfc/rfc791#section-3.1
+// pcap savefile caplen vs len — https://www.tcpdump.org/manpages/pcap-savefile.5.html
+// ---------------------------------------------------------------------------
+
+/// Ethernet → IPv4 (Total Length 1500) → TCP header only, as written by
+/// `tcpdump -s 54`.
+#[test]
+fn integration_ethernet_ipv4_tcp_snaplen_truncated() {
+    let reg = DissectorRegistry::default();
+    #[rustfmt::skip]
+    let pkt: [u8; 54] = [
+        // Ethernet, IPv4
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00,
+        // IPv4, total length 1500, TCP
+        0x45, 0x00, 0x05, 0xdc, 0x00, 0x01, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x01,
+        0x0a, 0x00, 0x00, 0x02,
+        // TCP 12345 -> 80, ACK
+        0x30, 0x39, 0x00, 0x50, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x10, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "TCP"]);
+    assert_layers_contiguous(&buf);
+    let ipv4 = buf.layer_by_name("IPv4").unwrap();
+    assert_eq!(
+        buf.field_by_name(ipv4, "total_length").unwrap().value,
+        FieldValue::U16(1500)
+    );
+}
+
+/// Ethernet → IPv6 (Payload Length 1480) → TCP header only: the same
+/// snaplen-truncated capture over IPv6 dissects identically.
+#[test]
+fn integration_ethernet_ipv6_tcp_snaplen_truncated() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = build_eth_ipv6_tcp();
+    pkt[14 + 4..14 + 6].copy_from_slice(&1480u16.to_be_bytes());
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+/// Ethernet → IPv4 → UDP → DNS cut mid-record by the snap length.
+///
+/// The IPv4 and UDP layers survive; only the innermost layer that needs
+/// the missing bytes reports the truncation.
+#[test]
+fn integration_ethernet_ipv4_udp_dns_snaplen_truncated() {
+    let reg = DissectorRegistry::default();
+    let full = build_eth_ipv4_udp_dns_query();
+    // Keep the DNS header and part of the question name.
+    let snaplen = 14 + 20 + 8 + 12 + 4;
+    assert!(snaplen < full.len());
+    let pkt = &full[..snaplen];
+
+    let mut buf = DissectBuffer::new();
+    let err = reg.dissect(pkt, &mut buf).unwrap_err();
+
+    assert!(matches!(err, PacketError::Truncated { .. }), "{err:?}");
+    // DNS may keep the part of its layer it parsed before the error.
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).take(3).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "UDP"]);
+    let udp = buf.layer_by_name("UDP").unwrap();
+    assert_eq!(
+        buf.field_by_name(udp, "length").unwrap().value,
+        FieldValue::U16((full.len() - 34) as u16)
+    );
+}
+
+/// Ethernet → IPv4 → probe cut by the snap length: the payload handed
+/// upward ends at the captured bytes, not at Total Length.
+#[test]
+fn integration_ethernet_ipv4_snaplen_payload_ends_at_capture() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_ip_protocol_or_replace(253, Box::new(PayloadProbe));
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 253, IPV4_SRC, IPV4_DST);
+    pkt.extend_from_slice(&[0xAA; 100]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    pkt.truncate(64);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let probe = buf.layer_by_name("Probe").unwrap();
+    assert_eq!(probe.range, 34..64);
 }
