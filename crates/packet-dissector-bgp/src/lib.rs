@@ -10,7 +10,9 @@
 //! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
 //! - RFC 4760 (Multiprotocol Extensions): <https://www.rfc-editor.org/rfc/rfc4760>
 //! - RFC 5492 (Capabilities Advertisement with BGP-4): <https://www.rfc-editor.org/rfc/rfc5492>
+//! - RFC 5065 (AS Confederations): <https://www.rfc-editor.org/rfc/rfc5065>
 //! - RFC 6793 (4-octet AS Numbers): <https://www.rfc-editor.org/rfc/rfc6793>
+//! - RFC 7606 (Revised Error Handling for BGP UPDATE Messages): <https://www.rfc-editor.org/rfc/rfc7606>
 //! - RFC 7313 (Enhanced Route Refresh): <https://www.rfc-editor.org/rfc/rfc7313>
 //! - RFC 7911 (ADD-PATH Capability): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8092 (Large Communities): <https://www.rfc-editor.org/rfc/rfc8092>
@@ -63,6 +65,18 @@
 //! | 3 | AS4_PATH | `parse_bgp_update_as4_path` |
 //! | 3 | AS4_AGGREGATOR | `parse_bgp_update_as4_aggregator` |
 //! | 3 | 4-octet AS Number Capability (asn) | `parse_bgp_open_capability_as4` |
+//! | 4.1 | AS_PATH with 4-octet AS numbers | `parse_bgp_update_as_path_four_octet`, `parse_bgp_update_as_path_four_octet_multi_segment` |
+//! | 4.1 | AS_PATH with 2-octet AS numbers (not valid as 4-octet) | `parse_bgp_update_as_path_two_octet_size`, `parse_bgp_update_as_path_two_octet_multi_segment` |
+//! | 4.1 | AS_PATH valid for both sizes decodes as 4-octet | `parse_bgp_update_as_path_ambiguous_prefers_four_octet` |
+//! | 4.1 | Empty AS_PATH has no inferred AS number size | `parse_bgp_update_as_path_empty` |
+//! | 3 | Malformed AS4_PATH kept as raw bytes | `parse_bgp_update_as4_path_malformed_is_raw` |
+//!
+//! # RFC 7606 (Revised Error Handling) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | 7.2 | AS_PATH segment validation (type, zero length, overrun, underrun) | `as_path_fits_checks_structure` |
+//! | 7.2 | AS_PATH malformed for both AS sizes kept as raw bytes | `parse_bgp_update_as_path_malformed_is_raw` |
 //!
 //! # RFC 1997 Coverage
 //!
@@ -1818,16 +1832,86 @@ fn parse_srv6_sid_info_sub_tlv<'pkt>(
     }
 }
 
-/// Parses an AS_PATH or AS4_PATH attribute value into the buffer.
+/// AS_PATH segment types defined by RFC 4271 (AS_SET = 1, AS_SEQUENCE = 2) and
+/// RFC 5065 (AS_CONFED_SEQUENCE = 3, AS_CONFED_SET = 4).
+///
+/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
+/// RFC 5065, Section 3 — <https://www.rfc-editor.org/rfc/rfc5065#section-3>
+const AS_PATH_SEGMENT_TYPES: core::ops::RangeInclusive<u8> = 1..=4;
+
+/// Returns `true` when `data` is a well-formed AS_PATH / AS4_PATH value whose
+/// AS numbers are `as_size` octets wide.
+///
+/// Every segment must have a recognized segment type (1-4), a non-zero Path
+/// Segment Length, and the segments must consume `data` exactly. These are the
+/// RFC 7606 malformation rules:
+///
+/// > An AS_PATH is considered malformed if an unrecognized segment type is
+/// > encountered or if it contains a malformed segment.  A segment is
+/// > considered malformed if any of the following are true:
+/// >
+/// > o  There is an overrun where the Path Segment Length field of the
+/// >    last segment encountered would cause the Attribute Length to be
+/// >    exceeded.
+/// >
+/// > o  There is an underrun where after the last successfully parsed
+/// >    segment there is only a single octet remaining (that is, there is
+/// >    not enough unconsumed data to provide even an empty segment
+/// >    header).
+/// >
+/// > o  It has a Path Segment Length field of zero.
+///
+/// RFC 7606, Section 7.2 — <https://www.rfc-editor.org/rfc/rfc7606#section-7.2>
+fn as_path_fits(data: &[u8], as_size: usize) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        let Some(&seg_len) = data.get(pos + 1) else {
+            return false;
+        };
+        if !AS_PATH_SEGMENT_TYPES.contains(&data[pos]) || seg_len == 0 {
+            return false;
+        }
+        pos += 2 + seg_len as usize * as_size;
+    }
+    pos == data.len()
+}
+
+/// Selects the AS number size (4 or 2 octets) of an AS_PATH attribute value.
+///
+/// The size is negotiated per session: "A BGP speaker that advertises such a
+/// capability to a particular peer, and receives from that peer the
+/// advertisement of such a capability, MUST encode AS numbers as four-octet
+/// entities in both the AS_PATH attribute and the AGGREGATOR attribute"
+/// (RFC 6793, Section 4.1). This dissector is stateless and cannot see the
+/// OPEN exchange, so the size is inferred from the structure of the value with
+/// [`as_path_fits`]. Four-octet is tried first because RFC 6793 sessions are
+/// the common case; a value that is valid for both sizes is therefore decoded
+/// with four-octet AS numbers. Returns `None` when neither size fits.
+///
+/// RFC 6793, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc6793#section-4.1>
+fn detect_as_path_as_size(data: &[u8]) -> Option<usize> {
+    [4, 2].into_iter().find(|&size| as_path_fits(data, size))
+}
+
+/// Pushes an AS_PATH or AS4_PATH attribute value as the attribute `value`
+/// Array of segment objects.
 ///
 /// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
 /// RFC 6793 — <https://www.rfc-editor.org/rfc/rfc6793>
+///
+/// Callers validate `data` with [`as_path_fits`] first, so every segment is
+/// complete.
 fn parse_as_path<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
     as_size: usize,
 ) {
+    let array_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
     let mut pos = 0;
 
     while pos + 2 <= data.len() {
@@ -1877,6 +1961,7 @@ fn parse_as_path<'pkt>(
 
         pos += 2 + seg_data_len;
     }
+    buf.end_container(array_idx);
 }
 
 /// Parses the value of a path attribute based on its type code.
@@ -1897,16 +1982,33 @@ fn parse_attr_value<'pkt>(
                 offset..offset + 1,
             );
         }
-        // AS_PATH (RFC 4271, Section 5.1.2) — 2-byte AS numbers
-        2 => {
-            let array_idx = buf.begin_container(
-                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
-                FieldValue::Array(0..0),
-                offset..offset + data.len(),
-            );
+        // AS_PATH (RFC 4271, Section 5.1.2) — 2-octet AS numbers, or 4-octet
+        // AS numbers between NEW BGP speakers (RFC 6793, Section 4.1 —
+        // https://www.rfc-editor.org/rfc/rfc6793#section-4.1).
+        2 if data.is_empty() => {
+            // No segments: nothing to infer the AS number size from.
             parse_as_path(buf, data, offset, 2);
-            buf.end_container(array_idx);
         }
+        2 => match detect_as_path_as_size(data) {
+            Some(as_size) => {
+                parse_as_path(buf, data, offset, as_size);
+                buf.push_field(
+                    &PATH_ATTR_CHILDREN[FD_PA_AS_NUMBER_SIZE],
+                    FieldValue::U8(as_size as u8),
+                    offset..offset + data.len(),
+                );
+            }
+            // Malformed for both sizes (RFC 7606, Section 7.2 —
+            // https://www.rfc-editor.org/rfc/rfc7606#section-7.2): keep the raw
+            // octets rather than a partial decode.
+            None => {
+                buf.push_field(
+                    &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+                    FieldValue::Bytes(data),
+                    offset..offset + data.len(),
+                );
+            }
+        },
         // NEXT_HOP (RFC 4271, Section 5.1.3) — 4-byte IPv4 address
         3 if data.len() == 4 => {
             buf.push_field(
@@ -2017,14 +2119,8 @@ fn parse_attr_value<'pkt>(
             buf.end_container(array_idx);
         }
         // AS4_PATH (RFC 6793) — same format as AS_PATH but with 4-byte AS numbers
-        17 => {
-            let array_idx = buf.begin_container(
-                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
-                FieldValue::Array(0..0),
-                offset..offset + data.len(),
-            );
+        17 if as_path_fits(data, 4) => {
             parse_as_path(buf, data, offset, 4);
-            buf.end_container(array_idx);
         }
         // AS4_AGGREGATOR (RFC 6793) — 4-byte AS + 4-byte IP = 8 bytes
         18 if data.len() == 8 => {
@@ -3620,6 +3716,7 @@ const FD_PA_FLAGS: usize = 0;
 const FD_PA_TYPE_CODE: usize = 1;
 const FD_PA_ATTR_LENGTH: usize = 2;
 const FD_PA_VALUE: usize = 3;
+const FD_PA_AS_NUMBER_SIZE: usize = 4;
 
 /// ORIGIN "value" field descriptor with display_fn for IGP/EGP/INCOMPLETE.
 static FD_ORIGIN_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value", FieldType::U8)
@@ -3663,6 +3760,11 @@ static PATH_ATTR_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("value", "Value", FieldType::Any)
         .optional()
         .with_children(PATH_ATTR_VALUE_CHILDREN),
+    // AS_PATH only: the AS number size (2 or 4 octets) inferred from the
+    // structure of the value, since the RFC 6793 capability exchange is not
+    // visible to a stateless dissector (RFC 6793, Section 4.1 —
+    // https://www.rfc-editor.org/rfc/rfc6793#section-4.1).
+    FieldDescriptor::new("as_number_size", "AS Number Size", FieldType::U8).optional(),
 ];
 
 /// Union of every field that can appear inside a structured path attribute
@@ -7752,5 +7854,197 @@ mod tests {
             param_type.name,
             NON_CAP_PARAM_CHILDREN[FD_NCP_PARAM_TYPE].name
         );
+    }
+
+    // -------------------------------------------------------------------
+    // AS_PATH AS number size detection (RFC 6793, Section 4.1 —
+    // https://www.rfc-editor.org/rfc/rfc6793#section-4.1; RFC 7606,
+    // Section 7.2 — https://www.rfc-editor.org/rfc/rfc7606#section-7.2).
+    // -------------------------------------------------------------------
+
+    /// Helper: decode the AS_PATH segments of the first path attribute as
+    /// `(segment_type, as_numbers)` pairs.
+    fn first_attr_as_path_segments(buf: &DissectBuffer<'_>) -> Vec<(u8, Vec<u32>)> {
+        let obj_range = first_pa_obj_range(buf);
+        let FieldValue::Array(ref segs_range) = *nested_field_value(buf, &obj_range, "value")
+        else {
+            panic!("expected Array for AS path value");
+        };
+        direct_children(buf, segs_range)
+            .iter()
+            .map(|seg| {
+                let seg_range = seg.value.as_container_range().unwrap();
+                let FieldValue::U8(seg_type) = *nested_field_value(buf, seg_range, "segment_type")
+                else {
+                    panic!("expected U8 segment_type");
+                };
+                let asns_range = nested_field_by_name(buf, seg_range, "as_numbers")
+                    .value
+                    .as_container_range()
+                    .unwrap();
+                let asns = buf
+                    .nested_fields(asns_range)
+                    .iter()
+                    .map(|f| match f.value {
+                        FieldValue::U32(v) => v,
+                        _ => panic!("expected U32 AS number"),
+                    })
+                    .collect();
+                (seg_type, asns)
+            })
+            .collect()
+    }
+
+    /// Helper: the `as_number_size` of the first path attribute, if present.
+    fn first_attr_as_number_size<'pkt>(buf: &DissectBuffer<'pkt>) -> Option<FieldValue<'pkt>> {
+        let obj_range = first_pa_obj_range(buf);
+        nested_field_by_name_opt(buf, &obj_range, "as_number_size").map(|f| f.value.clone())
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_two_octet_size() {
+        // AS_SEQUENCE { 65001, 65002 } with 2-octet AS numbers cannot be read
+        // as 4-octet (the segment would need 8 value octets).
+        let value = [2, 2, 0xFD, 0xE9, 0xFD, 0xEA];
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(2, vec![65001, 65002])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(2)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_four_octet() {
+        // Reproduction from the issue: AS_SEQUENCE { 65536 } with 4-octet AS
+        // numbers, as sent between two NEW BGP speakers (RFC 6793, Section 4.1).
+        let mut value = vec![2, 1];
+        value.extend_from_slice(&65536u32.to_be_bytes());
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(first_attr_as_path_segments(&buf), vec![(2, vec![65536])]);
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_four_octet_multi_segment() {
+        // AS_SEQUENCE { 65001, 4200000000 } + AS_SET { 65536 }.
+        let mut value = vec![2, 2];
+        value.extend_from_slice(&65001u32.to_be_bytes());
+        value.extend_from_slice(&4_200_000_000u32.to_be_bytes());
+        value.extend_from_slice(&[1, 1]);
+        value.extend_from_slice(&65536u32.to_be_bytes());
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(2, vec![65001, 4_200_000_000]), (1, vec![65536])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_two_octet_multi_segment() {
+        // AS_CONFED_SEQUENCE { 64512 } + AS_SEQUENCE { 65001, 65002, 65003 }
+        // with 2-octet AS numbers; the 4-octet reading would overrun.
+        let value = [3, 1, 0xFC, 0x00, 2, 3, 0xFD, 0xE9, 0xFD, 0xEA, 0xFD, 0xEB];
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(3, vec![64512]), (2, vec![65001, 65002, 65003])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(2)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_ambiguous_prefers_four_octet() {
+        // Valid both as 4-octet AS_SEQUENCE { 65538, 16842755 } and as
+        // 2-octet AS_SEQUENCE { 1, 2 } + AS_SET { 3 }: 4-octet wins.
+        let value = [2, 2, 0, 1, 0, 2, 1, 1, 0, 3];
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(2, vec![65538, 16_842_755])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_empty() {
+        // An empty AS_PATH (e.g. iBGP, locally originated) has no segments
+        // and gives no evidence of the AS number size.
+        let data = build_update(&build_attr(0x40, 2, &[]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert!(first_attr_as_path_segments(&buf).is_empty());
+        assert_eq!(first_attr_as_number_size(&buf), None);
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_malformed_is_raw() {
+        for value in [
+            // Segment length overruns the attribute for both sizes.
+            &[2u8, 5, 0, 1][..],
+            // Zero Path Segment Length (RFC 7606, Section 7.2).
+            &[2, 0],
+            // Unrecognized segment type 0.
+            &[0, 1, 0, 1],
+            // Single trailing octet after a valid segment (underrun).
+            &[2, 1, 0, 1, 2],
+        ] {
+            let data = build_update(&build_attr(0x40, 2, value), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+            let obj_range = first_pa_obj_range(&buf);
+            assert_eq!(
+                *nested_field_value(&buf, &obj_range, "value"),
+                FieldValue::Bytes(value),
+                "value {value:?}"
+            );
+            assert_eq!(first_attr_as_number_size(&buf), None);
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_as4_path_malformed_is_raw() {
+        // AS4_PATH always uses 4-octet AS numbers (RFC 6793, Section 3); a
+        // segment encoded with 2-octet numbers overruns and is kept raw.
+        let value = [2, 2, 0xFD, 0xE9, 0xFD, 0xEA];
+        let data = build_update(&build_attr(0xC0, 17, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &obj_range, "value"),
+            FieldValue::Bytes(&value)
+        );
+    }
+
+    #[test]
+    fn as_path_fits_checks_structure() {
+        assert!(as_path_fits(&[], 2));
+        assert!(as_path_fits(&[], 4));
+        assert!(as_path_fits(&[2, 1, 0, 1], 2));
+        assert!(!as_path_fits(&[2, 1, 0, 1], 4));
+        assert!(as_path_fits(&[4, 1, 0, 0, 0, 1], 4));
+        assert!(!as_path_fits(&[5, 1, 0, 0, 0, 1], 4));
+        assert!(!as_path_fits(&[2, 0], 2));
+        assert!(!as_path_fits(&[2], 2));
     }
 }
