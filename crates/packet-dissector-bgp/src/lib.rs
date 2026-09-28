@@ -4,17 +4,23 @@
 //! - RFC 4271 (BGP-4): <https://www.rfc-editor.org/rfc/rfc4271>
 //! - RFC 1997 (Communities): <https://www.rfc-editor.org/rfc/rfc1997>
 //! - RFC 2918 (Route Refresh): <https://www.rfc-editor.org/rfc/rfc2918>
+//! - RFC 2545 (BGP-4 Multiprotocol Extensions for IPv6): <https://www.rfc-editor.org/rfc/rfc2545>
 //! - RFC 4360 (Extended Communities): <https://www.rfc-editor.org/rfc/rfc4360>
+//! - RFC 4364 (BGP/MPLS IP VPNs): <https://www.rfc-editor.org/rfc/rfc4364>
 //! - RFC 4456 (Route Reflection): <https://www.rfc-editor.org/rfc/rfc4456>
 //! - RFC 4486 (Cease NOTIFICATION subcodes): <https://www.rfc-editor.org/rfc/rfc4486>
+//! - RFC 4659 (BGP-MPLS IP VPN Extension for IPv6 VPN): <https://www.rfc-editor.org/rfc/rfc4659>
 //! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
 //! - RFC 4760 (Multiprotocol Extensions): <https://www.rfc-editor.org/rfc/rfc4760>
 //! - RFC 5492 (Capabilities Advertisement with BGP-4): <https://www.rfc-editor.org/rfc/rfc5492>
+//! - RFC 5065 (AS Confederations): <https://www.rfc-editor.org/rfc/rfc5065>
 //! - RFC 6793 (4-octet AS Numbers): <https://www.rfc-editor.org/rfc/rfc6793>
+//! - RFC 7606 (Revised Error Handling for BGP UPDATE Messages): <https://www.rfc-editor.org/rfc/rfc7606>
 //! - RFC 7313 (Enhanced Route Refresh): <https://www.rfc-editor.org/rfc/rfc7313>
 //! - RFC 7911 (ADD-PATH Capability): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8092 (Large Communities): <https://www.rfc-editor.org/rfc/rfc8092>
 //! - RFC 8203 (Hard Reset Cease subcode): <https://www.rfc-editor.org/rfc/rfc8203>
+//! - RFC 8277 (Using BGP to Bind MPLS Labels to Address Prefixes): <https://www.rfc-editor.org/rfc/rfc8277>
 //! - RFC 8654 (Extended Message): <https://www.rfc-editor.org/rfc/rfc8654>
 //! - RFC 8669 (BGP Prefix-SID): <https://www.rfc-editor.org/rfc/rfc8669>
 //! - RFC 8950 (Extended Next Hop Encoding Capability): <https://www.rfc-editor.org/rfc/rfc8950>
@@ -63,6 +69,22 @@
 //! | 3 | AS4_PATH | `parse_bgp_update_as4_path` |
 //! | 3 | AS4_AGGREGATOR | `parse_bgp_update_as4_aggregator` |
 //! | 3 | 4-octet AS Number Capability (asn) | `parse_bgp_open_capability_as4` |
+//! | 4.1 | AS_PATH with 4-octet AS numbers | `parse_bgp_update_as_path_four_octet`, `parse_bgp_update_as_path_four_octet_multi_segment` |
+//! | 4.1 | AS_PATH with 2-octet AS numbers (not valid as 4-octet) | `parse_bgp_update_as_path_two_octet_size`, `parse_bgp_update_as_path_two_octet_multi_segment` |
+//! | 4.1 | AS_PATH valid for both sizes decodes as 4-octet | `parse_bgp_update_as_path_ambiguous_prefers_four_octet` |
+//! | 4.1 | Empty AS_PATH has no inferred AS number size | `parse_bgp_update_as_path_empty` |
+//! | 4.2.2 | AS4_PATH in the UPDATE selects 2-octet AS_PATH | `parse_bgp_update_as_path_two_octet_hint_from_as4_path` |
+//! | 4.2.2 | AS4_AGGREGATOR in the UPDATE selects 2-octet AS_PATH | `parse_bgp_update_as_path_two_octet_hint_from_as4_aggregator` |
+//! | 4.1 | AGGREGATOR length (6 / 8) selects the AS_PATH AS number size | `parse_bgp_update_as_path_size_hint_from_aggregator_length` |
+//! | 4.1 | A hint that does not fit the AS_PATH is ignored | `parse_bgp_update_as_path_hint_ignored_when_it_does_not_fit` |
+//! | 3 | Malformed AS4_PATH kept as raw bytes | `parse_bgp_update_as4_path_malformed_is_raw` |
+//!
+//! # RFC 7606 (Revised Error Handling) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | 7.2 | AS_PATH segment validation (type, zero length, overrun, underrun) | `as_path_fits_checks_structure` |
+//! | 7.2 | AS_PATH malformed for both AS sizes kept as raw bytes | `parse_bgp_update_as_path_malformed_is_raw` |
 //!
 //! # RFC 1997 Coverage
 //!
@@ -126,6 +148,40 @@
 //! | 4 | UPDATE top-level afi/safi mirrors MP_UNREACH_NLRI when it is the only MP attribute | `parse_bgp_update_top_level_afi_safi_from_mp_unreach_only` |
 //! | 3/4 | UPDATE top-level afi/safi: first MP attribute in attribute order wins | `parse_bgp_update_top_level_afi_safi_first_attribute_wins` |
 //! | 3/4 | Plain IPv4 unicast UPDATE (no MP attribute) has no top-level afi/safi | `parse_bgp_update_plain_ipv4_unicast_has_no_top_level_afi_safi` |
+//! | 5 | Plain prefix NLRI for SAFI 2 (multicast) | `parse_bgp_update_mp_reach_ipv4_multicast_prefixes` |
+//! | 3 | Unsupported AFI (EVPN) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_evpn_nlri_is_raw` |
+//! | 4 | Unsupported AFI (EVPN) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_evpn_withdrawn_is_raw` |
+//! | 3 | Non-prefix SAFI of AFI 1 (FlowSpec) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw` |
+//! | 4 | Non-prefix SAFI of AFI 1 (SR Policy) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw` |
+//! | 5 | Malformed tail of a prefix NLRI block kept as raw bytes | `parse_bgp_update_mp_reach_prefix_tail_is_raw` |
+//! | 5 | Prefix withdrawn routes that do not decode kept as raw bytes | `parse_bgp_update_mp_unreach_invalid_prefixes_are_raw` |
+//!
+//! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 8277 §2.2 | Labeled IPv4 unicast (SAFI 4), single label | `parse_bgp_update_mp_reach_labeled_ipv4_nlri` |
+//! | RFC 8277 §2.2 | Labeled IPv6 unicast (AFI 2, SAFI 4) | `parse_bgp_update_mp_reach_labeled_ipv6_nlri` |
+//! | RFC 8277 §2.2 | Single label: S bit ignored on reception | `parse_bgp_update_mp_reach_labeled_single_label_s_bit_ignored` |
+//! | RFC 8277 §2.3 | Multiple labels terminated by the S bit | `parse_bgp_update_mp_reach_labeled_multiple_labels` |
+//! | RFC 8277 §2.4 | Withdrawal with Compatibility 0x800000 (VPN-IPv4) | `parse_bgp_update_mp_unreach_vpn_ipv4_withdraw` |
+//! | RFC 8277 §2.4 | Withdrawal with Compatibility 0x000000 | `parse_bgp_update_mp_unreach_labeled_withdraw_zero_compatibility` |
+//! | RFC 8277 §2.2 | ADD-PATH Path Identifier before the Length field | `parse_bgp_update_mp_reach_labeled_add_path` |
+//! | RFC 8277 §2.2 | Malformed labeled / VPN NLRI kept as raw bytes | `parse_bgp_update_mp_labeled_malformed_is_raw` |
+//! | RFC 4364 §4.3.4 | VPN-IPv4 NLRI (label, RD, prefix) | `parse_bgp_update_mp_reach_vpn_ipv4_nlri` |
+//! | RFC 4659 §3.2 | VPN-IPv6 NLRI (label, RD, prefix) | `parse_bgp_update_mp_reach_vpn_ipv6_nlri` |
+//! | RFC 4271 §4.3 | CIDR formatting of prefixes held in the scratch buffer | `format_nlri_prefix_from_scratch` |
+//!
+//! # MP_REACH_NLRI Next Hop Coverage (RFC 4364 / RFC 4659 / RFC 8950)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 4364 §4.3.2 | VPN-IPv4 next hop (RD + IPv4) | `parse_bgp_update_mp_reach_vpn_ipv4_next_hop` |
+//! | RFC 4659 §3.2.1.1 | VPN-IPv6 next hop (RD + IPv6) | `parse_bgp_update_mp_reach_vpn_ipv6_next_hop` |
+//! | RFC 4659 §3.2.1.1 | VPN-IPv6 next hop with link-local | `parse_bgp_update_mp_reach_vpn_ipv6_next_hop_link_local` |
+//! | RFC 8950 §3 | IPv6 next hop for IPv4 NLRI (SAFI 1, 4) | `parse_bgp_update_mp_reach_ipv4_nlri_ipv6_next_hop` |
+//! | RFC 8950 §3 | VPN-IPv6 next hop for VPN-IPv4 NLRI | `parse_bgp_update_mp_reach_vpn_ipv4_nlri_ipv6_next_hop` |
+//! | RFC 4760 §3 | Unexpected next hop length kept as raw bytes | `parse_bgp_update_mp_reach_unexpected_next_hop_length_is_raw` |
 //!
 //! # BGP OPEN Capability Decoding Coverage
 //!
@@ -154,7 +210,7 @@
 //! | 3.1.5 | ST Route TLVs (3gpp-5g Session Parameters, Interwork Endpoint, Source Address) | `parse_bgp_update_mup_type1_st`, `parse_bgp_update_mup_type2_st` |
 //! | 3.2 | MUP Extended Community sub-types (2-Octet AS / IPv4 / 4-Octet AS, Direct/Interwork Segment) | `mup_extended_community_type_names`, `format_ext_community_mup_values` |
 //! | 3 | Route Type / Architecture Type name tables | `name_lookup_tables` |
-//! | 3 | Truncated MUP entry handling | `parse_bgp_update_mup_truncated_entry_is_dropped` |
+//! | 3 | Truncated MUP entry handling | `parse_bgp_update_mup_truncated_entry_is_raw` |
 //!
 //! # RFC 7911 (ADD-PATH) Coverage
 //!
@@ -247,6 +303,35 @@ const MUP_ROUTE_TYPE_MAX: u16 = 4;
 
 /// SAFI value for BGP-MUP (draft-ietf-bess-mup-safi-01).
 const SAFI_MUP: u8 = 85;
+
+/// AFI for IPv4 (IANA Address Family Numbers).
+const AFI_IPV4: u16 = 1;
+/// AFI for IPv6 (IANA Address Family Numbers).
+const AFI_IPV6: u16 = 2;
+/// SAFI for unicast forwarding (RFC 4760, Section 6 —
+/// <https://www.rfc-editor.org/rfc/rfc4760#section-6>).
+const SAFI_UNICAST: u8 = 1;
+/// SAFI for multicast forwarding (RFC 4760, Section 6 —
+/// <https://www.rfc-editor.org/rfc/rfc4760#section-6>).
+const SAFI_MULTICAST: u8 = 2;
+/// SAFI for NLRI with MPLS labels (RFC 8277, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc8277#section-2>).
+const SAFI_MPLS_LABEL: u8 = 4;
+/// SAFI for MPLS-labeled VPN address (RFC 4364, Section 4.3.4 —
+/// <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.4>).
+const SAFI_MPLS_VPN: u8 = 128;
+/// SAFI for Multicast for BGP/MPLS IP VPNs, whose next hop is a VPN address
+/// (RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>).
+/// Its NLRI (RD + prefix, without a label; RFC 6514, Section 10 —
+/// <https://www.rfc-editor.org/rfc/rfc6514#section-10>) is not decoded.
+const SAFI_MULTICAST_VPN: u8 = 129;
+/// Size of a Route Distinguisher (RFC 4364, Section 4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc4364#section-4.2>).
+const RD_SIZE: usize = 8;
+/// Size of one Label / Rsrv / S entry, and of the Compatibility field, in a
+/// labeled NLRI (RFC 8277, Sections 2.2-2.4 —
+/// <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>).
+const LABEL_ENTRY_SIZE: usize = 3;
 
 /// BGP message type: OPEN (RFC 4271, Section 4.1).
 const MSG_OPEN: u8 = 1;
@@ -1238,12 +1323,15 @@ fn mup_block_parses(data: &[u8], path_id_len: usize) -> bool {
 /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
 ///
 /// When `ipv6` is true, formats as IPv6; otherwise as IPv4.
+///
+/// Returns the number of octets decoded; decoding stops at the first entry
+/// that is malformed.
 fn parse_prefixes<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     base_offset: usize,
     ipv6: bool,
-) {
+) -> usize {
     let mut pos = 0;
 
     let max_bits: usize = if ipv6 { 128 } else { 32 };
@@ -1300,6 +1388,7 @@ fn parse_prefixes<'pkt>(
 
         pos += entry_len;
     }
+    pos
 }
 
 /// Returns a human-readable name for path attribute type codes.
@@ -1342,6 +1431,7 @@ fn parse_path_attribute<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     base_offset: usize,
+    as_size_hint: Option<usize>,
 ) -> Option<(usize, Option<MpAfiSafi>)> {
     if data.len() < 3 {
         return None;
@@ -1390,7 +1480,7 @@ fn parse_path_attribute<'pkt>(
     );
 
     let val_offset = base_offset + header_len;
-    let mp_afi_safi = parse_attr_value(buf, type_code, value_data, val_offset);
+    let mp_afi_safi = parse_attr_value(buf, type_code, value_data, val_offset, as_size_hint);
 
     buf.end_container(obj_idx);
 
@@ -1818,16 +1908,134 @@ fn parse_srv6_sid_info_sub_tlv<'pkt>(
     }
 }
 
-/// Parses an AS_PATH or AS4_PATH attribute value into the buffer.
+/// AS_PATH segment types defined by RFC 4271 (AS_SET = 1, AS_SEQUENCE = 2) and
+/// RFC 5065 (AS_CONFED_SEQUENCE = 3, AS_CONFED_SET = 4).
+///
+/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
+/// RFC 5065, Section 3 — <https://www.rfc-editor.org/rfc/rfc5065#section-3>
+const AS_PATH_SEGMENT_TYPES: core::ops::RangeInclusive<u8> = 1..=4;
+
+/// Returns `true` when `data` is a well-formed AS_PATH / AS4_PATH value whose
+/// AS numbers are `as_size` octets wide.
+///
+/// Every segment must have a recognized segment type (1-4), a non-zero Path
+/// Segment Length, and the segments must consume `data` exactly. These are the
+/// RFC 7606 malformation rules:
+///
+/// > An AS_PATH is considered malformed if an unrecognized segment type is
+/// > encountered or if it contains a malformed segment.  A segment is
+/// > considered malformed if any of the following are true:
+/// >
+/// > o  There is an overrun where the Path Segment Length field of the
+/// >    last segment encountered would cause the Attribute Length to be
+/// >    exceeded.
+/// >
+/// > o  There is an underrun where after the last successfully parsed
+/// >    segment there is only a single octet remaining (that is, there is
+/// >    not enough unconsumed data to provide even an empty segment
+/// >    header).
+/// >
+/// > o  It has a Path Segment Length field of zero.
+///
+/// RFC 7606, Section 7.2 — <https://www.rfc-editor.org/rfc/rfc7606#section-7.2>
+fn as_path_fits(data: &[u8], as_size: usize) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        let Some(&seg_len) = data.get(pos + 1) else {
+            return false;
+        };
+        if !AS_PATH_SEGMENT_TYPES.contains(&data[pos]) || seg_len == 0 {
+            return false;
+        }
+        pos += 2 + seg_len as usize * as_size;
+    }
+    pos == data.len()
+}
+
+/// Selects the AS number size (4 or 2 octets) of an AS_PATH attribute value.
+///
+/// The size is negotiated per session: "A BGP speaker that advertises such a
+/// capability to a particular peer, and receives from that peer the
+/// advertisement of such a capability, MUST encode AS numbers as four-octet
+/// entities in both the AS_PATH attribute and the AGGREGATOR attribute"
+/// (RFC 6793, Section 4.1). This dissector is stateless and cannot see the
+/// OPEN exchange, so the size is inferred from the structure of the value with
+/// [`as_path_fits`]:
+///
+/// 1. `hint`, derived from the other attributes of the same UPDATE by
+///    [`as_number_size_hint`], wins when the value fits it;
+/// 2. otherwise four-octet is tried first because RFC 6793 sessions are the
+///    common case, so a value that is valid for both sizes is decoded with
+///    four-octet AS numbers.
+///
+/// Returns `None` when neither size fits.
+///
+/// RFC 6793, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc6793#section-4.1>
+fn detect_as_path_as_size(data: &[u8], hint: Option<usize>) -> Option<usize> {
+    hint.into_iter()
+        .chain([4, 2])
+        .find(|&size| as_path_fits(data, size))
+}
+
+/// Infers the AS number size of the AS_PATH of an UPDATE from its other path
+/// attributes, or `None` when they give no evidence.
+///
+/// - AS4_PATH / AS4_AGGREGATOR are only sent towards OLD BGP speakers: "When
+///   communicating with an OLD BGP speaker, a NEW BGP speaker MUST send the AS
+///   path information in the AS_PATH attribute encoded with two-octet AS
+///   numbers.  The NEW BGP speaker MUST also send the AS path information in
+///   the AS4_PATH attribute" (RFC 6793, Section 4.2.2), and they "MUST NOT be
+///   carried in an UPDATE message between NEW BGP speakers" (RFC 6793,
+///   Section 4.1). Their presence means 2-octet.
+/// - AGGREGATOR uses the same AS number size as AS_PATH (RFC 6793,
+///   Section 4.1): a 6-octet value means 2-octet, an 8-octet value 4-octet.
+///
+/// `attrs` is the Path Attributes field of the UPDATE (RFC 4271, Section 4.3).
+///
+/// RFC 6793, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc6793#section-4.1>
+/// RFC 6793, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc6793#section-4.2.2>
+/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
+fn as_number_size_hint(attrs: &[u8]) -> Option<usize> {
+    let mut hint = None;
+    let mut pos = 0;
+    while let Some(&[flags, type_code]) = attrs.get(pos..pos + 2) {
+        let (attr_len, header_len) = if flags & 0x10 != 0 {
+            (read_be_u16(attrs, pos + 2).ok()? as usize, 4)
+        } else {
+            (*attrs.get(pos + 2)? as usize, 3)
+        };
+        match (type_code, attr_len) {
+            // AS4_PATH / AS4_AGGREGATOR: the strongest evidence.
+            (17 | 18, _) => return Some(2),
+            // AGGREGATOR with a 2-octet or 4-octet AS number.
+            (7, 6) => hint = Some(2),
+            (7, 8) => hint = Some(4),
+            _ => {}
+        }
+        pos += header_len + attr_len;
+    }
+    hint
+}
+
+/// Pushes an AS_PATH or AS4_PATH attribute value as the attribute `value`
+/// Array of segment objects.
 ///
 /// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
 /// RFC 6793 — <https://www.rfc-editor.org/rfc/rfc6793>
+///
+/// Callers validate `data` with [`as_path_fits`] first, so every segment is
+/// complete.
 fn parse_as_path<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
     as_size: usize,
 ) {
+    let array_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
     let mut pos = 0;
 
     while pos + 2 <= data.len() {
@@ -1877,16 +2085,21 @@ fn parse_as_path<'pkt>(
 
         pos += 2 + seg_data_len;
     }
+    buf.end_container(array_idx);
 }
 
 /// Parses the value of a path attribute based on its type code.
 ///
 /// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
+///
+/// `as_size_hint` is the AS number size inferred from the other attributes of
+/// the UPDATE (see [`as_number_size_hint`]), used for AS_PATH.
 fn parse_attr_value<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     type_code: u8,
     data: &'pkt [u8],
     offset: usize,
+    as_size_hint: Option<usize>,
 ) -> Option<MpAfiSafi> {
     match type_code {
         // ORIGIN (RFC 4271, Section 5.1.1)
@@ -1897,16 +2110,33 @@ fn parse_attr_value<'pkt>(
                 offset..offset + 1,
             );
         }
-        // AS_PATH (RFC 4271, Section 5.1.2) — 2-byte AS numbers
-        2 => {
-            let array_idx = buf.begin_container(
-                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
-                FieldValue::Array(0..0),
-                offset..offset + data.len(),
-            );
+        // AS_PATH (RFC 4271, Section 5.1.2) — 2-octet AS numbers, or 4-octet
+        // AS numbers between NEW BGP speakers (RFC 6793, Section 4.1 —
+        // https://www.rfc-editor.org/rfc/rfc6793#section-4.1).
+        2 if data.is_empty() => {
+            // No segments: nothing to infer the AS number size from.
             parse_as_path(buf, data, offset, 2);
-            buf.end_container(array_idx);
         }
+        2 => match detect_as_path_as_size(data, as_size_hint) {
+            Some(as_size) => {
+                parse_as_path(buf, data, offset, as_size);
+                buf.push_field(
+                    &PATH_ATTR_CHILDREN[FD_PA_AS_NUMBER_SIZE],
+                    FieldValue::U8(as_size as u8),
+                    offset..offset + data.len(),
+                );
+            }
+            // Malformed for both sizes (RFC 7606, Section 7.2 —
+            // https://www.rfc-editor.org/rfc/rfc7606#section-7.2): keep the raw
+            // octets rather than a partial decode.
+            None => {
+                buf.push_field(
+                    &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+                    FieldValue::Bytes(data),
+                    offset..offset + data.len(),
+                );
+            }
+        },
         // NEXT_HOP (RFC 4271, Section 5.1.3) — 4-byte IPv4 address
         3 if data.len() == 4 => {
             buf.push_field(
@@ -2017,14 +2247,8 @@ fn parse_attr_value<'pkt>(
             buf.end_container(array_idx);
         }
         // AS4_PATH (RFC 6793) — same format as AS_PATH but with 4-byte AS numbers
-        17 => {
-            let array_idx = buf.begin_container(
-                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
-                FieldValue::Array(0..0),
-                offset..offset + data.len(),
-            );
+        17 if as_path_fits(data, 4) => {
             parse_as_path(buf, data, offset, 4);
-            buf.end_container(array_idx);
         }
         // AS4_AGGREGATOR (RFC 6793) — 4-byte AS + 4-byte IP = 8 bytes
         18 if data.len() == 8 => {
@@ -2118,13 +2342,16 @@ fn mup_st_tlv_type_name(v: u8) -> Option<&'static str> {
 /// every entry is preceded by a 4-octet Path Identifier, emitted as a leading
 /// `path_id` field.
 ///
+/// Returns the number of octets decoded; decoding stops at the first entry
+/// that overruns the block.
+///
 /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
 fn parse_mup_nlri<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     base_offset: usize,
     ipv6: bool,
-) {
+) -> usize {
     let mut pos = 0;
     let id_len = if detect_add_path_mup(data) {
         PATH_ID_SIZE
@@ -2179,6 +2406,7 @@ fn parse_mup_nlri<'pkt>(
 
         pos += total;
     }
+    pos
 }
 
 /// Parses route-type-specific data for MUP NLRI entries.
@@ -2478,20 +2706,31 @@ fn parse_mup_st_tlvs<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], base
     buf.end_container(array_idx);
 }
 
+/// Returns the `[prefix_len_bits, prefix_octets...]` bytes of an NLRI prefix
+/// value: borrowed from the packet for plain prefixes, or from the scratch
+/// buffer for labeled / VPN prefixes (see [`parse_labeled_nlri`]).
+fn nlri_prefix_bytes<'a>(value: &'a FieldValue<'_>, ctx: &FormatContext<'a>) -> Option<&'a [u8]> {
+    match value {
+        FieldValue::Bytes(b) => Some(b),
+        FieldValue::Scratch(r) => ctx.scratch.get(r.start as usize..r.end as usize),
+        _ => None,
+    }
+}
+
 /// Writes a BGP IPv4 NLRI prefix as a JSON-quoted CIDR string (e.g., `"192.168.1.0/24"`).
 ///
-/// The raw bytes are `[prefix_len_bits, prefix_octets...]` per RFC 4271, Section 4.3.
+/// The raw bytes are `[prefix_len_bits, prefix_octets...]` per RFC 4271, Section 4.3,
+/// held in the packet or, for labeled / VPN prefixes, in the scratch buffer.
 /// Missing octets are zero-filled to produce a full dotted-quad address.
 ///
 /// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
 fn format_nlri_ipv4_prefix(
     value: &FieldValue<'_>,
-    _ctx: &FormatContext<'_>,
+    ctx: &FormatContext<'_>,
     w: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
-    let bytes = match value {
-        FieldValue::Bytes(b) => *b,
-        _ => return w.write_all(b"\"\""),
+    let Some(bytes) = nlri_prefix_bytes(value, ctx) else {
+        return w.write_all(b"\"\"");
     };
     if bytes.is_empty() {
         return w.write_all(b"\"\"");
@@ -2515,12 +2754,11 @@ fn format_nlri_ipv4_prefix(
 /// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
 fn format_nlri_ipv6_prefix(
     value: &FieldValue<'_>,
-    _ctx: &FormatContext<'_>,
+    ctx: &FormatContext<'_>,
     w: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
-    let bytes = match value {
-        FieldValue::Bytes(b) => *b,
-        _ => return w.write_all(b"\"\""),
+    let Some(bytes) = nlri_prefix_bytes(value, ctx) else {
+        return w.write_all(b"\"\"");
     };
     if bytes.is_empty() {
         return w.write_all(b"\"\"");
@@ -2762,6 +3000,463 @@ struct MpAfiSafi {
     offset: usize,
 }
 
+/// How the NLRI of an MP_REACH_NLRI / MP_UNREACH_NLRI attribute is encoded,
+/// selected by its (AFI, SAFI).
+///
+/// RFC 4760, Section 5 — <https://www.rfc-editor.org/rfc/rfc4760#section-5>
+#[derive(Clone, Copy)]
+enum MpNlriEncoding {
+    /// `<length, prefix>` tuples for IPv4/IPv6 unicast and multicast
+    /// (RFC 4760, Section 5 — <https://www.rfc-editor.org/rfc/rfc4760#section-5>).
+    Prefixes { ipv6: bool },
+    /// BGP-MUP NLRI (draft-ietf-bess-mup-safi-01, Section 3).
+    Mup { ipv6: bool },
+    /// Labeled NLRI: label(s) or a Compatibility field, an 8-octet Route
+    /// Distinguisher when `vpn`, then the prefix.
+    ///
+    /// RFC 8277, Sections 2.2-2.4 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>
+    /// RFC 4364, Section 4.3.4 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.4>
+    /// RFC 4659, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc4659#section-3.2>
+    Labeled { ipv6: bool, vpn: bool },
+}
+
+/// Shape of a labeled NLRI block.
+///
+/// RFC 8277, Sections 2.2-2.4 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>
+struct LabeledNlri {
+    /// Maximum prefix length in bits, excluding the labels and the RD: "In an
+    /// MP_REACH_NLRI attribute whose AFI/SAFI is 1/4, the prefix length will be
+    /// 32 bits or less.  In an MP_REACH_NLRI attribute whose AFI/SAFI is 2/4,
+    /// the prefix length will be 128 bits or less.  In an MP_REACH_NLRI
+    /// attribute whose SAFI is 128, the prefix will be 96 bits or less if the
+    /// AFI is 1 and will be 192 bits or less if the AFI is 2." (RFC 8277,
+    /// Section 2.2 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>; the
+    /// SAFI 128 limits include the 64-bit RD).
+    max_prefix_bits: usize,
+    /// Octets of Route Distinguisher preceding the prefix (8 for VPN NLRI).
+    rd_len: usize,
+    /// MP_UNREACH_NLRI withdrawal: a single 3-octet Compatibility field
+    /// replaces the label(s) (RFC 8277, Section 2.4 —
+    /// <https://www.rfc-editor.org/rfc/rfc8277#section-2.4>).
+    withdraw: bool,
+    /// Whether the prefix is IPv6.
+    ipv6: bool,
+}
+
+impl LabeledNlri {
+    fn new(ipv6: bool, vpn: bool, withdraw: bool) -> Self {
+        Self {
+            max_prefix_bits: if ipv6 { 128 } else { 32 },
+            rd_len: if vpn { RD_SIZE } else { 0 },
+            withdraw,
+            ipv6,
+        }
+    }
+}
+
+/// Layout of one labeled NLRI entry, starting at its Length octet.
+struct LabeledEntryLayout {
+    /// Total octets of the entry including the Length octet.
+    len: usize,
+    /// Number of 3-octet Label or Compatibility entries.
+    label_count: usize,
+    /// Prefix length in bits.
+    prefix_bits: usize,
+}
+
+/// Returns the layout of the labeled NLRI entry at the start of `data`, or
+/// `None` if it is malformed.
+///
+/// The Length octet "specifies the length in bits of the remainder of the
+/// NLRI field" (RFC 8277, Section 2.2), i.e. labels + RD + prefix.
+///
+/// - In a withdrawal the remainder starts with one 3-octet Compatibility field
+///   (RFC 8277, Section 2.4).
+/// - Otherwise labels are read until one has the S bit set, which is the
+///   encoding when the Multiple Labels Capability is used (RFC 8277,
+///   Section 2.3). That capability is exchanged in OPEN and is not visible to
+///   a stateless dissector, and without it the S bit "MUST be ignored on
+///   reception" (RFC 8277, Section 2.2), so an entry that does not parse as an
+///   S-terminated label stack is read with a single label.
+///
+/// A first label with S=0 is therefore read as the start of a label stack
+/// whenever the remaining octets allow it: a sender that does not use the
+/// Multiple Labels Capability "MUST" set the S bit (RFC 8277, Section 2.2),
+/// so S=0 on the first label is only valid with the Section 2.3 encoding.
+///
+/// RFC 8277, Section 2 — <https://www.rfc-editor.org/rfc/rfc8277#section-2>
+fn labeled_entry_layout(data: &[u8], shape: &LabeledNlri) -> Option<LabeledEntryLayout> {
+    let length_bits = *data.first()? as usize;
+    let len = 1 + length_bits.div_ceil(8);
+    if len > data.len() {
+        return None;
+    }
+
+    let layout = |label_count: usize| {
+        let prefix_bits =
+            length_bits.checked_sub((label_count * LABEL_ENTRY_SIZE + shape.rd_len) * 8)?;
+        (prefix_bits <= shape.max_prefix_bits).then_some(LabeledEntryLayout {
+            len,
+            label_count,
+            prefix_bits,
+        })
+    };
+
+    if !shape.withdraw {
+        // Label stack terminated by the S bit (RFC 8277, Section 2.3 —
+        // https://www.rfc-editor.org/rfc/rfc8277#section-2.3).
+        let mut label_count = 0;
+        while (label_count + 1) * LABEL_ENTRY_SIZE * 8 <= length_bits {
+            let s_bit = data[label_count * LABEL_ENTRY_SIZE + LABEL_ENTRY_SIZE] & 0x01;
+            label_count += 1;
+            if s_bit == 1 {
+                if let Some(layout) = layout(label_count) {
+                    return Some(layout);
+                }
+                break;
+            }
+        }
+    }
+    // Single label (RFC 8277, Section 2.2 —
+    // https://www.rfc-editor.org/rfc/rfc8277#section-2.2) or Compatibility
+    // field (RFC 8277, Section 2.4 —
+    // https://www.rfc-editor.org/rfc/rfc8277#section-2.4).
+    layout(1)
+}
+
+/// Returns `true` when `data` parses exactly as labeled NLRI entries, each
+/// preceded by `path_id_len` octets of ADD-PATH Path Identifier.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+/// RFC 8277, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>
+fn labeled_block_parses(data: &[u8], shape: &LabeledNlri, path_id_len: usize) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        let Some(layout) = data
+            .get(pos + path_id_len..)
+            .and_then(|entry| labeled_entry_layout(entry, shape))
+        else {
+            return false;
+        };
+        pos += path_id_len + layout.len;
+    }
+    true
+}
+
+/// Returns the ADD-PATH Path Identifier length (0 or 4) of a labeled NLRI
+/// block, or `None` if it parses neither way.
+///
+/// "If the procedures of [RFC7911] are being used, a four-octet "path
+/// identifier" (as defined in Section 3 of [RFC7911]) is part of the NLRI and
+/// precedes the Length field." (RFC 8277, Section 2.2). As for plain prefixes
+/// (see [`detect_add_path_prefixes`]), the plain encoding wins when both
+/// readings are valid.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn labeled_path_id_len(data: &[u8], shape: &LabeledNlri) -> Option<usize> {
+    [0, PATH_ID_SIZE]
+        .into_iter()
+        .find(|&path_id_len| labeled_block_parses(data, shape, path_id_len))
+}
+
+/// Parses a labeled NLRI block (RFC 8277) into one Object per entry:
+/// `{ path_id?, label_stack | compatibility, rd?, prefix }`.
+///
+/// A block that does not parse exactly with [`labeled_path_id_len`] is not
+/// decoded at all rather than partially. The prefix is not contiguous with its
+/// Length octet, so its `[prefix_len_bits, prefix_octets...]` value is
+/// assembled in the scratch buffer and rendered by the same CIDR formatters as
+/// plain prefixes.
+///
+/// Returns the number of octets decoded: `data.len()`, or 0 when the block is
+/// malformed.
+///
+/// RFC 8277, Sections 2.2-2.4 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>
+/// RFC 4364, Section 4.3.4 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.4>
+/// RFC 4659, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc4659#section-3.2>
+fn parse_labeled_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+    shape: &LabeledNlri,
+) -> usize {
+    let Some(path_id_len) = labeled_path_id_len(data, shape) else {
+        return 0;
+    };
+    let prefix_descriptor = if shape.ipv6 {
+        &PREFIX_ENTRY_IPV6_DESCRIPTOR
+    } else {
+        &PREFIX_ENTRY_IPV4_DESCRIPTOR
+    };
+    let mut pos = 0;
+    while pos < data.len() {
+        let entry_start = pos + path_id_len;
+        let Some(layout) = data
+            .get(entry_start..)
+            .and_then(|entry| labeled_entry_layout(entry, shape))
+        else {
+            break;
+        };
+        let entry_end = entry_start + layout.len;
+        let abs = base_offset + pos;
+        let obj_idx = buf.begin_container(
+            &NLRI_ENTRY_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + entry_end,
+        );
+
+        if path_id_len != 0 {
+            buf.push_field(
+                &NLRI_ENTRY_CHILDREN[FD_NLRI_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+
+        let labels_start = entry_start + 1;
+        let labels_end = labels_start + layout.label_count * LABEL_ENTRY_SIZE;
+        if shape.withdraw {
+            // RFC 8277, Section 2.4 — https://www.rfc-editor.org/rfc/rfc8277#section-2.4:
+            // "Upon reception, the value of the Compatibility field MUST be
+            // ignored." It is shown as is.
+            buf.push_field(
+                &NLRI_ENTRY_CHILDREN[FD_NLRI_COMPATIBILITY],
+                FieldValue::U32(read_be_u24(data, labels_start).unwrap_or_default()),
+                base_offset + labels_start..base_offset + labels_end,
+            );
+        } else {
+            let stack_idx = buf.begin_container(
+                &NLRI_ENTRY_CHILDREN[FD_NLRI_LABEL_STACK],
+                FieldValue::Array(0..0),
+                base_offset + labels_start..base_offset + labels_end,
+            );
+            for label_pos in (labels_start..labels_end).step_by(LABEL_ENTRY_SIZE) {
+                let raw = read_be_u24(data, label_pos).unwrap_or_default();
+                let label_abs = base_offset + label_pos;
+                let label_idx = buf.begin_container(
+                    &LABEL_ENTRY_OBJECT_DESCRIPTOR,
+                    FieldValue::Object(0..0),
+                    label_abs..label_abs + LABEL_ENTRY_SIZE,
+                );
+                // 20-bit Label, 3-bit Rsrv, 1-bit S (RFC 8277, Section 2.2 —
+                // https://www.rfc-editor.org/rfc/rfc8277#section-2.2).
+                buf.push_field(
+                    &LABEL_ENTRY_CHILDREN[FD_LABEL_LABEL],
+                    FieldValue::U32(raw >> 4),
+                    label_abs..label_abs + LABEL_ENTRY_SIZE,
+                );
+                buf.push_field(
+                    &LABEL_ENTRY_CHILDREN[FD_LABEL_RSRV],
+                    FieldValue::U8(((raw >> 1) & 0x07) as u8),
+                    label_abs + 2..label_abs + 3,
+                );
+                buf.push_field(
+                    &LABEL_ENTRY_CHILDREN[FD_LABEL_S],
+                    FieldValue::U8((raw & 0x01) as u8),
+                    label_abs + 2..label_abs + 3,
+                );
+                buf.end_container(label_idx);
+            }
+            buf.end_container(stack_idx);
+        }
+
+        let prefix_start = labels_end + shape.rd_len;
+        if shape.rd_len != 0 {
+            buf.push_field(
+                &MUP_NLRI_CHILDREN[FD_MUP_RD],
+                FieldValue::Bytes(&data[labels_end..prefix_start]),
+                base_offset + labels_end..base_offset + prefix_start,
+            );
+        }
+
+        let scratch = buf.push_scratch(&[layout.prefix_bits as u8]);
+        buf.extend_scratch(&data[prefix_start..entry_end]);
+        buf.push_field(
+            prefix_descriptor,
+            FieldValue::Scratch(scratch.start..buf.scratch_len()),
+            base_offset + prefix_start..base_offset + entry_end,
+        );
+
+        buf.end_container(obj_idx);
+        pos = entry_end;
+    }
+    pos
+}
+
+/// Selects the NLRI encoding for an (AFI, SAFI) pair.
+///
+/// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
+/// Section 5 may go to [`parse_prefixes`]: other SAFIs of AFI 1/2 (labeled
+/// unicast, L3VPN, FlowSpec, SR Policy, ...) have different NLRI layouts, and
+/// the ADD-PATH heuristic would otherwise turn them into plausible looking but
+/// wrong prefixes. Returns `None` for an (AFI, SAFI) whose NLRI is not
+/// decoded.
+///
+/// RFC 4760, Section 5 — <https://www.rfc-editor.org/rfc/rfc4760#section-5>
+fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
+    let ipv6 = afi == AFI_IPV6;
+    match (afi, safi) {
+        (AFI_IPV4 | AFI_IPV6, SAFI_UNICAST | SAFI_MULTICAST) => {
+            Some(MpNlriEncoding::Prefixes { ipv6 })
+        }
+        (AFI_IPV4 | AFI_IPV6, SAFI_MPLS_LABEL) => {
+            Some(MpNlriEncoding::Labeled { ipv6, vpn: false })
+        }
+        (AFI_IPV4 | AFI_IPV6, SAFI_MPLS_VPN) => Some(MpNlriEncoding::Labeled { ipv6, vpn: true }),
+        (_, SAFI_MUP) => Some(MpNlriEncoding::Mup { ipv6 }),
+        _ => None,
+    }
+}
+
+/// Parses the NLRI / Withdrawn Routes block of an MP_REACH_NLRI /
+/// MP_UNREACH_NLRI attribute.
+///
+/// Decoded entries go into an Array described by `array_desc`. Octets that
+/// are not decoded — the whole block for an (AFI, SAFI) whose encoding is not
+/// implemented, or the malformed tail of a decoded block — are pushed as raw
+/// bytes with `raw_desc`, so that routes are never silently dropped.
+///
+/// RFC 4760, Sections 3-4 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+#[allow(clippy::too_many_arguments)]
+fn parse_mp_nlri_block<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    afi: u16,
+    safi: u8,
+    withdraw: bool,
+    array_desc: &'static FieldDescriptor,
+    raw_desc: &'static FieldDescriptor,
+) {
+    let mut consumed = 0;
+    if let Some(encoding) = mp_nlri_encoding(afi, safi) {
+        let array_idx = buf.begin_container(
+            array_desc,
+            FieldValue::Array(0..0),
+            offset..offset + data.len(),
+        );
+        let before = buf.field_count();
+        consumed = match encoding {
+            MpNlriEncoding::Prefixes { ipv6 } => parse_prefixes(buf, data, offset, ipv6),
+            MpNlriEncoding::Mup { ipv6 } => parse_mup_nlri(buf, data, offset, ipv6),
+            MpNlriEncoding::Labeled { ipv6, vpn } => {
+                parse_labeled_nlri(buf, data, offset, &LabeledNlri::new(ipv6, vpn, withdraw))
+            }
+        };
+        if buf.field_count() == before {
+            buf.pop_field(); // remove empty array placeholder
+        } else {
+            buf.end_container(array_idx);
+        }
+    }
+    if consumed < data.len() {
+        buf.push_field(
+            raw_desc,
+            FieldValue::Bytes(&data[consumed..]),
+            offset + consumed..offset + data.len(),
+        );
+    }
+}
+
+/// Returns `true` for the SAFIs whose next hop is a VPN address, i.e. an
+/// 8-octet Route Distinguisher (set to zero) followed by an IP address.
+///
+/// RFC 4364, Section 4.3.2 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.2>
+/// RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>
+fn is_vpn_next_hop_safi(safi: u8) -> bool {
+    safi == SAFI_MPLS_VPN || safi == SAFI_MULTICAST_VPN
+}
+
+/// Parses the Network Address of Next Hop field of MP_REACH_NLRI.
+///
+/// The layout is selected by the AFI, the SAFI and the Length of Next Hop
+/// Network Address:
+///
+/// - AFI 1, non-VPN SAFI, length 4: IPv4 address.
+/// - AFI 1 or 2, non-VPN SAFI, length 16 or 32: IPv6 global address,
+///   optionally followed by a link-local address (RFC 2545, Section 3; for
+///   AFI 1 RFC 8950, Section 3).
+/// - AFI 1, VPN SAFI, length 12: VPN-IPv4 address, "encoded as a VPN-IPv4
+///   address with an RD of 0" (RFC 4364, Section 4.3.2).
+/// - AFI 1 or 2, VPN SAFI, length 24 or 48: VPN-IPv6 global address,
+///   optionally followed by a VPN-IPv6 link-local address, each "whose
+///   8-octet RD is set to zero" (RFC 4659, Section 3.2.1.1; for AFI 1
+///   RFC 8950, Section 3).
+///
+/// Anything else is pushed as raw bytes.
+///
+/// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+/// RFC 2545, Section 3 — <https://www.rfc-editor.org/rfc/rfc2545#section-3>
+/// RFC 4364, Section 4.3.2 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.2>
+/// RFC 4659, Section 3.2.1.1 — <https://www.rfc-editor.org/rfc/rfc4659#section-3.2.1.1>
+/// RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>
+fn parse_mp_next_hop<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    afi: u16,
+    safi: u8,
+    nh: &'pkt [u8],
+    offset: usize,
+) {
+    let ip_afi = afi == AFI_IPV4 || afi == AFI_IPV6;
+    // Length of the Route Distinguisher preceding each address, if any.
+    let rd_len = match (is_vpn_next_hop_safi(safi), nh.len()) {
+        (false, 4) if afi == AFI_IPV4 => 0,
+        (false, 16 | 32) if ip_afi => 0,
+        (true, 12) if afi == AFI_IPV4 => RD_SIZE,
+        (true, 24 | 48) if ip_afi => RD_SIZE,
+        _ => {
+            buf.push_field(
+                &MP_CHILDREN[FD_MP_NEXT_HOP],
+                FieldValue::Bytes(nh),
+                offset..offset + nh.len(),
+            );
+            return;
+        }
+    };
+
+    // A 32 / 48 octet next hop is a global address followed by a link-local
+    // address of the same shape.
+    let entry_len = match nh.len() {
+        32 | 48 => nh.len() / 2,
+        len => len,
+    };
+    let has_link_local = entry_len != nh.len();
+
+    if rd_len != 0 {
+        buf.push_field(
+            &MP_CHILDREN[FD_MP_NEXT_HOP_RD],
+            FieldValue::Bytes(&nh[..rd_len]),
+            offset..offset + rd_len,
+        );
+    }
+    let global = &nh[rd_len..entry_len];
+    let global_value = if global.len() == 4 {
+        FieldValue::Ipv4Addr(read_ipv4_addr(global, 0).unwrap_or_default())
+    } else {
+        FieldValue::Ipv6Addr(read_ipv6_addr(global, 0).unwrap_or_default())
+    };
+    buf.push_field(
+        &MP_CHILDREN[FD_MP_NEXT_HOP],
+        global_value,
+        offset + rd_len..offset + entry_len,
+    );
+
+    if has_link_local {
+        if rd_len != 0 {
+            buf.push_field(
+                &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL_RD],
+                FieldValue::Bytes(&nh[entry_len..entry_len + rd_len]),
+                offset + entry_len..offset + entry_len + rd_len,
+            );
+        }
+        buf.push_field(
+            &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL],
+            FieldValue::Ipv6Addr(read_ipv6_addr(nh, entry_len + rd_len).unwrap_or_default()),
+            offset + entry_len + rd_len..offset + nh.len(),
+        );
+    }
+}
+
 /// Parses MP_REACH_NLRI attribute value.
 ///
 /// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
@@ -2798,63 +3493,21 @@ fn parse_mp_reach_nlri<'pkt>(
         return MpAfiSafi { afi, safi, offset };
     }
 
-    // Parse Next Hop based on AFI
-    let nh_data = &data[nh_start..nh_end];
-    if afi == 1 && nh_len == 4 {
-        // IPv4 Next Hop
-        buf.push_field(
-            &MP_CHILDREN[FD_MP_NEXT_HOP],
-            FieldValue::Ipv4Addr([nh_data[0], nh_data[1], nh_data[2], nh_data[3]]),
-            offset + nh_start..offset + nh_end,
-        );
-    } else if afi == 2 && (nh_len == 16 || nh_len == 32) {
-        // IPv6 Next Hop (16 bytes global, or 32 bytes global + link-local)
-        let addr = read_ipv6_addr(nh_data, 0).unwrap_or_default();
-        buf.push_field(
-            &MP_CHILDREN[FD_MP_NEXT_HOP],
-            FieldValue::Ipv6Addr(addr),
-            offset + nh_start..offset + nh_start + 16,
-        );
-        if nh_len == 32 {
-            let ll_addr = read_ipv6_addr(nh_data, 16).unwrap_or_default();
-            buf.push_field(
-                &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL],
-                FieldValue::Ipv6Addr(ll_addr),
-                offset + nh_start + 16..offset + nh_end,
-            );
-        }
-    } else {
-        buf.push_field(
-            &MP_CHILDREN[FD_MP_NEXT_HOP],
-            FieldValue::Bytes(nh_data),
-            offset + nh_start..offset + nh_end,
-        );
-    }
+    parse_mp_next_hop(buf, afi, safi, &data[nh_start..nh_end], offset + nh_start);
 
     // Skip Reserved byte
     let nlri_start = nh_end + 1;
     if nlri_start < data.len() {
-        let nlri_data = &data[nlri_start..];
-        let is_mup = safi == SAFI_MUP;
-        let is_ip = afi == 1 || afi == 2;
-        if is_mup || is_ip {
-            let array_idx = buf.begin_container(
-                &MP_CHILDREN[FD_MP_NLRI],
-                FieldValue::Array(0..0),
-                offset + nlri_start..offset + data.len(),
-            );
-            let before = buf.field_count();
-            if is_mup {
-                parse_mup_nlri(buf, nlri_data, offset + nlri_start, afi == 2);
-            } else {
-                parse_prefixes(buf, nlri_data, offset + nlri_start, afi == 2);
-            }
-            if buf.field_count() == before {
-                buf.pop_field(); // remove empty array placeholder
-            } else {
-                buf.end_container(array_idx);
-            }
-        }
+        parse_mp_nlri_block(
+            buf,
+            &data[nlri_start..],
+            offset + nlri_start,
+            afi,
+            safi,
+            false,
+            &MP_CHILDREN[FD_MP_NLRI],
+            &MP_CHILDREN[FD_MP_NLRI_RAW],
+        );
     }
 
     buf.end_container(obj_idx);
@@ -2892,27 +3545,16 @@ fn parse_mp_unreach_nlri<'pkt>(
 
     let wr_start = 3;
     if wr_start < data.len() {
-        let wr_data = &data[wr_start..];
-        let is_mup = safi == SAFI_MUP;
-        let is_ip = afi == 1 || afi == 2;
-        if is_mup || is_ip {
-            let array_idx = buf.begin_container(
-                &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES],
-                FieldValue::Array(0..0),
-                offset + wr_start..offset + data.len(),
-            );
-            let before = buf.field_count();
-            if is_mup {
-                parse_mup_nlri(buf, wr_data, offset + wr_start, afi == 2);
-            } else {
-                parse_prefixes(buf, wr_data, offset + wr_start, afi == 2);
-            }
-            if buf.field_count() == before {
-                buf.pop_field(); // remove empty array placeholder
-            } else {
-                buf.end_container(array_idx);
-            }
-        }
+        parse_mp_nlri_block(
+            buf,
+            &data[wr_start..],
+            offset + wr_start,
+            afi,
+            safi,
+            true,
+            &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES],
+            &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES_RAW],
+        );
     }
 
     buf.end_container(obj_idx);
@@ -2996,10 +3638,14 @@ fn parse_update<'pkt>(
         let before = buf.field_count();
         let mut pos = 0;
         let attr_data = &data[pa_start..pa_end];
+        let as_size_hint = as_number_size_hint(attr_data);
         while pos < attr_data.len() {
-            if let Some((consumed, mp_afi_safi)) =
-                parse_path_attribute(buf, &attr_data[pos..], offset + pa_start + pos)
-            {
+            if let Some((consumed, mp_afi_safi)) = parse_path_attribute(
+                buf,
+                &attr_data[pos..],
+                offset + pa_start + pos,
+                as_size_hint,
+            ) {
                 if first_mp_afi_safi.is_none() {
                     first_mp_afi_safi = mp_afi_safi;
                 }
@@ -3111,6 +3757,30 @@ const NLRI_PREFIX_FIELD: FieldDescriptor = PREFIX_ENTRY_IPV4_FIELD.optional();
 /// Field descriptor index for [`NLRI_ENTRY_CHILDREN`] (index 1 is `prefix`,
 /// pushed through the address-family specific `PREFIX_ENTRY_*` descriptors).
 const FD_NLRI_PATH_ID: usize = 0;
+const FD_NLRI_LABEL_STACK: usize = 12;
+const FD_NLRI_COMPATIBILITY: usize = 13;
+
+/// Field descriptor indices for [`LABEL_ENTRY_CHILDREN`].
+const FD_LABEL_LABEL: usize = 0;
+const FD_LABEL_RSRV: usize = 1;
+const FD_LABEL_S: usize = 2;
+
+/// Child field descriptors of one Label / Rsrv / S entry of a labeled NLRI.
+///
+/// RFC 8277, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>
+const LABEL_ENTRY_FIELDS: [FieldDescriptor; 3] = [
+    FieldDescriptor::new("label", "Label", FieldType::U32),
+    FieldDescriptor::new("rsrv", "Reserved", FieldType::U8),
+    FieldDescriptor::new("s", "Bottom of Stack", FieldType::U8),
+];
+
+/// Slice form of [`LABEL_ENTRY_FIELDS`].
+static LABEL_ENTRY_CHILDREN: &[FieldDescriptor] = &LABEL_ENTRY_FIELDS;
+
+/// Object descriptor for label entries inside `label_stack`.
+static LABEL_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("entry", "Label Entry", FieldType::Object)
+        .with_children(&LABEL_ENTRY_FIELDS);
 
 /// Object descriptor for NLRI / withdrawn route entries.
 static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -3126,14 +3796,15 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// schema on either array.
 ///
 /// The element shape depends on the SAFI: SAFI 85 (BGP-MUP) yields MUP entries,
-/// every other supported SAFI yields plain prefix entries. All fields are
-/// therefore optional.
+/// SAFI 4 / 128 yield labeled entries (`label_stack` or `compatibility`, `rd`
+/// for SAFI 128, `prefix`), and SAFI 1 / 2 yield plain prefix entries. All
+/// fields are therefore optional.
 ///
 /// RFC 4760 — <https://www.rfc-editor.org/rfc/rfc4760>
 /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 12] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 14] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
@@ -3147,6 +3818,14 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 12] = [
     MUP_NLRI_FIELDS[FD_MUP_ENDPOINT_ADDRESS],
     MUP_NLRI_FIELDS[FD_MUP_SOURCE_ADDRESS],
     MUP_NLRI_FIELDS[FD_MUP_TLVS],
+    // Labeled NLRI fields (RFC 8277, Sections 2.2-2.4 —
+    // https://www.rfc-editor.org/rfc/rfc8277#section-2.2); VPN NLRI also carry
+    // `rd`, listed above (RFC 4364, Section 4.3.4 —
+    // https://www.rfc-editor.org/rfc/rfc4364#section-4.3.4).
+    FieldDescriptor::new("label_stack", "Label Stack", FieldType::Array)
+        .optional()
+        .with_children(&LABEL_ENTRY_FIELDS),
+    FieldDescriptor::new("compatibility", "Compatibility", FieldType::U32).optional(),
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
@@ -3462,11 +4141,15 @@ const FD_MP_NEXT_HOP: usize = 2;
 const FD_MP_NEXT_HOP_LINK_LOCAL: usize = 3;
 const FD_MP_NLRI: usize = 4;
 const FD_MP_WITHDRAWN_ROUTES: usize = 5;
+const FD_MP_NLRI_RAW: usize = 6;
+const FD_MP_WITHDRAWN_ROUTES_RAW: usize = 7;
+const FD_MP_NEXT_HOP_RD: usize = 8;
+const FD_MP_NEXT_HOP_LINK_LOCAL_RD: usize = 9;
 
 /// Child field descriptors for MP_REACH_NLRI / MP_UNREACH_NLRI objects.
 ///
 /// RFC 4760, Sections 3-4 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
-const MP_FIELDS: [FieldDescriptor; 6] = [
+const MP_FIELDS: [FieldDescriptor; 10] = [
     FieldDescriptor::new("afi", "AFI", FieldType::U16).with_display_fn(|v, _siblings| match v {
         FieldValue::U16(a) => afi_name(*a),
         _ => None,
@@ -3488,6 +4171,33 @@ const MP_FIELDS: [FieldDescriptor; 6] = [
     FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array)
         .optional()
         .with_children(NLRI_ENTRY_CHILDREN),
+    // Raw NLRI / Withdrawn Routes of an (AFI, SAFI) whose encoding is not
+    // decoded (e.g. EVPN, FlowSpec, SR Policy, BGP-LS).
+    FieldDescriptor::new("nlri_raw", "NLRI (raw)", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "withdrawn_routes_raw",
+        "Withdrawn Routes (raw)",
+        FieldType::Bytes,
+    )
+    .optional(),
+    // Route Distinguishers (always zero) of VPN next hops (RFC 4364,
+    // Section 4.3.2 — https://www.rfc-editor.org/rfc/rfc4364#section-4.3.2;
+    // RFC 4659, Section 3.2.1.1 —
+    // https://www.rfc-editor.org/rfc/rfc4659#section-3.2.1.1).
+    FieldDescriptor::new(
+        "next_hop_rd",
+        "Next Hop Route Distinguisher",
+        FieldType::Bytes,
+    )
+    .optional()
+    .with_format_fn(format_route_distinguisher),
+    FieldDescriptor::new(
+        "next_hop_link_local_rd",
+        "Next Hop Link-Local Route Distinguisher",
+        FieldType::Bytes,
+    )
+    .optional()
+    .with_format_fn(format_route_distinguisher),
 ];
 
 /// Slice form of [`MP_FIELDS`].
@@ -3620,6 +4330,7 @@ const FD_PA_FLAGS: usize = 0;
 const FD_PA_TYPE_CODE: usize = 1;
 const FD_PA_ATTR_LENGTH: usize = 2;
 const FD_PA_VALUE: usize = 3;
+const FD_PA_AS_NUMBER_SIZE: usize = 4;
 
 /// ORIGIN "value" field descriptor with display_fn for IGP/EGP/INCOMPLETE.
 static FD_ORIGIN_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value", FieldType::U8)
@@ -3663,6 +4374,11 @@ static PATH_ATTR_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("value", "Value", FieldType::Any)
         .optional()
         .with_children(PATH_ATTR_VALUE_CHILDREN),
+    // AS_PATH only: the AS number size (2 or 4 octets) inferred from the
+    // structure of the value, since the RFC 6793 capability exchange is not
+    // visible to a stateless dissector (RFC 6793, Section 4.1 —
+    // https://www.rfc-editor.org/rfc/rfc6793#section-4.1).
+    FieldDescriptor::new("as_number_size", "AS Number Size", FieldType::U8).optional(),
 ];
 
 /// Union of every field that can appear inside a structured path attribute
@@ -3688,6 +4404,10 @@ static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &[
     MP_FIELDS[FD_MP_NEXT_HOP_LINK_LOCAL],
     MP_FIELDS[FD_MP_NLRI],
     MP_FIELDS[FD_MP_WITHDRAWN_ROUTES],
+    MP_FIELDS[FD_MP_NLRI_RAW],
+    MP_FIELDS[FD_MP_WITHDRAWN_ROUTES_RAW],
+    MP_FIELDS[FD_MP_NEXT_HOP_RD],
+    MP_FIELDS[FD_MP_NEXT_HOP_LINK_LOCAL_RD],
     // BGP Prefix-SID TLV element fields (RFC 8669, RFC 9252).
     PREFIX_SID_TLV_FIELDS[FD_PSID_TYPE].optional(),
     PREFIX_SID_TLV_FIELDS[FD_PSID_LENGTH].optional(),
@@ -3975,6 +4695,11 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc1997",
     ),
     SpecReference::new(
+        "RFC 2545",
+        "Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain Routing",
+        "https://www.rfc-editor.org/rfc/rfc2545",
+    ),
+    SpecReference::new(
         "RFC 2918",
         "Route Refresh Capability for BGP-4",
         "https://www.rfc-editor.org/rfc/rfc2918",
@@ -3983,6 +4708,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 4360",
         "BGP Extended Communities Attribute",
         "https://www.rfc-editor.org/rfc/rfc4360",
+    ),
+    SpecReference::new(
+        "RFC 4364",
+        "BGP/MPLS IP Virtual Private Networks (VPNs)",
+        "https://www.rfc-editor.org/rfc/rfc4364",
     ),
     SpecReference::new(
         "RFC 4456",
@@ -3995,6 +4725,11 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc4486",
     ),
     SpecReference::new(
+        "RFC 4659",
+        "BGP-MPLS IP Virtual Private Network (VPN) Extension for IPv6 VPN",
+        "https://www.rfc-editor.org/rfc/rfc4659",
+    ),
+    SpecReference::new(
         "RFC 4724",
         "Graceful Restart Mechanism for BGP",
         "https://www.rfc-editor.org/rfc/rfc4724",
@@ -4003,6 +4738,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 4760",
         "Multiprotocol Extensions for BGP-4",
         "https://www.rfc-editor.org/rfc/rfc4760",
+    ),
+    SpecReference::new(
+        "RFC 5065",
+        "Autonomous System Confederations for BGP",
+        "https://www.rfc-editor.org/rfc/rfc5065",
     ),
     SpecReference::new(
         "RFC 5492",
@@ -4020,6 +4760,11 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc7313",
     ),
     SpecReference::new(
+        "RFC 7606",
+        "Revised Error Handling for BGP UPDATE Messages",
+        "https://www.rfc-editor.org/rfc/rfc7606",
+    ),
+    SpecReference::new(
         "RFC 7911",
         "Advertisement of Multiple Paths in BGP",
         "https://www.rfc-editor.org/rfc/rfc7911",
@@ -4033,6 +4778,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 8203",
         "BGP Administrative Shutdown Communication",
         "https://www.rfc-editor.org/rfc/rfc8203",
+    ),
+    SpecReference::new(
+        "RFC 8277",
+        "Using BGP to Bind MPLS Labels to Address Prefixes",
+        "https://www.rfc-editor.org/rfc/rfc8277",
     ),
     SpecReference::new(
         "RFC 8654",
@@ -5373,9 +6123,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_bgp_update_mup_truncated_entry_is_dropped() {
+    fn parse_bgp_update_mup_truncated_entry_is_raw() {
         // MUP entry whose declared Route Type Length runs past the end of the
-        // NLRI block: the walk stops and the empty array placeholder is removed.
+        // NLRI block: the walk stops, the empty array placeholder is removed
+        // and the bytes are kept as `nlri_raw`.
         let mut val = Vec::new();
         val.extend_from_slice(&1u16.to_be_bytes()); // AFI = IPv4
         val.push(85); // SAFI = BGP-MUP
@@ -5398,6 +6149,11 @@ mod tests {
             panic!("expected Object for MP_REACH");
         };
         assert!(nested_field_by_name_opt(&buf, mp_range, "nlri").is_none());
+        // The undecodable entry is kept as raw bytes instead of being dropped.
+        assert_eq!(
+            *nested_field_value(&buf, mp_range, "nlri_raw"),
+            FieldValue::Bytes(&[1, 0, 1, 200, 0xAA])
+        );
     }
 
     #[test]
@@ -5456,10 +6212,24 @@ mod tests {
             }
         }
 
+        // `label_stack` entries expose the RFC 8277 Label / Rsrv / S fields.
+        let label_stack = find(
+            find(descs, "nlri").unwrap().children.unwrap(),
+            "label_stack",
+        )
+        .expect("label_stack missing");
+        let label_children = label_stack.children.expect("label_stack has no children");
+        for name in ["label", "rsrv", "s"] {
+            assert!(find(label_children, name).is_some(), "{name} missing");
+        }
+
         // `path_attributes.value` is polymorphic and lists the union of every
         // structured shape it can take.
         let pa = find(descs, "path_attributes").expect("path_attributes missing");
         let pa_children = pa.children.expect("path_attributes has no children");
+        let as_number_size = find(pa_children, "as_number_size").expect("as_number_size missing");
+        assert_eq!(as_number_size.field_type, FieldType::U8);
+        assert!(as_number_size.optional);
         let value = find(pa_children, "value").expect("value missing");
         assert_eq!(value.field_type, FieldType::Any);
         assert!(value.optional);
@@ -5471,6 +6241,10 @@ mod tests {
             "next_hop_link_local",
             "nlri",
             "withdrawn_routes",
+            "nlri_raw",
+            "withdrawn_routes_raw",
+            "next_hop_rd",
+            "next_hop_link_local_rd",
             "label_index",
             "srgb_entries",
             "sub_tlvs",
@@ -5496,6 +6270,8 @@ mod tests {
             "endpoint_address",
             "source_address",
             "address",
+            "label_stack",
+            "compatibility",
         ] {
             let child = find(entry_children, name)
                 .unwrap_or_else(|| panic!("{name} missing from NLRI entry union"));
@@ -7751,6 +8527,901 @@ mod tests {
         assert_eq!(
             param_type.name,
             NON_CAP_PARAM_CHILDREN[FD_NCP_PARAM_TYPE].name
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // AS_PATH AS number size detection (RFC 6793, Section 4.1 —
+    // https://www.rfc-editor.org/rfc/rfc6793#section-4.1; RFC 7606,
+    // Section 7.2 — https://www.rfc-editor.org/rfc/rfc7606#section-7.2).
+    // -------------------------------------------------------------------
+
+    /// Helper: decode the AS_PATH segments of the first path attribute as
+    /// `(segment_type, as_numbers)` pairs.
+    fn first_attr_as_path_segments(buf: &DissectBuffer<'_>) -> Vec<(u8, Vec<u32>)> {
+        let obj_range = first_pa_obj_range(buf);
+        let FieldValue::Array(ref segs_range) = *nested_field_value(buf, &obj_range, "value")
+        else {
+            panic!("expected Array for AS path value");
+        };
+        direct_children(buf, segs_range)
+            .iter()
+            .map(|seg| {
+                let seg_range = seg.value.as_container_range().unwrap();
+                let FieldValue::U8(seg_type) = *nested_field_value(buf, seg_range, "segment_type")
+                else {
+                    panic!("expected U8 segment_type");
+                };
+                let asns_range = nested_field_by_name(buf, seg_range, "as_numbers")
+                    .value
+                    .as_container_range()
+                    .unwrap();
+                let asns = buf
+                    .nested_fields(asns_range)
+                    .iter()
+                    .map(|f| match f.value {
+                        FieldValue::U32(v) => v,
+                        _ => panic!("expected U32 AS number"),
+                    })
+                    .collect();
+                (seg_type, asns)
+            })
+            .collect()
+    }
+
+    /// Helper: the `as_number_size` of the first path attribute, if present.
+    fn first_attr_as_number_size<'pkt>(buf: &DissectBuffer<'pkt>) -> Option<FieldValue<'pkt>> {
+        let obj_range = first_pa_obj_range(buf);
+        nested_field_by_name_opt(buf, &obj_range, "as_number_size").map(|f| f.value.clone())
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_two_octet_size() {
+        // AS_SEQUENCE { 65001, 65002 } with 2-octet AS numbers cannot be read
+        // as 4-octet (the segment would need 8 value octets).
+        let value = [2, 2, 0xFD, 0xE9, 0xFD, 0xEA];
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(2, vec![65001, 65002])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(2)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_four_octet() {
+        // Reproduction from the issue: AS_SEQUENCE { 65536 } with 4-octet AS
+        // numbers, as sent between two NEW BGP speakers (RFC 6793, Section 4.1).
+        let mut value = vec![2, 1];
+        value.extend_from_slice(&65536u32.to_be_bytes());
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(first_attr_as_path_segments(&buf), vec![(2, vec![65536])]);
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_four_octet_multi_segment() {
+        // AS_SEQUENCE { 65001, 4200000000 } + AS_SET { 65536 }.
+        let mut value = vec![2, 2];
+        value.extend_from_slice(&65001u32.to_be_bytes());
+        value.extend_from_slice(&4_200_000_000u32.to_be_bytes());
+        value.extend_from_slice(&[1, 1]);
+        value.extend_from_slice(&65536u32.to_be_bytes());
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(2, vec![65001, 4_200_000_000]), (1, vec![65536])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_two_octet_multi_segment() {
+        // AS_CONFED_SEQUENCE { 64512 } + AS_SEQUENCE { 65001, 65002, 65003 }
+        // with 2-octet AS numbers; the 4-octet reading would overrun.
+        let value = [3, 1, 0xFC, 0x00, 2, 3, 0xFD, 0xE9, 0xFD, 0xEA, 0xFD, 0xEB];
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(3, vec![64512]), (2, vec![65001, 65002, 65003])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(2)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_ambiguous_prefers_four_octet() {
+        // Valid both as 4-octet AS_SEQUENCE { 65538, 16842755 } and as
+        // 2-octet AS_SEQUENCE { 1, 2 } + AS_SET { 3 }: 4-octet wins.
+        let value = [2, 2, 0, 1, 0, 2, 1, 1, 0, 3];
+        let data = build_update(&build_attr(0x40, 2, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            first_attr_as_path_segments(&buf),
+            vec![(2, vec![65538, 16_842_755])]
+        );
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_empty() {
+        // An empty AS_PATH (e.g. iBGP, locally originated) has no segments
+        // and gives no evidence of the AS number size.
+        let data = build_update(&build_attr(0x40, 2, &[]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert!(first_attr_as_path_segments(&buf).is_empty());
+        assert_eq!(first_attr_as_number_size(&buf), None);
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_malformed_is_raw() {
+        for value in [
+            // Segment length overruns the attribute for both sizes.
+            &[2u8, 5, 0, 1][..],
+            // Zero Path Segment Length (RFC 7606, Section 7.2).
+            &[2, 0],
+            // Unrecognized segment type 0.
+            &[0, 1, 0, 1],
+            // Single trailing octet after a valid segment (underrun).
+            &[2, 1, 0, 1, 2],
+        ] {
+            let data = build_update(&build_attr(0x40, 2, value), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+            let obj_range = first_pa_obj_range(&buf);
+            assert_eq!(
+                *nested_field_value(&buf, &obj_range, "value"),
+                FieldValue::Bytes(value),
+                "value {value:?}"
+            );
+            assert_eq!(first_attr_as_number_size(&buf), None);
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_as4_path_malformed_is_raw() {
+        // AS4_PATH always uses 4-octet AS numbers (RFC 6793, Section 3); a
+        // segment encoded with 2-octet numbers overruns and is kept raw.
+        let value = [2, 2, 0xFD, 0xE9, 0xFD, 0xEA];
+        let data = build_update(&build_attr(0xC0, 17, &value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj_range = first_pa_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &obj_range, "value"),
+            FieldValue::Bytes(&value)
+        );
+    }
+
+    #[test]
+    fn as_path_fits_checks_structure() {
+        assert!(as_path_fits(&[], 2));
+        assert!(as_path_fits(&[], 4));
+        assert!(as_path_fits(&[2, 1, 0, 1], 2));
+        assert!(!as_path_fits(&[2, 1, 0, 1], 4));
+        assert!(as_path_fits(&[4, 1, 0, 0, 0, 1], 4));
+        assert!(!as_path_fits(&[5, 1, 0, 0, 0, 1], 4));
+        assert!(!as_path_fits(&[2, 0], 2));
+        assert!(!as_path_fits(&[2], 2));
+    }
+
+    // -------------------------------------------------------------------
+    // MP_REACH_NLRI / MP_UNREACH_NLRI NLRI selection by AFI/SAFI
+    // (RFC 4760, Sections 3-5 — https://www.rfc-editor.org/rfc/rfc4760#section-3).
+    // -------------------------------------------------------------------
+
+    /// Helper: build an MP_REACH_NLRI attribute value.
+    fn build_mp_reach(afi: u16, safi: u8, next_hop: &[u8], nlri: &[u8]) -> Vec<u8> {
+        let mut val = afi.to_be_bytes().to_vec();
+        val.push(safi);
+        val.push(next_hop.len() as u8);
+        val.extend_from_slice(next_hop);
+        val.push(0); // Reserved
+        val.extend_from_slice(nlri);
+        val
+    }
+
+    /// Helper: build an MP_UNREACH_NLRI attribute value.
+    fn build_mp_unreach(afi: u16, safi: u8, withdrawn: &[u8]) -> Vec<u8> {
+        let mut val = afi.to_be_bytes().to_vec();
+        val.push(safi);
+        val.extend_from_slice(withdrawn);
+        val
+    }
+
+    /// Helper: build an UPDATE whose only path attribute is an optional,
+    /// extended-length attribute `type_code` carrying `value`.
+    fn build_single_attr_update(type_code: u8, value: &[u8]) -> Vec<u8> {
+        build_update(&build_attr(0x90, type_code, value), &[])
+    }
+
+    /// Helper: the child range of the first path attribute's Object `value`.
+    fn first_attr_value_obj_range(buf: &DissectBuffer<'_>) -> core::ops::Range<u32> {
+        let obj_range = first_pa_obj_range(buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(buf, &obj_range, "value") else {
+            panic!("expected Object value");
+        };
+        mp_range.clone()
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_nlri_is_raw() {
+        // EVPN IMET route (AFI 25, SAFI 70) from the issue: the NLRI must be
+        // kept as raw bytes, not dropped.
+        let nlri = [
+            0x03, 0x11, 0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64, 0, 0, 0, 0, 0x20, 0xc0, 0, 2, 1,
+        ];
+        let val = build_mp_reach(25, 70, &[0xc0, 0, 2, 1], &nlri);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "nlri_raw"),
+            FieldValue::Bytes(&nlri)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_evpn_withdrawn_is_raw() {
+        let wr = [0x03, 0x02, 0xaa, 0xbb];
+        let val = build_mp_unreach(25, 70, &wr);
+        let data = build_single_attr_update(15, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "withdrawn_routes_raw"),
+            FieldValue::Bytes(&wr)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "withdrawn_routes").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw() {
+        // IPv4 FlowSpec (AFI 1, SAFI 133; RFC 8955, Section 4) has a
+        // zero-length next hop and an NLRI that is not a plain prefix list
+        // (length 5: destination prefix 10.0.0.0/8, IP protocol == 6).
+        let nlri = [0x05, 0x01, 0x08, 0x0a, 0x81, 0x06];
+        let val = build_mp_reach(1, 133, &[], &nlri);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "nlri_raw"),
+            FieldValue::Bytes(&nlri)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw() {
+        // SR Policy (AFI 1, SAFI 73): not a plain prefix list.
+        let wr = [0x60, 0, 0, 0, 1, 0, 0, 0, 5, 0xc0, 0, 2, 1];
+        let val = build_mp_unreach(1, 73, &wr);
+        let data = build_single_attr_update(15, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "withdrawn_routes_raw"),
+            FieldValue::Bytes(&wr)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "withdrawn_routes").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_ipv4_multicast_prefixes() {
+        // SAFI 2 (multicast) uses the plain prefix encoding (RFC 4760, Section 5).
+        let val = build_mp_reach(1, 2, &[192, 0, 2, 1], &[24, 198, 51, 100]);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        let FieldValue::Array(ref nlri) = *nested_field_value(&buf, &mp, "nlri") else {
+            panic!("expected Array");
+        };
+        let entries = nlri_entry_ranges(&buf, nlri);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "prefix"),
+            FieldValue::Bytes(&[24, 198, 51, 100])
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri_raw").is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // MP_REACH_NLRI next hop encodings: VPN (RFC 4364, Section 4.3.2;
+    // RFC 4659, Section 3.2.1) and IPv6 next hop for IPv4 NLRI (RFC 8950,
+    // Section 3 — https://www.rfc-editor.org/rfc/rfc8950#section-3).
+    // -------------------------------------------------------------------
+
+    const NH_V6_GLOBAL: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    const NH_V6_LL: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+    /// Helper: dissect an MP_REACH_NLRI with an empty NLRI and return the
+    /// `(name, value)` pairs of the next hop fields.
+    fn mp_reach_next_hop_fields(afi: u16, safi: u8, next_hop: &[u8]) -> Vec<(String, String)> {
+        let val = build_mp_reach(afi, safi, next_hop, &[]);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        direct_children(&buf, &mp)
+            .iter()
+            .filter(|f| f.name().starts_with("next_hop"))
+            .map(|f| (f.name().to_string(), format!("{:?}", f.value)))
+            .collect()
+    }
+
+    fn nh(name: &str, value: FieldValue<'_>) -> (String, String) {
+        (name.to_string(), format!("{value:?}"))
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv4_next_hop() {
+        // RFC 4364, Section 4.3.2: VPN-IPv4 next hop with an RD of 0.
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&[192, 0, 2, 1]);
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv4Addr([192, 0, 2, 1])),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv6_next_hop() {
+        // RFC 4659, Section 3.2.1.1: VPN-IPv6 next hop (length 24).
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv6_next_hop_link_local() {
+        // RFC 4659, Section 3.2.1.1: global + link-local VPN-IPv6 (length 48).
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        next_hop.extend_from_slice(&[0u8; 8]);
+        next_hop.extend_from_slice(&NH_V6_LL);
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+                nh("next_hop_link_local_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop_link_local", FieldValue::Ipv6Addr(NH_V6_LL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_ipv4_nlri_ipv6_next_hop() {
+        // RFC 8950, Section 3: AFI 1 / SAFI 1, 2, 4 with a 16 or 32 octet
+        // IPv6 next hop.
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 1, &NH_V6_GLOBAL),
+            vec![nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL))]
+        );
+        let mut next_hop = NH_V6_GLOBAL.to_vec();
+        next_hop.extend_from_slice(&NH_V6_LL);
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 4, &next_hop),
+            vec![
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+                nh("next_hop_link_local", FieldValue::Ipv6Addr(NH_V6_LL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv4_nlri_ipv6_next_hop() {
+        // RFC 8950, Section 3: AFI 1 / SAFI 128 with a 24 octet VPN-IPv6
+        // next hop.
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_unexpected_next_hop_length_is_raw() {
+        // A 4 octet next hop is not a VPN-IPv4 address (RFC 4364, Section
+        // 4.3.2), so it is kept as raw bytes.
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 128, &[192, 0, 2, 1]),
+            vec![nh("next_hop", FieldValue::Bytes(&[192, 0, 2, 1]))]
+        );
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 1, &[192, 0, 2, 1]),
+            vec![nh("next_hop", FieldValue::Bytes(&[192, 0, 2, 1]))]
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Labeled unicast (RFC 8277, Sections 2.2-2.4 —
+    // https://www.rfc-editor.org/rfc/rfc8277#section-2.2) and VPN-IPv4 /
+    // VPN-IPv6 NLRI (RFC 4364, Section 4.3.4; RFC 4659, Section 3.2).
+    // -------------------------------------------------------------------
+
+    const RD_65000_100: [u8; 8] = [0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64];
+
+    /// A decoded labeled NLRI entry: `(path_id, labels as (label, rsrv, s),
+    /// compatibility, rd, prefix as [len, octets...])`.
+    type LabeledEntry = (
+        Option<u32>,
+        Vec<(u32, u8, u8)>,
+        Option<u32>,
+        Option<Vec<u8>>,
+        Vec<u8>,
+    );
+
+    /// Helper: dissect an MP_REACH_NLRI (`type_code` 14) or MP_UNREACH_NLRI
+    /// (15) attribute and decode its entries.
+    fn labeled_entries(type_code: u8, afi: u16, safi: u8, nlri: &[u8]) -> Vec<LabeledEntry> {
+        let (val, array_name) = if type_code == 14 {
+            let next_hop: &[u8] = if safi == 128 {
+                &[0, 0, 0, 0, 0, 0, 0, 0, 192, 0, 2, 1]
+            } else {
+                &[192, 0, 2, 1]
+            };
+            (build_mp_reach(afi, safi, next_hop, nlri), "nlri")
+        } else {
+            (build_mp_unreach(afi, safi, nlri), "withdrawn_routes")
+        };
+        let data = build_single_attr_update(type_code, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let FieldValue::Array(ref arr) = *nested_field_value(&buf, &mp, array_name) else {
+            panic!("expected Array for {array_name}");
+        };
+        nlri_entry_ranges(&buf, arr)
+            .iter()
+            .map(|entry| {
+                let path_id = nested_field_by_name_opt(&buf, entry, "path_id").map(|f| {
+                    let FieldValue::U32(v) = f.value else {
+                        panic!("path_id")
+                    };
+                    v
+                });
+                let labels = nested_field_by_name_opt(&buf, entry, "label_stack")
+                    .map(|f| {
+                        let range = f.value.as_container_range().unwrap();
+                        direct_children(&buf, range)
+                            .iter()
+                            .map(|l| {
+                                let r = l.value.as_container_range().unwrap();
+                                let FieldValue::U32(label) = *nested_field_value(&buf, r, "label")
+                                else {
+                                    panic!("label")
+                                };
+                                let FieldValue::U8(rsrv) = *nested_field_value(&buf, r, "rsrv")
+                                else {
+                                    panic!("rsrv")
+                                };
+                                let FieldValue::U8(s) = *nested_field_value(&buf, r, "s") else {
+                                    panic!("s")
+                                };
+                                (label, rsrv, s)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let compatibility =
+                    nested_field_by_name_opt(&buf, entry, "compatibility").map(|f| {
+                        let FieldValue::U32(v) = f.value else {
+                            panic!("compatibility")
+                        };
+                        v
+                    });
+                let rd = nested_field_by_name_opt(&buf, entry, "rd").map(|f| {
+                    let FieldValue::Bytes(b) = f.value else {
+                        panic!("rd")
+                    };
+                    b.to_vec()
+                });
+                let prefix = match nested_field_value(&buf, entry, "prefix") {
+                    FieldValue::Scratch(r) => {
+                        buf.scratch()[r.start as usize..r.end as usize].to_vec()
+                    }
+                    FieldValue::Bytes(b) => b.to_vec(),
+                    other => panic!("unexpected prefix {other:?}"),
+                };
+                (path_id, labels, compatibility, rd, prefix)
+            })
+            .collect()
+    }
+
+    /// Helper: the raw NLRI / withdrawn routes of an MP attribute, if any.
+    fn mp_raw(type_code: u8, afi: u16, safi: u8, nlri: &[u8]) -> Option<Vec<u8>> {
+        let (val, raw_name) = if type_code == 14 {
+            (build_mp_reach(afi, safi, &[192, 0, 2, 1], nlri), "nlri_raw")
+        } else {
+            (build_mp_unreach(afi, safi, nlri), "withdrawn_routes_raw")
+        };
+        let data = build_single_attr_update(type_code, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        nested_field_by_name_opt(&buf, &mp, raw_name).map(|f| {
+            let FieldValue::Bytes(b) = f.value else {
+                panic!("raw")
+            };
+            b.to_vec()
+        })
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv4_nlri() {
+        // Reproduction from the issue: label 100 (S=1), RD 0:65000:100,
+        // 10.0.0.0/24 — 112 bits.
+        let mut nlri = vec![0x70, 0x00, 0x06, 0x41];
+        nlri.extend_from_slice(&RD_65000_100);
+        nlri.extend_from_slice(&[10, 0, 0]);
+        assert_eq!(
+            labeled_entries(14, 1, 128, &nlri),
+            vec![(
+                None,
+                vec![(100, 0, 1)],
+                None,
+                Some(RD_65000_100.to_vec()),
+                vec![24, 10, 0, 0]
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv6_nlri() {
+        // Label 16 (S=1), RD 0:65000:100, 2001:db8:1::/48 — 24+64+48 bits.
+        let mut nlri = vec![24 + 64 + 48, 0x00, 0x01, 0x01];
+        nlri.extend_from_slice(&RD_65000_100);
+        nlri.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        let val = build_mp_reach(2, 128, &next_hop, &nlri);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let FieldValue::Array(ref arr) = *nested_field_value(&buf, &mp, "nlri") else {
+            panic!("expected Array");
+        };
+        let entries = nlri_entry_ranges(&buf, arr);
+        assert_eq!(entries.len(), 1);
+        let prefix = nested_field_by_name(&buf, &entries[0], "prefix");
+        let FieldValue::Scratch(ref r) = prefix.value else {
+            panic!("expected Scratch prefix");
+        };
+        assert_eq!(
+            &buf.scratch()[r.start as usize..r.end as usize],
+            &[48, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]
+        );
+        // The prefix field covers the prefix octets in the packet.
+        assert_eq!(prefix.range.end - prefix.range.start, 6);
+        // It is serialised with the IPv6 CIDR formatter.
+        let ctx = FormatContext {
+            packet_data: &data,
+            scratch: buf.scratch(),
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        (prefix.descriptor.format_fn.unwrap())(&prefix.value, &ctx, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\"2001:db8:1::/48\"");
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_labeled_ipv4_nlri() {
+        // Reproduction from the issue: SAFI 4, label 100, 10.0.0.0/24.
+        assert_eq!(
+            labeled_entries(14, 1, 4, &[0x30, 0x00, 0x06, 0x41, 10, 0, 0]),
+            vec![(None, vec![(100, 0, 1)], None, None, vec![24, 10, 0, 0])]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_labeled_ipv6_nlri() {
+        // SAFI 4, AFI 2 (RFC 8277, Section 2): label 3, 2001:db8::/32.
+        assert_eq!(
+            labeled_entries(14, 2, 4, &[0x38, 0x00, 0x00, 0x31, 0x20, 0x01, 0x0d, 0xb8]),
+            vec![(
+                None,
+                vec![(3, 0, 1)],
+                None,
+                None,
+                vec![32, 0x20, 0x01, 0x0d, 0xb8]
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_labeled_multiple_labels() {
+        // RFC 8277, Section 2.3: labels 100 (S=0) and 200 (S=1), 10.0.0.0/24.
+        assert_eq!(
+            labeled_entries(
+                14,
+                1,
+                4,
+                &[0x48, 0x00, 0x06, 0x40, 0x00, 0x0c, 0x81, 10, 0, 0]
+            ),
+            vec![(
+                None,
+                vec![(100, 0, 0), (200, 0, 1)],
+                None,
+                None,
+                vec![24, 10, 0, 0]
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_labeled_single_label_s_bit_ignored() {
+        // RFC 8277, Section 2.2: with a single label the S bit "MUST be
+        // ignored on reception". Label 100 with S=0 and Rsrv bits set.
+        assert_eq!(
+            labeled_entries(14, 1, 4, &[0x30, 0x00, 0x06, 0x4e, 10, 0, 0]),
+            vec![(None, vec![(100, 7, 0)], None, None, vec![24, 10, 0, 0])]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_vpn_ipv4_withdraw() {
+        // RFC 8277, Section 2.4: Compatibility field 0x800000, then RD and
+        // prefix.
+        let mut nlri = vec![0x70, 0x80, 0x00, 0x00];
+        nlri.extend_from_slice(&RD_65000_100);
+        nlri.extend_from_slice(&[10, 0, 0]);
+        assert_eq!(
+            labeled_entries(15, 1, 128, &nlri),
+            vec![(
+                None,
+                vec![],
+                Some(0x80_0000),
+                Some(RD_65000_100.to_vec()),
+                vec![24, 10, 0, 0]
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_labeled_withdraw_zero_compatibility() {
+        // RFC 8277, Section 2.4: "some implementations set it to 0x000000".
+        assert_eq!(
+            labeled_entries(15, 1, 4, &[0x30, 0, 0, 0, 10, 0, 0]),
+            vec![(None, vec![], Some(0), None, vec![24, 10, 0, 0])]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_labeled_add_path() {
+        // RFC 8277, Section 2.2: "If the procedures of [RFC7911] are being
+        // used, a four-octet "path identifier" ... precedes the Length field."
+        let nlri = [
+            0, 0, 0, 1, 0x30, 0x00, 0x06, 0x41, 10, 0, 0, //
+            0, 0, 0, 2, 0x30, 0x00, 0x0c, 0x81, 10, 0, 1,
+        ];
+        assert_eq!(
+            labeled_entries(14, 1, 4, &nlri),
+            vec![
+                (Some(1), vec![(100, 0, 1)], None, None, vec![24, 10, 0, 0]),
+                (Some(2), vec![(200, 0, 1)], None, None, vec![24, 10, 0, 1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_labeled_malformed_is_raw() {
+        for (type_code, safi, nlri) in [
+            // Length shorter than one label.
+            (14, 4, &[0x10, 0x00, 0x06][..]),
+            // Entry overruns the NLRI field.
+            (14, 4, &[0x30, 0x00, 0x06, 0x41, 10]),
+            // VPN-IPv4 prefix longer than 32 bits (RFC 8277, Section 2.2).
+            (
+                14,
+                128,
+                &[
+                    24 + 64 + 40,
+                    0,
+                    0x06,
+                    0x41,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    10,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            ),
+            // Withdrawal shorter than the Compatibility field and RD.
+            (15, 128, &[0x40, 0x80, 0, 0, 0, 0, 0, 0, 0]),
+        ] {
+            assert_eq!(
+                mp_raw(type_code, 1, safi, nlri),
+                Some(nlri.to_vec()),
+                "nlri {nlri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_nlri_prefix_from_scratch() {
+        let scratch = [24u8, 10, 0, 0, 32, 0x20, 0x01, 0x0d, 0xb8];
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch: &scratch,
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        format_nlri_ipv4_prefix(&FieldValue::Scratch(0..4), &ctx, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\"10.0.0.0/24\"");
+        let mut out = Vec::new();
+        format_nlri_ipv6_prefix(&FieldValue::Scratch(4..9), &ctx, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\"2001:db8::/32\"");
+        // An out-of-range scratch reference formats as an empty string.
+        let mut out = Vec::new();
+        format_nlri_ipv4_prefix(&FieldValue::Scratch(8..20), &ctx, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\"\"");
+    }
+
+    // -------------------------------------------------------------------
+    // AS_PATH AS number size hints from the same UPDATE (RFC 6793,
+    // Sections 4.1 and 4.2.2 — https://www.rfc-editor.org/rfc/rfc6793#section-4.2.2).
+    // -------------------------------------------------------------------
+
+    /// AS_PATH that is valid both as 4-octet AS_SEQUENCE { 65538, 16842755 }
+    /// and as 2-octet AS_SEQUENCE { 1, 2 } + AS_SET { 3 }.
+    const AMBIGUOUS_AS_PATH: [u8; 10] = [2, 2, 0, 1, 0, 2, 1, 1, 0, 3];
+
+    /// Helper: dissect an UPDATE whose first attribute is the ambiguous
+    /// AS_PATH followed by `other_attrs`.
+    fn dissect_ambiguous_as_path_with(other_attrs: &[u8]) -> (Vec<(u8, Vec<u32>)>, Option<u8>) {
+        let mut attrs = build_attr(0x40, 2, &AMBIGUOUS_AS_PATH);
+        attrs.extend_from_slice(other_attrs);
+        let data = build_update(&attrs, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let size = match first_attr_as_number_size(&buf) {
+            Some(FieldValue::U8(v)) => Some(v),
+            None => None,
+            other => panic!("unexpected as_number_size {other:?}"),
+        };
+        (first_attr_as_path_segments(&buf), size)
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_two_octet_hint_from_as4_path() {
+        // AS4_PATH is only sent towards OLD speakers, whose AS_PATH uses
+        // 2-octet AS numbers (RFC 6793, Section 4.2.2).
+        let mut as4_path = vec![2, 1];
+        as4_path.extend_from_slice(&200_000u32.to_be_bytes());
+        assert_eq!(
+            dissect_ambiguous_as_path_with(&build_attr(0xC0, 17, &as4_path)),
+            (vec![(2, vec![1, 2]), (1, vec![3])], Some(2))
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_two_octet_hint_from_as4_aggregator() {
+        let mut as4_aggregator = 200_000u32.to_be_bytes().to_vec();
+        as4_aggregator.extend_from_slice(&[192, 0, 2, 1]);
+        assert_eq!(
+            dissect_ambiguous_as_path_with(&build_attr(0xC0, 18, &as4_aggregator)),
+            (vec![(2, vec![1, 2]), (1, vec![3])], Some(2))
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_size_hint_from_aggregator_length() {
+        // AGGREGATOR uses the same AS number size as AS_PATH (RFC 6793,
+        // Section 4.1): 6 octets means 2-octet, 8 octets means 4-octet.
+        assert_eq!(
+            dissect_ambiguous_as_path_with(&build_attr(0xC0, 7, &[0xFD, 0xE9, 192, 0, 2, 1])),
+            (vec![(2, vec![1, 2]), (1, vec![3])], Some(2))
+        );
+        assert_eq!(
+            dissect_ambiguous_as_path_with(&build_attr(0xC0, 7, &[0, 1, 0, 0, 192, 0, 2, 1])),
+            (vec![(2, vec![65538, 16_842_755])], Some(4))
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_as_path_hint_ignored_when_it_does_not_fit() {
+        // A 2-octet hint does not override an AS_PATH that is only valid
+        // with 4-octet AS numbers.
+        let mut as_path = vec![2, 1];
+        as_path.extend_from_slice(&65536u32.to_be_bytes());
+        let mut attrs = build_attr(0x40, 2, &as_path);
+        attrs.extend_from_slice(&build_attr(0xC0, 7, &[0xFD, 0xE9, 192, 0, 2, 1]));
+        let data = build_update(&attrs, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(first_attr_as_path_segments(&buf), vec![(2, vec![65536])]);
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    // -------------------------------------------------------------------
+    // Undecodable tail of a plain prefix / MUP MP NLRI block is kept raw
+    // (RFC 4760, Section 5 — https://www.rfc-editor.org/rfc/rfc4760#section-5).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_bgp_update_mp_reach_prefix_tail_is_raw() {
+        // 10.0.0.0/24 followed by a prefix length of 40 (> 32 for IPv4).
+        let val = build_mp_reach(1, 1, &[192, 0, 2, 1], &[24, 10, 0, 0, 40, 1, 2]);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let FieldValue::Array(ref nlri) = *nested_field_value(&buf, &mp, "nlri") else {
+            panic!("expected Array");
+        };
+        assert_eq!(nlri_entry_ranges(&buf, nlri).len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "nlri_raw"),
+            FieldValue::Bytes(&[40, 1, 2])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_invalid_prefixes_are_raw() {
+        // No entry decodes at all: the whole block is kept raw.
+        let val = build_mp_unreach(1, 1, &[40, 1, 2]);
+        let data = build_single_attr_update(15, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert!(nested_field_by_name_opt(&buf, &mp, "withdrawn_routes").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "withdrawn_routes_raw"),
+            FieldValue::Bytes(&[40, 1, 2])
         );
     }
 }

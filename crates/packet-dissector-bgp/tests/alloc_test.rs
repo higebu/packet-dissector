@@ -70,3 +70,41 @@ fn zero_alloc_dissect_bgp_update_add_path() {
         "BGP ADD-PATH update dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_update_vpn_ipv4() {
+    // UPDATE with an MP_REACH_NLRI carrying labeled VPN-IPv4 NLRI
+    // (RFC 8277, Section 2.2 — https://www.rfc-editor.org/rfc/rfc8277#section-2.2;
+    // RFC 4364, Section 4.3.4 — https://www.rfc-editor.org/rfc/rfc4364#section-4.3.4),
+    // whose prefixes are assembled in the scratch buffer.
+    let mut mp_reach = vec![0x00, 0x01, 128, 12]; // AFI 1, SAFI 128, NH length 12
+    mp_reach.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 192, 0, 2, 1]); // RD 0 + 192.0.2.1
+    mp_reach.push(0); // Reserved
+    for third_octet in 0..4u8 {
+        // 112 bits: label 100 (S=1), RD 0:65000:100, 10.0.x.0/24
+        mp_reach.extend_from_slice(&[0x70, 0x00, 0x06, 0x41, 0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64]);
+        mp_reach.extend_from_slice(&[10, 0, third_octet]);
+    }
+    let mut attrs = vec![0x90, 14];
+    attrs.extend_from_slice(&(mp_reach.len() as u16).to_be_bytes());
+    attrs.extend_from_slice(&mp_reach);
+
+    let mut raw = vec![0xFF; 16]; // Marker
+    let total_len = 19 + 2 + 2 + attrs.len();
+    raw.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+    raw.push(2); // Type = UPDATE
+    raw.extend_from_slice(&0u16.to_be_bytes()); // Withdrawn Routes Length
+    raw.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    raw.extend_from_slice(&attrs);
+
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP VPN-IPv4 update dissect allocated {allocs} times"
+    );
+}
