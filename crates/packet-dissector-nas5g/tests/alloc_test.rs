@@ -46,3 +46,27 @@ fn zero_alloc_dissect_nas5g_5gsm() {
     });
     assert_eq!(allocs, 0, "NAS5G 5GSM dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_nas5g_ciphered_5gmm() {
+    // Security protected 5GMM, integrity protected and ciphered
+    // (3GPP TS 24.501, Section 4.4.5).
+    let raw: &[u8] = &[
+        0x7E, // EPD: 5GMM
+        0x02, // Security header: integrity protected and ciphered
+        0x12, 0x34, 0x56, 0x78, // MAC
+        0x03, // Sequence number
+        0x2E, 0x9A, 0x41, 0xC7, // Ciphered payload
+    ];
+
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        Nas5gDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "NAS5G ciphered 5GMM dissect allocated {allocs} times"
+    );
+}
