@@ -1894,7 +1894,17 @@ fn dissect_dns_tcp_message<'pkt>(
         offset..offset + 2,
     );
 
-    let result = DnsDissector.dissect(&msg_data[2..2 + msg_len], buf, offset + 2)?;
+    // RFC 1035, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc1035#section-4.2.2>:
+    // the length prefix delimits the message, so a message that needs more
+    // octets than it declares is malformed, not a truncated capture.
+    let result = DnsDissector
+        .dissect(&msg_data[2..2 + msg_len], buf, offset + 2)
+        .map_err(|e| match e {
+            PacketError::Truncated { .. } => {
+                PacketError::InvalidHeader("DNS message overruns TCP length prefix")
+            }
+            other => other,
+        })?;
 
     // Extend the DNS layer range to include the 2-byte TCP length prefix
     // and the tcp_length field we pushed before the DNS dissect call.
@@ -1991,6 +2001,7 @@ mod tests {
     // | RFC 1035 §4.1.4        | Name compression pointer loop       | reject_name_pointer_loop          |
     // | RFC 1035 §3.1          | Reserved label type (10)            | reject_reserved_label_type        |
     // | RFC 1035 §4.2.2 / 7766 | TCP 2-byte length prefix            | parse_tcp_length_prefix           |
+    // | RFC 1035 §4.2.2 / 7766 | Message overruns TCP length prefix  | tcp_message_overrunning_length_prefix_is_invalid |
     // | RFC 3596               | AAAA record                         | parse_aaaa_record                 |
     // | RFC 2782               | SRV record                          | parse_srv_record                  |
     // | RFC 3403               | NAPTR record                        | parse_naptr_record                |
@@ -3264,6 +3275,26 @@ mod tests {
         let mut b = buf();
         let err = DnsTcpDissector.dissect(&[0u8], &mut b, 0).unwrap_err();
         assert!(matches!(err, PacketError::Truncated { .. }));
+    }
+
+    #[test]
+    fn tcp_message_overrunning_length_prefix_is_invalid() {
+        // RFC 1035 §4.2.2 — the length prefix delimits the message. A message
+        // whose sections need more octets than the prefix gives is malformed;
+        // the capture itself is not truncated, so `Truncated` would be wrong
+        // (and would report the inner slice length, not `data.len()`).
+        let dns = header(1, 0, 0, 0); // QDCOUNT=1 but no question follows
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(dns.len() as u16).to_be_bytes());
+        framed.extend_from_slice(&dns);
+        framed.extend_from_slice(&wire_name("ex.test")); // beyond the prefix
+
+        let mut b = buf();
+        let err = DnsTcpDissector.dissect(&framed, &mut b, 0).unwrap_err();
+        assert_eq!(
+            err,
+            PacketError::InvalidHeader("DNS message overruns TCP length prefix")
+        );
     }
 
     // ---- Name lookup helpers --------------------------------------------
