@@ -1898,6 +1898,13 @@ impl Default for DissectorRegistry {
         // Port 3785 carries BFD Echo packets (RFC 5881, Section 4), whose
         // payload is a local matter (RFC 5880, Section 5) unless it uses the
         // Control format (RFC 9747, Section 2).
+        //   <https://www.rfc-editor.org/rfc/rfc5881>
+        //   <https://www.rfc-editor.org/rfc/rfc5883>
+        //   <https://www.rfc-editor.org/rfc/rfc7130#section-2.2>
+        //   <https://www.rfc-editor.org/rfc/rfc7881#section-2>
+        //   <https://www.rfc-editor.org/rfc/rfc5881#section-4>
+        //   <https://www.rfc-editor.org/rfc/rfc5880#section-5>
+        //   <https://www.rfc-editor.org/rfc/rfc9747#section-2>
         #[cfg(feature = "bfd")]
         {
             #[cfg(feature = "udp")]

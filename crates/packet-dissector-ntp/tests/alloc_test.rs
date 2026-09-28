@@ -69,6 +69,7 @@ fn zero_alloc_dissect_ntp_server() {
 #[test]
 fn zero_alloc_dissect_ntp_control_message() {
     // RFC 9327, Section 2 — mode 6 response with 4 data octets.
+    //   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
     let raw: &[u8] = &[
         0x16, 0x82, 0x00, 0x01, 0x06, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, b'l', b'e', b'a',
         b'p',

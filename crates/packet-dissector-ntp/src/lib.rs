@@ -89,6 +89,7 @@ const MODE_PRIVATE: u8 = 7;
 /// <https://www.rfc-editor.org/rfc/rfc9327#section-2>.
 fn control_opcode_name(opcode: u8) -> &'static str {
     // Verbatim from RFC 9327, Table 1.
+    //   <https://www.rfc-editor.org/rfc/rfc9327>
     match opcode {
         1 => "read status command/response",
         2 => "read variables command/response",
@@ -205,6 +206,7 @@ const FD_ORIGIN_TIMESTAMP: usize = 10;
 const FD_RECEIVE_TIMESTAMP: usize = 11;
 const FD_TRANSMIT_TIMESTAMP: usize = 12;
 // RFC 9327, Section 2 — NTP Control Message (mode 6) fields.
+//   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
 const FD_RESPONSE: usize = 13;
 const FD_ERROR: usize = 14;
 const FD_MORE: usize = 15;
@@ -217,6 +219,9 @@ const FD_COUNT: usize = 21;
 const FD_DATA: usize = 22;
 const FD_PADDING: usize = 23;
 const FD_AUTHENTICATOR: usize = 24;
+
+/// Layer name used for every NTP mode.
+const SHORT_NAME: &str = "NTP";
 
 /// NTP dissector.
 pub struct NtpDissector;
@@ -300,6 +305,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         format_fn: None,
     },
     // Fields below are present for modes 0-5 only (RFC 5905, Section 7.3).
+    //   <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>
     FieldDescriptor::new("poll", "Poll Interval", FieldType::I32).optional(),
     FieldDescriptor::new("precision", "Precision", FieldType::I32).optional(),
     FieldDescriptor::new("root_delay", "Root Delay", FieldType::U32).optional(),
@@ -312,6 +318,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("receive_timestamp", "Receive Timestamp", FieldType::U64).optional(),
     FieldDescriptor::new("transmit_timestamp", "Transmit Timestamp", FieldType::U64).optional(),
     // Fields below are present for mode 6 only (RFC 9327, Section 2).
+    //   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
     FieldDescriptor::new("response", "Response Bit", FieldType::U8).optional(),
     FieldDescriptor::new("error", "Error Bit", FieldType::U8).optional(),
     FieldDescriptor::new("more", "More Bit", FieldType::U8).optional(),
@@ -344,7 +351,7 @@ impl Dissector for NtpDissector {
     }
 
     fn short_name(&self) -> &'static str {
-        "NTP"
+        SHORT_NAME
     }
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
@@ -415,26 +422,12 @@ impl Dissector for NtpDissector {
         let transmit_ts = read_be_u64(data, 40)?;
 
         buf.begin_layer(
-            self.short_name(),
+            SHORT_NAME,
             None,
             FIELD_DESCRIPTORS,
             offset..offset + HEADER_SIZE,
         );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_LEAP_INDICATOR],
-            FieldValue::U8(li),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_VERSION],
-            FieldValue::U8(vn),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_MODE],
-            FieldValue::U8(mode),
-            offset..offset + 1,
-        );
+        push_first_octet(buf, offset, Some(li), vn, mode);
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_STRATUM],
             FieldValue::U8(stratum),
@@ -543,6 +536,7 @@ fn dissect_control<'pkt>(
     }
 
     // RFC 9327, Section 2, Figure 1 — second octet: R | E | M | opcode (5 bits).
+    //   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
     let byte1 = data[1];
     let response = (byte1 >> 7) & 0x01;
     let error = (byte1 >> 6) & 0x01;
@@ -554,6 +548,7 @@ fn dissect_control<'pkt>(
     let data_offset = read_be_u16(data, 8)?;
     // RFC 9327, Section 2 — "Count: This is a 16-bit unsigned integer
     // indicating the length of the data field, in octets."
+    //   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
     let count = read_be_u16(data, 10)?;
 
     let data_end = CONTROL_HEADER_SIZE + count as usize;
@@ -568,10 +563,11 @@ fn dissect_control<'pkt>(
     // with a value of zero, as needed to ensure the overall control message
     // size is a multiple of 4 octets." Anything after the padding is the
     // optional Authenticator.
+    //   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
     let padding_end = (data_end + (4 - data_end % 4) % 4).min(data.len());
     let total = data.len();
 
-    buf.begin_layer("NTP", None, FIELD_DESCRIPTORS, offset..offset + total);
+    buf.begin_layer(SHORT_NAME, None, FIELD_DESCRIPTORS, offset..offset + total);
     push_first_octet(buf, offset, Some(li), vn, mode);
     for (fd, value) in [
         (FD_RESPONSE, response),
@@ -631,7 +627,7 @@ fn dissect_private<'pkt>(
     mode: u8,
 ) -> Result<DissectResult, PacketError> {
     let total = data.len();
-    buf.begin_layer("NTP", None, FIELD_DESCRIPTORS, offset..offset + total);
+    buf.begin_layer(SHORT_NAME, None, FIELD_DESCRIPTORS, offset..offset + total);
     push_first_octet(buf, offset, None, vn, mode);
     if total > 1 {
         buf.push_field(
@@ -915,6 +911,7 @@ mod tests {
     }
 
     /// Build an NTP control message (RFC 9327, Section 2).
+    ///   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
     #[allow(clippy::too_many_arguments)]
     fn build_mode6(
         vn: u8,
@@ -1116,6 +1113,7 @@ mod tests {
     fn test_parse_mode7_private() {
         // RFC 5905, Section 7.3, Figure 10 — mode 7 is "reserved for private
         // use"; only VN and Mode are interpreted.
+        //   <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>
         let data = [0x17, 0x00, 0x03, 0x2a, 0, 0, 0, 0];
         let mut buf = DissectBuffer::new();
         let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();

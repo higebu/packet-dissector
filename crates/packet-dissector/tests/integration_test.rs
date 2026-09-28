@@ -4265,6 +4265,7 @@ fn integration_ethernet_ipv4_udp_ntp_client() {
 #[test]
 fn integration_ethernet_ipv4_udp_ntp_control_request() {
     // RFC 9327, Section 2 — a 12-octet `ntpq -c rv` request (mode 6).
+    //   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
     let mut pkt = Vec::new();
     push_ethernet(
         &mut pkt,
@@ -4379,6 +4380,7 @@ fn build_eth_ipv4_udp_payload(src_port: u16, dst_port: u16, payload: &[u8]) -> V
 }
 
 /// Minimal BFD Control packet (RFC 5880, Section 4.1) in the Down state.
+///   <https://www.rfc-editor.org/rfc/rfc5880#section-4.1>
 fn bfd_control_down(my_disc: u32) -> Vec<u8> {
     let mut p = vec![1u8 << 5, 1u8 << 6, 3, 24];
     p.extend_from_slice(&my_disc.to_be_bytes());
@@ -4393,6 +4395,7 @@ fn bfd_control_down(my_disc: u32) -> Vec<u8> {
 fn integration_ethernet_ipv4_udp_bfd_echo_opaque() {
     // RFC 5880, Section 5 — the Echo payload is a local matter and must not
     // make the frame fail.
+    //   <https://www.rfc-editor.org/rfc/rfc5880#section-5>
     let payloads: [&[u8]; 2] = [
         &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2a],
         &[
@@ -4420,6 +4423,7 @@ fn integration_ethernet_ipv4_udp_bfd_echo_opaque() {
 fn integration_ethernet_ipv4_udp_bfd_echo_control() {
     // RFC 9747, Section 2 — Unaffiliated BFD Echo uses the Control format on
     // UDP 3785.
+    //   <https://www.rfc-editor.org/rfc/rfc9747#section-2>
     let pkt = build_eth_ipv4_udp_payload(49152, 3785, &bfd_control_down(0x55));
     let registry = DissectorRegistry::default();
     let mut buf = DissectBuffer::new();
@@ -4439,6 +4443,8 @@ fn integration_ethernet_ipv4_udp_bfd_echo_control() {
 fn integration_ethernet_ipv4_udp_sbfd_and_micro_bfd() {
     // RFC 7881, Section 2 (S-BFD, UDP 7784) and RFC 7130, Section 2.2
     // (Micro-BFD, UDP 6784) both carry BFD Control packets.
+    //   <https://www.rfc-editor.org/rfc/rfc7881#section-2>
+    //   <https://www.rfc-editor.org/rfc/rfc7130#section-2.2>
     let registry = DissectorRegistry::default();
     for (src, dst) in [(49152, 7784), (7784, 49152), (49152, 6784)] {
         let pkt = build_eth_ipv4_udp_payload(src, dst, &bfd_control_down(7));
@@ -6848,6 +6854,7 @@ fn integration_ethernet_ipv4_igmp_v2_report() {
 #[test]
 fn integration_ethernet_ipv4_igmp_mrd_solicitation() {
     // RFC 4286, Section 4.1 — a 4-octet Solicitation to All-Routers.
+    //   <https://www.rfc-editor.org/rfc/rfc4286#section-4.1>
     let reg = DissectorRegistry::default();
     let mut pkt = Vec::new();
     push_ethernet(

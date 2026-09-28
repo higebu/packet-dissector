@@ -233,6 +233,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("hash", "Auth Key/Hash", FieldType::Bytes).optional(),
     // BFD Echo only (RFC 5880, Section 5): opaque payload that is not a
     // Control packet. Excluded from `CONTROL_FIELD_DESCRIPTORS`.
+    //   <https://www.rfc-editor.org/rfc/rfc5880#section-5>
     FieldDescriptor::new("payload", "Payload", FieldType::Bytes).optional(),
 ];
 
@@ -1150,6 +1151,7 @@ mod tests {
     fn test_parse_with_auth_sha1() {
         // RFC 5880, Section 4.4 — Keyed SHA1: type=4, auth_len=28, key_id=1,
         // reserved=0, seq=1, hash=20 bytes
+        //   <https://www.rfc-editor.org/rfc/rfc5880#section-4.4>
         let mut auth_data = vec![1, 0]; // key_id, reserved
         auth_data.extend_from_slice(&1u32.to_be_bytes()); // sequence number
         auth_data.extend_from_slice(&[0xAA; 20]); // SHA1 hash (20 bytes)
@@ -1439,6 +1441,7 @@ mod tests {
     fn test_parse_with_auth_meticulous_md5_and_sha1() {
         // RFC 5880, Sections 4.3 and 4.4 — Meticulous variants share the
         // Keyed layouts.
+        //   <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>
         let mut md5 = vec![7, 0];
         md5.extend_from_slice(&5u32.to_be_bytes());
         md5.extend_from_slice(&[0x11; 16]);
@@ -1491,6 +1494,7 @@ mod tests {
     fn echo_opaque_payload() {
         // RFC 5880, Section 5 — the Echo payload is a local matter. An
         // 8-byte vendor payload must not be treated as an error.
+        //   <https://www.rfc-editor.org/rfc/rfc5880#section-5>
         let data = [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2A];
         let mut buf = DissectBuffer::new();
         let result = BfdEchoDissector.dissect(&data, &mut buf, 42).unwrap();
@@ -1523,6 +1527,7 @@ mod tests {
     fn echo_unaffiliated_control_format() {
         // RFC 9747, Section 2 — Unaffiliated BFD Echo packets reuse the
         // Control packet format on UDP port 3785.
+        //   <https://www.rfc-editor.org/rfc/rfc9747#section-2>
         let data = build_bfd(
             1, 0, 1, 0, 0, 0, 0, 0, 0, 3, 24, 0x1234, 0, 1_000_000, 1_000_000, 0,
         );
@@ -1630,6 +1635,7 @@ mod tests {
         // RFC 5880, Section 6.7.3 — "If the Auth Len field is not equal to
         // 24, the packet MUST be discarded." Section 6.7.4 — the same with
         // 28. Section 6.7.2 — Simple Password Auth Len is 4 to 19 bytes.
+        //   <https://www.rfc-editor.org/rfc/rfc5880#section-6.7.3>
         for (auth_type, auth_len) in [(1u8, 20u8), (2, 40), (3, 25), (4, 32), (5, 29)] {
             let total = 24 + auth_len as usize;
             let mut pkt = build_bfd(

@@ -95,6 +95,8 @@ fn zero_alloc_dissect_bfd_with_auth() {
 #[test]
 fn zero_alloc_dissect_bfd_echo() {
     // Control-format Echo (RFC 9747) and opaque Echo (RFC 5880, Section 5).
+    //   <https://www.rfc-editor.org/rfc/rfc9747>
+    //   <https://www.rfc-editor.org/rfc/rfc5880#section-5>
     let control = build_bfd(1, 3, 1, 0); // state=Down
     let opaque: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2a];
 

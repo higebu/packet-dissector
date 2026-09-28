@@ -197,14 +197,19 @@ const FD_CODE: usize = 15;
 /// Field descriptor index for `data` (body of a type that is not decoded).
 const FD_DATA: usize = 16;
 /// Field descriptor index for MRD `advertisement_interval` (RFC 4286 §3.2.2).
+///   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.2>
 const FD_ADVERTISEMENT_INTERVAL: usize = 17;
 /// Field descriptor index for MRD `query_interval` (RFC 4286 §3.2.4).
+///   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.4>
 const FD_QUERY_INTERVAL: usize = 18;
 /// Field descriptor index for MRD `robustness_variable` (RFC 4286 §3.2.5).
+///   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.5>
 const FD_ROBUSTNESS_VARIABLE: usize = 19;
 /// Field descriptor index for MRD `reserved` (RFC 4286 §4.1.2, §5.1.2).
+///   <https://www.rfc-editor.org/rfc/rfc4286#section-4.1.2>
 const FD_RESERVED: usize = 20;
 /// Field descriptor index for the derived `query_version` (RFC 9776 §7.1).
+///   <https://www.rfc-editor.org/rfc/rfc9776#section-7.1>
 const FD_QUERY_VERSION: usize = 21;
 
 // ---------------------------------------------------------------------------
@@ -357,6 +362,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("code", "Code", FieldType::U8).optional(),
     FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
     // Multicast Router Discovery (RFC 4286).
+    //   <https://www.rfc-editor.org/rfc/rfc4286>
     FieldDescriptor::new(
         "advertisement_interval",
         "Advertisement Interval",
@@ -367,8 +373,67 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("robustness_variable", "Robustness Variable", FieldType::U16).optional(),
     FieldDescriptor::new("reserved", "Reserved", FieldType::U8).optional(),
     // Derived from the message length and Max Resp Code (RFC 9776 §7.1).
+    //   <https://www.rfc-editor.org/rfc/rfc9776#section-7.1>
     FieldDescriptor::new("query_version", "Query Version", FieldType::U8).optional(),
 ];
+
+/// Per-type header layout shared by the fixed fields of every IGMP message.
+struct TypeLayout {
+    /// Minimum message length in octets.
+    min_len: usize,
+    /// Field descriptor index used for byte 1.
+    byte1_fd: usize,
+    /// Whether bytes 4–7 carry a Group Address.
+    has_group_address: bool,
+}
+
+/// Returns the fixed-header layout of an IGMP message type.
+///
+/// This is the single place that classifies types; the body decoding in
+/// `dissect` only handles types whose layout it lists here.
+fn type_layout(igmp_type: u8) -> TypeLayout {
+    match igmp_type {
+        // Queries, v1/v2 Reports and Leave Group: Max Resp Time / Code in
+        // byte 1 and a Group Address in bytes 4–7.
+        //   RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
+        //   RFC 9776, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1>
+        TYPE_MEMBERSHIP_QUERY | TYPE_V1_REPORT | TYPE_V2_REPORT | TYPE_V2_LEAVE => TypeLayout {
+            min_len: HEADER_SIZE,
+            byte1_fd: FD_MAX_RESP_TIME,
+            has_group_address: true,
+        },
+        // IGMPv3 Report: byte 1 is Reserved (kept as `max_resp_time` for
+        // compatibility); bytes 4–7 are Flags and the record count.
+        //   RFC 9776, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2>
+        TYPE_V3_REPORT => TypeLayout {
+            min_len: HEADER_SIZE,
+            byte1_fd: FD_MAX_RESP_TIME,
+            has_group_address: false,
+        },
+        // MRD Advertisement: Advertisement Interval in byte 1.
+        //   RFC 4286, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc4286#section-3.2>
+        TYPE_MRD_ADVERTISEMENT => TypeLayout {
+            min_len: HEADER_SIZE,
+            byte1_fd: FD_ADVERTISEMENT_INTERVAL,
+            has_group_address: false,
+        },
+        // MRD Solicitation / Termination: 4-octet messages, Reserved byte 1.
+        //   RFC 4286, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc4286#section-4.1>
+        //   RFC 4286, Section 5.1 — <https://www.rfc-editor.org/rfc/rfc4286#section-5.1>
+        TYPE_MRD_SOLICITATION | TYPE_MRD_TERMINATION => TypeLayout {
+            min_len: COMMON_HEADER_SIZE,
+            byte1_fd: FD_RESERVED,
+            has_group_address: false,
+        },
+        // Other types: only the common Type / Code / Checksum layout is
+        // assumed; the body is kept as raw data.
+        _ => TypeLayout {
+            min_len: COMMON_HEADER_SIZE,
+            byte1_fd: FD_CODE,
+            has_group_address: false,
+        },
+    }
+}
 
 /// IGMP dissector supporting IGMPv1 (RFC 1112), IGMPv2 (RFC 2236), and
 /// IGMPv3 (RFC 9776, which obsoletes RFC 3376).
@@ -548,24 +613,10 @@ impl Dissector for IgmpDissector {
             });
         };
 
-        // Minimum length depends on the message type.
-        let min_len = match igmp_type {
-            TYPE_MEMBERSHIP_QUERY
-            | TYPE_V1_REPORT
-            | TYPE_V2_REPORT
-            | TYPE_V2_LEAVE
-            | TYPE_V3_REPORT
-            | TYPE_MRD_ADVERTISEMENT => HEADER_SIZE,
-            // RFC 4286, Sections 4.1 and 5.1 — 4-octet messages.
-            //   <https://www.rfc-editor.org/rfc/rfc4286#section-4.1>
-            //   <https://www.rfc-editor.org/rfc/rfc4286#section-5.1>
-            // Other types: only the common Type / Code / Checksum layout is
-            // assumed.
-            _ => COMMON_HEADER_SIZE,
-        };
-        if data.len() < min_len {
+        let layout = type_layout(igmp_type);
+        if data.len() < layout.min_len {
             return Err(PacketError::Truncated {
-                expected: min_len,
+                expected: layout.min_len,
                 actual: data.len(),
             });
         }
@@ -590,23 +641,8 @@ impl Dissector for IgmpDissector {
             FieldValue::U8(igmp_type),
             offset..offset + 1,
         );
-        // The meaning of byte 1 depends on the type.
-        let byte1_fd = match igmp_type {
-            TYPE_MEMBERSHIP_QUERY
-            | TYPE_V1_REPORT
-            | TYPE_V2_REPORT
-            | TYPE_V2_LEAVE
-            | TYPE_V3_REPORT => FD_MAX_RESP_TIME,
-            // RFC 4286, Section 3.2.2 — Advertisement Interval (seconds).
-            //   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.2>
-            TYPE_MRD_ADVERTISEMENT => FD_ADVERTISEMENT_INTERVAL,
-            // RFC 4286, Sections 4.1.2 and 5.1.2 — Reserved.
-            //   <https://www.rfc-editor.org/rfc/rfc4286#section-4.1.2>
-            TYPE_MRD_SOLICITATION | TYPE_MRD_TERMINATION => FD_RESERVED,
-            _ => FD_CODE,
-        };
         buf.push_field(
-            &FIELD_DESCRIPTORS[byte1_fd],
+            &FIELD_DESCRIPTORS[layout.byte1_fd],
             FieldValue::U8(byte1),
             offset + 1..offset + 2,
         );
@@ -616,12 +652,7 @@ impl Dissector for IgmpDissector {
             offset + 2..offset + 4,
         );
 
-        // Group address: bytes 4–7 of Queries, v1/v2 Reports and Leave Group.
-        // RFC 2236, Section 2.4 — <https://www.rfc-editor.org/rfc/rfc2236#section-2.4>
-        if matches!(
-            igmp_type,
-            TYPE_MEMBERSHIP_QUERY | TYPE_V1_REPORT | TYPE_V2_REPORT | TYPE_V2_LEAVE
-        ) {
+        if layout.has_group_address {
             let group_addr = read_ipv4_addr(data, 4)?;
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_GROUP_ADDRESS],
@@ -1472,6 +1503,7 @@ mod tests {
     #[test]
     fn parse_mrd_advertisement() {
         // RFC 4286, Section 3.2 — interval 20 s, QQI 125 s, robustness 2.
+        //   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2>
         let raw: &[u8] = &[0x30, 0x14, 0xcf, 0x6c, 0x00, 0x7d, 0x00, 0x02];
         let mut buf = DissectBuffer::new();
         let result = IgmpDissector.dissect(raw, &mut buf, 20).unwrap();
@@ -1515,6 +1547,7 @@ mod tests {
     #[test]
     fn parse_mrd_solicitation() {
         // RFC 4286, Section 4.1 — 4-octet Solicitation.
+        //   <https://www.rfc-editor.org/rfc/rfc4286#section-4.1>
         let raw: &[u8] = &[0x31, 0x00, 0xce, 0xff];
         let mut buf = DissectBuffer::new();
         let result = IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
@@ -1537,6 +1570,7 @@ mod tests {
 
         // RFC 4286, Section 2 — "Any data beyond the fixed message format
         // MUST be ignored."
+        //   <https://www.rfc-editor.org/rfc/rfc4286#section-2>
         let raw: &[u8] = &[0x31, 0x00, 0xce, 0xff, 0xde, 0xad, 0xbe, 0xef];
         let mut buf = DissectBuffer::new();
         IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
@@ -1547,6 +1581,7 @@ mod tests {
     #[test]
     fn parse_mrd_termination() {
         // RFC 4286, Section 5.1 — 4-octet Termination.
+        //   <https://www.rfc-editor.org/rfc/rfc4286#section-5.1>
         let raw: &[u8] = &[0x32, 0x00, 0xcd, 0xff];
         let mut buf = DissectBuffer::new();
         IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
@@ -1586,6 +1621,7 @@ mod tests {
     #[test]
     fn query_version_distinctions() {
         // RFC 9776, Section 7.1 — Query Version Distinctions.
+        //   <https://www.rfc-editor.org/rfc/rfc9776#section-7.1>
         let cases: [(&[u8], Option<u8>); 4] = [
             (&[0x11, 0x00, 0, 0, 0, 0, 0, 0], Some(1)),
             (&[0x11, 0x64, 0, 0, 0, 0, 0, 0], Some(2)),

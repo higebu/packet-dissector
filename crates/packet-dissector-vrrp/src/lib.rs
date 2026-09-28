@@ -178,6 +178,8 @@ const FD_AUTHENTICATION_DATA: usize = 11;
 /// Parses VRRPv3 packets as defined in RFC 9568 and VRRPv2 packets as
 /// defined in RFC 3768. Other versions are rejected with
 /// [`PacketError::InvalidFieldValue`].
+///   <https://www.rfc-editor.org/rfc/rfc9568>
+///   <https://www.rfc-editor.org/rfc/rfc3768>
 pub struct VrrpDissector;
 
 /// Specification references for the VRRP dissector.
@@ -755,6 +757,7 @@ mod tests {
         // RFC 3768, Section 5.1 — VRRPv2 packet: Auth Type and Adver Int
         // occupy bytes 4..6 and 8 bytes of Authentication Data follow the
         // IP addresses.
+        //   <https://www.rfc-editor.org/rfc/rfc3768#section-5.1>
         let raw: &[u8] = &[
             0x21, // Version=2, Type=1 (Advertisement)
             0x01, // VRID=1
@@ -814,6 +817,8 @@ mod tests {
         // RFC 3768, Section 5.3.6.2 — Auth Type 1 is reserved for RFC 2338
         // compatibility (simple text password). Section 5.3.10 —
         // Authentication Data carries the legacy password.
+        //   <https://www.rfc-editor.org/rfc/rfc3768#section-5.3.6.2>
+        //   <https://www.rfc-editor.org/rfc/rfc2338>
         let raw: &[u8] = &[
             0x21, 0x07, 0xFF, 0x00, // v2, type=1, vrid=7, pri=255, count=0
             0x01, 0x03, // Auth Type=1, Adver Int=3
@@ -851,6 +856,7 @@ mod tests {
     fn parse_vrrpv2_truncated_auth_data() {
         // RFC 3768, Section 5.1 — the 8-byte Authentication Data trailer is
         // part of every VRRPv2 packet.
+        //   <https://www.rfc-editor.org/rfc/rfc3768#section-5.1>
         let raw: &[u8] = &[
             0x21, 0x01, 0x64, 0x01, 0x00, 0x01, 0x00, 0x00, 192, 0, 2, 1, 0, 0, 0, 0,
         ];
@@ -868,6 +874,8 @@ mod tests {
     #[test]
     fn parse_vrrp_unsupported_version() {
         // Only VRRPv2 (RFC 3768) and VRRPv3 (RFC 9568) are defined.
+        //   <https://www.rfc-editor.org/rfc/rfc3768>
+        //   <https://www.rfc-editor.org/rfc/rfc9568>
         for first in [0x11u8, 0x41] {
             let raw: &[u8] = &[first, 0x01, 0x64, 0x00, 0x00, 0x64, 0x00, 0x00];
             let mut buf = buf_with_ipv4_layer();
