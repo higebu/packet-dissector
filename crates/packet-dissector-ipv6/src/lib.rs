@@ -57,13 +57,6 @@ const HEADER_SIZE: usize = 40;
 /// RFC 8200, Section 3: <https://www.rfc-editor.org/rfc/rfc8200#section-3>
 const IPV6_VERSION: u8 = 6;
 
-/// Next Header value of the Hop-by-Hop Options header, which carries the
-/// Jumbo Payload option.
-///
-/// RFC 8200, Section 4.3: <https://www.rfc-editor.org/rfc/rfc8200#section-4.3>
-/// RFC 2675, Section 2: <https://www.rfc-editor.org/rfc/rfc2675#section-2>
-const NEXT_HEADER_HOP_BY_HOP: u8 = 0;
-
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_VERSION: usize = 0;
 const FD_TRAFFIC_CLASS: usize = 1;
@@ -230,11 +223,13 @@ impl Dissector for Ipv6Dissector {
 
         // RFC 2675, Section 3 — "The Payload Length field in the IPv6 header
         // must be set to zero in every packet that carries the Jumbo Payload
-        // option." That option is carried in a Hop-by-Hop Options header, so
-        // a zero Payload Length followed by one may be a jumbogram whose
-        // length the IPv6 header does not give; leave the payload unbounded.
+        // option." The real length then comes from that option in the
+        // Hop-by-Hop Options header, not from this header. Host-side captures
+        // of segmentation-offloaded packets also carry a zero Payload Length
+        // without that option. In both cases the IPv6 header does not give
+        // the payload length, so leave the payload unbounded.
         // https://www.rfc-editor.org/rfc/rfc2675#section-3
-        if payload_length == 0 && next_header == NEXT_HEADER_HOP_BY_HOP {
+        if payload_length == 0 {
             return Ok(result);
         }
 
@@ -271,7 +266,7 @@ mod tests {
     //! | —           | Payload Length = 0 (Jumbo)   | payload_length_zero_is_accepted         |
     //! | 3           | Payload ends at Payload Len  | payload_len_from_payload_length         |
     //! | 3 / 2675 §3 | Payload Len 0 + HBH unbounded| payload_length_zero_hop_by_hop_unbounded|
-    //! | 3           | Payload Len 0, no HBH → empty| payload_length_zero_without_hop_by_hop  |
+    //! | 3           | Payload Len 0, no HBH unbound| payload_length_zero_without_hop_by_hop_unbounded |
     //! | —           | Hop Limit = 0                | hop_limit_zero_is_accepted              |
     //! | —           | Field count                  | field_descriptors_count                 |
 
@@ -500,6 +495,7 @@ mod tests {
         // RFC 8200, Section 3 — Payload Length is the "Length of the IPv6
         // payload, i.e., the rest of the packet following this IPv6 header,
         // in octets." Trailing bytes past it are not IPv6 payload.
+        // <https://www.rfc-editor.org/rfc/rfc8200#section-3>
         let mut data = build_ipv6_header(0, 0, 20, 6, 64, [0; 16], [0; 16]);
         data.resize(HEADER_SIZE + 24, 0x00); // 20 bytes of payload + 4 of trailer
         let mut buf = DissectBuffer::new();
@@ -513,6 +509,7 @@ mod tests {
         // must be set to zero in every packet that carries the Jumbo Payload
         // option." The Jumbo Payload option lives in a Hop-by-Hop Options
         // header, so the payload length cannot be taken from the IPv6 header.
+        // <https://www.rfc-editor.org/rfc/rfc2675#section-3>
         let data = build_ipv6_header(0, 0, 0, 0, 64, [0; 16], [0; 16]);
         let mut buf = DissectBuffer::new();
         let result = Ipv6Dissector.dissect(&data, &mut buf, 0).unwrap();
@@ -520,14 +517,18 @@ mod tests {
     }
 
     #[test]
-    fn payload_length_zero_without_hop_by_hop() {
-        // Without a Hop-by-Hop header there is no Jumbo Payload option, so a
-        // zero Payload Length means an empty payload.
-        let mut data = build_ipv6_header(0, 0, 0, 59, 64, [0; 16], [0; 16]);
-        data.extend_from_slice(&[0x00; 6]); // trailer
+    fn payload_length_zero_without_hop_by_hop_unbounded() {
+        // RFC 8200, Section 3 defines Payload Length as the length of the
+        // rest of the packet, but host-side captures of segmentation-offloaded
+        // packets carry Payload Length 0 without a Jumbo Payload option. The
+        // payload is left unbounded (as before payload bounding existed) so
+        // the upper layer is still dissected.
+        // <https://www.rfc-editor.org/rfc/rfc8200#section-3>
+        let mut data = build_ipv6_header(0, 0, 0, 6, 64, [0; 16], [0; 16]);
+        data.extend_from_slice(&[0x00; 20]);
         let mut buf = DissectBuffer::new();
         let result = Ipv6Dissector.dissect(&data, &mut buf, 0).unwrap();
-        assert_eq!(result.payload_len, Some(0));
+        assert_eq!(result.payload_len, None);
     }
 
     #[test]

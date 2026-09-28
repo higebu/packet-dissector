@@ -109,6 +109,8 @@
 //! | Ethernet → IPv6 (snaplen-truncated) → TCP                    | integration_ethernet_ipv6_tcp_snaplen_truncated      |
 //! | Ethernet → IPv4 → UDP → DNS (cut by snaplen)                 | integration_ethernet_ipv4_udp_dns_snaplen_truncated  |
 //! | Ethernet → IPv4 (snaplen-truncated) → probe                  | integration_ethernet_ipv4_snaplen_payload_ends_at_capture |
+//! | Ethernet → IPv4 → TCP (snaplen) then next segment → HTTP     | integration_ethernet_ipv4_tcp_snaplen_segment_does_not_stall_reassembly |
+//! | Ethernet → IPv6 (Payload Length 0, no HBH) → TCP              | integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded |
 
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
@@ -7068,6 +7070,7 @@ fn integration_ethernet_ipv4_esp_null_transport_udp_padded() {
 ///
 /// RFC 9868, Section 7 — bytes past the UDP Length but within the IP
 /// payload are the surplus area, not UDP user data.
+/// <https://www.rfc-editor.org/rfc/rfc9868#section-7>
 #[test]
 fn integration_ethernet_ipv4_udp_surplus_area_not_passed_to_application() {
     let mut reg = DissectorRegistry::default();
@@ -7299,4 +7302,68 @@ fn integration_ethernet_ipv4_snaplen_payload_ends_at_capture() {
 
     let probe = buf.layer_by_name("Probe").unwrap();
     assert_eq!(probe.range, 34..64);
+}
+
+/// Build Ethernet → IPv4 → TCP (12345 → 80) with the given sequence number,
+/// declared TCP payload length and captured payload bytes.
+fn build_eth_ipv4_tcp_segment(seq: u32, declared_payload_len: usize, captured: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 6, IPV4_SRC, IPV4_DST);
+    let tcp_start = pkt.len();
+    push_tcp(&mut pkt, 12345, 80, 0x18); // PSH+ACK
+    pkt[tcp_start + 4..tcp_start + 8].copy_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(captured);
+    let total_length = (20 + 20 + declared_payload_len) as u16;
+    pkt[ip_start + 2..ip_start + 4].copy_from_slice(&total_length.to_be_bytes());
+    pkt
+}
+
+/// A snaplen-truncated TCP segment must not be buffered for reassembly:
+/// its captured bytes are shorter than the sequence space it occupies, so
+/// buffering them would leave a gap before the next segment and stall the
+/// stream.
+#[test]
+fn integration_ethernet_ipv4_tcp_snaplen_segment_does_not_stall_reassembly() {
+    let reg = DissectorRegistry::default();
+
+    // Segment 1: 1000 payload bytes on the wire, only 24 captured.
+    let first = build_eth_ipv4_tcp_segment(1, 1000, b"GET / HTTP/1.1\r\nHost: ex");
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&first, &mut buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).take(3).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "TCP"]);
+
+    // Segment 2: the next segment in sequence space, fully captured.
+    let request = b"GET /b HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let second = build_eth_ipv4_tcp_segment(1 + 1000, request.len(), request);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&second, &mut buf).unwrap();
+
+    let http = buf
+        .layer_by_name("HTTP")
+        .expect("HTTP must be dissected after a snaplen-truncated segment");
+    assert_eq!(
+        buf.field_by_name(http, "method").unwrap().value,
+        FieldValue::Str("GET")
+    );
+}
+
+/// Ethernet → IPv6 (Payload Length 0, Next Header TCP) → TCP: host-side
+/// captures of large segmentation-offloaded packets carry Payload Length 0
+/// without a Jumbo Payload option. The payload is left unbounded so TCP is
+/// still dissected.
+#[test]
+fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x86DD);
+    push_ipv6(&mut pkt, 6, IPV6_SRC, IPV6_DST); // Payload Length stays 0
+    push_tcp(&mut pkt, 12345, 443, 0x10);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
 }

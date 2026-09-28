@@ -934,7 +934,20 @@ impl DissectorRegistry {
                         let remaining = end.saturating_sub(offset);
                         let payload_end = offset + ctx.payload_len.min(remaining);
                         let payload = &data[offset..payload_end];
-                        match self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)? {
+                        let upper_result = if payload.len() < ctx.payload_len {
+                            // The capture holds fewer bytes than the segment
+                            // occupies in sequence space (snaplen truncation).
+                            // Buffering them would leave a gap before the
+                            // next segment and stall the stream, so dissect
+                            // the captured bytes directly without reassembly.
+                            if payload.is_empty() {
+                                break;
+                            }
+                            Some(upper.dissect(payload, buf, offset)?)
+                        } else {
+                            self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)?
+                        };
+                        match upper_result {
                             Some(upper_result) => {
                                 // Fast path succeeded — propagate the upper
                                 // dissector's result so chaining can continue.
