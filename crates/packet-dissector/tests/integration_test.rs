@@ -71,7 +71,7 @@
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
 //! | PPP (HDLC) → IPv4 → UDP                               | integration_ppp_ipv4_udp                              |
-//! | PPP → LCP (inline)                                     | integration_ppp_lcp_inline                            |
+//! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
 //! | Ethernet → IPv4 → UDP → GENEVE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_geneve_ipv4        |
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
 //! | Ethernet → IPv4 → UDP → L2TP → PPP → IPv4 → UDP          | ethernet_ipv4_udp_l2tp_ppp_ipv4_udp              |
@@ -5510,7 +5510,7 @@ fn integration_ppp_ipv4_udp() {
 }
 
 // ---------------------------------------------------------------------------
-// PPP → LCP (via link_type=50, no HDLC, control protocol inline)
+// PPP → LCP (via link_type=50, LINKTYPE_PPP_HDLC, control protocol inline)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -5518,8 +5518,12 @@ fn integration_ppp_lcp_inline() {
     let registry = DissectorRegistry::default();
     let mut pkt = Vec::new();
 
-    // PPP frame without HDLC framing: Protocol=0xC021 (LCP)
-    pkt.extend_from_slice(&[0xC0, 0x21]);
+    // LINKTYPE_PPP_HDLC frames carry the RFC 1662, Section 3.1 Address and
+    // Control fields (no flag octets) —
+    // https://www.tcpdump.org/linktypes/LINKTYPE_PPP_HDLC.html
+    // https://www.rfc-editor.org/rfc/rfc1662#section-3.1
+    // Address=0xFF, Control=0x03, Protocol=0xC021 (LCP)
+    pkt.extend_from_slice(&[0xFF, 0x03, 0xC0, 0x21]);
 
     // LCP Configure-Request with MRU option
     #[rustfmt::skip]
@@ -5528,7 +5532,7 @@ fn integration_ppp_lcp_inline() {
         1, 4, 0x05, 0xDC,       // MRU=1500
     ]);
 
-    // LINKTYPE_PPP_ETHER = 50
+    // LINKTYPE_PPP_HDLC = 50
     let mut buf = DissectBuffer::new();
     registry.dissect_with_link_type(&pkt, 50, &mut buf).unwrap();
     assert_eq!(buf.layers().len(), 1); // PPP only (LCP parsed inline)

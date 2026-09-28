@@ -544,6 +544,8 @@ impl DissectorRegistry {
     ///
     /// Common values (from <https://www.tcpdump.org/linktypes.html>):
     /// - `1` — `LINKTYPE_ETHERNET`
+    /// - `9` — `LINKTYPE_PPP`
+    /// - `50` — `LINKTYPE_PPP_HDLC`
     /// - `113` — `LINKTYPE_LINUX_SLL`
     /// - `276` — `LINKTYPE_LINUX_SLL2`
     pub fn dissect_with_link_type<'pkt>(
@@ -2172,8 +2174,9 @@ impl Default for DissectorRegistry {
         // L2TP port 1701 registration is handled by L2tpDispatcher above.
 
         // PPP — registered by link type and EtherType
-        // LINKTYPE_PPP (9), LINKTYPE_PPP_ETHER (50 — PPPoE payload),
+        // LINKTYPE_PPP (9), LINKTYPE_PPP_HDLC (50 — RFC 1662 HDLC-like framing),
         // EtherType 0x880B (GRE-encapsulated PPP)
+        // https://www.tcpdump.org/linktypes/LINKTYPE_PPP_HDLC.html
         #[cfg(feature = "ppp")]
         {
             assert_builtin(
