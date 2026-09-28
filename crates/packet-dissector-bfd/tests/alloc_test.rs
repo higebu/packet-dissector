@@ -1,6 +1,6 @@
 //! Zero-allocation dissection tests for the BFD dissector.
 
-use packet_dissector_bfd::BfdDissector;
+use packet_dissector_bfd::{BfdDissector, BfdEchoDissector};
 use packet_dissector_core::dissector::Dissector;
 use packet_dissector_core::field::FieldValue;
 use packet_dissector_core::packet::DissectBuffer;
@@ -72,6 +72,8 @@ fn zero_alloc_dissect_bfd_with_auth() {
 
     // Pre-allocate the buffer (this allocation is OK — happens once).
     let mut buf = DissectBuffer::new();
+    // Warm up: fill the buffer once so capacity is allocated.
+    BfdDissector.dissect(&pkt, &mut buf, 0).unwrap();
 
     // The dissect call itself must be zero-allocation.
     let allocs = count_allocs(|| {
@@ -86,5 +88,29 @@ fn zero_alloc_dissect_bfd_with_auth() {
     // Verify the dissected data is correct.
     assert_eq!(buf.layers().len(), 1);
     let fields = buf.layer_fields(&buf.layers()[0]);
-    assert_eq!(fields.len(), 18); // 16 mandatory + auth_type + auth_data
+    // 16 mandatory + auth_type + auth_len + auth_key_id + password
+    assert_eq!(fields.len(), 20);
+}
+
+#[test]
+fn zero_alloc_dissect_bfd_echo() {
+    // Control-format Echo (RFC 9747) and opaque Echo (RFC 5880, Section 5).
+    //   <https://www.rfc-editor.org/rfc/rfc9747>
+    //   <https://www.rfc-editor.org/rfc/rfc5880#section-5>
+    let control = build_bfd(1, 3, 1, 0); // state=Down
+    let opaque: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2a];
+
+    let mut buf = DissectBuffer::new();
+    BfdEchoDissector.dissect(&control, &mut buf, 0).unwrap();
+    buf.clear();
+    BfdEchoDissector.dissect(opaque, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BfdEchoDissector.dissect(&control, &mut buf, 0).unwrap();
+        buf.clear();
+        BfdEchoDissector.dissect(opaque, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "BFD Echo dissect allocated {allocs} times");
+    assert_eq!(buf.layers()[0].name, "BFD-Echo");
 }

@@ -1959,23 +1959,42 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("ntp", || Box::new(packet_dissector_ntp::NtpDissector));
         }
 
-        // BFD runs over UDP on ports 3784 (single-hop), 4784 (multihop),
-        // and 3785 (echo) (RFC 5881, RFC 5883)
+        // BFD Control runs over UDP on ports 3784 (single-hop, RFC 5881),
+        // 4784 (multihop, RFC 5883), 6784 (Micro-BFD on LAG members,
+        // RFC 7130, Section 2.2) and 7784 (S-BFD, RFC 7881, Section 2).
+        // Port 3785 carries BFD Echo packets (RFC 5881, Section 4), whose
+        // payload is a local matter (RFC 5880, Section 5) unless it uses the
+        // Control format (RFC 9747, Section 2).
+        //   <https://www.rfc-editor.org/rfc/rfc5881>
+        //   <https://www.rfc-editor.org/rfc/rfc5883>
+        //   <https://www.rfc-editor.org/rfc/rfc7130#section-2.2>
+        //   <https://www.rfc-editor.org/rfc/rfc7881#section-2>
+        //   <https://www.rfc-editor.org/rfc/rfc5881#section-4>
+        //   <https://www.rfc-editor.org/rfc/rfc5880#section-5>
+        //   <https://www.rfc-editor.org/rfc/rfc9747#section-2>
         #[cfg(feature = "bfd")]
         {
             #[cfg(feature = "udp")]
             {
+                for port in [3784, 4784, 6784, 7784] {
+                    assert_builtin(
+                        reg.register_by_udp_port(
+                            port,
+                            Box::new(packet_dissector_bfd::BfdDissector),
+                        ),
+                    );
+                }
                 assert_builtin(
-                    reg.register_by_udp_port(3784, Box::new(packet_dissector_bfd::BfdDissector)),
-                );
-                assert_builtin(
-                    reg.register_by_udp_port(4784, Box::new(packet_dissector_bfd::BfdDissector)),
-                );
-                assert_builtin(
-                    reg.register_by_udp_port(3785, Box::new(packet_dissector_bfd::BfdDissector)),
+                    reg.register_by_udp_port(
+                        3785,
+                        Box::new(packet_dissector_bfd::BfdEchoDissector),
+                    ),
                 );
             }
             reg.register_dissector_factory("bfd", || Box::new(packet_dissector_bfd::BfdDissector));
+            reg.register_dissector_factory("bfd.echo", || {
+                Box::new(packet_dissector_bfd::BfdEchoDissector)
+            });
         }
 
         // DNS runs over both TCP and UDP (RFC 1035)
@@ -3375,6 +3394,8 @@ mod tests {
             assert!(reg.get_by_udp_port(3784).is_some());
             assert!(reg.get_by_udp_port(4784).is_some());
             assert!(reg.get_by_udp_port(3785).is_some());
+            assert!(reg.get_by_udp_port(6784).is_some());
+            assert!(reg.get_by_udp_port(7784).is_some());
         }
 
         #[cfg(all(feature = "mdns", feature = "udp"))]
@@ -3430,7 +3451,10 @@ mod tests {
         assert!(reg.create_dissector_by_name("ntp").is_some());
 
         #[cfg(feature = "bfd")]
-        assert!(reg.create_dissector_by_name("bfd").is_some());
+        {
+            assert!(reg.create_dissector_by_name("bfd").is_some());
+            assert!(reg.create_dissector_by_name("bfd.echo").is_some());
+        }
 
         #[cfg(feature = "dhcp")]
         assert!(reg.create_dissector_by_name("dhcp").is_some());

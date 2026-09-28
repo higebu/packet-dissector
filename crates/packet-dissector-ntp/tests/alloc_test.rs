@@ -65,3 +65,22 @@ fn zero_alloc_dissect_ntp_server() {
     assert_eq!(fields[2].value, FieldValue::U8(4)); // mode (server)
     assert_eq!(fields[8].value, FieldValue::Bytes(&[192, 168, 1, 1])); // reference_id
 }
+
+#[test]
+fn zero_alloc_dissect_ntp_control_message() {
+    // RFC 9327, Section 2 — mode 6 response with 4 data octets.
+    //   <https://www.rfc-editor.org/rfc/rfc9327#section-2>
+    let raw: &[u8] = &[
+        0x16, 0x82, 0x00, 0x01, 0x06, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, b'l', b'e', b'a',
+        b'p',
+    ];
+    let mut buf = DissectBuffer::new();
+    NtpDissector.dissect(raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        NtpDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "NTP mode 6 dissect allocated {allocs} times");
+    assert_eq!(buf.layers().len(), 1);
+}
