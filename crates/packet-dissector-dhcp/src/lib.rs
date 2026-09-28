@@ -113,6 +113,7 @@ const FD_VENDOR_SPECIFIC_INFO: usize = 80;
 const FD_X_WINDOW_DISPLAY_MANAGER: usize = 81;
 const FD_X_WINDOW_FONT_SERVER: usize = 82;
 const FD_VEND: usize = 83;
+const FD_CHADDR_BYTES: usize = 84;
 
 // Fixed header fields are always present; DHCP options are dynamic
 // and represented as individual option fields at the top level.
@@ -128,10 +129,11 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("yiaddr", "Your IP Address", FieldType::Ipv4Addr),
     FieldDescriptor::new("siaddr", "Server IP Address", FieldType::Ipv4Addr),
     FieldDescriptor::new("giaddr", "Gateway IP Address", FieldType::Ipv4Addr),
-    // RFC 2131, Section 2 — chaddr holds `hlen` octets. The descriptor is
-    // `MacAddr` because Ethernet dominates; any other length is emitted as
-    // `FieldValue::Bytes` of exactly `hlen` octets (as the ARP dissector does).
-    FieldDescriptor::new("chaddr", "Client Hardware Address", FieldType::MacAddr),
+    // RFC 2131, Section 2 — chaddr holds `hlen` octets.
+    // <https://www.rfc-editor.org/rfc/rfc2131#section-2>
+    // A 6-octet address is emitted as `chaddr`; any other length as
+    // `chaddr_bytes` (see `CHADDR_BYTES` below).
+    FieldDescriptor::new("chaddr", "Client Hardware Address", FieldType::MacAddr).optional(),
     FieldDescriptor::new("sname", "Server Host Name", FieldType::Bytes)
         .optional()
         .with_format_fn(format_utf8_lossy),
@@ -367,7 +369,12 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional(),
     // RFC 951, Section 3 — BOOTP vendor-specific area (only when the RFC 2132
     // magic cookie is absent)
+    // <https://www.rfc-editor.org/rfc/rfc951#section-3>
     FieldDescriptor::new("vend", "Vendor-Specific Area", FieldType::Bytes).optional(),
+    // RFC 2131, Section 2 — chaddr when `hlen` is not 6 (the first `hlen`
+    // octets, at most 16)
+    // <https://www.rfc-editor.org/rfc/rfc2131#section-2>
+    FieldDescriptor::new("chaddr_bytes", "Client Hardware Address", FieldType::Bytes).optional(),
 ];
 
 /// Child field descriptor indices for [`CLIENT_ID_CHILDREN`].
@@ -487,7 +494,9 @@ const MIN_BOOTP_MSG_SIZE: usize = 300;
 /// Byte offset of the `chaddr` field within the fixed header.
 const CHADDR_OFFSET: usize = 28;
 
-/// Size of the `chaddr` field in octets (RFC 2131, Section 2).
+/// Size of the `chaddr` field in octets.
+///
+/// RFC 2131, Section 2 — <https://www.rfc-editor.org/rfc/rfc2131#section-2>
 const CHADDR_SIZE: usize = 16;
 
 /// DHCP magic cookie: 99.130.83.99 (RFC 2131, Section 3).
@@ -1311,13 +1320,20 @@ impl Dissector for DhcpDissector {
             });
         }
 
-        // RFC 2131, Section 2 — Verify magic cookie.
+        // RFC 2131, Section 3 — verify the magic cookie.
+        // <https://www.rfc-editor.org/rfc/rfc2131#section-3>
         // RFC 2132, Section 2 — the cookie only marks the vendor area as
-        // holding options. Without it the message is plain BOOTP (RFC 951,
-        // Section 3), whose 64-octet `vend` area is exposed as raw bytes.
+        // holding options.
         // <https://www.rfc-editor.org/rfc/rfc2132#section-2>
+        // Without it the message is plain BOOTP (RFC 951, Section 3), whose
+        // `vend` area is exposed as raw bytes.
+        // <https://www.rfc-editor.org/rfc/rfc951#section-3>
         let is_bootp = data[236..240] != MAGIC_COOKIE;
-        if is_bootp && data.len() < MIN_BOOTP_MSG_SIZE {
+        // RFC 1542, Section 2.1 — "The 'op' (opcode) field of the message must
+        // contain either the code for a BOOTREQUEST (1) or the code for a
+        // BOOTREPLY (2)."
+        // <https://www.rfc-editor.org/rfc/rfc1542#section-2.1>
+        if is_bootp && (data.len() < MIN_BOOTP_MSG_SIZE || !matches!(data[0], 1 | 2)) {
             return Err(PacketError::InvalidHeader("DHCP magic cookie not found"));
         }
 
@@ -1345,14 +1361,21 @@ impl Dissector for DhcpDissector {
         // <https://www.rfc-editor.org/rfc/rfc4390#section-2.1>
         let chaddr_len = core::cmp::min(hlen as usize, CHADDR_SIZE);
         let chaddr_raw = &data[CHADDR_OFFSET..CHADDR_OFFSET + chaddr_len];
-        let chaddr_value = match *chaddr_raw {
-            [a, b, c, d, e, f] => FieldValue::MacAddr(MacAddr([a, b, c, d, e, f])),
-            _ => FieldValue::Bytes(chaddr_raw),
+        let (chaddr_fd, chaddr_value) = match *chaddr_raw {
+            [a, b, c, d, e, f] => (
+                &FIELD_DESCRIPTORS[FD_CHADDR],
+                FieldValue::MacAddr(MacAddr([a, b, c, d, e, f])),
+            ),
+            _ => (
+                &FIELD_DESCRIPTORS[FD_CHADDR_BYTES],
+                FieldValue::Bytes(chaddr_raw),
+            ),
         };
 
+        let field_start = buf.fields().len();
         buf.begin_layer(
             self.short_name(),
-            is_bootp.then_some("BOOTP"),
+            None,
             FIELD_DESCRIPTORS,
             offset..offset + data.len(),
         );
@@ -1414,7 +1437,7 @@ impl Dissector for DhcpDissector {
             offset + 24..offset + 28,
         );
         buf.push_field(
-            &FIELD_DESCRIPTORS[FD_CHADDR],
+            chaddr_fd,
             chaddr_value,
             offset + CHADDR_OFFSET..offset + CHADDR_OFFSET + chaddr_len,
         );
@@ -1426,6 +1449,7 @@ impl Dissector for DhcpDissector {
 
         if is_bootp {
             // RFC 951, Section 3 — "vend    64      optional vendor-specific area"
+            // <https://www.rfc-editor.org/rfc/rfc951#section-3>
             // RFC 1542, Section 2.1 — "BOOTP messages which, according to the
             // IP Total Length and UDP Length fields, are larger than the
             // minimum size specified by [1] MUST also be accepted."
@@ -1488,8 +1512,19 @@ impl Dissector for DhcpDissector {
             );
         }
 
+        // RFC 2131, Section 3 — "One particular option - the "DHCP message
+        // type" option - must be included in every DHCP message."
+        // <https://www.rfc-editor.org/rfc/rfc2131#section-3>
+        // A message without it is BOOTP, with or without RFC 1497 vendor
+        // extensions.
+        let has_message_type = buf.fields()[field_start..]
+            .iter()
+            .any(|f| f.name() == FIELD_DESCRIPTORS[FD_DHCP_MESSAGE_TYPE].name);
         if let Some(layer) = buf.last_layer_mut() {
             layer.range = offset..offset + total_consumed;
+            if !has_message_type {
+                layer.display_name = Some("BOOTP");
+            }
         }
         buf.end_layer();
 
@@ -1519,6 +1554,8 @@ mod tests {
     // | 2           | chaddr, hlen 8                      | parse_dhcp_chaddr_hlen_8                    |
     // | 2           | chaddr, hlen 1                      | parse_dhcp_chaddr_hlen_1                    |
     // | 2           | chaddr, hlen > 16 clamped           | parse_dhcp_chaddr_hlen_over_16_clamped      |
+    // | 2           | chaddr value types match descriptors| parse_dhcp_chaddr_value_types_match_descriptors |
+    // | 3           | Option 53 absent -> BOOTP label     | parse_bootp_with_vendor_extensions_labeled_bootp |
     //
     // # RFC 4390 Coverage
     //
@@ -1539,6 +1576,7 @@ mod tests {
     // | RFC Section | Description                         | Test                                        |
     // |-------------|-------------------------------------|---------------------------------------------|
     // | 2.1         | BOOTP message larger than 300 octets| parse_bootp_longer_than_300_octets          |
+    // | 2.1         | op must be BOOTREQUEST/BOOTREPLY    | parse_bootp_invalid_op_rejected             |
     //
     // # RFC 2132 Coverage
     //
@@ -1687,6 +1725,58 @@ mod tests {
         let f = buf.field_by_name(&buf.layers()[0], "chaddr").unwrap();
         assert_eq!(f.value, FieldValue::MacAddr(MacAddr(mac)));
         assert_eq!(f.range, 28..34);
+        assert!(
+            buf.field_by_name(&buf.layers()[0], "chaddr_bytes")
+                .is_none()
+        );
+    }
+
+    /// Every emitted field's value type matches its descriptor, whatever
+    /// `hlen` is.
+    #[test]
+    fn parse_dhcp_chaddr_value_types_match_descriptors() {
+        for (htype, hlen) in [(1u8, 6u8), (0x1b, 8), (7, 1), (32, 0), (1, 20)] {
+            let pkt = build_discover_with_hw(htype, hlen, &[0x42; 16][..hlen.min(16) as usize]);
+            let mut buf = DissectBuffer::new();
+            DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            for f in buf.layer_fields(&buf.layers()[0]) {
+                assert_eq!(
+                    f.value.field_type(),
+                    f.descriptor.field_type,
+                    "hlen {hlen}: field {}",
+                    f.name()
+                );
+            }
+        }
+    }
+
+    /// RFC 1542, Section 2.1 — "The 'op' (opcode) field of the message must
+    /// contain either the code for a BOOTREQUEST (1) or the code for a
+    /// BOOTREPLY (2)." Without the magic cookie and a valid op, the payload
+    /// is not BOOTP.
+    #[test]
+    fn parse_bootp_invalid_op_rejected() {
+        let mut data = vec![0u8; 300];
+        data[0] = 0x47;
+        let mut buf = DissectBuffer::new();
+        let err = DhcpDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(err, PacketError::InvalidHeader(_)));
+    }
+
+    /// RFC 2131, Section 3 — the DHCP message type option "must be included
+    /// in every DHCP message". A message with the RFC 1497 cookie but no
+    /// option 53 is a BOOTP message with vendor extensions.
+    #[test]
+    fn parse_bootp_with_vendor_extensions_labeled_bootp() {
+        let mut pkt = build_dhcp_base(2, 5, [0; 6], [192, 0, 2, 10]);
+        push_option(&mut pkt, 1, &[255, 255, 255, 0]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.protocol_name(), "BOOTP");
+        assert!(buf.field_by_name(layer, "subnet_mask").is_some());
+        assert!(buf.field_by_name(layer, "vend").is_none());
     }
 
     /// RFC 2131, Section 2 — a hardware address longer than 6 octets
@@ -1697,7 +1787,9 @@ mod tests {
         let pkt = build_discover_with_hw(0x1b, 8, &hw);
         let mut buf = DissectBuffer::new();
         DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        let f = buf.field_by_name(&buf.layers()[0], "chaddr").unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
         assert_eq!(f.value, FieldValue::Bytes(&hw));
         assert_eq!(f.range, 28..36);
     }
@@ -1708,7 +1800,9 @@ mod tests {
         let pkt = build_discover_with_hw(7, 1, &[0x2a]);
         let mut buf = DissectBuffer::new();
         DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        let f = buf.field_by_name(&buf.layers()[0], "chaddr").unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
         assert_eq!(f.value, FieldValue::Bytes(&[0x2a]));
         assert_eq!(f.range, 28..29);
     }
@@ -1719,7 +1813,9 @@ mod tests {
         let pkt = build_discover_with_hw(32, 0, &[]);
         let mut buf = DissectBuffer::new();
         DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        let f = buf.field_by_name(&buf.layers()[0], "chaddr").unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
         assert_eq!(f.value, FieldValue::Bytes(&[]));
         assert_eq!(f.range, 28..28);
     }
@@ -1733,7 +1829,8 @@ mod tests {
         let mut buf = DissectBuffer::new();
         DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
         let layer = &buf.layers()[0];
-        let f = buf.field_by_name(layer, "chaddr").unwrap();
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
         assert_eq!(f.value, FieldValue::Bytes(&hw));
         assert_eq!(f.range, 28..44);
         assert_eq!(
