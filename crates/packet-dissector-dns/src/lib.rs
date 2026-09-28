@@ -418,7 +418,10 @@ fn parse_name(msg: &[u8], pos: usize) -> Result<usize, PacketError> {
 /// continues past it is malformed. A compression pointer (RFC 1035,
 /// Section 4.1.4 — <https://www.rfc-editor.org/rfc/rfc1035#section-4.1.4>)
 /// may still refer to a name elsewhere in the message; only the octets
-/// encoded in place are bounded by RDATA.
+/// encoded in place are bounded by RDATA. Pointers are accepted even in RR
+/// types whose names must not be compressed (RFC 3597, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc3597#section-4>), since the dissector
+/// is liberal in what it accepts.
 fn parse_rdata_name(
     msg: &[u8],
     rdata_offset: usize,
@@ -2025,7 +2028,7 @@ mod tests {
     // | RFC 4034 §2.1          | DNSKEY record                       | parse_dnskey_record               |
     // | RFC 4034 §3.1          | RRSIG record                        | parse_rrsig_record                |
     // | RFC 4034 §4.1          | NSEC record                         | parse_nsec_record                 |
-    // | RFC 4034 §4.1          | NSEC name via compression pointer   | nsec_next_name_compression_pointer_is_accepted |
+    // | RFC 4034 §4.1.1 / RFC 3597 §4 | Compressed NSEC name (sender MUST NOT; accepted liberally) | nsec_next_name_compression_pointer_is_accepted |
     // | RFC 1035 §3.2.1        | NSEC next name past RDLENGTH        | nsec_next_name_overrunning_rdata_falls_back |
     // | RFC 1035 §3.2.1        | RRSIG signer name past RDLENGTH     | rrsig_signer_name_overrunning_rdata_falls_back |
     // | RFC 1035 §3.2.1        | SOA RNAME past RDLENGTH             | soa_rname_overrunning_rdata_falls_back |
@@ -3021,8 +3024,11 @@ mod tests {
 
     #[test]
     fn nsec_next_name_compression_pointer_is_accepted() {
-        // RFC 1035 §4.1.4 — a pointer occupies 2 octets inside RDATA even if
-        // it refers to a name outside RDATA; only the in-place octets count.
+        // RFC 4034 §4.1.1 says a sender MUST NOT compress the Next Domain
+        // Name, and RFC 3597 §4 forbids compression in RR types newer than
+        // RFC 1035. This is not spec behaviour: the dissector accepts such a
+        // pointer liberally (Postel's Law). The pointer's 2 octets
+        // (RFC 1035 §4.1.4) are what must fit inside RDATA.
         let mut data = header(0, 1, 0, 0);
         data.extend_from_slice(&wire_name("ex.test")); // owner at offset 12
         data.extend_from_slice(&TYPE_NSEC.to_be_bytes());
