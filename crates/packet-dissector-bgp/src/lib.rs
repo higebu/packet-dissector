@@ -4,9 +4,12 @@
 //! - RFC 4271 (BGP-4): <https://www.rfc-editor.org/rfc/rfc4271>
 //! - RFC 1997 (Communities): <https://www.rfc-editor.org/rfc/rfc1997>
 //! - RFC 2918 (Route Refresh): <https://www.rfc-editor.org/rfc/rfc2918>
+//! - RFC 2545 (BGP-4 Multiprotocol Extensions for IPv6): <https://www.rfc-editor.org/rfc/rfc2545>
 //! - RFC 4360 (Extended Communities): <https://www.rfc-editor.org/rfc/rfc4360>
+//! - RFC 4364 (BGP/MPLS IP VPNs): <https://www.rfc-editor.org/rfc/rfc4364>
 //! - RFC 4456 (Route Reflection): <https://www.rfc-editor.org/rfc/rfc4456>
 //! - RFC 4486 (Cease NOTIFICATION subcodes): <https://www.rfc-editor.org/rfc/rfc4486>
+//! - RFC 4659 (BGP-MPLS IP VPN Extension for IPv6 VPN): <https://www.rfc-editor.org/rfc/rfc4659>
 //! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
 //! - RFC 4760 (Multiprotocol Extensions): <https://www.rfc-editor.org/rfc/rfc4760>
 //! - RFC 5492 (Capabilities Advertisement with BGP-4): <https://www.rfc-editor.org/rfc/rfc5492>
@@ -146,6 +149,17 @@
 //! | 3 | Non-prefix SAFI of AFI 1 (FlowSpec) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw` |
 //! | 4 | Non-prefix SAFI of AFI 1 (SR Policy) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw` |
 //!
+//! # MP_REACH_NLRI Next Hop Coverage (RFC 4364 / RFC 4659 / RFC 8950)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 4364 §4.3.2 | VPN-IPv4 next hop (RD + IPv4) | `parse_bgp_update_mp_reach_vpn_ipv4_next_hop` |
+//! | RFC 4659 §3.2.1.1 | VPN-IPv6 next hop (RD + IPv6) | `parse_bgp_update_mp_reach_vpn_ipv6_next_hop` |
+//! | RFC 4659 §3.2.1.1 | VPN-IPv6 next hop with link-local | `parse_bgp_update_mp_reach_vpn_ipv6_next_hop_link_local` |
+//! | RFC 8950 §3 | IPv6 next hop for IPv4 NLRI (SAFI 1, 4) | `parse_bgp_update_mp_reach_ipv4_nlri_ipv6_next_hop` |
+//! | RFC 8950 §3 | VPN-IPv6 next hop for VPN-IPv4 NLRI | `parse_bgp_update_mp_reach_vpn_ipv4_nlri_ipv6_next_hop` |
+//! | RFC 4760 §3 | Unexpected next hop length kept as raw bytes | `parse_bgp_update_mp_reach_unexpected_next_hop_length_is_raw` |
+//!
 //! # BGP OPEN Capability Decoding Coverage
 //!
 //! | RFC / Draft Section | Description | Test |
@@ -277,6 +291,15 @@ const SAFI_UNICAST: u8 = 1;
 /// SAFI for multicast forwarding (RFC 4760, Section 6 —
 /// <https://www.rfc-editor.org/rfc/rfc4760#section-6>).
 const SAFI_MULTICAST: u8 = 2;
+/// SAFI for MPLS-labeled VPN address (RFC 4364, Section 4.3.4 —
+/// <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.4>).
+const SAFI_MPLS_VPN: u8 = 128;
+/// SAFI for Multicast for BGP/MPLS IP VPNs (RFC 6514 —
+/// <https://www.rfc-editor.org/rfc/rfc6514>).
+const SAFI_MULTICAST_VPN: u8 = 129;
+/// Size of a Route Distinguisher (RFC 4364, Section 4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc4364#section-4.2>).
+const RD_SIZE: usize = 8;
 
 /// BGP message type: OPEN (RFC 4271, Section 4.1).
 const MSG_OPEN: u8 = 1;
@@ -2952,6 +2975,105 @@ fn parse_mp_nlri_block<'pkt>(
     }
 }
 
+/// Returns `true` for the SAFIs whose next hop is a VPN address, i.e. an
+/// 8-octet Route Distinguisher (set to zero) followed by an IP address.
+///
+/// RFC 4364, Section 4.3.2 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.2>
+/// RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>
+fn is_vpn_next_hop_safi(safi: u8) -> bool {
+    safi == SAFI_MPLS_VPN || safi == SAFI_MULTICAST_VPN
+}
+
+/// Parses the Network Address of Next Hop field of MP_REACH_NLRI.
+///
+/// The layout is selected by the AFI, the SAFI and the Length of Next Hop
+/// Network Address:
+///
+/// - AFI 1, non-VPN SAFI, length 4: IPv4 address.
+/// - AFI 1 or 2, non-VPN SAFI, length 16 or 32: IPv6 global address,
+///   optionally followed by a link-local address (RFC 2545, Section 3; for
+///   AFI 1 RFC 8950, Section 3).
+/// - AFI 1, VPN SAFI, length 12: VPN-IPv4 address, "encoded as a VPN-IPv4
+///   address with an RD of 0" (RFC 4364, Section 4.3.2).
+/// - AFI 1 or 2, VPN SAFI, length 24 or 48: VPN-IPv6 global address,
+///   optionally followed by a VPN-IPv6 link-local address, each "whose
+///   8-octet RD is set to zero" (RFC 4659, Section 3.2.1.1; for AFI 1
+///   RFC 8950, Section 3).
+///
+/// Anything else is pushed as raw bytes.
+///
+/// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+/// RFC 2545, Section 3 — <https://www.rfc-editor.org/rfc/rfc2545#section-3>
+/// RFC 4364, Section 4.3.2 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.2>
+/// RFC 4659, Section 3.2.1.1 — <https://www.rfc-editor.org/rfc/rfc4659#section-3.2.1.1>
+/// RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>
+fn parse_mp_next_hop<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    afi: u16,
+    safi: u8,
+    nh: &'pkt [u8],
+    offset: usize,
+) {
+    let ip_afi = afi == AFI_IPV4 || afi == AFI_IPV6;
+    // Length of the Route Distinguisher preceding each address, if any.
+    let rd_len = match (is_vpn_next_hop_safi(safi), nh.len()) {
+        (false, 4) if afi == AFI_IPV4 => 0,
+        (false, 16 | 32) if ip_afi => 0,
+        (true, 12) if afi == AFI_IPV4 => RD_SIZE,
+        (true, 24 | 48) if ip_afi => RD_SIZE,
+        _ => {
+            buf.push_field(
+                &MP_CHILDREN[FD_MP_NEXT_HOP],
+                FieldValue::Bytes(nh),
+                offset..offset + nh.len(),
+            );
+            return;
+        }
+    };
+
+    // A 32 / 48 octet next hop is a global address followed by a link-local
+    // address of the same shape.
+    let entry_len = match nh.len() {
+        32 | 48 => nh.len() / 2,
+        len => len,
+    };
+    let has_link_local = entry_len != nh.len();
+
+    if rd_len != 0 {
+        buf.push_field(
+            &MP_CHILDREN[FD_MP_NEXT_HOP_RD],
+            FieldValue::Bytes(&nh[..rd_len]),
+            offset..offset + rd_len,
+        );
+    }
+    let global = &nh[rd_len..entry_len];
+    let global_value = if global.len() == 4 {
+        FieldValue::Ipv4Addr(read_ipv4_addr(global, 0).unwrap_or_default())
+    } else {
+        FieldValue::Ipv6Addr(read_ipv6_addr(global, 0).unwrap_or_default())
+    };
+    buf.push_field(
+        &MP_CHILDREN[FD_MP_NEXT_HOP],
+        global_value,
+        offset + rd_len..offset + entry_len,
+    );
+
+    if has_link_local {
+        if rd_len != 0 {
+            buf.push_field(
+                &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL_RD],
+                FieldValue::Bytes(&nh[entry_len..entry_len + rd_len]),
+                offset + entry_len..offset + entry_len + rd_len,
+            );
+        }
+        buf.push_field(
+            &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL],
+            FieldValue::Ipv6Addr(read_ipv6_addr(nh, entry_len + rd_len).unwrap_or_default()),
+            offset + entry_len + rd_len..offset + nh.len(),
+        );
+    }
+}
+
 /// Parses MP_REACH_NLRI attribute value.
 ///
 /// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
@@ -2988,38 +3110,7 @@ fn parse_mp_reach_nlri<'pkt>(
         return MpAfiSafi { afi, safi, offset };
     }
 
-    // Parse Next Hop based on AFI
-    let nh_data = &data[nh_start..nh_end];
-    if afi == 1 && nh_len == 4 {
-        // IPv4 Next Hop
-        buf.push_field(
-            &MP_CHILDREN[FD_MP_NEXT_HOP],
-            FieldValue::Ipv4Addr([nh_data[0], nh_data[1], nh_data[2], nh_data[3]]),
-            offset + nh_start..offset + nh_end,
-        );
-    } else if afi == 2 && (nh_len == 16 || nh_len == 32) {
-        // IPv6 Next Hop (16 bytes global, or 32 bytes global + link-local)
-        let addr = read_ipv6_addr(nh_data, 0).unwrap_or_default();
-        buf.push_field(
-            &MP_CHILDREN[FD_MP_NEXT_HOP],
-            FieldValue::Ipv6Addr(addr),
-            offset + nh_start..offset + nh_start + 16,
-        );
-        if nh_len == 32 {
-            let ll_addr = read_ipv6_addr(nh_data, 16).unwrap_or_default();
-            buf.push_field(
-                &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL],
-                FieldValue::Ipv6Addr(ll_addr),
-                offset + nh_start + 16..offset + nh_end,
-            );
-        }
-    } else {
-        buf.push_field(
-            &MP_CHILDREN[FD_MP_NEXT_HOP],
-            FieldValue::Bytes(nh_data),
-            offset + nh_start..offset + nh_end,
-        );
-    }
+    parse_mp_next_hop(buf, afi, safi, &data[nh_start..nh_end], offset + nh_start);
 
     // Skip Reserved byte
     let nlri_start = nh_end + 1;
@@ -3630,11 +3721,13 @@ const FD_MP_NLRI: usize = 4;
 const FD_MP_WITHDRAWN_ROUTES: usize = 5;
 const FD_MP_NLRI_RAW: usize = 6;
 const FD_MP_WITHDRAWN_ROUTES_RAW: usize = 7;
+const FD_MP_NEXT_HOP_RD: usize = 8;
+const FD_MP_NEXT_HOP_LINK_LOCAL_RD: usize = 9;
 
 /// Child field descriptors for MP_REACH_NLRI / MP_UNREACH_NLRI objects.
 ///
 /// RFC 4760, Sections 3-4 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
-const MP_FIELDS: [FieldDescriptor; 8] = [
+const MP_FIELDS: [FieldDescriptor; 10] = [
     FieldDescriptor::new("afi", "AFI", FieldType::U16).with_display_fn(|v, _siblings| match v {
         FieldValue::U16(a) => afi_name(*a),
         _ => None,
@@ -3665,6 +3758,22 @@ const MP_FIELDS: [FieldDescriptor; 8] = [
         FieldType::Bytes,
     )
     .optional(),
+    // Route Distinguishers (always zero) of VPN next hops (RFC 4364,
+    // Section 4.3.2; RFC 4659, Section 3.2.1.1).
+    FieldDescriptor::new(
+        "next_hop_rd",
+        "Next Hop Route Distinguisher",
+        FieldType::Bytes,
+    )
+    .optional()
+    .with_format_fn(format_route_distinguisher),
+    FieldDescriptor::new(
+        "next_hop_link_local_rd",
+        "Next Hop Link-Local Route Distinguisher",
+        FieldType::Bytes,
+    )
+    .optional()
+    .with_format_fn(format_route_distinguisher),
 ];
 
 /// Slice form of [`MP_FIELDS`].
@@ -3873,6 +3982,8 @@ static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &[
     MP_FIELDS[FD_MP_WITHDRAWN_ROUTES],
     MP_FIELDS[FD_MP_NLRI_RAW],
     MP_FIELDS[FD_MP_WITHDRAWN_ROUTES_RAW],
+    MP_FIELDS[FD_MP_NEXT_HOP_RD],
+    MP_FIELDS[FD_MP_NEXT_HOP_LINK_LOCAL_RD],
     // BGP Prefix-SID TLV element fields (RFC 8669, RFC 9252).
     PREFIX_SID_TLV_FIELDS[FD_PSID_TYPE].optional(),
     PREFIX_SID_TLV_FIELDS[FD_PSID_LENGTH].optional(),
@@ -5661,6 +5772,8 @@ mod tests {
             "withdrawn_routes",
             "nlri_raw",
             "withdrawn_routes_raw",
+            "next_hop_rd",
+            "next_hop_link_local_rd",
             "label_index",
             "srgb_entries",
             "sub_tlvs",
@@ -8266,5 +8379,127 @@ mod tests {
             FieldValue::Bytes(&[24, 198, 51, 100])
         );
         assert!(nested_field_by_name_opt(&buf, &mp, "nlri_raw").is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // MP_REACH_NLRI next hop encodings: VPN (RFC 4364, Section 4.3.2;
+    // RFC 4659, Section 3.2.1) and IPv6 next hop for IPv4 NLRI (RFC 8950,
+    // Section 3 — https://www.rfc-editor.org/rfc/rfc8950#section-3).
+    // -------------------------------------------------------------------
+
+    const NH_V6_GLOBAL: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    const NH_V6_LL: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+    /// Helper: dissect an MP_REACH_NLRI with an empty NLRI and return the
+    /// `(name, value)` pairs of the next hop fields.
+    fn mp_reach_next_hop_fields(afi: u16, safi: u8, next_hop: &[u8]) -> Vec<(String, String)> {
+        let val = build_mp_reach(afi, safi, next_hop, &[]);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        direct_children(&buf, &mp)
+            .iter()
+            .filter(|f| f.name().starts_with("next_hop"))
+            .map(|f| (f.name().to_string(), format!("{:?}", f.value)))
+            .collect()
+    }
+
+    fn nh(name: &str, value: FieldValue<'_>) -> (String, String) {
+        (name.to_string(), format!("{value:?}"))
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv4_next_hop() {
+        // RFC 4364, Section 4.3.2: VPN-IPv4 next hop with an RD of 0.
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&[192, 0, 2, 1]);
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv4Addr([192, 0, 2, 1])),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv6_next_hop() {
+        // RFC 4659, Section 3.2.1.1: VPN-IPv6 next hop (length 24).
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv6_next_hop_link_local() {
+        // RFC 4659, Section 3.2.1.1: global + link-local VPN-IPv6 (length 48).
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        next_hop.extend_from_slice(&[0u8; 8]);
+        next_hop.extend_from_slice(&NH_V6_LL);
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+                nh("next_hop_link_local_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop_link_local", FieldValue::Ipv6Addr(NH_V6_LL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_ipv4_nlri_ipv6_next_hop() {
+        // RFC 8950, Section 3: AFI 1 / SAFI 1, 2, 4 with a 16 or 32 octet
+        // IPv6 next hop.
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 1, &NH_V6_GLOBAL),
+            vec![nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL))]
+        );
+        let mut next_hop = NH_V6_GLOBAL.to_vec();
+        next_hop.extend_from_slice(&NH_V6_LL);
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 4, &next_hop),
+            vec![
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+                nh("next_hop_link_local", FieldValue::Ipv6Addr(NH_V6_LL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpn_ipv4_nlri_ipv6_next_hop() {
+        // RFC 8950, Section 3: AFI 1 / SAFI 128 with a 24 octet VPN-IPv6
+        // next hop.
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 128, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_unexpected_next_hop_length_is_raw() {
+        // A 4 octet next hop is not a VPN-IPv4 address (RFC 4364, Section
+        // 4.3.2), so it is kept as raw bytes.
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 128, &[192, 0, 2, 1]),
+            vec![nh("next_hop", FieldValue::Bytes(&[192, 0, 2, 1]))]
+        );
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 1, &[192, 0, 2, 1]),
+            vec![nh("next_hop", FieldValue::Bytes(&[192, 0, 2, 1]))]
+        );
     }
 }
