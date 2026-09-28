@@ -484,6 +484,9 @@ mod tests {
     //! | 9.4.2        | Truncated header              | parse_ngap_truncated              |
     //! | 9.4          | Empty IE container            | parse_ngap_empty_ie_container     |
     //! | 9.4          | ProtocolIE-Container          | parse_ngap_with_ies               |
+    //! | 9.5          | APER IE values (InitialUEMessage) | parse_aper_initial_ue_message |
+    //! | 9.5          | APER IE values (NGSetupRequest)   | parse_aper_ng_setup_request   |
+    //! | 9.5          | APER IE values (UEContextReleaseRequest) | parse_aper_ue_context_release_request |
 
     use super::*;
 
@@ -821,5 +824,142 @@ mod tests {
             assert!(reference.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+    }
+
+    /// Returns `(name, value)` of every field of the IE with `ie_id`,
+    /// excluding the IE header fields.
+    fn ie_value_fields<'a>(
+        buf: &'a DissectBuffer<'a>,
+        ie_id: u16,
+    ) -> Vec<(&'static str, FieldValue<'a>)> {
+        for field in buf.fields() {
+            if field.name() != "ie" {
+                continue;
+            }
+            let FieldValue::Object(ref range) = field.value else {
+                continue;
+            };
+            let fields = buf.nested_fields(range);
+            if fields
+                .iter()
+                .any(|f| f.name() == "id" && f.value == FieldValue::U16(ie_id))
+            {
+                return fields
+                    .iter()
+                    .filter(|f| !matches!(f.name(), "id" | "criticality" | "length"))
+                    .map(|f| (f.name(), f.value.clone()))
+                    .collect();
+            }
+        }
+        panic!("IE {ie_id} not found");
+    }
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // The PDUs below were produced by an independent ALIGNED PER encoder
+    // (pycrate `NGAP_PDU_Descriptions.NGAP_PDU.to_aper()`), so they
+    // exercise the bit-packed IE value layout of 3GPP TS 38.413,
+    // Section 9.5 rather than a hand-written approximation.
+
+    #[test]
+    fn parse_aper_initial_ue_message() {
+        // RAN-UE-NGAP-ID 1, NAS-PDU (Registration Request), ULI NR
+        // (PLMN 001/01, NCI 0x10, TAC 1, timeStamp), RRCEstablishmentCause
+        // mo-Signalling, UEContextRequest requested.
+        let data = decode_hex(concat!(
+            "000f404200000500550002000100260014137e004179000d0100f11000000000",
+            "0000000001007900135000f110000000010000f110000001e84f5c11005a4001",
+            "180070400100",
+        ));
+        let mut buf = DissectBuffer::new();
+        NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            ie_value_fields(&buf, 85),
+            vec![("ran_ue_ngap_id", FieldValue::U32(1))]
+        );
+        assert_eq!(ie_value_fields(&buf, 38)[0].0, "nas_pdu");
+        let plmn: &[u8] = &[0x00, 0xF1, 0x10];
+        assert_eq!(
+            ie_value_fields(&buf, 121),
+            vec![
+                ("choice", FieldValue::U8(1)),
+                ("plmn_identity", FieldValue::Bytes(plmn)),
+                ("nr_cell_identity", FieldValue::U64(0x10)),
+                ("plmn_identity", FieldValue::Bytes(plmn)),
+                ("tac", FieldValue::U32(1)),
+                ("time_stamp", FieldValue::U32(0xE84F_5C11)),
+            ]
+        );
+        assert_eq!(
+            ie_value_fields(&buf, 90),
+            vec![("rrc_establishment_cause", FieldValue::U8(3))]
+        );
+        assert_eq!(
+            ie_value_fields(&buf, 112),
+            vec![("ue_context_request", FieldValue::U8(0))]
+        );
+    }
+
+    #[test]
+    fn parse_aper_ng_setup_request() {
+        // GlobalRANNodeID gNB (PLMN 001/01, 32-bit gNB-ID 1), RANNodeName
+        // "UERANSIM-gnb-1-1-1", SupportedTAList, DefaultPagingDRX v128.
+        let data = decode_hex(concat!(
+            "0015003e000004001b00090000f1105000000001005240140880554552414e53",
+            "494d2d676e622d312d312d310066000d00000000010000f11000000008001540",
+            "0140",
+        ));
+        let mut buf = DissectBuffer::new();
+        NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let plmn: &[u8] = &[0x00, 0xF1, 0x10];
+        assert_eq!(
+            ie_value_fields(&buf, 27),
+            vec![
+                ("choice", FieldValue::U8(0)),
+                ("plmn_identity", FieldValue::Bytes(plmn)),
+                ("gnb_id_length", FieldValue::U8(32)),
+                ("gnb_id", FieldValue::U32(1)),
+            ]
+        );
+        assert_eq!(
+            ie_value_fields(&buf, 82),
+            vec![("name", FieldValue::Bytes(b"UERANSIM-gnb-1-1-1"))]
+        );
+        assert_eq!(
+            ie_value_fields(&buf, 21),
+            vec![("default_paging_drx", FieldValue::U8(2))]
+        );
+    }
+
+    #[test]
+    fn parse_aper_ue_context_release_request() {
+        // AMF-UE-NGAP-ID 0x1234567890, RAN-UE-NGAP-ID 0xdeadbeef,
+        // Cause nas/deregister.
+        let data = decode_hex("002a401b000003000a000680123456789000550005c0deadbeef000f400148");
+        let mut buf = DissectBuffer::new();
+        NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            ie_value_fields(&buf, 10),
+            vec![("amf_ue_ngap_id", FieldValue::U64(0x12_3456_7890))]
+        );
+        assert_eq!(
+            ie_value_fields(&buf, 85),
+            vec![("ran_ue_ngap_id", FieldValue::U32(0xDEAD_BEEF))]
+        );
+        assert_eq!(
+            ie_value_fields(&buf, 15),
+            vec![
+                ("cause_group", FieldValue::U8(2)),
+                ("cause_value", FieldValue::U8(2)),
+            ]
+        );
     }
 }
