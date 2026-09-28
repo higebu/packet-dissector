@@ -152,6 +152,7 @@ fn parse_udp_length_exceeds_data_accepted() {
     // declared Length is what a snaplen-limited capture holds, so the header
     // is still dissected; the dispatch loop clamps the payload to the
     // captured bytes.
+    // https://www.rfc-editor.org/rfc/rfc768
     let mut data = build_udp_packet(1234, 5678, 20); // claims 20 bytes total
     data.truncate(12); // only 12 bytes available
 

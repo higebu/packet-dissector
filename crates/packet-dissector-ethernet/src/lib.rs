@@ -308,11 +308,9 @@ impl Dissector for EthernetDissector {
             field_range: layer_field_start..layer_field_end,
         });
 
-        let result = DissectResult::new(header_len, dispatch_hint);
-        Ok(match llc_payload_len {
-            Some(len) => result.with_payload_len(len),
-            None => result,
-        })
+        let mut result = DissectResult::new(header_len, dispatch_hint);
+        result.payload_len = llc_payload_len;
+        Ok(result)
     }
 }
 

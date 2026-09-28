@@ -283,6 +283,7 @@ fn parse_ipv4_total_length_exceeds_data_accepted() {
     // capture keeps fewer bytes, so the header is still dissected and the
     // declared payload length is reported (the dispatch loop clamps it to the
     // captured bytes).
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
     let mut data = [0u8; 24];
     data[0] = 0x45; // Version=4, IHL=5
     data[2..4].copy_from_slice(&100u16.to_be_bytes()); // Total Length = 100
@@ -424,6 +425,7 @@ fn parse_ipv4_payload_len_from_total_length() {
     // RFC 791, Section 3.1 — "Total Length is the length of the datagram,
     // measured in octets, including internet header and data."
     // Bytes past Total Length (e.g. Ethernet padding) are not IP payload.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
     let mut data = build_ipv4_packet(1, [10, 0, 0, 1], [10, 0, 0, 2], 28);
     data.resize(46, 0x00); // 18 bytes of trailing link-layer padding
     let mut buf = DissectBuffer::new();
@@ -436,6 +438,7 @@ fn parse_ipv4_payload_len_from_total_length() {
 #[test]
 fn parse_ipv4_payload_len_with_options() {
     // RFC 791, Section 3.1 — the payload is Total Length minus IHL * 4.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
     let mut data = build_ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], 36);
     data[0] = 0x46; // IHL = 6 (4 bytes of options)
     let mut buf = DissectBuffer::new();

@@ -280,6 +280,7 @@ mod tests {
         // buffer shorter than it (snaplen truncation) is not a malformed
         // datagram: the header is dissected and the declared payload length
         // is reported for the dispatch loop to clamp.
+        // https://www.rfc-editor.org/rfc/rfc768
         let mut data = build_udp(1234, 5678, 20, 0);
         data.truncate(12);
 
@@ -317,6 +318,7 @@ mod tests {
         // the IP transport payload into two areas -- that intended as UDP
         // user data and an additional \"surplus area\"". Only the user data
         // is handed to the application-layer dissector.
+        // https://www.rfc-editor.org/rfc/rfc9868#section-7
         let mut data = build_udp(1234, 5678, 12, 0); // 4 bytes of user data
         data.extend_from_slice(&[0xAA; 6]); // surplus area
 
