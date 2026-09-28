@@ -70,6 +70,9 @@
 //! | Ethernet → MPLS (2 labels) → IPv4 → UDP              | integration_ethernet_mpls_two_labels_ipv4_udp        |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
+//! | Ethernet → IPv4 → UDP → BFD Echo (opaque payload)    | integration_ethernet_ipv4_udp_bfd_echo_opaque        |
+//! | Ethernet → IPv4 → UDP → BFD Echo (Control format)    | integration_ethernet_ipv4_udp_bfd_echo_control       |
+//! | Ethernet → IPv4 → UDP → S-BFD / Micro-BFD            | integration_ethernet_ipv4_udp_sbfd_and_micro_bfd     |
 //! | PPP (HDLC) → IPv4 → UDP                               | integration_ppp_ipv4_udp                              |
 //! | PPP → LCP (inline)                                     | integration_ppp_lcp_inline                            |
 //! | Ethernet → IPv4 → UDP → GENEVE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_geneve_ipv4        |
@@ -4319,6 +4322,97 @@ fn integration_ethernet_ipv4_udp_bfd_up() {
         buf.field_by_name(bfd, "your_discriminator").unwrap().value,
         FieldValue::U32(2)
     );
+}
+
+/// Build Ethernet/IPv4/UDP to `dst_port` carrying `payload`.
+fn build_eth_ipv4_udp_payload(src_port: u16, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, src_port, dst_port);
+    pkt.extend_from_slice(payload);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    pkt
+}
+
+/// Minimal BFD Control packet (RFC 5880, Section 4.1) in the Down state.
+fn bfd_control_down(my_disc: u32) -> Vec<u8> {
+    let mut p = vec![1u8 << 5, 1u8 << 6, 3, 24];
+    p.extend_from_slice(&my_disc.to_be_bytes());
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p.extend_from_slice(&1_000_000u32.to_be_bytes());
+    p.extend_from_slice(&1_000_000u32.to_be_bytes());
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_bfd_echo_opaque() {
+    // RFC 5880, Section 5 — the Echo payload is a local matter and must not
+    // make the frame fail.
+    let payloads: [&[u8]; 2] = [
+        &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2a],
+        &[
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ],
+    ];
+    let registry = DissectorRegistry::default();
+    for payload in payloads {
+        let pkt = build_eth_ipv4_udp_payload(3785, 3785, payload);
+        let mut buf = DissectBuffer::new();
+        registry.dissect(&pkt, &mut buf).unwrap();
+        assert_eq!(buf.layers().len(), 4);
+        assert_layers_contiguous(&buf);
+        let echo = &buf.layers()[3];
+        assert_eq!(echo.name, "BFD Echo");
+        assert_eq!(
+            buf.field_by_name(echo, "payload").unwrap().value,
+            FieldValue::Bytes(payload)
+        );
+    }
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_bfd_echo_control() {
+    // RFC 9747, Section 2 — Unaffiliated BFD Echo uses the Control format on
+    // UDP 3785.
+    let pkt = build_eth_ipv4_udp_payload(49152, 3785, &bfd_control_down(0x55));
+    let registry = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let bfd = &buf.layers()[3];
+    assert_eq!(bfd.name, "BFD");
+    assert_eq!(bfd.display_name, Some("BFD Echo"));
+    assert_eq!(
+        buf.field_by_name(bfd, "my_discriminator").unwrap().value,
+        FieldValue::U32(0x55)
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_sbfd_and_micro_bfd() {
+    // RFC 7881, Section 2 (S-BFD, UDP 7784) and RFC 7130, Section 2.2
+    // (Micro-BFD, UDP 6784) both carry BFD Control packets.
+    let registry = DissectorRegistry::default();
+    for (src, dst) in [(49152, 7784), (7784, 49152), (49152, 6784)] {
+        let pkt = build_eth_ipv4_udp_payload(src, dst, &bfd_control_down(7));
+        let mut buf = DissectBuffer::new();
+        registry.dissect(&pkt, &mut buf).unwrap();
+        assert_eq!(buf.layers().len(), 4, "ports {src} -> {dst}");
+        assert_layers_contiguous(&buf);
+        let bfd = &buf.layers()[3];
+        assert_eq!(bfd.name, "BFD");
+        assert_eq!(bfd.display_name, None);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -10,8 +10,12 @@
 //!   <https://www.rfc-editor.org/rfc/rfc7880>
 //! - RFC 8562 (BFD for Multipoint Networks; updates RFC 5880, redefines the
 //!   Multipoint (M) bit): <https://www.rfc-editor.org/rfc/rfc8562>
-//! - RFC 9747 (BFD Echo function clarifications; updates RFC 5880):
+//! - RFC 9747 (Unaffiliated BFD Echo; updates RFC 5880):
 //!   <https://www.rfc-editor.org/rfc/rfc9747>
+//! - RFC 7130 (BFD on LAG Interfaces, Micro-BFD):
+//!   <https://www.rfc-editor.org/rfc/rfc7130>
+//! - RFC 7881 (S-BFD for IPv4, IPv6, and MPLS):
+//!   <https://www.rfc-editor.org/rfc/rfc7881>
 
 #![deny(missing_docs)]
 
@@ -51,6 +55,21 @@ const AUTH_LEN_SHA1: usize = 28;
 /// password). RFC 5880, Section 4.2 —
 /// <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>
 const MIN_AUTH_LEN_SIMPLE_PASSWORD: usize = 4;
+
+/// Offset of the Auth Key ID octet within the Control packet.
+/// RFC 5880, Section 4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>
+const AUTH_KEY_ID_OFFSET: usize = 26;
+
+/// Offset of the Sequence Number in the Keyed MD5 / SHA1 sections.
+/// RFC 5880, Sections 4.3 and 4.4 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>
+const AUTH_SEQUENCE_OFFSET: usize = 28;
+
+/// Offset of the Auth Key/Digest or Auth Key/Hash in the Keyed MD5 / SHA1
+/// sections. RFC 5880, Sections 4.3 and 4.4 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>
+const AUTH_DIGEST_OFFSET: usize = 32;
 
 /// Minimum Auth Len for an unknown authentication type (Type + Len + at
 /// least one byte of authentication data).
@@ -200,6 +219,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         format_fn: None,
     },
     FieldDescriptor::new("auth_data", "Auth Data", FieldType::Bytes).optional(),
+    FieldDescriptor::new("auth_len", "Auth Len", FieldType::U8).optional(),
+    FieldDescriptor::new("auth_key_id", "Auth Key ID", FieldType::U8).optional(),
+    FieldDescriptor::new("password", "Password", FieldType::Bytes).optional(),
+    FieldDescriptor::new("auth_reserved", "Reserved", FieldType::U8).optional(),
+    FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U32).optional(),
+    FieldDescriptor::new("digest", "Auth Key/Digest", FieldType::Bytes).optional(),
+    FieldDescriptor::new("hash", "Auth Key/Hash", FieldType::Bytes).optional(),
 ];
 
 /// Index constants for `FIELD_DESCRIPTORS`.
@@ -222,6 +248,13 @@ const FD_REQUIRED_MIN_ECHO_RX_INTERVAL: usize = 15;
 // Authentication fields (optional — only present when A bit is set)
 const FD_AUTH_TYPE: usize = 16;
 const FD_AUTH_DATA: usize = 17;
+const FD_AUTH_LEN: usize = 18;
+const FD_AUTH_KEY_ID: usize = 19;
+const FD_PASSWORD: usize = 20;
+const FD_AUTH_RESERVED: usize = 21;
+const FD_SEQUENCE_NUMBER: usize = 22;
+const FD_DIGEST: usize = 23;
+const FD_HASH: usize = 24;
 
 /// Specification references for the BFD dissector.
 static REFERENCES: &[SpecReference] = &[
@@ -260,6 +293,16 @@ static REFERENCES: &[SpecReference] = &[
         "Unaffiliated Bidirectional Forwarding Detection (BFD) Echo",
         "https://www.rfc-editor.org/rfc/rfc9747",
     ),
+    SpecReference::new(
+        "RFC 7130",
+        "Bidirectional Forwarding Detection (BFD) on Link Aggregation Group (LAG) Interfaces",
+        "https://www.rfc-editor.org/rfc/rfc7130",
+    ),
+    SpecReference::new(
+        "RFC 7881",
+        "Seamless Bidirectional Forwarding Detection (S-BFD) for IPv4, IPv6, and MPLS",
+        "https://www.rfc-editor.org/rfc/rfc7881",
+    ),
 ];
 
 impl Dissector for BfdDissector {
@@ -289,240 +332,301 @@ impl Dissector for BfdDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        if data.len() < MIN_HEADER_SIZE {
-            return Err(PacketError::Truncated {
-                expected: MIN_HEADER_SIZE,
-                actual: data.len(),
-            });
-        }
+        dissect_control(data, buf, offset, None)
+    }
+}
 
-        // RFC 5880, Section 4.1 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — first octet:
-        // Vers (3 bits) | Diag (5 bits).
-        let byte0 = data[0];
-        let version = (byte0 >> 5) & 0x07;
-        let diagnostic = byte0 & 0x1F;
+/// Dissects a BFD Control packet (RFC 5880, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.1>).
+///
+/// `display_name` is recorded on the pushed layer; the Echo dissector uses
+/// it to mark Control-format Echo packets.
+fn dissect_control<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    display_name: Option<&'static str>,
+) -> Result<DissectResult, PacketError> {
+    if data.len() < MIN_HEADER_SIZE {
+        return Err(PacketError::Truncated {
+            expected: MIN_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
 
-        // RFC 5880, Section 6.8.6 #1 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
-        // version number is not correct (1), the packet MUST be discarded."
-        if version != BFD_VERSION {
-            return Err(PacketError::InvalidFieldValue {
-                field: "version",
-                value: u32::from(version),
-            });
-        }
+    // RFC 5880, Section 4.1 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — first octet:
+    // Vers (3 bits) | Diag (5 bits).
+    let byte0 = data[0];
+    let version = (byte0 >> 5) & 0x07;
+    let diagnostic = byte0 & 0x1F;
 
-        // RFC 5880, Section 4.1 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — second octet:
-        // Sta (2) | P | F | C | A | D | M.
-        let byte1 = data[1];
-        let state = (byte1 >> 6) & 0x03;
-        let poll = (byte1 >> 5) & 0x01;
-        let final_flag = (byte1 >> 4) & 0x01;
-        let control_plane_independent = (byte1 >> 3) & 0x01;
-        let auth_present = (byte1 >> 2) & 0x01;
-        let demand = (byte1 >> 1) & 0x01;
-        // RFC 5880 originally reserved the M bit as zero; RFC 8562, Section
-        // 4.2 — <https://www.rfc-editor.org/rfc/rfc8562#section-4.2> — updates
-        // RFC 5880 to set M=1 on MultipointHead sessions, so either value is
-        // accepted here.
-        let multipoint = byte1 & 0x01;
+    // RFC 5880, Section 6.8.6 #1 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
+    // version number is not correct (1), the packet MUST be discarded."
+    if version != BFD_VERSION {
+        return Err(PacketError::InvalidFieldValue {
+            field: "version",
+            value: u32::from(version),
+        });
+    }
 
-        let detect_mult = data[2];
-        // RFC 5880, Section 6.8.6 #4 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
-        // Detect Mult field is zero, the packet MUST be discarded."
-        if detect_mult == 0 {
-            return Err(PacketError::InvalidFieldValue {
-                field: "detect_mult",
-                value: 0,
-            });
-        }
+    // RFC 5880, Section 4.1 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — second octet:
+    // Sta (2) | P | F | C | A | D | M.
+    let byte1 = data[1];
+    let state = (byte1 >> 6) & 0x03;
+    let poll = (byte1 >> 5) & 0x01;
+    let final_flag = (byte1 >> 4) & 0x01;
+    let control_plane_independent = (byte1 >> 3) & 0x01;
+    let auth_present = (byte1 >> 2) & 0x01;
+    let demand = (byte1 >> 1) & 0x01;
+    // RFC 5880 originally reserved the M bit as zero; RFC 8562, Section
+    // 4.2 — <https://www.rfc-editor.org/rfc/rfc8562#section-4.2> — updates
+    // RFC 5880 to set M=1 on MultipointHead sessions, so either value is
+    // accepted here.
+    let multipoint = byte1 & 0x01;
 
-        // RFC 5880, Section 4.1 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — "The length
-        // of the BFD Control packet, in bytes."
-        let length_u8 = data[3];
-        let length = length_u8 as usize;
+    let detect_mult = data[2];
+    // RFC 5880, Section 6.8.6 #4 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
+    // Detect Mult field is zero, the packet MUST be discarded."
+    if detect_mult == 0 {
+        return Err(PacketError::InvalidFieldValue {
+            field: "detect_mult",
+            value: 0,
+        });
+    }
+
+    // RFC 5880, Section 4.1 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-4.1> — "The length
+    // of the BFD Control packet, in bytes."
+    let length_u8 = data[3];
+    let length = length_u8 as usize;
+    // RFC 5880, Section 6.8.6 #2 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — Length
+    // below the minimum (24 without auth, 26 with auth) MUST be
+    // discarded. The auth variant is enforced below once the A bit is
+    // known.
+    if length < MIN_HEADER_SIZE {
+        return Err(PacketError::InvalidFieldValue {
+            field: "length",
+            value: length_u8 as u32,
+        });
+    }
+    // RFC 5880, Section 6.8.6 #3 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
+    // Length field is greater than the payload of the encapsulating
+    // protocol, the packet MUST be discarded."
+    if data.len() < length {
+        return Err(PacketError::Truncated {
+            expected: length,
+            actual: data.len(),
+        });
+    }
+
+    let my_discriminator = read_be_u32(data, 4)?;
+    // RFC 5880, Section 6.8.6 #6 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the My
+    // Discriminator field is zero, the packet MUST be discarded."
+    if my_discriminator == 0 {
+        return Err(PacketError::InvalidFieldValue {
+            field: "my_discriminator",
+            value: 0,
+        });
+    }
+    let your_discriminator = read_be_u32(data, 8)?;
+    let desired_min_tx = read_be_u32(data, 12)?;
+    let required_min_rx = read_be_u32(data, 16)?;
+    let required_min_echo_rx = read_be_u32(data, 20)?;
+
+    buf.begin_layer(
+        CONTROL_SHORT_NAME,
+        display_name,
+        FIELD_DESCRIPTORS,
+        offset..offset + length,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_VERSION],
+        FieldValue::U8(version),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_DIAGNOSTIC],
+        FieldValue::U8(diagnostic),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_STATE],
+        FieldValue::U8(state),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_POLL],
+        FieldValue::U8(poll),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_FINAL],
+        FieldValue::U8(final_flag),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_CONTROL_PLANE_INDEPENDENT],
+        FieldValue::U8(control_plane_independent),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_AUTH_PRESENT],
+        FieldValue::U8(auth_present),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_DEMAND],
+        FieldValue::U8(demand),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MULTIPOINT],
+        FieldValue::U8(multipoint),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_DETECT_MULT],
+        FieldValue::U8(detect_mult),
+        offset + 2..offset + 3,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_LENGTH],
+        FieldValue::U8(length_u8),
+        offset + 3..offset + 4,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MY_DISCRIMINATOR],
+        FieldValue::U32(my_discriminator),
+        offset + 4..offset + 8,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_YOUR_DISCRIMINATOR],
+        FieldValue::U32(your_discriminator),
+        offset + 8..offset + 12,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_DESIRED_MIN_TX_INTERVAL],
+        FieldValue::U32(desired_min_tx),
+        offset + 12..offset + 16,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_REQUIRED_MIN_RX_INTERVAL],
+        FieldValue::U32(required_min_rx),
+        offset + 16..offset + 20,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_REQUIRED_MIN_ECHO_RX_INTERVAL],
+        FieldValue::U32(required_min_echo_rx),
+        offset + 20..offset + 24,
+    );
+
+    // RFC 5880, Section 4.2 —
+    // <https://www.rfc-editor.org/rfc/rfc5880#section-4.2> — Optional
+    // Authentication Section.
+    if auth_present == 1 {
         // RFC 5880, Section 6.8.6 #2 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — Length
-        // below the minimum (24 without auth, 26 with auth) MUST be
-        // discarded. The auth variant is enforced below once the A bit is
-        // known.
-        if length < MIN_HEADER_SIZE {
-            return Err(PacketError::InvalidFieldValue {
-                field: "length",
-                value: length_u8 as u32,
-            });
+        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — when
+        // the A bit is set, the minimum correct Length is 26.
+        if length < MIN_HEADER_SIZE_WITH_AUTH {
+            return Err(PacketError::InvalidHeader(
+                "BFD auth present but length is less than minimum with auth",
+            ));
         }
-        // RFC 5880, Section 6.8.6 #3 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the
-        // Length field is greater than the payload of the encapsulating
-        // protocol, the packet MUST be discarded."
-        if data.len() < length {
-            return Err(PacketError::Truncated {
-                expected: length,
-                actual: data.len(),
-            });
+        let auth_type = data[24];
+        let auth_len = data[25] as usize;
+
+        // RFC 5880, Sections 4.2–4.4 — each authentication type has a
+        // fixed or minimum Auth Len including the Type and Length bytes
+        // themselves. Enforce these to reject malformed auth sections
+        // with missing fields such as the Key ID or fixed MD5/SHA1
+        // digest/hash.
+        //   - Simple Password (Section 4.2 —
+        //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>):
+        //     Type(1) + Len(1) + Key ID(1) + 1..=16 byte password ⇒ 4..=19
+        //   - Keyed / Meticulous Keyed MD5 (Section 4.3 —
+        //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>):
+        //     Auth Len is fixed at 24.
+        //   - Keyed / Meticulous Keyed SHA1 (Section 4.4 —
+        //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.4>):
+        //     Auth Len is fixed at 28.
+        let min_auth_len = match auth_type {
+            1 => MIN_AUTH_LEN_SIMPLE_PASSWORD,
+            2 | 3 => AUTH_LEN_MD5,
+            4 | 5 => AUTH_LEN_SHA1,
+            _ => MIN_AUTH_LEN_UNKNOWN,
+        };
+
+        if auth_len < min_auth_len {
+            return Err(PacketError::InvalidHeader(
+                "BFD auth length is less than minimum for auth type",
+            ));
+        }
+        let auth_end = 24 + auth_len;
+        if auth_end > length {
+            return Err(PacketError::InvalidHeader(
+                "BFD auth section exceeds packet length",
+            ));
         }
 
-        let my_discriminator = read_be_u32(data, 4)?;
-        // RFC 5880, Section 6.8.6 #6 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — "If the My
-        // Discriminator field is zero, the packet MUST be discarded."
-        if my_discriminator == 0 {
-            return Err(PacketError::InvalidFieldValue {
-                field: "my_discriminator",
-                value: 0,
-            });
-        }
-        let your_discriminator = read_be_u32(data, 8)?;
-        let desired_min_tx = read_be_u32(data, 12)?;
-        let required_min_rx = read_be_u32(data, 16)?;
-        let required_min_echo_rx = read_be_u32(data, 20)?;
-
-        buf.begin_layer(
-            self.short_name(),
-            None,
-            FIELD_DESCRIPTORS,
-            offset..offset + length,
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_AUTH_TYPE],
+            FieldValue::U8(auth_type),
+            offset + 24..offset + 25,
         );
         buf.push_field(
-            &FIELD_DESCRIPTORS[FD_VERSION],
-            FieldValue::U8(version),
-            offset..offset + 1,
+            &FIELD_DESCRIPTORS[FD_AUTH_LEN],
+            FieldValue::U8(data[25]),
+            offset + 25..offset + 26,
         );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_DIAGNOSTIC],
-            FieldValue::U8(diagnostic),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_STATE],
-            FieldValue::U8(state),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_POLL],
-            FieldValue::U8(poll),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_FINAL],
-            FieldValue::U8(final_flag),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_CONTROL_PLANE_INDEPENDENT],
-            FieldValue::U8(control_plane_independent),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_AUTH_PRESENT],
-            FieldValue::U8(auth_present),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_DEMAND],
-            FieldValue::U8(demand),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_MULTIPOINT],
-            FieldValue::U8(multipoint),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_DETECT_MULT],
-            FieldValue::U8(detect_mult),
-            offset + 2..offset + 3,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_LENGTH],
-            FieldValue::U8(length_u8),
-            offset + 3..offset + 4,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_MY_DISCRIMINATOR],
-            FieldValue::U32(my_discriminator),
-            offset + 4..offset + 8,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_YOUR_DISCRIMINATOR],
-            FieldValue::U32(your_discriminator),
-            offset + 8..offset + 12,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_DESIRED_MIN_TX_INTERVAL],
-            FieldValue::U32(desired_min_tx),
-            offset + 12..offset + 16,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_REQUIRED_MIN_RX_INTERVAL],
-            FieldValue::U32(required_min_rx),
-            offset + 16..offset + 20,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_REQUIRED_MIN_ECHO_RX_INTERVAL],
-            FieldValue::U32(required_min_echo_rx),
-            offset + 20..offset + 24,
-        );
-
-        // RFC 5880, Section 4.2 —
-        // <https://www.rfc-editor.org/rfc/rfc5880#section-4.2> — Optional
-        // Authentication Section.
-        if auth_present == 1 {
-            // RFC 5880, Section 6.8.6 #2 —
-            // <https://www.rfc-editor.org/rfc/rfc5880#section-6.8.6> — when
-            // the A bit is set, the minimum correct Length is 26.
-            if length < MIN_HEADER_SIZE_WITH_AUTH {
-                return Err(PacketError::InvalidHeader(
-                    "BFD auth present but length is less than minimum with auth",
-                ));
+        match auth_type {
+            // RFC 5880, Section 4.2 —
+            // <https://www.rfc-editor.org/rfc/rfc5880#section-4.2> —
+            // Simple Password: Auth Key ID followed by the password.
+            1 => {
+                push_auth_key_id(buf, data, offset);
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_PASSWORD],
+                    FieldValue::Bytes(&data[AUTH_KEY_ID_OFFSET + 1..auth_end]),
+                    offset + AUTH_KEY_ID_OFFSET + 1..offset + auth_end,
+                );
             }
-            let auth_type = data[24];
-            let auth_len = data[25] as usize;
-
-            // RFC 5880, Sections 4.2–4.4 — each authentication type has a
-            // fixed or minimum Auth Len including the Type and Length bytes
-            // themselves. Enforce these to reject malformed auth sections
-            // with missing fields such as the Key ID or fixed MD5/SHA1
-            // digest/hash.
-            //   - Simple Password (Section 4.2 —
-            //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>):
-            //     Type(1) + Len(1) + Key ID(1) + 1..=16 byte password ⇒ 4..=19
-            //   - Keyed / Meticulous Keyed MD5 (Section 4.3 —
-            //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>):
-            //     Auth Len is fixed at 24.
-            //   - Keyed / Meticulous Keyed SHA1 (Section 4.4 —
-            //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.4>):
-            //     Auth Len is fixed at 28.
-            let min_auth_len = match auth_type {
-                1 => MIN_AUTH_LEN_SIMPLE_PASSWORD,
-                2 | 3 => AUTH_LEN_MD5,
-                4 | 5 => AUTH_LEN_SHA1,
-                _ => MIN_AUTH_LEN_UNKNOWN,
-            };
-
-            if auth_len < min_auth_len {
-                return Err(PacketError::InvalidHeader(
-                    "BFD auth length is less than minimum for auth type",
-                ));
+            // RFC 5880, Section 4.3 —
+            // <https://www.rfc-editor.org/rfc/rfc5880#section-4.3> —
+            // Keyed MD5 / Meticulous Keyed MD5: Auth Key ID, Reserved,
+            // Sequence Number, Auth Key/Digest.
+            // RFC 5880, Section 4.4 —
+            // <https://www.rfc-editor.org/rfc/rfc5880#section-4.4> —
+            // Keyed SHA1 / Meticulous Keyed SHA1: same layout with an
+            // Auth Key/Hash.
+            2..=5 => {
+                push_auth_key_id(buf, data, offset);
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_AUTH_RESERVED],
+                    FieldValue::U8(data[AUTH_KEY_ID_OFFSET + 1]),
+                    offset + AUTH_KEY_ID_OFFSET + 1..offset + AUTH_SEQUENCE_OFFSET,
+                );
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_SEQUENCE_NUMBER],
+                    FieldValue::U32(read_be_u32(data, AUTH_SEQUENCE_OFFSET)?),
+                    offset + AUTH_SEQUENCE_OFFSET..offset + AUTH_DIGEST_OFFSET,
+                );
+                let fd = if auth_type <= 3 { FD_DIGEST } else { FD_HASH };
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[fd],
+                    FieldValue::Bytes(&data[AUTH_DIGEST_OFFSET..auth_end]),
+                    offset + AUTH_DIGEST_OFFSET..offset + auth_end,
+                );
             }
-            let auth_end = 24 + auth_len;
-            if auth_end > length {
-                return Err(PacketError::InvalidHeader(
-                    "BFD auth section exceeds packet length",
-                ));
-            }
-
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_AUTH_TYPE],
-                FieldValue::U8(auth_type),
-                offset + 24..offset + 25,
-            );
-            if auth_len > 2 {
+            // Unknown Auth Type: the body format is not defined, so it
+            // is kept as raw bytes.
+            _ => {
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_AUTH_DATA],
                     FieldValue::Bytes(&data[26..auth_end]),
@@ -530,10 +634,106 @@ impl Dissector for BfdDissector {
                 );
             }
         }
+    }
 
+    buf.end_layer();
+
+    Ok(DissectResult::new(length, DispatchHint::End))
+}
+
+/// Pushes the Auth Key ID octet shared by all defined authentication types.
+///
+/// RFC 5880, Sections 4.2–4.4 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>
+fn push_auth_key_id<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_AUTH_KEY_ID],
+        FieldValue::U8(data[AUTH_KEY_ID_OFFSET]),
+        offset + AUTH_KEY_ID_OFFSET..offset + AUTH_KEY_ID_OFFSET + 1,
+    );
+}
+
+/// Layer name used for BFD Control packets.
+const CONTROL_SHORT_NAME: &str = "BFD";
+
+/// Layer / display name used for BFD Echo packets.
+const ECHO_SHORT_NAME: &str = "BFD Echo";
+
+/// BFD Echo dissector (UDP port 3785).
+///
+/// RFC 5880, Section 5 — <https://www.rfc-editor.org/rfc/rfc5880#section-5> —
+/// "The payload of a BFD Echo packet is a local matter, since only the
+/// sending system ever processes the content." RFC 9747, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc9747#section-2> — "the Unaffiliated
+/// BFD Echo packet reuses the format of the BFD Control packet defined in
+/// \[RFC5880\]".
+///
+/// The payload is decoded as a Control packet (layer `BFD`, display name
+/// `BFD Echo`) when it validates as one. Otherwise a `BFD Echo` layer with
+/// an opaque `payload` field is emitted. An Echo packet never produces an
+/// error.
+pub struct BfdEchoDissector;
+
+/// Field descriptors for opaque BFD Echo packets.
+static ECHO_FIELD_DESCRIPTORS: &[FieldDescriptor] =
+    &[FieldDescriptor::new("payload", "Payload", FieldType::Bytes)];
+
+/// Index constants for `ECHO_FIELD_DESCRIPTORS`.
+const FD_ECHO_PAYLOAD: usize = 0;
+
+impl Dissector for BfdEchoDissector {
+    fn name(&self) -> &'static str {
+        "Bidirectional Forwarding Detection Echo"
+    }
+
+    fn short_name(&self) -> &'static str {
+        ECHO_SHORT_NAME
+    }
+
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        ECHO_FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<DissectResult, PacketError> {
+        let layer_count = buf.layers().len();
+        let field_count = buf.fields().len();
+        if let Ok(result) = dissect_control(data, buf, offset, Some(ECHO_SHORT_NAME)) {
+            return Ok(result);
+        }
+        // Not a valid Control packet: roll back anything the Control
+        // dissector pushed before it failed.
+        while buf.layers().len() > layer_count {
+            buf.pop_layer();
+        }
+        buf.truncate_fields(field_count);
+
+        buf.begin_layer(
+            ECHO_SHORT_NAME,
+            None,
+            ECHO_FIELD_DESCRIPTORS,
+            offset..offset + data.len(),
+        );
+        buf.push_field(
+            &ECHO_FIELD_DESCRIPTORS[FD_ECHO_PAYLOAD],
+            FieldValue::Bytes(data),
+            offset..offset + data.len(),
+        );
         buf.end_layer();
 
-        Ok(DissectResult::new(length, DispatchHint::End))
+        Ok(DissectResult::new(data.len(), DispatchHint::End))
     }
 }
 
@@ -559,6 +759,14 @@ mod tests {
     // | 4.2         | Simple Password too short (< 4) rejected   | test_simple_password_too_short    |
     // | 4.2         | Keyed MD5 wrong length rejected            | test_md5_wrong_length             |
     // | 4.2         | Keyed SHA1 wrong length rejected           | test_sha1_wrong_length            |
+    // | 4.2         | Auth section (unknown type, raw data)      | test_parse_with_auth_unknown_type |
+    // | 4.3         | Keyed MD5 fields split                     | test_parse_with_auth_md5          |
+    // | 4.3, 4.4    | Meticulous MD5 / SHA1 fields split         | test_parse_with_auth_meticulous_md5_and_sha1 |
+    // | 4.4         | Keyed SHA1 fields split                    | test_parse_with_auth_sha1         |
+    // | 5           | Echo: opaque payload                       | echo_opaque_payload               |
+    // | 5           | Echo: non-Control payload (version 0)      | echo_payload_with_invalid_version |
+    // | 5           | Echo: Control-like payload rolled back     | echo_control_with_bad_auth_rolls_back |
+    // | 5           | Echo: field descriptors                    | echo_field_descriptors            |
     // | 6.8.6 #1    | Version != 1 rejected                      | test_invalid_version              |
     // | 6.8.6 #2    | Invalid length (< 24)                      | test_invalid_length_field         |
     // | 6.8.6 #3    | Length > payload                           | test_length_exceeds_data          |
@@ -569,6 +777,12 @@ mod tests {
     // | ---         | Auth section exceeds length                | test_auth_section_exceeds_length  |
     // | ---         | Offset handling                            | test_dissect_with_offset          |
     // | ---         | Field descriptors                          | test_field_descriptors            |
+    //
+    // # RFC 9747 Coverage
+    //
+    // | RFC Section | Description                                | Test                              |
+    // |-------------|--------------------------------------------|-----------------------------------|
+    // | 2           | Unaffiliated Echo in Control format        | echo_unaffiliated_control_format  |
 
     /// Build a minimal BFD Control packet.
     #[allow(clippy::too_many_arguments)]
@@ -819,8 +1033,12 @@ mod tests {
             Some("Simple Password")
         );
         assert_eq!(
-            buf.field_by_name(layer, "auth_data").unwrap().value,
-            FieldValue::Bytes(&[0x41, 0x42])
+            buf.field_by_name(layer, "auth_key_id").unwrap().value,
+            FieldValue::U8(0x41)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "password").unwrap().value,
+            FieldValue::Bytes(&[0x42])
         );
     }
 
@@ -899,15 +1117,24 @@ mod tests {
             Some("Simple Password")
         );
         assert_eq!(
-            buf.field_by_name(layer, "auth_data").unwrap().value,
-            FieldValue::Bytes(&auth_data)
+            buf.field_by_name(layer, "auth_len").unwrap().value,
+            FieldValue::U8(9)
         );
+        let key_id = buf.field_by_name(layer, "auth_key_id").unwrap();
+        assert_eq!(key_id.value, FieldValue::U8(1));
+        assert_eq!(key_id.range, 26..27);
+        let password = buf.field_by_name(layer, "password").unwrap();
+        assert_eq!(password.value, FieldValue::Bytes(b"secret"));
+        assert_eq!(password.range, 27..33);
+        assert!(buf.field_by_name(layer, "auth_data").is_none());
+        assert!(buf.field_by_name(layer, "sequence_number").is_none());
     }
 
     #[test]
     fn test_parse_with_auth_sha1() {
-        // Keyed SHA1 authentication: type=4, key_id=1, reserved=0, seq=1, hash=20 bytes
-        let mut auth_data = vec![1, 0, 0, 0]; // key_id, reserved, reserved, reserved
+        // RFC 5880, Section 4.4 — Keyed SHA1: type=4, auth_len=28, key_id=1,
+        // reserved=0, seq=1, hash=20 bytes
+        let mut auth_data = vec![1, 0]; // key_id, reserved
         auth_data.extend_from_slice(&1u32.to_be_bytes()); // sequence number
         auth_data.extend_from_slice(&[0xAA; 20]); // SHA1 hash (20 bytes)
         let data = build_bfd_with_auth(1, 0, 3, 3, 0x1000, 0x2000, 4, &auth_data);
@@ -923,6 +1150,26 @@ mod tests {
             buf.resolve_display_name(layer, "auth_type_name"),
             Some("Keyed SHA1")
         );
+        assert_eq!(
+            buf.field_by_name(layer, "auth_len").unwrap().value,
+            FieldValue::U8(28)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "auth_key_id").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "auth_reserved").unwrap().value,
+            FieldValue::U8(0)
+        );
+        let seq = buf.field_by_name(layer, "sequence_number").unwrap();
+        assert_eq!(seq.value, FieldValue::U32(1));
+        assert_eq!(seq.range, 28..32);
+        let hash = buf.field_by_name(layer, "hash").unwrap();
+        assert_eq!(hash.value, FieldValue::Bytes(&[0xAA; 20]));
+        assert_eq!(hash.range, 32..52);
+        assert!(buf.field_by_name(layer, "digest").is_none());
+        assert!(buf.field_by_name(layer, "auth_data").is_none());
     }
 
     #[test]
@@ -997,13 +1244,13 @@ mod tests {
     #[test]
     fn test_field_descriptors() {
         let descriptors = BfdDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 18);
+        assert_eq!(descriptors.len(), 25);
         assert_eq!(descriptors[0].name, "version");
-        assert_eq!(descriptors[descriptors.len() - 1].name, "auth_data");
+        assert_eq!(descriptors[FD_AUTH_DATA].name, "auth_data");
+        assert_eq!(descriptors[descriptors.len() - 1].name, "hash");
         // Check optional fields
         assert!(!descriptors[0].optional); // version
-        assert!(descriptors[16].optional); // auth_type
-        assert!(descriptors[17].optional); // auth_data
+        assert!(descriptors[FD_AUTH_TYPE..].iter().all(|d| d.optional));
     }
 
     #[test]
@@ -1150,6 +1397,165 @@ mod tests {
             buf.resolve_display_name(layer, "auth_type_name"),
             Some("Keyed MD5")
         );
+        assert_eq!(
+            buf.field_by_name(layer, "auth_len").unwrap().value,
+            FieldValue::U8(24)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "auth_key_id").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "auth_reserved").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "sequence_number").unwrap().value,
+            FieldValue::U32(42)
+        );
+        let digest = buf.field_by_name(layer, "digest").unwrap();
+        assert_eq!(digest.value, FieldValue::Bytes(&[0xBB; 16]));
+        assert_eq!(digest.range, 32..48);
+        assert!(buf.field_by_name(layer, "hash").is_none());
+    }
+
+    #[test]
+    fn test_parse_with_auth_meticulous_md5_and_sha1() {
+        // RFC 5880, Sections 4.3 and 4.4 — Meticulous variants share the
+        // Keyed layouts.
+        let mut md5 = vec![7, 0];
+        md5.extend_from_slice(&5u32.to_be_bytes());
+        md5.extend_from_slice(&[0x11; 16]);
+        let data = build_bfd_with_auth(1, 0, 3, 3, 0x1000, 0x2000, 3, &md5);
+        let mut buf = DissectBuffer::new();
+        BfdDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "digest").unwrap().value,
+            FieldValue::Bytes(&[0x11; 16])
+        );
+
+        let mut sha1 = vec![7, 0];
+        sha1.extend_from_slice(&6u32.to_be_bytes());
+        sha1.extend_from_slice(&[0x22; 20]);
+        let data = build_bfd_with_auth(1, 0, 3, 3, 0x1000, 0x2000, 5, &sha1);
+        let mut buf = DissectBuffer::new();
+        BfdDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "sequence_number").unwrap().value,
+            FieldValue::U32(6)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "hash").unwrap().value,
+            FieldValue::Bytes(&[0x22; 20])
+        );
+    }
+
+    #[test]
+    fn test_parse_with_auth_unknown_type() {
+        // Unknown Auth Type: the body format is not defined, so it is kept
+        // as raw bytes after the Auth Type and Auth Len octets.
+        let data = build_bfd_with_auth(1, 0, 3, 3, 0x1000, 0x2000, 9, &[1, 2, 3]);
+        let mut buf = DissectBuffer::new();
+        BfdDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "auth_len").unwrap().value,
+            FieldValue::U8(5)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "auth_data").unwrap().value,
+            FieldValue::Bytes(&[1, 2, 3])
+        );
+        assert!(buf.field_by_name(layer, "auth_key_id").is_none());
+    }
+
+    #[test]
+    fn echo_opaque_payload() {
+        // RFC 5880, Section 5 — the Echo payload is a local matter. An
+        // 8-byte vendor payload must not be treated as an error.
+        let data = [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2A];
+        let mut buf = DissectBuffer::new();
+        let result = BfdEchoDissector.dissect(&data, &mut buf, 42).unwrap();
+        assert_eq!(result.bytes_consumed, 8);
+        assert!(matches!(result.next, DispatchHint::End));
+        assert_eq!(buf.layers().len(), 1);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.name, "BFD Echo");
+        assert_eq!(layer.range, 42..50);
+        let payload = buf.field_by_name(layer, "payload").unwrap();
+        assert_eq!(payload.value, FieldValue::Bytes(&data));
+        assert_eq!(payload.range, 42..50);
+        assert_eq!(buf.fields().len(), 1);
+    }
+
+    #[test]
+    fn echo_payload_with_invalid_version() {
+        // 24 bytes whose version bits are 0: not a Control packet.
+        let data: Vec<u8> = (0..24u8)
+            .map(|i| [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef][i as usize % 8])
+            .collect();
+        let mut buf = DissectBuffer::new();
+        let result = BfdEchoDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 24);
+        assert_eq!(buf.layers().len(), 1);
+        assert_eq!(buf.layers()[0].name, "BFD Echo");
+    }
+
+    #[test]
+    fn echo_unaffiliated_control_format() {
+        // RFC 9747, Section 2 — Unaffiliated BFD Echo packets reuse the
+        // Control packet format on UDP port 3785.
+        let data = build_bfd(
+            1, 0, 1, 0, 0, 0, 0, 0, 0, 3, 24, 0x1234, 0, 1_000_000, 1_000_000, 0,
+        );
+        let mut buf = DissectBuffer::new();
+        let result = BfdEchoDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 24);
+        assert_eq!(buf.layers().len(), 1);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.name, "BFD");
+        assert_eq!(layer.display_name, Some("BFD Echo"));
+        assert_eq!(
+            buf.field_by_name(layer, "my_discriminator").unwrap().value,
+            FieldValue::U32(0x1234)
+        );
+        assert!(buf.field_by_name(layer, "payload").is_none());
+    }
+
+    #[test]
+    fn echo_control_with_bad_auth_rolls_back() {
+        // Control header validates but the auth section does not: the
+        // partially pushed Control layer must be discarded and the payload
+        // shown as opaque Echo data.
+        let mut pkt = build_bfd(
+            1, 0, 3, 0, 0, 0, 1, 0, 0, 3, 28, 1, 0, 1_000_000, 1_000_000, 0,
+        );
+        pkt.extend_from_slice(&[1, 10, 1, b'x']);
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("UDP", None, &[], 0..8);
+        buf.end_layer();
+        let fields_before = buf.fields().len();
+        let result = BfdEchoDissector.dissect(&pkt, &mut buf, 8).unwrap();
+        assert_eq!(result.bytes_consumed, 28);
+        assert_eq!(buf.layers().len(), 2);
+        let layer = &buf.layers()[1];
+        assert_eq!(layer.name, "BFD Echo");
+        assert_eq!(buf.fields().len(), fields_before + 1);
+        assert_eq!(
+            buf.field_by_name(layer, "payload").unwrap().value,
+            FieldValue::Bytes(&pkt)
+        );
+    }
+
+    #[test]
+    fn echo_field_descriptors() {
+        let fds = BfdEchoDissector.field_descriptors();
+        assert_eq!(fds.len(), 1);
+        assert_eq!(fds[0].name, "payload");
+        assert_eq!(BfdEchoDissector.short_name(), "BFD Echo");
+        assert!(!BfdEchoDissector.name().is_empty());
     }
 
     #[test]
@@ -1230,5 +1636,6 @@ mod tests {
         }
 
         assert_layer_and_references(&BfdDissector);
+        assert_layer_and_references(&BfdEchoDissector);
     }
 }
