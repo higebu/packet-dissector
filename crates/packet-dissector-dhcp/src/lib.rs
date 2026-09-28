@@ -3,6 +3,13 @@
 //! ## References
 //! - RFC 2131: <https://www.rfc-editor.org/rfc/rfc2131>
 //! - RFC 2132 (DHCP Options): <https://www.rfc-editor.org/rfc/rfc2132>
+//! - RFC 951 (BOOTP): <https://www.rfc-editor.org/rfc/rfc951>
+//! - RFC 1542 (BOOTP Clarifications): <https://www.rfc-editor.org/rfc/rfc1542>
+//! - RFC 4390 (DHCP over InfiniBand): <https://www.rfc-editor.org/rfc/rfc4390>
+//! - RFC 3203 (DHCP FORCERENEW): <https://www.rfc-editor.org/rfc/rfc3203>
+//! - RFC 4388 (DHCP Leasequery): <https://www.rfc-editor.org/rfc/rfc4388>
+//! - RFC 6926 (DHCPv4 Bulk Leasequery): <https://www.rfc-editor.org/rfc/rfc6926>
+//! - RFC 7724 (Active DHCPv4 Lease Query): <https://www.rfc-editor.org/rfc/rfc7724>
 //! - RFC 3396 (Long Options): <https://www.rfc-editor.org/rfc/rfc3396>
 //! - RFC 4361 (Client Identifier): <https://www.rfc-editor.org/rfc/rfc4361>
 //! - RFC 3046 (Relay Agent Information): <https://www.rfc-editor.org/rfc/rfc3046>
@@ -105,6 +112,8 @@ const FD_VENDOR_CLASS_IDENTIFIER: usize = 79;
 const FD_VENDOR_SPECIFIC_INFO: usize = 80;
 const FD_X_WINDOW_DISPLAY_MANAGER: usize = 81;
 const FD_X_WINDOW_FONT_SERVER: usize = 82;
+const FD_VEND: usize = 83;
+const FD_CHADDR_BYTES: usize = 84;
 
 // Fixed header fields are always present; DHCP options are dynamic
 // and represented as individual option fields at the top level.
@@ -120,7 +129,11 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("yiaddr", "Your IP Address", FieldType::Ipv4Addr),
     FieldDescriptor::new("siaddr", "Server IP Address", FieldType::Ipv4Addr),
     FieldDescriptor::new("giaddr", "Gateway IP Address", FieldType::Ipv4Addr),
-    FieldDescriptor::new("chaddr", "Client Hardware Address", FieldType::MacAddr),
+    // RFC 2131, Section 2 — chaddr holds `hlen` octets.
+    // <https://www.rfc-editor.org/rfc/rfc2131#section-2>
+    // A 6-octet address is emitted as `chaddr`; any other length as
+    // `chaddr_bytes` (see `CHADDR_BYTES` below).
+    FieldDescriptor::new("chaddr", "Client Hardware Address", FieldType::MacAddr).optional(),
     FieldDescriptor::new("sname", "Server Host Name", FieldType::Bytes)
         .optional()
         .with_format_fn(format_utf8_lossy),
@@ -354,6 +367,14 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::Array,
     )
     .optional(),
+    // RFC 951, Section 3 — BOOTP vendor-specific area (only when the RFC 2132
+    // magic cookie is absent)
+    // <https://www.rfc-editor.org/rfc/rfc951#section-3>
+    FieldDescriptor::new("vend", "Vendor-Specific Area", FieldType::Bytes).optional(),
+    // RFC 2131, Section 2 — chaddr when `hlen` is not 6 (the first `hlen`
+    // octets, at most 16)
+    // <https://www.rfc-editor.org/rfc/rfc2131#section-2>
+    FieldDescriptor::new("chaddr_bytes", "Client Hardware Address", FieldType::Bytes).optional(),
 ];
 
 /// Child field descriptor indices for [`CLIENT_ID_CHILDREN`].
@@ -464,12 +485,31 @@ static STATIC_ROUTE_CHILD_FIELDS: &[FieldDescriptor] = &[
 /// Minimum DHCP message size: fixed header (236) + magic cookie (4).
 const MIN_MSG_SIZE: usize = 240;
 
+/// Minimum BOOTP message size: fixed header (236) + 64-octet `vend` area.
+///
+/// RFC 951, Section 3 — "vend    64      optional vendor-specific area"
+/// <https://www.rfc-editor.org/rfc/rfc951#section-3>
+const MIN_BOOTP_MSG_SIZE: usize = 300;
+
+/// Byte offset of the `chaddr` field within the fixed header.
+const CHADDR_OFFSET: usize = 28;
+
+/// Size of the `chaddr` field in octets.
+///
+/// RFC 2131, Section 2 — <https://www.rfc-editor.org/rfc/rfc2131#section-2>
+const CHADDR_SIZE: usize = 16;
+
 /// DHCP magic cookie: 99.130.83.99 (RFC 2131, Section 3).
 const MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
 
 /// Returns a human-readable name for DHCP message type option values.
 ///
 /// RFC 2132, Section 9.6 — DHCP Message Type option (option 53).
+/// <https://www.rfc-editor.org/rfc/rfc2132#section-9.6>
+///
+/// Later values are listed in the IANA "BOOTP and DHCP Parameters" registry,
+/// "Message Type 53 Values":
+/// <https://www.iana.org/assignments/bootp-dhcp-parameters/bootp-dhcp-parameters.xhtml#message-type-53>
 fn dhcp_message_type_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("DISCOVER"),
@@ -480,6 +520,20 @@ fn dhcp_message_type_name(v: u8) -> Option<&'static str> {
         6 => Some("NAK"),
         7 => Some("RELEASE"),
         8 => Some("INFORM"),
+        // RFC 3203, Section 4 — <https://www.rfc-editor.org/rfc/rfc3203#section-4>
+        9 => Some("FORCERENEW"),
+        // RFC 4388, Section 6.1 — <https://www.rfc-editor.org/rfc/rfc4388#section-6.1>
+        10 => Some("LEASEQUERY"),
+        11 => Some("LEASEUNASSIGNED"),
+        12 => Some("LEASEUNKNOWN"),
+        13 => Some("LEASEACTIVE"),
+        // RFC 6926, Section 6.2.1 — <https://www.rfc-editor.org/rfc/rfc6926#section-6.2.1>
+        14 => Some("BULKLEASEQUERY"),
+        15 => Some("LEASEQUERYDONE"),
+        // RFC 7724, Section 5.2.1 — <https://www.rfc-editor.org/rfc/rfc7724#section-5.2.1>
+        16 => Some("ACTIVELEASEQUERY"),
+        17 => Some("LEASEQUERYSTATUS"),
+        18 => Some("TLS"),
         _ => None,
     }
 }
@@ -1195,6 +1249,41 @@ static REFERENCES: &[SpecReference] = &[
         "Domain names - implementation and specification",
         "https://www.rfc-editor.org/rfc/rfc1035",
     ),
+    SpecReference::new(
+        "RFC 951",
+        "Bootstrap Protocol",
+        "https://www.rfc-editor.org/rfc/rfc951",
+    ),
+    SpecReference::new(
+        "RFC 1542",
+        "Clarifications and Extensions for the Bootstrap Protocol",
+        "https://www.rfc-editor.org/rfc/rfc1542",
+    ),
+    SpecReference::new(
+        "RFC 4390",
+        "Dynamic Host Configuration Protocol (DHCP) over InfiniBand",
+        "https://www.rfc-editor.org/rfc/rfc4390",
+    ),
+    SpecReference::new(
+        "RFC 3203",
+        "DHCP reconfigure extension",
+        "https://www.rfc-editor.org/rfc/rfc3203",
+    ),
+    SpecReference::new(
+        "RFC 4388",
+        "Dynamic Host Configuration Protocol (DHCP) Leasequery",
+        "https://www.rfc-editor.org/rfc/rfc4388",
+    ),
+    SpecReference::new(
+        "RFC 6926",
+        "DHCPv4 Bulk Leasequery",
+        "https://www.rfc-editor.org/rfc/rfc6926",
+    ),
+    SpecReference::new(
+        "RFC 7724",
+        "Active DHCPv4 Lease Query",
+        "https://www.rfc-editor.org/rfc/rfc7724",
+    ),
 ];
 
 impl Dissector for DhcpDissector {
@@ -1231,8 +1320,20 @@ impl Dissector for DhcpDissector {
             });
         }
 
-        // RFC 2131, Section 2 — Verify magic cookie
-        if data[236..240] != MAGIC_COOKIE {
+        // RFC 2131, Section 3 — verify the magic cookie.
+        // <https://www.rfc-editor.org/rfc/rfc2131#section-3>
+        // RFC 2132, Section 2 — the cookie only marks the vendor area as
+        // holding options.
+        // <https://www.rfc-editor.org/rfc/rfc2132#section-2>
+        // Without it the message is plain BOOTP (RFC 951, Section 3), whose
+        // `vend` area is exposed as raw bytes.
+        // <https://www.rfc-editor.org/rfc/rfc951#section-3>
+        let is_bootp = data[236..240] != MAGIC_COOKIE;
+        // RFC 1542, Section 2.1 — "The 'op' (opcode) field of the message must
+        // contain either the code for a BOOTREQUEST (1) or the code for a
+        // BOOTREPLY (2)."
+        // <https://www.rfc-editor.org/rfc/rfc1542#section-2.1>
+        if is_bootp && (data.len() < MIN_BOOTP_MSG_SIZE || !matches!(data[0], 1 | 2)) {
             return Err(PacketError::InvalidHeader("DHCP magic cookie not found"));
         }
 
@@ -1251,12 +1352,27 @@ impl Dissector for DhcpDissector {
         let siaddr: [u8; 4] = [data[20], data[21], data[22], data[23]];
         let giaddr: [u8; 4] = [data[24], data[25], data[26], data[27]];
 
-        // chaddr: first `hlen` bytes of the 16-byte field
-        let mut chaddr_bytes = [0u8; 6];
-        if hlen >= 6 {
-            chaddr_bytes.copy_from_slice(&data[28..34]);
-        }
+        // RFC 2131, Section 2 — "chaddr  16  Client hardware address." and
+        // "hlen  1  Hardware address length (e.g.  '6' for 10mb ethernet)."
+        // <https://www.rfc-editor.org/rfc/rfc2131#section-2>
+        // Only the first `hlen` octets are the address. An `hlen` larger than
+        // the field is clamped to its 16 octets. RFC 4390, Section 2.1 sets
+        // `hlen` to 0 for InfiniBand, which yields an empty address.
+        // <https://www.rfc-editor.org/rfc/rfc4390#section-2.1>
+        let chaddr_len = core::cmp::min(hlen as usize, CHADDR_SIZE);
+        let chaddr_raw = &data[CHADDR_OFFSET..CHADDR_OFFSET + chaddr_len];
+        let (chaddr_fd, chaddr_value) = match *chaddr_raw {
+            [a, b, c, d, e, f] => (
+                &FIELD_DESCRIPTORS[FD_CHADDR],
+                FieldValue::MacAddr(MacAddr([a, b, c, d, e, f])),
+            ),
+            _ => (
+                &FIELD_DESCRIPTORS[FD_CHADDR_BYTES],
+                FieldValue::Bytes(chaddr_raw),
+            ),
+        };
 
+        let field_start = buf.fields().len();
         buf.begin_layer(
             self.short_name(),
             None,
@@ -1321,9 +1437,9 @@ impl Dissector for DhcpDissector {
             offset + 24..offset + 28,
         );
         buf.push_field(
-            &FIELD_DESCRIPTORS[FD_CHADDR],
-            FieldValue::MacAddr(MacAddr(chaddr_bytes)),
-            offset + 28..offset + 44,
+            chaddr_fd,
+            chaddr_value,
+            offset + CHADDR_OFFSET..offset + CHADDR_OFFSET + chaddr_len,
         );
 
         // Parse options (after magic cookie at offset 240)
@@ -1331,7 +1447,20 @@ impl Dissector for DhcpDissector {
         let mut total_consumed = options_start;
         let mut overload_value: Option<u8> = None;
 
-        if data.len() > options_start {
+        if is_bootp {
+            // RFC 951, Section 3 — "vend    64      optional vendor-specific area"
+            // <https://www.rfc-editor.org/rfc/rfc951#section-3>
+            // RFC 1542, Section 2.1 — "BOOTP messages which, according to the
+            // IP Total Length and UDP Length fields, are larger than the
+            // minimum size specified by [1] MUST also be accepted."
+            // <https://www.rfc-editor.org/rfc/rfc1542#section-2.1>
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_VEND],
+                FieldValue::Bytes(&data[OPTIONS_FIXED_END..]),
+                offset + OPTIONS_FIXED_END..offset + data.len(),
+            );
+            total_consumed = data.len();
+        } else if data.len() > options_start {
             let (opt_consumed, overload) = parse_options(buf, data, offset, options_start)?;
             total_consumed = options_start + opt_consumed;
             overload_value = overload;
@@ -1383,8 +1512,19 @@ impl Dissector for DhcpDissector {
             );
         }
 
+        // RFC 2131, Section 3 — "One particular option - the "DHCP message
+        // type" option - must be included in every DHCP message."
+        // <https://www.rfc-editor.org/rfc/rfc2131#section-3>
+        // A message without it is BOOTP, with or without RFC 1497 vendor
+        // extensions.
+        let has_message_type = buf.fields()[field_start..]
+            .iter()
+            .any(|f| f.name() == FIELD_DESCRIPTORS[FD_DHCP_MESSAGE_TYPE].name);
         if let Some(layer) = buf.last_layer_mut() {
             layer.range = offset..offset + total_consumed;
+            if !has_message_type {
+                layer.display_name = Some("BOOTP");
+            }
         }
         buf.end_layer();
 
@@ -1410,6 +1550,33 @@ mod tests {
     // | 2           | file field (string, not overloaded) | parse_dhcp_file_field_exposed_when_not_overloaded |
     // | 2           | sname suppressed when overloaded    | parse_dhcp_sname_not_exposed_when_overloaded_sname |
     // | 2           | file suppressed when overloaded     | parse_dhcp_file_not_exposed_when_overloaded_file |
+    // | 2           | chaddr, htype 1 / hlen 6 (MAC)      | parse_dhcp_chaddr_ethernet_mac              |
+    // | 2           | chaddr, hlen 8                      | parse_dhcp_chaddr_hlen_8                    |
+    // | 2           | chaddr, hlen 1                      | parse_dhcp_chaddr_hlen_1                    |
+    // | 2           | chaddr, hlen > 16 clamped           | parse_dhcp_chaddr_hlen_over_16_clamped      |
+    // | 2           | chaddr value types match descriptors| parse_dhcp_chaddr_value_types_match_descriptors |
+    // | 3           | Option 53 absent -> BOOTP label     | parse_bootp_with_vendor_extensions_labeled_bootp |
+    //
+    // # RFC 4390 Coverage
+    //
+    // | RFC Section | Description                         | Test                                        |
+    // |-------------|-------------------------------------|---------------------------------------------|
+    // | 2.1         | InfiniBand hlen 0, no chaddr        | parse_dhcp_chaddr_hlen_0                    |
+    //
+    // # RFC 951 (BOOTP) Coverage
+    //
+    // | RFC Section | Description                         | Test                                        |
+    // |-------------|-------------------------------------|---------------------------------------------|
+    // | 3           | BOOTP message, vend without cookie  | parse_bootp_without_magic_cookie            |
+    // | 3           | DHCP message has no vend field      | parse_dhcp_has_no_vend_field                |
+    // | 3           | Short message without cookie        | parse_bootp_short_without_magic_cookie_rejected |
+    //
+    // # RFC 1542 (BOOTP Clarifications) Coverage
+    //
+    // | RFC Section | Description                         | Test                                        |
+    // |-------------|-------------------------------------|---------------------------------------------|
+    // | 2.1         | BOOTP message larger than 300 octets| parse_bootp_longer_than_300_octets          |
+    // | 2.1         | op must be BOOTREQUEST/BOOTREPLY    | parse_bootp_invalid_op_rejected             |
     //
     // # RFC 2132 Coverage
     //
@@ -1477,6 +1644,8 @@ mod tests {
     // | 9.4         | TFTP Server Name                    | parse_dhcp_tftp_server_name                 |
     // | 9.5         | Bootfile Name                       | parse_dhcp_bootfile_name                    |
     // | 9.6         | DHCP Message Type                   | parse_dhcp_discover                         |
+    // | 9.6         | Message Types 9-18 (IANA)           | dhcp_message_type_names_later_registrations |
+    // | 9.6 / 3203  | DHCPFORCERENEW (RFC 3203, 4)        | parse_dhcp_forcerenew_message_type          |
     // | 9.7         | Server Identifier                   | parse_dhcp_offer                            |
     // | 9.8         | Parameter Request List              | parse_dhcp_parameter_request_list           |
     // | 9.9         | Message                             | parse_dhcp_message_option                   |
@@ -1532,6 +1701,258 @@ mod tests {
         pkt.push(code);
         pkt.push(data.len() as u8);
         pkt.extend_from_slice(data);
+    }
+
+    /// Build a DHCPDISCOVER with the given htype/hlen and raw chaddr bytes.
+    fn build_discover_with_hw(htype: u8, hlen: u8, chaddr: &[u8]) -> Vec<u8> {
+        let mut pkt = build_dhcp_base(1, 0x01020304, [0; 6], [0; 4]);
+        pkt[1] = htype;
+        pkt[2] = hlen;
+        pkt[28..28 + chaddr.len()].copy_from_slice(chaddr);
+        push_option(&mut pkt, 53, &[1]);
+        pkt.push(255);
+        pkt
+    }
+
+    /// RFC 2131, Section 2 — Ethernet (htype 1, hlen 6): chaddr is a MAC
+    /// address occupying the first `hlen` octets of the field.
+    #[test]
+    fn parse_dhcp_chaddr_ethernet_mac() {
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let pkt = build_discover_with_hw(1, 6, &mac);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let f = buf.field_by_name(&buf.layers()[0], "chaddr").unwrap();
+        assert_eq!(f.value, FieldValue::MacAddr(MacAddr(mac)));
+        assert_eq!(f.range, 28..34);
+        assert!(
+            buf.field_by_name(&buf.layers()[0], "chaddr_bytes")
+                .is_none()
+        );
+    }
+
+    /// Every emitted field's value type matches its descriptor, whatever
+    /// `hlen` is.
+    #[test]
+    fn parse_dhcp_chaddr_value_types_match_descriptors() {
+        for (htype, hlen) in [(1u8, 6u8), (0x1b, 8), (7, 1), (32, 0), (1, 20)] {
+            let pkt = build_discover_with_hw(htype, hlen, &[0x42; 16][..hlen.min(16) as usize]);
+            let mut buf = DissectBuffer::new();
+            DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            for f in buf.layer_fields(&buf.layers()[0]) {
+                assert_eq!(
+                    f.value.field_type(),
+                    f.descriptor.field_type,
+                    "hlen {hlen}: field {}",
+                    f.name()
+                );
+            }
+        }
+    }
+
+    /// RFC 1542, Section 2.1 — "The 'op' (opcode) field of the message must
+    /// contain either the code for a BOOTREQUEST (1) or the code for a
+    /// BOOTREPLY (2)." Without the magic cookie and a valid op, the payload
+    /// is not BOOTP.
+    #[test]
+    fn parse_bootp_invalid_op_rejected() {
+        let mut data = vec![0u8; 300];
+        data[0] = 0x47;
+        let mut buf = DissectBuffer::new();
+        let err = DhcpDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(err, PacketError::InvalidHeader(_)));
+    }
+
+    /// RFC 2131, Section 3 — the DHCP message type option "must be included
+    /// in every DHCP message". A message with the RFC 1497 cookie but no
+    /// option 53 is a BOOTP message with vendor extensions.
+    #[test]
+    fn parse_bootp_with_vendor_extensions_labeled_bootp() {
+        let mut pkt = build_dhcp_base(2, 5, [0; 6], [192, 0, 2, 10]);
+        push_option(&mut pkt, 1, &[255, 255, 255, 0]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.protocol_name(), "BOOTP");
+        assert!(buf.field_by_name(layer, "subnet_mask").is_some());
+        assert!(buf.field_by_name(layer, "vend").is_none());
+    }
+
+    /// RFC 2131, Section 2 — a hardware address longer than 6 octets
+    /// (EUI-64, htype 27, hlen 8) is kept whole.
+    #[test]
+    fn parse_dhcp_chaddr_hlen_8() {
+        let hw = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
+        let pkt = build_discover_with_hw(0x1b, 8, &hw);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
+        assert_eq!(f.value, FieldValue::Bytes(&hw));
+        assert_eq!(f.range, 28..36);
+    }
+
+    /// RFC 2131, Section 2 — a 1-octet hardware address (ARCNET, htype 7).
+    #[test]
+    fn parse_dhcp_chaddr_hlen_1() {
+        let pkt = build_discover_with_hw(7, 1, &[0x2a]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
+        assert_eq!(f.value, FieldValue::Bytes(&[0x2a]));
+        assert_eq!(f.range, 28..29);
+    }
+
+    /// RFC 4390, Section 2.1 — InfiniBand uses hlen 0 and no chaddr.
+    #[test]
+    fn parse_dhcp_chaddr_hlen_0() {
+        let pkt = build_discover_with_hw(32, 0, &[]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
+        assert_eq!(f.value, FieldValue::Bytes(&[]));
+        assert_eq!(f.range, 28..28);
+    }
+
+    /// RFC 2131, Section 2 — chaddr is 16 octets, so an hlen above 16 is
+    /// clamped to the field size.
+    #[test]
+    fn parse_dhcp_chaddr_hlen_over_16_clamped() {
+        let hw: Vec<u8> = (1..=16).collect();
+        let pkt = build_discover_with_hw(1, 20, &hw);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "chaddr").is_none());
+        let f = buf.field_by_name(layer, "chaddr_bytes").unwrap();
+        assert_eq!(f.value, FieldValue::Bytes(&hw));
+        assert_eq!(f.range, 28..44);
+        assert_eq!(
+            buf.field_by_name(layer, "hlen").unwrap().value,
+            FieldValue::U8(20)
+        );
+    }
+
+    /// RFC 951, Section 3 — a BOOTP message whose 64-octet `vend` area
+    /// does not start with the RFC 2132 magic cookie.
+    #[test]
+    fn parse_bootp_without_magic_cookie() {
+        let mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let mut pkt = build_dhcp_base(1, 0xCAFEBABE, mac, [0; 4]);
+        pkt.truncate(236);
+        pkt[108..116].copy_from_slice(b"pxelinux");
+        let mut vend = [0u8; 64];
+        vend[0] = 0xde;
+        vend[63] = 0xad;
+        pkt.extend_from_slice(&vend);
+        assert_eq!(pkt.len(), 300);
+
+        let mut buf = DissectBuffer::new();
+        let result = DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 300);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.name, "DHCP");
+        assert_eq!(layer.protocol_name(), "BOOTP");
+        assert_eq!(layer.range, 0..300);
+        assert_eq!(
+            buf.field_by_name(layer, "xid").unwrap().value,
+            FieldValue::U32(0xCAFEBABE)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "chaddr").unwrap().value,
+            FieldValue::MacAddr(MacAddr(mac))
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "file").unwrap().value,
+            FieldValue::Bytes(b"pxelinux")
+        );
+        let v = buf.field_by_name(layer, "vend").unwrap();
+        assert_eq!(v.value, FieldValue::Bytes(&vend));
+        assert_eq!(v.range, 236..300);
+        assert!(buf.field_by_name(layer, "dhcp_message_type").is_none());
+    }
+
+    /// RFC 1542, Section 2.1 — BOOTP messages larger than 300 octets "MUST
+    /// also be accepted"; the whole area after the fixed header is `vend`.
+    #[test]
+    fn parse_bootp_longer_than_300_octets() {
+        let mut pkt = build_dhcp_base(2, 7, [0; 6], [0; 4]);
+        pkt.truncate(236);
+        pkt.extend_from_slice(&[0x5a; 100]);
+        let mut buf = DissectBuffer::new();
+        let result = DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 336);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.protocol_name(), "BOOTP");
+        let v = buf.field_by_name(layer, "vend").unwrap();
+        assert_eq!(v.value, FieldValue::Bytes(&[0x5a; 100]));
+        assert_eq!(v.range, 236..336);
+    }
+
+    /// A DHCP message (with the magic cookie) keeps the DHCP display name
+    /// and has no `vend` field.
+    #[test]
+    fn parse_dhcp_has_no_vend_field() {
+        let pkt = build_discover_with_hw(1, 6, &[0; 6]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.protocol_name(), "DHCP");
+        assert!(buf.field_by_name(layer, "vend").is_none());
+    }
+
+    /// Without the magic cookie, a message shorter than the 300-octet
+    /// BOOTP message (RFC 951, Section 3) is rejected.
+    #[test]
+    fn parse_bootp_short_without_magic_cookie_rejected() {
+        let data = vec![0u8; 299];
+        let mut buf = DissectBuffer::new();
+        let err = DhcpDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(err, PacketError::InvalidHeader(_)));
+    }
+
+    /// DHCP Message Type values 9-18 (IANA "BOOTP and DHCP Parameters",
+    /// Message Type 53 Values).
+    #[test]
+    fn dhcp_message_type_names_later_registrations() {
+        let expected = [
+            (9, "FORCERENEW"),
+            (10, "LEASEQUERY"),
+            (11, "LEASEUNASSIGNED"),
+            (12, "LEASEUNKNOWN"),
+            (13, "LEASEACTIVE"),
+            (14, "BULKLEASEQUERY"),
+            (15, "LEASEQUERYDONE"),
+            (16, "ACTIVELEASEQUERY"),
+            (17, "LEASEQUERYSTATUS"),
+            (18, "TLS"),
+        ];
+        for (v, name) in expected {
+            assert_eq!(dhcp_message_type_name(v), Some(name), "type {v}");
+        }
+        assert_eq!(dhcp_message_type_name(0), None);
+        assert_eq!(dhcp_message_type_name(19), None);
+    }
+
+    /// RFC 3203, Section 4 — DHCPFORCERENEW resolves through option 53.
+    #[test]
+    fn parse_dhcp_forcerenew_message_type() {
+        let mut pkt = build_dhcp_base(2, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 53, &[9]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "dhcp_message_type_name"),
+            Some("FORCERENEW")
+        );
     }
 
     #[test]

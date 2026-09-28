@@ -2,6 +2,11 @@
 //!
 //! ## References
 //! - RFC 3931, Section 5.1: <https://www.rfc-editor.org/rfc/rfc3931#section-5.1>
+//! - RFC 3931, Section 5.4: <https://www.rfc-editor.org/rfc/rfc3931#section-5.4>
+//! - RFC 3931, Section 10.1: <https://www.rfc-editor.org/rfc/rfc3931#section-10.1>
+//! - RFC 2661, Section 4.4: <https://www.rfc-editor.org/rfc/rfc2661#section-4.4>
+//! - IANA L2TP Control Message Attribute Value Pairs:
+//!   <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-1>
 
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -22,12 +27,23 @@ static FD_INLINE_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value",
 static FD_INLINE_VENDOR_ID: FieldDescriptor =
     FieldDescriptor::new("vendor_id", "Vendor ID", FieldType::U16);
 
-/// Map an L2TPv3 base-protocol Attribute Type (Vendor ID=0) to its AVP name.
+/// Map an IETF (Vendor ID=0) Attribute Type to its AVP name.
 ///
-/// RFC 3931, Section 5.4 — Control Message Attribute Value Pairs.
+/// The Attribute Type number space is shared by L2TPv2 and L2TPv3.
+/// RFC 3931, Section 10.1 — "This number space is managed by IANA as per
+/// [RFC3438]."
+/// <https://www.rfc-editor.org/rfc/rfc3931#section-10.1>
+///
+/// Names follow the IANA "L2TP Control Message Attribute Value Pairs"
+/// registry, with the trailing "AVP" dropped. Where RFC 3931, Section 5.4
+/// gives an existing type a new name, the L2TPv3 name is used
+/// (15 Serial Number, 34 Circuit Errors); type 13 uses the RFC 2661,
+/// Section 4.4.3 heading "Challenge Response".
 /// <https://www.rfc-editor.org/rfc/rfc3931#section-5.4>
+/// <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-1>
 pub(crate) fn avp_name(attribute_type: u16) -> Option<&'static str> {
     match attribute_type {
+        // RFC 2661 — https://www.rfc-editor.org/rfc/rfc2661
         0 => Some("Message Type"),
         1 => Some("Result Code"),
         2 => Some("Protocol Version"),
@@ -37,32 +53,122 @@ pub(crate) fn avp_name(attribute_type: u16) -> Option<&'static str> {
         6 => Some("Firmware Revision"),
         7 => Some("Host Name"),
         8 => Some("Vendor Name"),
-        9 => Some("Assigned Control Connection ID"),
+        9 => Some("Assigned Tunnel ID"),
         10 => Some("Receive Window Size"),
         11 => Some("Challenge"),
+        12 => Some("Q.931 Cause Code"),
         13 => Some("Challenge Response"),
-        14 => Some("Cause Code"),
-        15 => Some("Assigned Session ID"),
-        16 => Some("Remote Session ID"),
-        18 => Some("Assigned Cookie"),
-        19 => Some("Remote End ID"),
-        21 => Some("Pseudowire Type"),
-        22 => Some("L2-Specific Sublayer"),
-        23 => Some("Data Sequencing"),
-        24 => Some("Circuit Status"),
-        25 => Some("Preferred Language"),
-        26 => Some("Control Message Authentication Nonce"),
-        27 => Some("Tx Connect Speed"),
-        28 => Some("Rx Connect Speed"),
-        29 => Some("Failover Capability"),
-        30 => Some("Tunnel Recovery"),
-        31 => Some("Suggested Control Sequence"),
-        32 => Some("Failover Session State"),
+        14 => Some("Assigned Session ID"),
+        15 => Some("Serial Number"),
+        16 => Some("Minimum BPS"),
+        17 => Some("Maximum BPS"),
+        18 => Some("Bearer Type"),
+        19 => Some("Framing Type"),
+        21 => Some("Called Number"),
+        22 => Some("Calling Number"),
+        23 => Some("Sub-Address"),
+        24 => Some("(Tx) Connect Speed BPS"),
+        25 => Some("Physical Channel ID"),
+        26 => Some("Initial Received LCP CONFREQ"),
+        27 => Some("Last Sent LCP CONFREQ"),
+        28 => Some("Last Received LCP CONFREQ"),
+        29 => Some("Proxy Authen Type"),
+        30 => Some("Proxy Authen Name"),
+        31 => Some("Proxy Authen Challenge"),
+        32 => Some("Proxy Authen ID"),
+        33 => Some("Proxy Authen Response"),
+        34 => Some("Circuit Errors"),
+        35 => Some("ACCM"),
         36 => Some("Random Vector"),
-        37 => Some("Message Digest"),
-        38 => Some("Router ID"),
-        39 => Some("Assigned Control Connection ID"),
-        40 => Some("Pseudowire Capabilities List"),
+        37 => Some("Private Group ID"),
+        38 => Some("Rx Connect Speed"),
+        39 => Some("Sequencing Required"),
+        // RFC 3301 — https://www.rfc-editor.org/rfc/rfc3301
+        40 => Some("Rx Minimum BPS"),
+        41 => Some("Rx Maximum BPS"),
+        42 => Some("Service Category"),
+        43 => Some("Service Name"),
+        44 => Some("Calling Sub-Address"),
+        45 => Some("VPI/VCI Identifier"),
+        // RFC 3145 — https://www.rfc-editor.org/rfc/rfc3145
+        46 => Some("PPP Disconnect Cause Code"),
+        // RFC 3308 — https://www.rfc-editor.org/rfc/rfc3308
+        47 => Some("CCDS"),
+        48 => Some("SDS"),
+        // RFC 3437 — https://www.rfc-editor.org/rfc/rfc3437
+        49 => Some("LCP Want Options"),
+        50 => Some("LCP Allow Options"),
+        51 => Some("LNS Last Sent LCP Confreq"),
+        52 => Some("LNS Last Received LCP Confreq"),
+        // RFC 3573 — https://www.rfc-editor.org/rfc/rfc3573
+        53 => Some("Modem On-Hold Capable"),
+        54 => Some("Modem On-Hold Status"),
+        // RFC 3817 — https://www.rfc-editor.org/rfc/rfc3817
+        55 => Some("PPPoE Relay"),
+        56 => Some("PPPoE Relay Response Capability"),
+        57 => Some("PPPoE Relay Forward Capability"),
+        // RFC 3931 — https://www.rfc-editor.org/rfc/rfc3931
+        58 => Some("Extended Vendor ID"),
+        59 => Some("Message Digest"),
+        60 => Some("Router ID"),
+        61 => Some("Assigned Control Connection ID"),
+        62 => Some("Pseudowire Capabilities List"),
+        63 => Some("Local Session ID"),
+        64 => Some("Remote Session ID"),
+        65 => Some("Assigned Cookie"),
+        66 => Some("Remote End ID"),
+        67 => Some("Application Code"),
+        68 => Some("Pseudowire Type"),
+        69 => Some("L2-Specific Sublayer"),
+        70 => Some("Data Sequencing"),
+        71 => Some("Circuit Status"),
+        72 => Some("Preferred Language"),
+        73 => Some("Control Message Authentication Nonce"),
+        74 => Some("Tx Connect Speed"),
+        75 => Some("Rx Connect Speed"),
+        // RFC 4951 — https://www.rfc-editor.org/rfc/rfc4951
+        76 => Some("Failover Capability"),
+        77 => Some("Tunnel Recovery"),
+        78 => Some("Suggested Control Sequence"),
+        79 => Some("Failover Session State"),
+        // RFC 4045 — https://www.rfc-editor.org/rfc/rfc4045
+        80 => Some("Multicast Capability"),
+        81 => Some("New Outgoing Sessions"),
+        82 => Some("New Outgoing Sessions Acknowledgement"),
+        83 => Some("Withdraw Outgoing Sessions"),
+        84 => Some("Multicast Packets Priority"),
+        // RFC 4591 — https://www.rfc-editor.org/rfc/rfc4591
+        85 => Some("Frame-Relay Header Length"),
+        // RFC 4454 — https://www.rfc-editor.org/rfc/rfc4454
+        86 => Some("ATM Maximum Concatenated Cells"),
+        87 => Some("OAM Emulation Required"),
+        88 => Some("ATM Alarm Status"),
+        // RFC 4667 — https://www.rfc-editor.org/rfc/rfc4667
+        89 => Some("Attachment Group Identifier"),
+        90 => Some("Local End Identifier"),
+        91 => Some("Interface Maximum Transmission Unit"),
+        // RFC 4720 — https://www.rfc-editor.org/rfc/rfc4720
+        92 => Some("FCS Retention"),
+        // draft-ietf-l2tpext-tunnel-switching-06 — https://datatracker.ietf.org/doc/draft-ietf-l2tpext-tunnel-switching-06/
+        93 => Some("Tunnel Switching Aggregator ID"),
+        // RFC 4623 — https://www.rfc-editor.org/rfc/rfc4623
+        94 => Some("Maximum Receive Unit (MRU)"),
+        95 => Some("Maximum Reassembled Receive Unit (MRRU)"),
+        // RFC 5085 — https://www.rfc-editor.org/rfc/rfc5085
+        96 => Some("VCCV Capability"),
+        // RFC 5515 — https://www.rfc-editor.org/rfc/rfc5515
+        97 => Some("Connect Speed Update"),
+        98 => Some("Connect Speed Update Enable"),
+        // RFC 5611 — https://www.rfc-editor.org/rfc/rfc5611
+        99 => Some("TDM Pseudowire"),
+        100 => Some("RTP"),
+        // RFC 6073 — https://www.rfc-editor.org/rfc/rfc6073
+        101 => Some("PW Switching Point"),
+        // RFC 7886 — https://www.rfc-editor.org/rfc/rfc7886
+        102 => Some("S-BFD Target Discriminator ID"),
+        // RFC 9601 — https://www.rfc-editor.org/rfc/rfc9601
+        103 => Some("ECN Capability"),
+        // 20 is Reserved (RFC 2661); 104-65535 are unassigned.
         _ => None,
     }
 }
@@ -239,6 +345,8 @@ mod tests {
     // | 5.1         | Length too small        | parse_avp_length_too_small |
     // | 5.4.1       | Message Type extraction | extract_message_type_sccrq |
     // | 5.4.1       | Non-message-type AVP   | extract_message_type_wrong |
+    // | 5.4, 10.1   | AVP names (IANA)       | avp_name_matches_iana_registry |
+    // | 5.4.4       | Session AVP names      | avp_container_resolves_l2tpv3_session_avps |
 
     #[test]
     fn parse_avp_basic() {
@@ -340,6 +448,156 @@ mod tests {
         assert!(buf.fields()[0].value.is_object());
         assert_eq!(buf.fields()[0].descriptor.display_name, "AVP");
         assert_eq!(buf.resolve_container_display_name(0), Some("Message Type"),);
+    }
+
+    #[test]
+    fn avp_name_matches_iana_registry() {
+        // IANA "L2TP Control Message Attribute Value Pairs"; the number space
+        // is shared by L2TPv2 and L2TPv3 (RFC 3931, Section 10.1).
+        // https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-1
+        let expected: &[(u16, &str)] = &[
+            (0, "Message Type"),
+            (1, "Result Code"),
+            (2, "Protocol Version"),
+            (3, "Framing Capabilities"),
+            (4, "Bearer Capabilities"),
+            (5, "Tie Breaker"),
+            (6, "Firmware Revision"),
+            (7, "Host Name"),
+            (8, "Vendor Name"),
+            (9, "Assigned Tunnel ID"),
+            (10, "Receive Window Size"),
+            (11, "Challenge"),
+            (12, "Q.931 Cause Code"),
+            (13, "Challenge Response"),
+            (14, "Assigned Session ID"),
+            (15, "Serial Number"),
+            (16, "Minimum BPS"),
+            (17, "Maximum BPS"),
+            (18, "Bearer Type"),
+            (19, "Framing Type"),
+            (21, "Called Number"),
+            (22, "Calling Number"),
+            (23, "Sub-Address"),
+            (24, "(Tx) Connect Speed BPS"),
+            (25, "Physical Channel ID"),
+            (26, "Initial Received LCP CONFREQ"),
+            (27, "Last Sent LCP CONFREQ"),
+            (28, "Last Received LCP CONFREQ"),
+            (29, "Proxy Authen Type"),
+            (30, "Proxy Authen Name"),
+            (31, "Proxy Authen Challenge"),
+            (32, "Proxy Authen ID"),
+            (33, "Proxy Authen Response"),
+            (34, "Circuit Errors"),
+            (35, "ACCM"),
+            (36, "Random Vector"),
+            (37, "Private Group ID"),
+            (38, "Rx Connect Speed"),
+            (39, "Sequencing Required"),
+            (40, "Rx Minimum BPS"),
+            (41, "Rx Maximum BPS"),
+            (42, "Service Category"),
+            (43, "Service Name"),
+            (44, "Calling Sub-Address"),
+            (45, "VPI/VCI Identifier"),
+            (46, "PPP Disconnect Cause Code"),
+            (47, "CCDS"),
+            (48, "SDS"),
+            (49, "LCP Want Options"),
+            (50, "LCP Allow Options"),
+            (51, "LNS Last Sent LCP Confreq"),
+            (52, "LNS Last Received LCP Confreq"),
+            (53, "Modem On-Hold Capable"),
+            (54, "Modem On-Hold Status"),
+            (55, "PPPoE Relay"),
+            (56, "PPPoE Relay Response Capability"),
+            (57, "PPPoE Relay Forward Capability"),
+            (58, "Extended Vendor ID"),
+            (59, "Message Digest"),
+            (60, "Router ID"),
+            (61, "Assigned Control Connection ID"),
+            (62, "Pseudowire Capabilities List"),
+            (63, "Local Session ID"),
+            (64, "Remote Session ID"),
+            (65, "Assigned Cookie"),
+            (66, "Remote End ID"),
+            (67, "Application Code"),
+            (68, "Pseudowire Type"),
+            (69, "L2-Specific Sublayer"),
+            (70, "Data Sequencing"),
+            (71, "Circuit Status"),
+            (72, "Preferred Language"),
+            (73, "Control Message Authentication Nonce"),
+            (74, "Tx Connect Speed"),
+            (75, "Rx Connect Speed"),
+            (76, "Failover Capability"),
+            (77, "Tunnel Recovery"),
+            (78, "Suggested Control Sequence"),
+            (79, "Failover Session State"),
+            (80, "Multicast Capability"),
+            (81, "New Outgoing Sessions"),
+            (82, "New Outgoing Sessions Acknowledgement"),
+            (83, "Withdraw Outgoing Sessions"),
+            (84, "Multicast Packets Priority"),
+            (85, "Frame-Relay Header Length"),
+            (86, "ATM Maximum Concatenated Cells"),
+            (87, "OAM Emulation Required"),
+            (88, "ATM Alarm Status"),
+            (89, "Attachment Group Identifier"),
+            (90, "Local End Identifier"),
+            (91, "Interface Maximum Transmission Unit"),
+            (92, "FCS Retention"),
+            (93, "Tunnel Switching Aggregator ID"),
+            (94, "Maximum Receive Unit (MRU)"),
+            (95, "Maximum Reassembled Receive Unit (MRRU)"),
+            (96, "VCCV Capability"),
+            (97, "Connect Speed Update"),
+            (98, "Connect Speed Update Enable"),
+            (99, "TDM Pseudowire"),
+            (100, "RTP"),
+            (101, "PW Switching Point"),
+            (102, "S-BFD Target Discriminator ID"),
+            (103, "ECN Capability"),
+        ];
+        for &(t, name) in expected {
+            assert_eq!(avp_name(t), Some(name), "attribute type {t}");
+        }
+        // 20 is Reserved (RFC 2661); 104 and above are unassigned.
+        for t in [20u16, 104, 1000, u16::MAX] {
+            assert_eq!(avp_name(t), None, "attribute type {t}");
+        }
+    }
+
+    #[test]
+    fn avp_container_resolves_l2tpv3_session_avps() {
+        // Serial Number (15) and Local Session ID (63), RFC 3931, Section 5.4.4.
+        let data: &[u8] = &[
+            0x00, 0x0a, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x07, // Serial Number = 7
+            0x80, 0x0a, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00,
+            0x2a, // Local Session ID = 42
+        ];
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("test", None, &[], 0..20);
+        parse_avps(data, 0, &mut buf);
+        buf.end_layer();
+
+        let objs: Vec<u32> = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.value.is_object())
+            .map(|(i, _)| i as u32)
+            .collect();
+        assert_eq!(objs.len(), 2);
+        assert_eq!(
+            buf.resolve_container_display_name(objs[0]),
+            Some("Serial Number")
+        );
+        assert_eq!(
+            buf.resolve_container_display_name(objs[1]),
+            Some("Local Session ID")
+        );
     }
 
     #[test]
