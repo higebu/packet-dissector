@@ -182,7 +182,6 @@ where
         return Err(PcapError::UnsupportedFormat);
     }
 
-    let read_u16 = if is_le { u16_le } else { u16_be };
     let read_u32 = if is_le { u32_le } else { u32_be };
 
     // Read remaining 20 bytes of global header.
@@ -194,7 +193,10 @@ where
             PcapError::Io(e)
         }
     })?;
-    let link_type = read_u16(&hdr[16..18]);
+    // The LinkType is the low 16 bits of the 32-bit "LinkType and additional
+    // information" field (file offset 20) — draft-ietf-opsawg-pcap, Section 4
+    // — https://datatracker.ietf.org/doc/html/draft-ietf-opsawg-pcap#section-4
+    let link_type = read_u32(&hdr[16..20]) as u16;
     let mut pos: u64 = PCAP_GLOBAL_HEADER_SIZE as u64;
 
     let mut pkt_buf = Vec::new();
@@ -804,6 +806,51 @@ mod tests {
             buf.extend_from_slice(pkt);
         }
         buf
+    }
+
+    /// Build a single-packet big-endian pcap file with the given 32-bit
+    /// "LinkType and additional information" field.
+    fn build_pcap_be_bytes(link_type_field: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&PCAP_MAGIC_BE);
+        buf.extend_from_slice(&2u16.to_be_bytes()); // major
+        buf.extend_from_slice(&4u16.to_be_bytes()); // minor
+        buf.extend_from_slice(&0u32.to_be_bytes()); // reserved1
+        buf.extend_from_slice(&0u32.to_be_bytes()); // reserved2
+        buf.extend_from_slice(&65535u32.to_be_bytes()); // snaplen
+        buf.extend_from_slice(&link_type_field.to_be_bytes());
+
+        let pkt: &[u8] = &[0xff; 42];
+        buf.extend_from_slice(&7u32.to_be_bytes()); // ts_sec
+        buf.extend_from_slice(&0u32.to_be_bytes()); // ts_usec
+        buf.extend_from_slice(&(pkt.len() as u32).to_be_bytes()); // incl_len
+        buf.extend_from_slice(&(pkt.len() as u32).to_be_bytes()); // orig_len
+        buf.extend_from_slice(pkt);
+        buf
+    }
+
+    /// The LinkType is the low 16 bits of the 32-bit "LinkType and additional
+    /// information" field at offset 20, read in the file's byte order —
+    /// draft-ietf-opsawg-pcap, Section 4 —
+    /// <https://datatracker.ietf.org/doc/html/draft-ietf-opsawg-pcap#section-4>
+    #[test]
+    fn pcap_be_link_type_stream_matches_index() {
+        // LINKTYPE_ETHERNET, and LINKTYPE_ETHERNET with the P bit and an FCS
+        // length of 2 set in the upper bits.
+        for field in [1u32, 0x2400_0001] {
+            let data = build_pcap_be_bytes(field);
+
+            let records = build_index(&data).unwrap();
+            assert_eq!(records[0].link_type, 1, "index, field {field:#x}");
+
+            let mut streamed = Vec::new();
+            stream_packets(data.as_slice(), |rec, _| {
+                streamed.push(rec.link_type);
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+            assert_eq!(streamed, [1], "stream, field {field:#x}");
+        }
     }
 
     #[test]
