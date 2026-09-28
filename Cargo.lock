@@ -900,6 +900,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-null"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-ospf"
 version = "0.5.0"
 dependencies = [
@@ -954,6 +963,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-radius"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-raw-ip"
 version = "0.5.0"
 dependencies = [
  "criterion",
