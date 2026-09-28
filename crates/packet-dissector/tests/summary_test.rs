@@ -22,6 +22,7 @@
 //! | Projection reset/reuse across packets | projection_is_reusable_across_packets |
 //! | Link-type entry selection (projection) | projection_with_link_type_uses_link_type_table |
 //! | Unregistered link type is an error (projection) | projection_with_unregistered_link_type_is_error |
+//! | Projection is reset even when the link type is unsupported | projection_is_reset_when_link_type_is_unsupported |
 //! | Empty projection stops after the entry layer | empty_projection_stops_after_entry_layer |
 
 use packet_dissector::registry::DissectorRegistry;
@@ -343,6 +344,27 @@ fn projection_with_unregistered_link_type_is_error() {
 
     assert_eq!(err, PacketError::UnsupportedLinkType(147));
     assert!(buf.layers().is_empty());
+}
+
+#[test]
+fn projection_is_reset_when_link_type_is_unsupported() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_eth_ipv4_udp_dns();
+    let mut projection = FieldProjection::new([("IPv4", "src")]);
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_projected_with_link_type(&pkt, 1, &mut buf, &mut projection)
+        .unwrap();
+    assert!(projection.is_satisfied());
+
+    // A reused projection must not report the previous packet's state when
+    // the next packet cannot be dissected.
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_projected_with_link_type(&pkt, 147, &mut buf, &mut projection)
+        .unwrap_err();
+    assert!(!projection.is_satisfied());
 }
 
 #[test]

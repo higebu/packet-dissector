@@ -725,8 +725,10 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'pkt>,
         projection: &mut FieldProjection,
     ) -> Result<(), PacketError> {
-        let entry = self.entry_dissector_for_link_type(link_type)?;
+        // Reset first so a reused projection never reports the previous
+        // packet's state when the link type is unsupported.
         projection.reset();
+        let entry = self.entry_dissector_for_link_type(link_type)?;
         self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf))
     }
 
