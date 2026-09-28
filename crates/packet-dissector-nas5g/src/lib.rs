@@ -43,8 +43,39 @@ const MIN_5GMM_SIZE: usize = 3;
 const MIN_5GSM_SIZE: usize = 4;
 
 /// Security-protected 5GMM message minimum: EPD (1) + security header (1) +
-/// MAC (4) + sequence number (1) + inner EPD (1) = 8 bytes.
+/// MAC (4) + sequence number (1) = 7 bytes. The plain 5GS NAS message
+/// starts at octet 8.
+///
+/// 3GPP TS 24.501, Section 9.1.1, Figure 9.1.1.2.
 const MIN_SECURITY_PROTECTED_SIZE: usize = 7;
+
+/// Offset of the plain 5GS NAS message (octet 8) in a security protected
+/// 5GS NAS message.
+///
+/// 3GPP TS 24.501, Section 9.1.1, Figure 9.1.1.2.
+const SECURITY_PROTECTED_PAYLOAD_OFFSET: usize = 7;
+
+/// Security header type: plain 5GS NAS message, not security protected.
+///
+/// 3GPP TS 24.501, Section 9.3, Table 9.3.1.
+const SHT_PLAIN: u8 = 0;
+
+/// Security header type: integrity protected.
+///
+/// 3GPP TS 24.501, Section 9.3, Table 9.3.1.
+const SHT_INTEGRITY_PROTECTED: u8 = 1;
+
+/// Security header type: integrity protected with new 5G NAS security
+/// context.
+///
+/// 3GPP TS 24.501, Section 9.3, Table 9.3.1.
+const SHT_INTEGRITY_PROTECTED_NEW_CONTEXT: u8 = 3;
+
+/// Security header type: integrity protected and ciphered with new 5G NAS
+/// security context.
+///
+/// 3GPP TS 24.501, Section 9.3, Table 9.3.1.
+const SHT_INTEGRITY_PROTECTED_AND_CIPHERED_NEW_CONTEXT: u8 = 4;
 
 // ── Field descriptors for 5GMM plain messages ──────────────────────────
 
@@ -99,6 +130,16 @@ static FD_SEQUENCE_NUMBER: FieldDescriptor =
 
 static FD_PLAIN_NAS: FieldDescriptor =
     FieldDescriptor::new("plain_nas_message", "Plain NAS Message", FieldType::Object).optional();
+
+static FD_CIPHERED_NAS: FieldDescriptor = FieldDescriptor::new(
+    "ciphered_nas_message",
+    "Ciphered NAS Message",
+    FieldType::Bytes,
+)
+.optional();
+
+static FD_RAW_NAS: FieldDescriptor =
+    FieldDescriptor::new("raw_nas_message", "Raw NAS Message", FieldType::Bytes).optional();
 
 // ── Field descriptors for 5GSM messages ────────────────────────────────
 
@@ -178,6 +219,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::U8,
     )
     .optional(),
+    FieldDescriptor::new(
+        "ciphered_nas_message",
+        "Ciphered NAS Message",
+        FieldType::Bytes,
+    )
+    .optional(),
+    FieldDescriptor::new("raw_nas_message", "Raw NAS Message", FieldType::Bytes).optional(),
 ];
 
 /// Push parsed 5G NAS PDU fields into the given [`DissectBuffer`].
@@ -210,10 +258,21 @@ fn push_5gmm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usiz
 
     let security_header_type = data[1] & 0x0F;
 
-    if security_header_type == 0 {
-        push_5gmm_plain(buf, data, offset)
-    } else {
-        push_5gmm_security_protected(buf, data, offset, security_header_type)
+    match security_header_type {
+        SHT_PLAIN => push_5gmm_plain(buf, data, offset),
+        SHT_INTEGRITY_PROTECTED..=SHT_INTEGRITY_PROTECTED_AND_CIPHERED_NEW_CONTEXT => {
+            push_5gmm_security_protected(buf, data, offset, security_header_type)
+        }
+        _ => {
+            buf.push_field(&FD_EPD, FieldValue::U8(data[0]), offset..offset + 1);
+            buf.push_field(
+                &FD_SECURITY_HEADER_TYPE,
+                FieldValue::U8(security_header_type),
+                offset + 1..offset + 2,
+            );
+            push_reserved_sht_body(buf, data, offset);
+            true
+        }
     }
 }
 
@@ -243,7 +302,7 @@ fn push_5gmm_plain<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset
 
 /// Push a security-protected 5GMM message.
 ///
-/// 3GPP TS 24.501, Section 9.9.
+/// 3GPP TS 24.501, Section 9.1.1, Figure 9.1.1.2.
 fn push_5gmm_security_protected<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -254,44 +313,119 @@ fn push_5gmm_security_protected<'pkt>(
         return false;
     }
 
-    let mac = read_be_u32(data, 2).unwrap_or_default();
-    let seq = data[6];
-
     buf.push_field(&FD_EPD, FieldValue::U8(data[0]), offset..offset + 1);
     buf.push_field(
         &FD_SECURITY_HEADER_TYPE,
         FieldValue::U8(security_header_type),
         offset + 1..offset + 2,
     );
+    push_security_protected_body(buf, data, offset, security_header_type);
+
+    true
+}
+
+/// Push the MAC, the sequence number and the plain 5GS NAS message part
+/// (octet 8 onwards) of a security protected 5GMM message.
+///
+/// The caller has already pushed the EPD and the security header type and
+/// checked that `data` holds at least [`MIN_SECURITY_PROTECTED_SIZE`] bytes.
+///
+/// 3GPP TS 24.501, Section 4.4.5 — <https://www.3gpp.org/ftp/Specs/archive/24_series/24.501/>:
+/// "the sender shall cipher the plain 5GS NAS message portion of the
+/// security protected 5GS NAS message (see figure 9.1.1.2), i.e. octet 8
+/// and all subsequent octets". Also: "If the "null ciphering algorithm"
+/// 5G-EA0 has been selected as a ciphering algorithm, the NAS messages with
+/// the security header indicating ciphering are regarded as ciphered."
+///
+/// So for the ciphered security header types (Table 9.3.1: 2 and 4) the
+/// payload is reported as opaque bytes and never parsed as a NAS message.
+fn push_security_protected_body<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    security_header_type: u8,
+) {
+    let Ok(mac) = read_be_u32(data, 2) else {
+        return;
+    };
     buf.push_field(&FD_MAC, FieldValue::U32(mac), offset + 2..offset + 6);
     buf.push_field(
         &FD_SEQUENCE_NUMBER,
-        FieldValue::U8(seq),
+        FieldValue::U8(data[6]),
         offset + 6..offset + 7,
     );
 
-    // Bytes 7+: Plain NAS message (starts with EPD again).
-    let inner_data = &data[7..];
-    let inner_offset = offset + 7;
-    if !inner_data.is_empty() {
-        let obj_idx = buf.begin_container(
-            &FD_PLAIN_NAS,
-            FieldValue::Object(0..0),
-            inner_offset..offset + data.len(),
-        );
-        let ok = push_nas_pdu(buf, inner_data, inner_offset);
-        if !ok {
-            // Could not parse inner NAS — store raw bytes as a fallback field.
-            buf.push_field(
-                &FD_PLAIN_NAS,
-                FieldValue::Bytes(inner_data),
-                inner_offset..offset + data.len(),
-            );
-        }
-        buf.end_container(obj_idx);
+    let payload = &data[SECURITY_PROTECTED_PAYLOAD_OFFSET..];
+    if payload.is_empty() {
+        return;
     }
+    let payload_offset = offset + SECURITY_PROTECTED_PAYLOAD_OFFSET;
+    let payload_range = payload_offset..offset + data.len();
 
-    true
+    match security_header_type {
+        SHT_INTEGRITY_PROTECTED | SHT_INTEGRITY_PROTECTED_NEW_CONTEXT => {
+            // Integrity protected only (types 1 and 3): octet 8 onwards is
+            // the plain 5GS NAS message in clear text.
+            let obj_idx = buf.begin_container(
+                &FD_PLAIN_NAS,
+                FieldValue::Object(0..0),
+                payload_range.clone(),
+            );
+            if !push_plain_nas_message(buf, payload, payload_offset) {
+                // Could not parse inner NAS — store raw bytes as a fallback field.
+                buf.push_field(&FD_RAW_NAS, FieldValue::Bytes(payload), payload_range);
+            }
+            buf.end_container(obj_idx);
+        }
+        _ => {
+            // Integrity protected and ciphered (types 2 and 4). Anything
+            // not known to be clear text is kept opaque.
+            buf.push_field(&FD_CIPHERED_NAS, FieldValue::Bytes(payload), payload_range);
+        }
+    }
+}
+
+/// Push the plain 5GS NAS message carried in octet 8 onwards of a security
+/// protected 5GS NAS message.
+///
+/// Returns `false` when `data` is not a plain 5GS NAS message, including a
+/// 5GMM message that is itself security protected. Such a message is never
+/// decoded, which also bounds the nesting depth.
+///
+/// 3GPP TS 24.501, Section 9.1.1 — <https://www.3gpp.org/ftp/Specs/archive/24_series/24.501/>:
+/// a security protected 5GS NAS message consists of "plain 5GS NAS message,
+/// as defined in item 1".
+fn push_plain_nas_message<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    match data.first() {
+        Some(&EPD_5GMM) => {
+            data.len() >= MIN_5GMM_SIZE
+                && data[1] & 0x0F == SHT_PLAIN
+                && push_5gmm_plain(buf, data, offset)
+        }
+        Some(&EPD_5GSM) => push_5gsm(buf, data, offset),
+        _ => false,
+    }
+}
+
+/// Push the octets after the security header type of a 5GMM message whose
+/// security header type is reserved.
+///
+/// 3GPP TS 24.501, Section 9.3, Table 9.3.1: "All other values are
+/// reserved." The layout of the rest of the message is not defined, so it
+/// is kept as raw bytes.
+fn push_reserved_sht_body<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    let rest = &data[2..];
+    if !rest.is_empty() {
+        buf.push_field(
+            &FD_RAW_NAS,
+            FieldValue::Bytes(rest),
+            offset + 2..offset + data.len(),
+        );
+    }
 }
 
 /// Push 5GSM fields into the buffer.
@@ -398,6 +532,19 @@ impl Dissector for Nas5gDissector {
                 }
 
                 let security_header_type = data[1] & 0x0F;
+                // 3GPP TS 24.501, Section 9.1.1, Figure 9.1.1.2: a security
+                // protected message carries a MAC and a sequence number.
+                if (SHT_INTEGRITY_PROTECTED..=SHT_INTEGRITY_PROTECTED_AND_CIPHERED_NEW_CONTEXT)
+                    .contains(&security_header_type)
+                    && data.len() < MIN_SECURITY_PROTECTED_SIZE
+                {
+                    buf.end_layer();
+                    return Err(PacketError::Truncated {
+                        expected: MIN_SECURITY_PROTECTED_SIZE,
+                        actual: data.len(),
+                    });
+                }
+
                 buf.push_field(
                     &FIELD_DESCRIPTORS[0],
                     FieldValue::U8(epd),
@@ -409,37 +556,18 @@ impl Dissector for Nas5gDissector {
                     offset + 1..offset + 2,
                 );
 
-                if security_header_type == 0 {
-                    let message_type = data[2];
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[2],
-                        FieldValue::U8(message_type),
-                        offset + 2..offset + 3,
-                    );
-                } else if data.len() >= MIN_SECURITY_PROTECTED_SIZE {
-                    let mac = read_be_u32(data, 2)?;
-                    let seq = data[6];
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[3],
-                        FieldValue::U32(mac),
-                        offset + 2..offset + 6,
-                    );
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[4],
-                        FieldValue::U8(seq),
-                        offset + 6..offset + 7,
-                    );
-
-                    // Parse inner plain NAS if present.
-                    if data.len() > 7 {
-                        let obj_idx = buf.begin_container(
-                            &FIELD_DESCRIPTORS[5],
-                            FieldValue::Object(0..0),
-                            offset + 7..offset + data.len(),
+                match security_header_type {
+                    SHT_PLAIN => {
+                        buf.push_field(
+                            &FIELD_DESCRIPTORS[2],
+                            FieldValue::U8(data[2]),
+                            offset + 2..offset + 3,
                         );
-                        push_nas_pdu(buf, &data[7..], offset + 7);
-                        buf.end_container(obj_idx);
                     }
+                    SHT_INTEGRITY_PROTECTED..=SHT_INTEGRITY_PROTECTED_AND_CIPHERED_NEW_CONTEXT => {
+                        push_security_protected_body(buf, data, offset, security_header_type);
+                    }
+                    _ => push_reserved_sht_body(buf, data, offset),
                 }
             }
             EPD_5GSM => {
@@ -496,6 +624,23 @@ mod tests {
     //! | 8.2          | Security protected 5GMM      | parse_security_protected_5gmm     |
     //! | 8.3          | 5GSM message                 | parse_5gsm_pdu_session_establishment |
     //! | 9.3          | Security header type         | parse_security_protected_5gmm     |
+    //! | 4.4.5, 9.3   | Type 1: inner plain decoded  | push_security_protected_5gmm      |
+    //! | 4.4.5, 9.3   | Type 3: inner plain decoded  | push_integrity_new_context_decodes_inner |
+    //! | 4.4.5, 9.3   | Type 2: payload is ciphered  | push_ciphered_5gmm_not_decoded    |
+    //! | 4.4.5, 9.3   | Type 4: payload is ciphered  | push_ciphered_new_context_not_decoded |
+    //! | 4.4.5, 9.3   | Ciphered, no payload octets  | push_ciphered_without_payload     |
+    //! | 9.3          | Reserved security header type | push_reserved_security_header_type |
+    //! | 9.1.1        | Inner message must be plain  | push_nested_security_protected_not_decoded |
+    //! | 9.1.1        | Inner plain 5GSM decoded     | push_integrity_protected_inner_5gsm_decoded |
+    //! | 9.1.1        | Truncated inner 5GMM kept raw | push_integrity_protected_truncated_inner_5gmm_kept_raw |
+    //! | 9.1.1        | Deep nesting, no recursion   | push_deeply_nested_security_protected_does_not_overflow |
+    //! | 9.1.1        | Dissector: deep nesting      | dissect_nested_security_protected_not_recursed |
+    //! | 9.1.1        | Dissector: truncated header  | dissect_truncated_security_protected_5gmm |
+    //! | 4.4.5, 9.3   | Dissector: type 2 ciphered   | dissect_ciphered_5gmm_not_decoded |
+    //! | 4.4.5, 9.3   | Dissector: type 4 ciphered   | dissect_ciphered_new_context_not_decoded |
+    //! | 4.4.5, 9.3   | Dissector: type 1 decoded    | dissect_integrity_protected_decodes_inner |
+    //! | 9.3          | Dissector: inner not parsable | dissect_integrity_protected_unparsable_inner |
+    //! | 9.3          | Dissector: reserved type     | dissect_reserved_security_header_type |
     //! | 8.2          | push_nas_pdu plain           | push_nas_pdu_plain_5gmm           |
     //! | 8.3          | push_nas_pdu 5GSM            | push_nas_pdu_5gsm                 |
     //! |              | Empty data                   | push_nas_pdu_empty                |
@@ -504,6 +649,7 @@ mod tests {
     //! |              | Truncated 5GSM               | push_nas_pdu_truncated_5gsm       |
 
     use super::*;
+    use packet_dissector_core::field::Field;
 
     #[test]
     fn push_nas_pdu_plain_5gmm() {
@@ -595,6 +741,195 @@ mod tests {
         }
     }
 
+    /// Security protected 5GMM header (EPD, security header type, MAC,
+    /// sequence number) followed by `payload`.
+    fn security_protected(sht: u8, payload: &[u8]) -> Vec<u8> {
+        let mut data = vec![0x7E, sht, 0x12, 0x34, 0x56, 0x78, 0x03];
+        data.extend_from_slice(payload);
+        data
+    }
+
+    /// Assert that a security protected message was reported with its
+    /// payload as an opaque `ciphered_nas_message` and nothing decoded.
+    fn assert_ciphered(fields: &[Field<'_>], sht: u8, payload: &[u8], offset: usize) {
+        let names: Vec<_> = fields.iter().map(|f| f.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "extended_protocol_discriminator",
+                "security_header_type",
+                "message_authentication_code",
+                "sequence_number",
+                "ciphered_nas_message",
+            ]
+        );
+        assert_eq!(fields[1].value, FieldValue::U8(sht));
+        assert_eq!(fields[2].value, FieldValue::U32(0x1234_5678));
+        assert_eq!(fields[3].value, FieldValue::U8(3));
+        assert_eq!(fields[4].value, FieldValue::Bytes(payload));
+        assert_eq!(fields[4].range, offset + 7..offset + 7 + payload.len());
+    }
+
+    #[test]
+    fn push_ciphered_5gmm_not_decoded() {
+        // TS 24.501, 4.4.5: octet 8 onwards is ciphered. A first
+        // ciphertext octet of 0x2e or 0x7e must not be taken as an EPD.
+        for payload in [
+            &[0x2e, 0x9a, 0x41, 0xc7, 0x55][..],
+            &[0x7e, 0x00, 0x41, 0x01][..],
+            &[0x99, 0x01][..],
+        ] {
+            let data = security_protected(0x02, payload);
+            let mut buf = DissectBuffer::new();
+            assert!(push_nas_pdu(&mut buf, &data, 20));
+            assert_ciphered(buf.fields(), 2, payload, 20);
+        }
+    }
+
+    #[test]
+    fn push_ciphered_new_context_not_decoded() {
+        for payload in [&[0x7e, 0x00, 0x5e][..], &[0x2e, 0x01, 0x00, 0xc1][..]] {
+            let data = security_protected(0x04, payload);
+            let mut buf = DissectBuffer::new();
+            assert!(push_nas_pdu(&mut buf, &data, 0));
+            assert_ciphered(buf.fields(), 4, payload, 0);
+        }
+    }
+
+    #[test]
+    fn push_ciphered_without_payload() {
+        let data = security_protected(0x02, &[]);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        assert_eq!(buf.fields().len(), 4);
+        assert!(
+            buf.fields()
+                .iter()
+                .all(|f| f.name() != "ciphered_nas_message")
+        );
+    }
+
+    #[test]
+    fn push_integrity_new_context_decodes_inner() {
+        // Type 3 (integrity protected with new 5G NAS security context)
+        // is not ciphered, so the inner Security mode command is decoded.
+        let data = security_protected(0x03, &[0x7e, 0x00, 0x5d]);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        assert_eq!(buf.fields()[4].name(), "plain_nas_message");
+        let FieldValue::Object(ref range) = buf.fields()[4].value else {
+            panic!("expected inner Object");
+        };
+        let inner = buf.nested_fields(range);
+        let mt = inner.iter().find(|f| f.name() == "message_type").unwrap();
+        assert_eq!(mt.value, FieldValue::U8(0x5d));
+        assert!(
+            buf.fields()
+                .iter()
+                .all(|f| f.name() != "ciphered_nas_message")
+        );
+    }
+
+    #[test]
+    fn push_reserved_security_header_type() {
+        // TS 24.501, Table 9.3.1: "All other values are reserved." The
+        // layout after octet 2 is unknown, so it is kept as raw bytes.
+        let data = [0x7E, 0x05, 0x2e, 0x01, 0x00, 0xc1];
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 4));
+        let names: Vec<_> = buf.fields().iter().map(|f| f.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "extended_protocol_discriminator",
+                "security_header_type",
+                "raw_nas_message",
+            ]
+        );
+        assert_eq!(buf.fields()[1].value, FieldValue::U8(5));
+        assert_eq!(buf.fields()[2].value, FieldValue::Bytes(&data[2..]));
+        assert_eq!(buf.fields()[2].range, 6..10);
+    }
+
+    /// `depth` integrity protected headers, each wrapping the next, around a
+    /// plain Registration request.
+    fn deeply_nested_security_protected(depth: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(depth * 7 + 3);
+        for _ in 0..depth {
+            data.extend_from_slice(&[0x7E, 0x01, 0, 0, 0, 0, 0]);
+        }
+        data.extend_from_slice(&[0x7E, 0x00, 0x41]);
+        data
+    }
+
+    #[test]
+    fn push_nested_security_protected_not_decoded() {
+        // TS 24.501, 9.1.1: octet 8 onwards of a security protected message
+        // is a "plain 5GS NAS message, as defined in item 1". An inner
+        // security protected 5GMM message is not valid there and is kept as
+        // raw bytes.
+        let inner = security_protected(0x01, &[0x7e, 0x00, 0x41]);
+        let data = security_protected(0x01, &inner);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        assert_eq!(buf.fields()[4].name(), "plain_nas_message");
+        let FieldValue::Object(ref range) = buf.fields()[4].value else {
+            panic!("expected inner Object");
+        };
+        let nested = buf.nested_fields(range);
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].name(), "raw_nas_message");
+        assert_eq!(nested[0].value, FieldValue::Bytes(&inner));
+        assert_eq!(nested[0].range, 7..data.len());
+    }
+
+    #[test]
+    fn push_integrity_protected_inner_5gsm_decoded() {
+        // A plain 5GSM message is a "plain 5GS NAS message" (TS 24.501,
+        // 9.1.1 item 1), so it is decoded.
+        let data = security_protected(0x01, &[0x2e, 0x05, 0x01, 0xc1]);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        let FieldValue::Object(ref range) = buf.fields()[4].value else {
+            panic!("expected inner Object");
+        };
+        let nested = buf.nested_fields(range);
+        let names: Vec<_> = nested.iter().map(|f| f.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "extended_protocol_discriminator",
+                "pdu_session_id",
+                "procedure_transaction_identity",
+                "message_type",
+            ]
+        );
+        assert_eq!(nested[1].value, FieldValue::U8(0x05));
+        assert_eq!(nested[3].value, FieldValue::U8(0xc1));
+    }
+
+    #[test]
+    fn push_integrity_protected_truncated_inner_5gmm_kept_raw() {
+        let data = security_protected(0x01, &[0x7e, 0x00]);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        let FieldValue::Object(ref range) = buf.fields()[4].value else {
+            panic!("expected inner Object");
+        };
+        let nested = buf.nested_fields(range);
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].name(), "raw_nas_message");
+        assert_eq!(nested[0].value, FieldValue::Bytes(&[0x7e, 0x00]));
+    }
+
+    #[test]
+    fn push_deeply_nested_security_protected_does_not_overflow() {
+        let data = deeply_nested_security_protected(10_000);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        assert_eq!(buf.fields().len(), 6);
+    }
+
     #[test]
     fn push_nas_pdu_empty() {
         let data: &[u8] = &[];
@@ -675,6 +1010,112 @@ mod tests {
         );
     }
 
+    /// Fields of the NAS-5G layer, in order.
+    fn layer_fields<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>) -> &'a [Field<'pkt>] {
+        let layer = buf.layer_by_name("NAS-5G").unwrap();
+        buf.layer_fields(layer)
+    }
+
+    #[test]
+    fn dissect_ciphered_5gmm_not_decoded() {
+        let payload = [0x2e, 0x9a, 0x41, 0xc7, 0x55];
+        let data = security_protected(0x02, &payload);
+        let mut buf = DissectBuffer::new();
+        let result = Nas5gDissector.dissect(&data, &mut buf, 14).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        assert_ciphered(layer_fields(&buf), 2, &payload, 14);
+    }
+
+    #[test]
+    fn dissect_ciphered_new_context_not_decoded() {
+        let payload = [0x7e, 0x00, 0x5e];
+        let data = security_protected(0x04, &payload);
+        let mut buf = DissectBuffer::new();
+        Nas5gDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_ciphered(layer_fields(&buf), 4, &payload, 0);
+    }
+
+    #[test]
+    fn dissect_integrity_protected_unparsable_inner() {
+        // The inner octets do not start with a known EPD: keep them as raw
+        // bytes instead of dropping them.
+        let payload = [0x99, 0x01, 0x02];
+        let data = security_protected(0x01, &payload);
+        let mut buf = DissectBuffer::new();
+        Nas5gDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("NAS-5G").unwrap();
+        let plain = buf.field_by_name(layer, "plain_nas_message").unwrap();
+        let FieldValue::Object(ref range) = plain.value else {
+            panic!("expected inner Object");
+        };
+        let inner = buf.nested_fields(range);
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].name(), "raw_nas_message");
+        assert_eq!(inner[0].descriptor.field_type, FieldType::Bytes);
+        assert_eq!(inner[0].value, FieldValue::Bytes(&payload));
+    }
+
+    #[test]
+    fn dissect_integrity_protected_decodes_inner() {
+        let data = security_protected(0x01, &[0x7e, 0x00, 0x67]);
+        let mut buf = DissectBuffer::new();
+        Nas5gDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("NAS-5G").unwrap();
+        let plain = buf.field_by_name(layer, "plain_nas_message").unwrap();
+        let FieldValue::Object(ref range) = plain.value else {
+            panic!("expected inner Object");
+        };
+        let inner = buf.nested_fields(range);
+        let mt = inner.iter().find(|f| f.name() == "message_type").unwrap();
+        assert_eq!(mt.value, FieldValue::U8(0x67));
+    }
+
+    #[test]
+    fn dissect_reserved_security_header_type() {
+        let data = [0x7E, 0x0f, 0x7e, 0x00, 0x41];
+        let mut buf = DissectBuffer::new();
+        let result = Nas5gDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        let fields = layer_fields(&buf);
+        let names: Vec<_> = fields.iter().map(|f| f.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "extended_protocol_discriminator",
+                "security_header_type",
+                "raw_nas_message",
+            ]
+        );
+        assert_eq!(fields[2].value, FieldValue::Bytes(&data[2..]));
+    }
+
+    #[test]
+    fn dissect_truncated_security_protected_5gmm() {
+        // Security protected header needs 7 octets (Figure 9.1.1.2).
+        for data in [&[0x7E, 0x02, 0x12, 0x34][..], &[0x7E, 0x01, 0, 0, 0, 0][..]] {
+            let mut buf = DissectBuffer::new();
+            let result = Nas5gDissector.dissect(data, &mut buf, 0);
+            assert!(
+                matches!(
+                    result,
+                    Err(PacketError::Truncated {
+                        expected: 7,
+                        actual
+                    }) if actual == data.len()
+                ),
+                "{data:02x?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dissect_nested_security_protected_not_recursed() {
+        let data = deeply_nested_security_protected(10_000);
+        let mut buf = DissectBuffer::new();
+        let result = Nas5gDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+    }
+
     #[test]
     fn dissect_truncated_5gmm() {
         let data = [0x7E, 0x00];
@@ -694,7 +1135,7 @@ mod tests {
     #[test]
     fn field_descriptors_accessible() {
         let d = Nas5gDissector;
-        assert_eq!(d.field_descriptors().len(), 8);
+        assert_eq!(d.field_descriptors().len(), 10);
     }
 
     #[test]
