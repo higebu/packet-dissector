@@ -56,6 +56,11 @@ const AUTH_LEN_SHA1: usize = 28;
 /// <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>
 const MIN_AUTH_LEN_SIMPLE_PASSWORD: usize = 4;
 
+/// Maximum Auth Len for Simple Password (Type + Len + Key ID + 16-byte
+/// password). RFC 5880, Section 6.7.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-6.7.2>
+const MAX_AUTH_LEN_SIMPLE_PASSWORD: usize = 19;
+
 /// Offset of the Auth Key ID octet within the Control packet.
 /// RFC 5880, Section 4.2 —
 /// <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>
@@ -226,7 +231,15 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U32).optional(),
     FieldDescriptor::new("digest", "Auth Key/Digest", FieldType::Bytes).optional(),
     FieldDescriptor::new("hash", "Auth Key/Hash", FieldType::Bytes).optional(),
+    // BFD Echo only (RFC 5880, Section 5): opaque payload that is not a
+    // Control packet. Excluded from `CONTROL_FIELD_DESCRIPTORS`.
+    FieldDescriptor::new("payload", "Payload", FieldType::Bytes).optional(),
 ];
+
+/// Field descriptors produced by [`BfdDissector`]: every entry of
+/// `FIELD_DESCRIPTORS` except the Echo-only `payload`.
+static CONTROL_FIELD_DESCRIPTORS: &[FieldDescriptor] =
+    FIELD_DESCRIPTORS.split_at(FD_ECHO_PAYLOAD).0;
 
 /// Index constants for `FIELD_DESCRIPTORS`.
 const FD_VERSION: usize = 0;
@@ -255,6 +268,8 @@ const FD_AUTH_RESERVED: usize = 21;
 const FD_SEQUENCE_NUMBER: usize = 22;
 const FD_DIGEST: usize = 23;
 const FD_HASH: usize = 24;
+// BFD Echo only.
+const FD_ECHO_PAYLOAD: usize = 25;
 
 /// Specification references for the BFD dissector.
 static REFERENCES: &[SpecReference] = &[
@@ -315,7 +330,7 @@ impl Dissector for BfdDissector {
     }
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
-        FIELD_DESCRIPTORS
+        CONTROL_FIELD_DESCRIPTORS
     }
 
     fn references(&self) -> &'static [SpecReference] {
@@ -332,20 +347,27 @@ impl Dissector for BfdDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        dissect_control(data, buf, offset, None)
+        dissect_control(
+            data,
+            buf,
+            offset,
+            CONTROL_SHORT_NAME,
+            CONTROL_FIELD_DESCRIPTORS,
+        )
     }
 }
 
 /// Dissects a BFD Control packet (RFC 5880, Section 4.1 —
 /// <https://www.rfc-editor.org/rfc/rfc5880#section-4.1>).
 ///
-/// `display_name` is recorded on the pushed layer; the Echo dissector uses
-/// it to mark Control-format Echo packets.
+/// `layer_name` and `descriptors` identify the calling dissector, so the
+/// pushed layer matches its `short_name()` and `field_descriptors()`.
 fn dissect_control<'pkt>(
     data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
-    display_name: Option<&'static str>,
+    layer_name: &'static str,
+    descriptors: &'static [FieldDescriptor],
 ) -> Result<DissectResult, PacketError> {
     if data.len() < MIN_HEADER_SIZE {
         return Err(PacketError::Truncated {
@@ -440,12 +462,7 @@ fn dissect_control<'pkt>(
     let required_min_rx = read_be_u32(data, 16)?;
     let required_min_echo_rx = read_be_u32(data, 20)?;
 
-    buf.begin_layer(
-        CONTROL_SHORT_NAME,
-        display_name,
-        FIELD_DESCRIPTORS,
-        offset..offset + length,
-    );
+    buf.begin_layer(layer_name, None, descriptors, offset..offset + length);
     buf.push_field(
         &FIELD_DESCRIPTORS[FD_VERSION],
         FieldValue::U8(version),
@@ -542,30 +559,34 @@ fn dissect_control<'pkt>(
         let auth_type = data[24];
         let auth_len = data[25] as usize;
 
-        // RFC 5880, Sections 4.2–4.4 — each authentication type has a
-        // fixed or minimum Auth Len including the Type and Length bytes
-        // themselves. Enforce these to reject malformed auth sections
-        // with missing fields such as the Key ID or fixed MD5/SHA1
-        // digest/hash.
-        //   - Simple Password (Section 4.2 —
-        //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.2>):
-        //     Type(1) + Len(1) + Key ID(1) + 1..=16 byte password ⇒ 4..=19
-        //   - Keyed / Meticulous Keyed MD5 (Section 4.3 —
-        //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.3>):
-        //     Auth Len is fixed at 24.
-        //   - Keyed / Meticulous Keyed SHA1 (Section 4.4 —
-        //     <https://www.rfc-editor.org/rfc/rfc5880#section-4.4>):
-        //     Auth Len is fixed at 28.
-        let min_auth_len = match auth_type {
-            1 => MIN_AUTH_LEN_SIMPLE_PASSWORD,
-            2 | 3 => AUTH_LEN_MD5,
-            4 | 5 => AUTH_LEN_SHA1,
-            _ => MIN_AUTH_LEN_UNKNOWN,
+        // RFC 5880, Sections 4.2–4.4 and 6.7.2–6.7.4 — each authentication
+        // type has a fixed Auth Len or a bounded range, including the Type
+        // and Length bytes themselves. Packets outside it "MUST be
+        // discarded", so they are rejected here rather than shown with
+        // mis-sized password / digest / hash fields.
+        //   - Simple Password (Section 6.7.2 —
+        //     <https://www.rfc-editor.org/rfc/rfc5880#section-6.7.2>):
+        //     "The Auth Len field MUST be set to the proper length (4 to 19
+        //     bytes)."
+        //   - Keyed / Meticulous Keyed MD5 (Section 6.7.3 —
+        //     <https://www.rfc-editor.org/rfc/rfc5880#section-6.7.3>):
+        //     "If the Auth Len field is not equal to 24, the packet MUST be
+        //     discarded."
+        //   - Keyed / Meticulous Keyed SHA1 (Section 6.7.4 —
+        //     <https://www.rfc-editor.org/rfc/rfc5880#section-6.7.4>):
+        //     "If the Auth Len field is not equal to 28, the packet MUST be
+        //     discarded."
+        //   - Unknown types: at least one byte of data after Type and Len.
+        let valid_auth_len = match auth_type {
+            1 => MIN_AUTH_LEN_SIMPLE_PASSWORD..=MAX_AUTH_LEN_SIMPLE_PASSWORD,
+            2 | 3 => AUTH_LEN_MD5..=AUTH_LEN_MD5,
+            4 | 5 => AUTH_LEN_SHA1..=AUTH_LEN_SHA1,
+            _ => MIN_AUTH_LEN_UNKNOWN..=usize::from(u8::MAX),
         };
 
-        if auth_len < min_auth_len {
+        if !valid_auth_len.contains(&auth_len) {
             return Err(PacketError::InvalidHeader(
-                "BFD auth length is less than minimum for auth type",
+                "BFD auth length is invalid for auth type",
             ));
         }
         let auth_end = 24 + auth_len;
@@ -656,8 +677,9 @@ fn push_auth_key_id<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offse
 /// Layer name used for BFD Control packets.
 const CONTROL_SHORT_NAME: &str = "BFD";
 
-/// Layer / display name used for BFD Echo packets.
-const ECHO_SHORT_NAME: &str = "BFD Echo";
+/// Layer name used for BFD Echo packets (hyphenated like other variant
+/// names such as `GTPv1-U`).
+const ECHO_SHORT_NAME: &str = "BFD-Echo";
 
 /// BFD Echo dissector (UDP port 3785).
 ///
@@ -668,18 +690,11 @@ const ECHO_SHORT_NAME: &str = "BFD Echo";
 /// BFD Echo packet reuses the format of the BFD Control packet defined in
 /// \[RFC5880\]".
 ///
-/// The payload is decoded as a Control packet (layer `BFD`, display name
-/// `BFD Echo`) when it validates as one. Otherwise a `BFD Echo` layer with
-/// an opaque `payload` field is emitted. An Echo packet never produces an
-/// error.
+/// Every packet produces one `BFD-Echo` layer. When the payload validates
+/// as a Control packet, the layer carries the Control fields; otherwise it
+/// carries a single opaque `payload` field. An Echo packet never produces
+/// an error.
 pub struct BfdEchoDissector;
-
-/// Field descriptors for opaque BFD Echo packets.
-static ECHO_FIELD_DESCRIPTORS: &[FieldDescriptor] =
-    &[FieldDescriptor::new("payload", "Payload", FieldType::Bytes)];
-
-/// Index constants for `ECHO_FIELD_DESCRIPTORS`.
-const FD_ECHO_PAYLOAD: usize = 0;
 
 impl Dissector for BfdEchoDissector {
     fn name(&self) -> &'static str {
@@ -691,7 +706,7 @@ impl Dissector for BfdEchoDissector {
     }
 
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
-        ECHO_FIELD_DESCRIPTORS
+        FIELD_DESCRIPTORS
     }
 
     fn references(&self) -> &'static [SpecReference] {
@@ -710,7 +725,7 @@ impl Dissector for BfdEchoDissector {
     ) -> Result<DissectResult, PacketError> {
         let layer_count = buf.layers().len();
         let field_count = buf.fields().len();
-        if let Ok(result) = dissect_control(data, buf, offset, Some(ECHO_SHORT_NAME)) {
+        if let Ok(result) = dissect_control(data, buf, offset, ECHO_SHORT_NAME, FIELD_DESCRIPTORS) {
             return Ok(result);
         }
         // Not a valid Control packet: roll back anything the Control
@@ -723,11 +738,11 @@ impl Dissector for BfdEchoDissector {
         buf.begin_layer(
             ECHO_SHORT_NAME,
             None,
-            ECHO_FIELD_DESCRIPTORS,
+            FIELD_DESCRIPTORS,
             offset..offset + data.len(),
         );
         buf.push_field(
-            &ECHO_FIELD_DESCRIPTORS[FD_ECHO_PAYLOAD],
+            &FIELD_DESCRIPTORS[FD_ECHO_PAYLOAD],
             FieldValue::Bytes(data),
             offset..offset + data.len(),
         );
@@ -759,6 +774,7 @@ mod tests {
     // | 4.2         | Simple Password too short (< 4) rejected   | test_simple_password_too_short    |
     // | 4.2         | Keyed MD5 wrong length rejected            | test_md5_wrong_length             |
     // | 4.2         | Keyed SHA1 wrong length rejected           | test_sha1_wrong_length            |
+    // | 6.7.2-6.7.4 | Auth Len above fixed / maximum rejected    | test_auth_len_above_fixed_or_maximum_rejected |
     // | 4.2         | Auth section (unknown type, raw data)      | test_parse_with_auth_unknown_type |
     // | 4.3         | Keyed MD5 fields split                     | test_parse_with_auth_md5          |
     // | 4.3, 4.4    | Meticulous MD5 / SHA1 fields split         | test_parse_with_auth_meticulous_md5_and_sha1 |
@@ -1482,7 +1498,7 @@ mod tests {
         assert!(matches!(result.next, DispatchHint::End));
         assert_eq!(buf.layers().len(), 1);
         let layer = &buf.layers()[0];
-        assert_eq!(layer.name, "BFD Echo");
+        assert_eq!(layer.name, BfdEchoDissector.short_name());
         assert_eq!(layer.range, 42..50);
         let payload = buf.field_by_name(layer, "payload").unwrap();
         assert_eq!(payload.value, FieldValue::Bytes(&data));
@@ -1500,7 +1516,7 @@ mod tests {
         let result = BfdEchoDissector.dissect(&data, &mut buf, 0).unwrap();
         assert_eq!(result.bytes_consumed, 24);
         assert_eq!(buf.layers().len(), 1);
-        assert_eq!(buf.layers()[0].name, "BFD Echo");
+        assert_eq!(buf.layers()[0].name, BfdEchoDissector.short_name());
     }
 
     #[test]
@@ -1515,8 +1531,14 @@ mod tests {
         assert_eq!(result.bytes_consumed, 24);
         assert_eq!(buf.layers().len(), 1);
         let layer = &buf.layers()[0];
-        assert_eq!(layer.name, "BFD");
-        assert_eq!(layer.display_name, Some("BFD Echo"));
+        // The layer name is the dissector's short_name (Dissector trait
+        // contract), whichever form the Echo payload takes.
+        assert_eq!(layer.name, BfdEchoDissector.short_name());
+        assert_eq!(layer.display_name, None);
+        assert!(std::ptr::eq(
+            layer.field_descriptors,
+            BfdEchoDissector.field_descriptors()
+        ));
         assert_eq!(
             buf.field_by_name(layer, "my_discriminator").unwrap().value,
             FieldValue::U32(0x1234)
@@ -1541,7 +1563,7 @@ mod tests {
         assert_eq!(result.bytes_consumed, 28);
         assert_eq!(buf.layers().len(), 2);
         let layer = &buf.layers()[1];
-        assert_eq!(layer.name, "BFD Echo");
+        assert_eq!(layer.name, BfdEchoDissector.short_name());
         assert_eq!(buf.fields().len(), fields_before + 1);
         assert_eq!(
             buf.field_by_name(layer, "payload").unwrap().value,
@@ -1551,10 +1573,17 @@ mod tests {
 
     #[test]
     fn echo_field_descriptors() {
+        // Echo layers carry either the Control fields or an opaque payload,
+        // so the Echo schema is the Control schema plus `payload`.
         let fds = BfdEchoDissector.field_descriptors();
-        assert_eq!(fds.len(), 1);
-        assert_eq!(fds[0].name, "payload");
-        assert_eq!(BfdEchoDissector.short_name(), "BFD Echo");
+        let control = BfdDissector.field_descriptors();
+        assert_eq!(fds.len(), control.len() + 1);
+        assert!(fds.iter().zip(control).all(|(a, b)| a.name == b.name));
+        assert_eq!(fds[fds.len() - 1].name, "payload");
+        assert!(fds[fds.len() - 1].optional);
+        assert!(control.iter().all(|d| d.name != "payload"));
+        // Short names follow the hyphenated variant convention (GTPv1-U).
+        assert_eq!(BfdEchoDissector.short_name(), "BFD-Echo");
         assert!(!BfdEchoDissector.name().is_empty());
     }
 
@@ -1593,6 +1622,44 @@ mod tests {
                 assert!(msg.contains("auth length"), "unexpected message: {msg}");
             }
             other => panic!("Expected InvalidHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_auth_len_above_fixed_or_maximum_rejected() {
+        // RFC 5880, Section 6.7.3 — "If the Auth Len field is not equal to
+        // 24, the packet MUST be discarded." Section 6.7.4 — the same with
+        // 28. Section 6.7.2 — Simple Password Auth Len is 4 to 19 bytes.
+        for (auth_type, auth_len) in [(1u8, 20u8), (2, 40), (3, 25), (4, 32), (5, 29)] {
+            let total = 24 + auth_len as usize;
+            let mut pkt = build_bfd(
+                1,
+                0,
+                3,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                3,
+                total as u8,
+                1,
+                0,
+                1_000_000,
+                1_000_000,
+                0,
+            );
+            pkt.push(auth_type);
+            pkt.push(auth_len);
+            pkt.extend_from_slice(&vec![0u8; auth_len as usize - 2]);
+            let mut buf = DissectBuffer::new();
+            match BfdDissector.dissect(&pkt, &mut buf, 0).unwrap_err() {
+                PacketError::InvalidHeader(msg) => {
+                    assert!(msg.contains("auth length"), "unexpected message: {msg}");
+                }
+                other => panic!("type {auth_type}: expected InvalidHeader, got {other:?}"),
+            }
         }
     }
 

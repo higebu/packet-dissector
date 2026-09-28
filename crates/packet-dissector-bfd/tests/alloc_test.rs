@@ -110,5 +110,5 @@ fn zero_alloc_dissect_bfd_echo() {
         BfdEchoDissector.dissect(opaque, &mut buf, 0).unwrap();
     });
     assert_eq!(allocs, 0, "BFD Echo dissect allocated {allocs} times");
-    assert_eq!(buf.layers()[0].name, "BFD Echo");
+    assert_eq!(buf.layers()[0].name, "BFD-Echo");
 }

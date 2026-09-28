@@ -4408,7 +4408,7 @@ fn integration_ethernet_ipv4_udp_bfd_echo_opaque() {
         assert_eq!(buf.layers().len(), 4);
         assert_layers_contiguous(&buf);
         let echo = &buf.layers()[3];
-        assert_eq!(echo.name, "BFD Echo");
+        assert_eq!(echo.name, "BFD-Echo");
         assert_eq!(
             buf.field_by_name(echo, "payload").unwrap().value,
             FieldValue::Bytes(payload)
@@ -4427,8 +4427,8 @@ fn integration_ethernet_ipv4_udp_bfd_echo_control() {
     assert_eq!(buf.layers().len(), 4);
     assert_layers_contiguous(&buf);
     let bfd = &buf.layers()[3];
-    assert_eq!(bfd.name, "BFD");
-    assert_eq!(bfd.display_name, Some("BFD Echo"));
+    assert_eq!(bfd.name, "BFD-Echo");
+    assert_eq!(bfd.display_name, None);
     assert_eq!(
         buf.field_by_name(bfd, "my_discriminator").unwrap().value,
         FieldValue::U32(0x55)
