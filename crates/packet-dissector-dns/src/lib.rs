@@ -405,6 +405,30 @@ fn parse_name(msg: &[u8], pos: usize) -> Result<usize, PacketError> {
     Ok(consumed)
 }
 
+/// Parse a domain name embedded in RDATA and require that its in-place
+/// encoding fits inside RDATA.
+///
+/// `rel_pos` is the name's offset relative to the start of RDATA. Returns the
+/// number of octets the name occupies at `rel_pos`, or `None` if the name is
+/// malformed or runs past RDLENGTH.
+///
+/// RFC 1035, Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc1035#section-3.2.1>:
+/// "RDATA           a variable length string of octets that describes the
+///                 resource."  Its length is given by RDLENGTH, so a name that
+/// continues past it is malformed. A compression pointer (RFC 1035,
+/// Section 4.1.4 — <https://www.rfc-editor.org/rfc/rfc1035#section-4.1.4>)
+/// may still refer to a name elsewhere in the message; only the octets
+/// encoded in place are bounded by RDATA.
+fn parse_rdata_name(
+    msg: &[u8],
+    rdata_offset: usize,
+    rdata_len: usize,
+    rel_pos: usize,
+) -> Option<usize> {
+    let consumed = parse_name(msg, rdata_offset + rel_pos).ok()?;
+    (rel_pos + consumed <= rdata_len).then_some(consumed)
+}
+
 /// Parse RDATA into typed fields based on the record type.
 ///
 /// `msg` is the full DNS message (needed for name compression in RDATA).
@@ -452,11 +476,10 @@ fn parse_rdata<'pkt>(
         // RFC 1035, Section 3.3.1/3.3.11/3.3.12 — CNAME/NS/PTR
         // RFC 6672 — DNAME: a single domain name
         TYPE_CNAME | TYPE_NS | TYPE_PTR | TYPE_DNAME => {
-            if let Ok(consumed) = parse_name(msg, rdata_offset) {
-                let _ = consumed;
+            if parse_rdata_name(msg, rdata_offset, rdata.len(), 0).is_some() {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA],
-                    FieldValue::Bytes(&msg[rdata_offset..rdata_offset + rdata.len()]),
+                    FieldValue::Bytes(rdata),
                     rdata_range,
                 );
                 return;
@@ -465,7 +488,7 @@ fn parse_rdata<'pkt>(
         // RFC 1035, Section 3.3.9 — MX: preference (U16) + exchange (domain name)
         TYPE_MX if rdata.len() >= 3 => {
             let preference = read_be_u16(rdata, 0).unwrap_or_default();
-            if parse_name(msg, rdata_offset + 2).is_ok() {
+            if parse_rdata_name(msg, rdata_offset, rdata.len(), 2).is_some() {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_PREFERENCE],
                     FieldValue::U16(preference),
@@ -473,7 +496,7 @@ fn parse_rdata<'pkt>(
                 );
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_EXCHANGE],
-                    FieldValue::Bytes(&msg[rdata_offset + 2..rdata_offset + rdata.len()]),
+                    FieldValue::Bytes(&rdata[2..]),
                     abs_offset + 2..abs_offset + rdata.len(),
                 );
                 return;
@@ -491,9 +514,9 @@ fn parse_rdata<'pkt>(
         }
         // RFC 1035, Section 3.3.13 — SOA
         TYPE_SOA => {
-            if let Ok(mname_len) = parse_name(msg, rdata_offset) {
-                let rname_off = rdata_offset + mname_len;
-                if let Ok(rname_len) = parse_name(msg, rname_off) {
+            if let Some(mname_len) = parse_rdata_name(msg, rdata_offset, rdata.len(), 0) {
+                if let Some(rname_len) = parse_rdata_name(msg, rdata_offset, rdata.len(), mname_len)
+                {
                     let timers_off = mname_len + rname_len;
                     if timers_off + 20 <= rdata.len() {
                         let t = timers_off;
@@ -506,12 +529,12 @@ fn parse_rdata<'pkt>(
                         let rname_end = mname_end + rname_len;
                         buf.push_field(
                             &RR_CHILD_FIELDS[RRFD_RDATA_MNAME],
-                            FieldValue::Bytes(&msg[rdata_offset..rdata_offset + mname_len]),
+                            FieldValue::Bytes(&rdata[..mname_len]),
                             abs_offset..mname_end,
                         );
                         buf.push_field(
                             &RR_CHILD_FIELDS[RRFD_RDATA_RNAME],
-                            FieldValue::Bytes(&msg[rname_off..rname_off + rname_len]),
+                            FieldValue::Bytes(&rdata[mname_len..timers_off]),
                             mname_end..rname_end,
                         );
                         buf.push_field(
@@ -549,7 +572,7 @@ fn parse_rdata<'pkt>(
             let priority = read_be_u16(rdata, 0).unwrap_or_default();
             let weight = read_be_u16(rdata, 2).unwrap_or_default();
             let port = read_be_u16(rdata, 4).unwrap_or_default();
-            if parse_name(msg, rdata_offset + 6).is_ok() {
+            if parse_rdata_name(msg, rdata_offset, rdata.len(), 6).is_some() {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_PRIORITY],
                     FieldValue::U16(priority),
@@ -567,7 +590,7 @@ fn parse_rdata<'pkt>(
                 );
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_TARGET],
-                    FieldValue::Bytes(&msg[rdata_offset + 6..rdata_offset + rdata.len()]),
+                    FieldValue::Bytes(&rdata[6..]),
                     abs_offset + 6..abs_offset + rdata.len(),
                 );
                 return;
@@ -596,7 +619,7 @@ fn parse_rdata<'pkt>(
                 n += 1;
                 pos += str_len;
             }
-            if n == 3 && parse_name(msg, rdata_offset + pos).is_ok() {
+            if n == 3 && parse_rdata_name(msg, rdata_offset, rdata.len(), pos).is_some() {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_ORDER],
                     FieldValue::U16(order),
@@ -624,7 +647,7 @@ fn parse_rdata<'pkt>(
                 );
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_REPLACEMENT],
-                    FieldValue::Bytes(&msg[rdata_offset + pos..rdata_offset + rdata.len()]),
+                    FieldValue::Bytes(&rdata[pos..]),
                     abs_offset + pos..abs_offset + rdata.len(),
                 );
                 return;
@@ -708,7 +731,7 @@ fn parse_rdata<'pkt>(
             let sig_expiration = read_be_u32(rdata, 8).unwrap_or_default();
             let sig_inception = read_be_u32(rdata, 12).unwrap_or_default();
             let key_tag = read_be_u16(rdata, 16).unwrap_or_default();
-            if let Ok(signer_name_len) = parse_name(msg, rdata_offset + 18) {
+            if let Some(signer_name_len) = parse_rdata_name(msg, rdata_offset, rdata.len(), 18) {
                 let sig_start = 18 + signer_name_len;
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_TYPE_COVERED],
@@ -747,7 +770,7 @@ fn parse_rdata<'pkt>(
                 );
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_SIGNER_NAME],
-                    FieldValue::Bytes(&msg[rdata_offset + 18..rdata_offset + sig_start]),
+                    FieldValue::Bytes(&rdata[18..sig_start]),
                     abs_offset + 18..abs_offset + sig_start,
                 );
                 buf.push_field(
@@ -760,10 +783,10 @@ fn parse_rdata<'pkt>(
         }
         // RFC 4035 — NSEC: next_domain_name + type_bitmaps
         TYPE_NSEC => {
-            if let Ok(name_len) = parse_name(msg, rdata_offset) {
+            if let Some(name_len) = parse_rdata_name(msg, rdata_offset, rdata.len(), 0) {
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_NEXT_DOMAIN_NAME],
-                    FieldValue::Bytes(&msg[rdata_offset..rdata_offset + name_len]),
+                    FieldValue::Bytes(&rdata[..name_len]),
                     abs_offset..abs_offset + name_len,
                 );
                 buf.push_field(
@@ -894,7 +917,7 @@ fn parse_rdata<'pkt>(
         // RFC 9460 — SVCB/HTTPS: SvcPriority(2) + TargetName(name) + SvcParams(rest)
         TYPE_SVCB | TYPE_HTTPS if rdata.len() >= 3 => {
             let priority = read_be_u16(rdata, 0).unwrap_or_default();
-            if let Ok(target_len) = parse_name(msg, rdata_offset + 2) {
+            if let Some(target_len) = parse_rdata_name(msg, rdata_offset, rdata.len(), 2) {
                 let params_start = 2 + target_len;
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_PRIORITY],
@@ -903,16 +926,14 @@ fn parse_rdata<'pkt>(
                 );
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_RDATA_TARGET],
-                    FieldValue::Bytes(&msg[rdata_offset + 2..rdata_offset + params_start]),
+                    FieldValue::Bytes(&rdata[2..params_start]),
                     abs_offset + 2..abs_offset + params_start,
                 );
-                if params_start <= rdata.len() {
-                    buf.push_field(
-                        &RR_CHILD_FIELDS[RRFD_RDATA_PARAMS],
-                        FieldValue::Bytes(&rdata[params_start..]),
-                        abs_offset + params_start..abs_offset + rdata.len(),
-                    );
-                }
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RDATA_PARAMS],
+                    FieldValue::Bytes(&rdata[params_start..]),
+                    abs_offset + params_start..abs_offset + rdata.len(),
+                );
                 return;
             }
         }
@@ -1978,6 +1999,11 @@ mod tests {
     // | RFC 4034 §2.1          | DNSKEY record                       | parse_dnskey_record               |
     // | RFC 4034 §3.1          | RRSIG record                        | parse_rrsig_record                |
     // | RFC 4034 §4.1          | NSEC record                         | parse_nsec_record                 |
+    // | RFC 4034 §4.1          | NSEC name via compression pointer   | nsec_next_name_compression_pointer_is_accepted |
+    // | RFC 1035 §3.2.1        | NSEC next name past RDLENGTH        | nsec_next_name_overrunning_rdata_falls_back |
+    // | RFC 1035 §3.2.1        | RRSIG signer name past RDLENGTH     | rrsig_signer_name_overrunning_rdata_falls_back |
+    // | RFC 1035 §3.2.1        | SOA RNAME past RDLENGTH             | soa_rname_overrunning_rdata_falls_back |
+    // | RFC 1035 §3.2.1        | Any RDATA name past RDLENGTH        | names_overrunning_rdata_fall_back_for_every_name_type |
     // | RFC 4034 §5.1          | DS record                           | parse_ds_record                   |
     // | RFC 4255               | SSHFP record                        | parse_sshfp_record                |
     // | RFC 5155 §3.2          | NSEC3 record                        | parse_nsec3_record                |
@@ -2839,6 +2865,130 @@ mod tests {
         assert_eq!(
             find_child(&b, rr, "rdata_type_bitmaps").unwrap().value,
             FieldValue::Bytes(&bitmaps)
+        );
+    }
+
+    // ---- RFC 1035 §3.2.1 — names embedded in RDATA stay within RDLENGTH --
+
+    /// Build a response with one answer RR (root owner, class IN, TTL 0)
+    /// whose RDLENGTH covers only `rdata`; `trailing` follows RDATA in the
+    /// message, so a name that starts inside `rdata` can run into it.
+    fn answer_with_trailing(rtype: u16, rdata: &[u8], trailing: &[u8]) -> Vec<u8> {
+        let mut data = header(0, 1, 0, 0);
+        data.push(0); // owner name: root
+        data.extend_from_slice(&rtype.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+        data.extend_from_slice(&0u32.to_be_bytes()); // TTL
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(rdata);
+        data.extend_from_slice(trailing);
+        data
+    }
+
+    /// Dissect `data` and assert that the single answer RR fell back to a
+    /// raw `rdata` field covering exactly `rdata`, with no typed sub-field.
+    fn assert_raw_rdata_fallback(data: &[u8], rdata: &[u8]) {
+        let mut b = buf();
+        DnsDissector.dissect(data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        let rdata_field = find_child(&b, rr, "rdata").expect("raw rdata fallback");
+        assert_eq!(rdata_field.value, FieldValue::Bytes(rdata));
+        // header (12) + root owner (1) + TYPE/CLASS/TTL/RDLENGTH (10)
+        let rdata_start = 12 + 1 + 10;
+        assert_eq!(rdata_field.range, rdata_start..rdata_start + rdata.len());
+        let range = match &rr.value {
+            FieldValue::Object(r) => r.clone(),
+            _ => panic!("expected Object"),
+        };
+        for f in b.nested_fields(&range) {
+            assert!(
+                !f.name().starts_with("rdata_"),
+                "unexpected typed field {}",
+                f.name()
+            );
+            assert!(f.range.end <= rdata_start + rdata.len());
+        }
+    }
+
+    /// "com." encoded in place: 5 octets, placed right after RDATA.
+    const OVERRUN_NAME: [u8; 5] = [3, b'c', b'o', b'm', 0];
+
+    #[test]
+    fn nsec_next_name_overrunning_rdata_falls_back() {
+        // RDLENGTH=1: only the "com" length octet is inside RDATA.
+        let data = answer_with_trailing(TYPE_NSEC, &OVERRUN_NAME[..1], &OVERRUN_NAME[1..]);
+        assert_raw_rdata_fallback(&data, &OVERRUN_NAME[..1]);
+    }
+
+    #[test]
+    fn rrsig_signer_name_overrunning_rdata_falls_back() {
+        // RDLENGTH=18: the fixed part only; the signer name lies outside RDATA.
+        let rdata = [0u8; 18];
+        let data = answer_with_trailing(TYPE_RRSIG, &rdata, &OVERRUN_NAME);
+        assert_raw_rdata_fallback(&data, &rdata);
+    }
+
+    #[test]
+    fn names_overrunning_rdata_fall_back_for_every_name_type() {
+        // (type, fixed-size prefix before the embedded name)
+        let cases: &[(u16, &[u8])] = &[
+            (TYPE_CNAME, &[]),
+            (TYPE_NS, &[]),
+            (TYPE_PTR, &[]),
+            (TYPE_DNAME, &[]),
+            (TYPE_SOA, &[]),
+            (TYPE_MX, &[0, 10]),
+            (TYPE_SRV, &[0, 1, 0, 2, 0, 80]),
+            // order, preference, three empty character-strings
+            (TYPE_NAPTR, &[0, 1, 0, 2, 0, 0, 0]),
+            (TYPE_SVCB, &[0, 1]),
+            (TYPE_HTTPS, &[0, 1]),
+        ];
+        for &(rtype, prefix) in cases {
+            // RDATA holds the prefix plus the first octet of the name.
+            let mut rdata = prefix.to_vec();
+            rdata.push(OVERRUN_NAME[0]);
+            let data = answer_with_trailing(rtype, &rdata, &OVERRUN_NAME[1..]);
+            assert_raw_rdata_fallback(&data, &rdata);
+        }
+    }
+
+    #[test]
+    fn soa_rname_overrunning_rdata_falls_back() {
+        // MNAME fits; RNAME starts on the last RDATA octet and runs past it.
+        let mut rdata = wire_name("ns.test");
+        rdata.push(OVERRUN_NAME[0]);
+        let data = answer_with_trailing(TYPE_SOA, &rdata, &OVERRUN_NAME[1..]);
+        assert_raw_rdata_fallback(&data, &rdata);
+    }
+
+    #[test]
+    fn nsec_next_name_compression_pointer_is_accepted() {
+        // RFC 1035 §4.1.4 — a pointer occupies 2 octets inside RDATA even if
+        // it refers to a name outside RDATA; only the in-place octets count.
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test")); // owner at offset 12
+        data.extend_from_slice(&TYPE_NSEC.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        let rdata = [0xC0u8, 0x0C, 0, 1, 0x40];
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(&rdata);
+
+        let mut b = buf();
+        DnsDissector.dissect(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        let answers = b.field_by_name(layer, "answers").unwrap();
+        let rr = first_array_entry(&b, answers);
+        assert_eq!(
+            find_child(&b, rr, "rdata_next_domain_name").unwrap().value,
+            FieldValue::Bytes(&rdata[..2])
+        );
+        assert_eq!(
+            find_child(&b, rr, "rdata_type_bitmaps").unwrap().value,
+            FieldValue::Bytes(&rdata[2..])
         );
     }
 
