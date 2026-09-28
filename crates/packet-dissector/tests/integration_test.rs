@@ -15,6 +15,7 @@
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
+//! | Ethernet → IPv4 → IGMP MRD Solicitation | integration_ethernet_ipv4_igmp_mrd_solicitation |
 //! | Ethernet → IPv6 → ICMPv6 Echo           | integration_ethernet_ipv6_icmpv6_echo         |
 //! | Ethernet → IPv6 → TCP                    | integration_ethernet_ipv6_tcp                 |
 //! | Ethernet → IPv6 → UDP → DNS             | integration_ethernet_ipv6_udp_dns             |
@@ -6842,6 +6843,35 @@ fn integration_ethernet_ipv4_igmp_v2_report() {
         buf.field_by_name(igmp, "group_address").unwrap().value,
         FieldValue::Ipv4Addr([239, 1, 1, 1])
     );
+}
+
+#[test]
+fn integration_ethernet_ipv4_igmp_mrd_solicitation() {
+    // RFC 4286, Section 4.1 — a 4-octet Solicitation to All-Routers.
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x01, 0x00, 0x5e, 0x00, 0x00, 0x02],
+        MAC_SRC,
+        0x0800,
+    );
+    let ip_start = push_ipv4(&mut pkt, 2, IPV4_SRC, [224, 0, 0, 2]);
+    pkt.extend_from_slice(&[0x31, 0x00, 0xce, 0xff]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 3);
+    assert_layers_contiguous(&buf);
+
+    let igmp = &buf.layers()[2];
+    assert_eq!(igmp.name, "IGMP");
+    assert_eq!(
+        display_name_for(&buf, igmp, "type"),
+        Some("Multicast Router Solicitation")
+    );
+    assert!(buf.field_by_name(igmp, "group_address").is_none());
 }
 
 #[test]

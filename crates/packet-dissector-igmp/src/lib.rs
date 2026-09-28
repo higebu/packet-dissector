@@ -5,6 +5,8 @@
 //! - RFC 2236: <https://www.rfc-editor.org/rfc/rfc2236> (IGMPv2, updated by RFC 3376 and RFC 9776)
 //! - RFC 9776: <https://www.rfc-editor.org/rfc/rfc9776> (IGMPv3; obsoletes RFC 3376)
 //! - RFC 4604: <https://www.rfc-editor.org/rfc/rfc4604> (SSM semantics for IGMPv3/MLDv2)
+//! - RFC 4286: <https://www.rfc-editor.org/rfc/rfc4286> (Multicast Router Discovery)
+//! - IANA "IGMP Type Numbers": <https://www.iana.org/assignments/igmp-type-numbers>
 
 #![deny(missing_docs)]
 
@@ -39,6 +41,11 @@ static REFERENCES: &[SpecReference] = &[
          Listener Discovery Protocol Version 2 (MLDv2) for Source-Specific Multicast",
         "https://www.rfc-editor.org/rfc/rfc4604",
     ),
+    SpecReference::new(
+        "RFC 4286",
+        "Multicast Router Discovery",
+        "https://www.rfc-editor.org/rfc/rfc4286",
+    ),
 ];
 
 /// Returns a human-readable name for well-known IGMP type values.
@@ -46,16 +53,56 @@ static REFERENCES: &[SpecReference] = &[
 /// RFC 1112, Section 6.2 — <https://www.rfc-editor.org/rfc/rfc1112#section-6.2>
 /// RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
 /// RFC 9776, Section 4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4>
+/// RFC 4286, Section 8 — <https://www.rfc-editor.org/rfc/rfc4286#section-8>
+/// IANA "IGMP Type Numbers" — <https://www.iana.org/assignments/igmp-type-numbers>
 fn igmp_type_name(v: u8) -> Option<&'static str> {
     match v {
-        0x11 => Some("Membership Query"),
-        0x12 => Some("IGMPv1 Membership Report"),
-        0x16 => Some("IGMPv2 Membership Report"),
-        0x17 => Some("Leave Group"),
-        0x22 => Some("IGMPv3 Membership Report"),
+        TYPE_MEMBERSHIP_QUERY => Some("Membership Query"),
+        TYPE_V1_REPORT => Some("IGMPv1 Membership Report"),
+        0x13 => Some("DVMRP"),
+        0x14 => Some("PIM version 1"),
+        TYPE_V2_REPORT => Some("IGMPv2 Membership Report"),
+        TYPE_V2_LEAVE => Some("Leave Group"),
+        0x1e => Some("Multicast Traceroute Response"),
+        0x1f => Some("Multicast Traceroute"),
+        TYPE_V3_REPORT => Some("IGMPv3 Membership Report"),
+        TYPE_MRD_ADVERTISEMENT => Some("Multicast Router Advertisement"),
+        TYPE_MRD_SOLICITATION => Some("Multicast Router Solicitation"),
+        TYPE_MRD_TERMINATION => Some("Multicast Router Termination"),
         _ => None,
     }
 }
+
+/// Membership Query.
+/// RFC 2236, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc2236#section-2.1>
+const TYPE_MEMBERSHIP_QUERY: u8 = 0x11;
+/// IGMPv1 Membership Report.
+/// RFC 1112, Appendix I — <https://www.rfc-editor.org/rfc/rfc1112#appendix-I>
+const TYPE_V1_REPORT: u8 = 0x12;
+/// IGMPv2 Membership Report.
+/// RFC 2236, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc2236#section-2.1>
+const TYPE_V2_REPORT: u8 = 0x16;
+/// IGMPv2 Leave Group.
+/// RFC 2236, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc2236#section-2.1>
+const TYPE_V2_LEAVE: u8 = 0x17;
+/// IGMPv3 Membership Report.
+/// RFC 9776, Section 4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4>
+const TYPE_V3_REPORT: u8 = 0x22;
+/// Multicast Router Advertisement.
+/// RFC 4286, Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.1>
+const TYPE_MRD_ADVERTISEMENT: u8 = 0x30;
+/// Multicast Router Solicitation.
+/// RFC 4286, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc4286#section-4.1.1>
+const TYPE_MRD_SOLICITATION: u8 = 0x31;
+/// Multicast Router Termination.
+/// RFC 4286, Section 5.1.1 — <https://www.rfc-editor.org/rfc/rfc4286#section-5.1.1>
+const TYPE_MRD_TERMINATION: u8 = 0x32;
+
+/// Size of the fields shared by every IGMP message: Type(1) + byte 1(1) +
+/// Checksum(2). Also the full size of an MRD Solicitation / Termination.
+///
+/// RFC 4286, Sections 4.1 and 5.1 — <https://www.rfc-editor.org/rfc/rfc4286#section-4.1>
+const COMMON_HEADER_SIZE: usize = 4;
 
 /// Returns a human-readable name for IGMPv3 group record type values.
 ///
@@ -145,6 +192,20 @@ const FD_REPORT_FLAGS: usize = 12;
 const FD_NUM_GROUP_RECORDS: usize = 13;
 /// Field descriptor index for `group_records`.
 const FD_GROUP_RECORDS: usize = 14;
+/// Field descriptor index for `code` (byte 1 of a type whose body is not decoded).
+const FD_CODE: usize = 15;
+/// Field descriptor index for `data` (body of a type that is not decoded).
+const FD_DATA: usize = 16;
+/// Field descriptor index for MRD `advertisement_interval` (RFC 4286 §3.2.2).
+const FD_ADVERTISEMENT_INTERVAL: usize = 17;
+/// Field descriptor index for MRD `query_interval` (RFC 4286 §3.2.4).
+const FD_QUERY_INTERVAL: usize = 18;
+/// Field descriptor index for MRD `robustness_variable` (RFC 4286 §3.2.5).
+const FD_ROBUSTNESS_VARIABLE: usize = 19;
+/// Field descriptor index for MRD `reserved` (RFC 4286 §4.1.2, §5.1.2).
+const FD_RESERVED: usize = 20;
+/// Field descriptor index for the derived `query_version` (RFC 9776 §7.1).
+const FD_QUERY_VERSION: usize = 21;
 
 // ---------------------------------------------------------------------------
 // Child field descriptor indices — source address
@@ -241,7 +302,8 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         }),
         format_fn: None,
     },
-    FieldDescriptor::new("max_resp_time", "Max Resp Time", FieldType::U8),
+    // Not present for MRD messages or types whose body is not decoded.
+    FieldDescriptor::new("max_resp_time", "Max Resp Time", FieldType::U8).optional(),
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
     FieldDescriptor {
         name: "group_address",
@@ -291,6 +353,21 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("group_records", "Group Records", FieldType::Array)
         .optional()
         .with_children(GROUP_RECORD_CHILDREN),
+    // Types whose body is not decoded (unknown, DVMRP, PIMv1, mtrace).
+    FieldDescriptor::new("code", "Code", FieldType::U8).optional(),
+    FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
+    // Multicast Router Discovery (RFC 4286).
+    FieldDescriptor::new(
+        "advertisement_interval",
+        "Advertisement Interval",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("query_interval", "Query Interval", FieldType::U16).optional(),
+    FieldDescriptor::new("robustness_variable", "Robustness Variable", FieldType::U16).optional(),
+    FieldDescriptor::new("reserved", "Reserved", FieldType::U8).optional(),
+    // Derived from the message length and Max Resp Code (RFC 9776 §7.1).
+    FieldDescriptor::new("query_version", "Query Version", FieldType::U8).optional(),
 ];
 
 /// IGMP dissector supporting IGMPv1 (RFC 1112), IGMPv2 (RFC 2236), and
@@ -464,9 +541,31 @@ impl Dissector for IgmpDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        if data.len() < HEADER_SIZE {
+        let Some(&igmp_type) = data.first() else {
             return Err(PacketError::Truncated {
-                expected: HEADER_SIZE,
+                expected: COMMON_HEADER_SIZE,
+                actual: 0,
+            });
+        };
+
+        // Minimum length depends on the message type.
+        let min_len = match igmp_type {
+            TYPE_MEMBERSHIP_QUERY
+            | TYPE_V1_REPORT
+            | TYPE_V2_REPORT
+            | TYPE_V2_LEAVE
+            | TYPE_V3_REPORT
+            | TYPE_MRD_ADVERTISEMENT => HEADER_SIZE,
+            // RFC 4286, Sections 4.1 and 5.1 — 4-octet messages.
+            //   <https://www.rfc-editor.org/rfc/rfc4286#section-4.1>
+            //   <https://www.rfc-editor.org/rfc/rfc4286#section-5.1>
+            // Other types: only the common Type / Code / Checksum layout is
+            // assumed.
+            _ => COMMON_HEADER_SIZE,
+        };
+        if data.len() < min_len {
+            return Err(PacketError::Truncated {
+                expected: min_len,
                 actual: data.len(),
             });
         }
@@ -482,8 +581,8 @@ impl Dissector for IgmpDissector {
         // Common header fields.
         // RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
         // RFC 9776, Section 4 — <https://www.rfc-editor.org/rfc/rfc9776#section-4>
-        let igmp_type = data[0];
-        let max_resp_time = data[1];
+        // RFC 4286, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc4286#section-3.2>
+        let byte1 = data[1];
         let checksum = read_be_u16(data, 2)?;
 
         buf.push_field(
@@ -491,9 +590,24 @@ impl Dissector for IgmpDissector {
             FieldValue::U8(igmp_type),
             offset..offset + 1,
         );
+        // The meaning of byte 1 depends on the type.
+        let byte1_fd = match igmp_type {
+            TYPE_MEMBERSHIP_QUERY
+            | TYPE_V1_REPORT
+            | TYPE_V2_REPORT
+            | TYPE_V2_LEAVE
+            | TYPE_V3_REPORT => FD_MAX_RESP_TIME,
+            // RFC 4286, Section 3.2.2 — Advertisement Interval (seconds).
+            //   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.2>
+            TYPE_MRD_ADVERTISEMENT => FD_ADVERTISEMENT_INTERVAL,
+            // RFC 4286, Sections 4.1.2 and 5.1.2 — Reserved.
+            //   <https://www.rfc-editor.org/rfc/rfc4286#section-4.1.2>
+            TYPE_MRD_SOLICITATION | TYPE_MRD_TERMINATION => FD_RESERVED,
+            _ => FD_CODE,
+        };
         buf.push_field(
-            &FIELD_DESCRIPTORS[FD_MAX_RESP_TIME],
-            FieldValue::U8(max_resp_time),
+            &FIELD_DESCRIPTORS[byte1_fd],
+            FieldValue::U8(byte1),
             offset + 1..offset + 2,
         );
         buf.push_field(
@@ -502,8 +616,12 @@ impl Dissector for IgmpDissector {
             offset + 2..offset + 4,
         );
 
-        // Group address is present for all types except IGMPv3 Report (0x22)
-        if igmp_type != 0x22 {
+        // Group address: bytes 4–7 of Queries, v1/v2 Reports and Leave Group.
+        // RFC 2236, Section 2.4 — <https://www.rfc-editor.org/rfc/rfc2236#section-2.4>
+        if matches!(
+            igmp_type,
+            TYPE_MEMBERSHIP_QUERY | TYPE_V1_REPORT | TYPE_V2_REPORT | TYPE_V2_LEAVE
+        ) {
             let group_addr = read_ipv4_addr(data, 4)?;
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_GROUP_ADDRESS],
@@ -512,15 +630,35 @@ impl Dissector for IgmpDissector {
             );
         }
 
+        // RFC 9776, Section 7.1 — Query Version Distinctions.
+        //   <https://www.rfc-editor.org/rfc/rfc9776#section-7.1>
+        // "Query Messages that do not match any of the above conditions
+        // (e.g., a Query of length 10 octets) MUST be silently ignored."
+        if igmp_type == TYPE_MEMBERSHIP_QUERY {
+            let query_version = match data.len() {
+                HEADER_SIZE if byte1 == 0 => Some(1),
+                HEADER_SIZE => Some(2),
+                n if n >= V3_QUERY_MIN_SIZE => Some(3),
+                _ => None,
+            };
+            if let Some(v) = query_version {
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_QUERY_VERSION],
+                    FieldValue::U8(v),
+                    offset..offset + total_len,
+                );
+            }
+        }
+
         match igmp_type {
             // Membership Query (0x11)
             // RFC 2236, Section 2 — <https://www.rfc-editor.org/rfc/rfc2236#section-2>
             // RFC 9776, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1>
             // IGMPv3 query: at least 12 bytes.
-            0x11 if data.len() >= V3_QUERY_MIN_SIZE => {
+            TYPE_MEMBERSHIP_QUERY if data.len() >= V3_QUERY_MIN_SIZE => {
                 // Decoded Max Resp Time.
                 // RFC 9776, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.1.1>
-                let decoded_mrt = decode_exp_field(max_resp_time);
+                let decoded_mrt = decode_exp_field(byte1);
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_MAX_RESP_TIME_VALUE],
                     FieldValue::U32(decoded_mrt),
@@ -584,11 +722,11 @@ impl Dissector for IgmpDissector {
             // RFC 1112, Section 6.2 — <https://www.rfc-editor.org/rfc/rfc1112#section-6.2>
             // IGMPv2 Membership Report (0x16) / Leave Group (0x17)
             // RFC 2236, Section 3 — <https://www.rfc-editor.org/rfc/rfc2236#section-3>
-            0x12 | 0x16 | 0x17 => {}
+            TYPE_MEMBERSHIP_QUERY | TYPE_V1_REPORT | TYPE_V2_REPORT | TYPE_V2_LEAVE => {}
 
             // IGMPv3 Membership Report (0x22).
             // RFC 9776, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2>
-            0x22 => {
+            TYPE_V3_REPORT => {
                 // Bytes 4–5: Flags (IANA "IGMP Type Numbers" registry;
                 // formerly "Reserved" in RFC 3376 §4.2).
                 // RFC 9776, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9776#section-4.2.3>
@@ -612,8 +750,44 @@ impl Dissector for IgmpDissector {
                 push_group_records(buf, data, offset, num_records)?;
             }
 
-            // Unknown type — group_address already pushed above
-            _ => {}
+            // Multicast Router Advertisement (0x30).
+            // RFC 4286, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc4286#section-3.2>
+            TYPE_MRD_ADVERTISEMENT => {
+                // RFC 4286, Section 3.2.4 — Query Interval (seconds).
+                //   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.4>
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_QUERY_INTERVAL],
+                    FieldValue::U16(read_be_u16(data, 4)?),
+                    offset + 4..offset + 6,
+                );
+                // RFC 4286, Section 3.2.5 — Robustness Variable.
+                //   <https://www.rfc-editor.org/rfc/rfc4286#section-3.2.5>
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_ROBUSTNESS_VARIABLE],
+                    FieldValue::U16(read_be_u16(data, 6)?),
+                    offset + 6..offset + 8,
+                );
+            }
+
+            // Multicast Router Solicitation (0x31) / Termination (0x32).
+            // RFC 4286, Sections 4.1 and 5.1 — no fields beyond the common
+            // header. RFC 4286, Section 2 — "Any data beyond the fixed
+            // message format MUST be ignored."
+            //   <https://www.rfc-editor.org/rfc/rfc4286#section-2>
+            TYPE_MRD_SOLICITATION | TYPE_MRD_TERMINATION => {}
+
+            // Other types (unknown, or registered in the IANA "IGMP Type
+            // Numbers" registry without a decoder here): the body is kept
+            // as raw data.
+            _ => {
+                if total_len > COMMON_HEADER_SIZE {
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_DATA],
+                        FieldValue::Bytes(&data[COMMON_HEADER_SIZE..]),
+                        offset + COMMON_HEADER_SIZE..offset + total_len,
+                    );
+                }
+            }
         }
 
         buf.end_layer();
@@ -649,6 +823,15 @@ mod tests {
     // | ---            | IGMPv3 query truncated sources       | parse_igmpv3_query_truncated_sources         |
     // | ---            | IGMPv3 report truncated record       | parse_igmpv3_report_truncated_record         |
     // | ---            | Unknown IGMP type                    | parse_unknown_type                           |
+    // | RFC 4286 3.2   | MRD Advertisement                    | parse_mrd_advertisement                      |
+    // | RFC 4286 4.1   | MRD Solicitation (4 octets)          | parse_mrd_solicitation                       |
+    // | RFC 4286 5.1   | MRD Termination (4 octets)           | parse_mrd_termination                        |
+    // | RFC 4286 2     | MRD trailing data ignored            | parse_mrd_solicitation                       |
+    // | RFC 4286 3.2   | MRD Advertisement truncated          | parse_mrd_advertisement_truncated            |
+    // | RFC 4286 8     | MRD type names                       | igmp_type_names_from_iana_registry           |
+    // | IANA registry  | DVMRP / PIMv1 / mtrace type names    | igmp_type_names_from_iana_registry           |
+    // | ---            | Unknown type shorter than 8 octets   | parse_unknown_type_short                     |
+    // | RFC 9776 7.1   | Query version (v1 / v2 / v3)         | query_version_distinctions                   |
     // | ---            | Offset handling                      | parse_with_offset                            |
     // | ---            | Dissector metadata                   | dissector_metadata                           |
 
@@ -1236,9 +1419,195 @@ mod tests {
         let type_field = buf.field_by_name(layer, "type").unwrap();
         let display = type_field.descriptor.display_fn.unwrap()(&type_field.value, &[]);
         assert_eq!(display, None);
+        // The body of an unknown type is not interpreted.
         assert_eq!(
-            buf.field_by_name(layer, "group_address").unwrap().value,
-            FieldValue::Ipv4Addr([224, 0, 0, 1])
+            buf.field_by_name(layer, "code").unwrap().value,
+            FieldValue::U8(0)
+        );
+        let data = buf.field_by_name(layer, "data").unwrap();
+        assert_eq!(data.value, FieldValue::Bytes(&[0xE0, 0x00, 0x00, 0x01]));
+        assert_eq!(data.range, 4..8);
+        assert!(buf.field_by_name(layer, "group_address").is_none());
+        assert!(buf.field_by_name(layer, "max_resp_time").is_none());
+    }
+
+    #[test]
+    fn parse_unknown_type_short() {
+        // An unknown type (e.g. 0x40) is not bound to the 8-octet layout.
+        let raw: &[u8] = &[0x40, 0x07, 0x12, 0x34];
+        let mut buf = DissectBuffer::new();
+        let result = IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 4);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "code").unwrap().value,
+            FieldValue::U8(7)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "checksum").unwrap().value,
+            FieldValue::U16(0x1234)
+        );
+        assert!(buf.field_by_name(layer, "data").is_none());
+
+        let mut buf = DissectBuffer::new();
+        let err = IgmpDissector.dissect(&raw[..3], &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 4,
+                actual: 3
+            }
+        ));
+        let mut buf = DissectBuffer::new();
+        let err = IgmpDissector.dissect(&[], &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 4,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_mrd_advertisement() {
+        // RFC 4286, Section 3.2 — interval 20 s, QQI 125 s, robustness 2.
+        let raw: &[u8] = &[0x30, 0x14, 0xcf, 0x6c, 0x00, 0x7d, 0x00, 0x02];
+        let mut buf = DissectBuffer::new();
+        let result = IgmpDissector.dissect(raw, &mut buf, 20).unwrap();
+        assert_eq!(result.bytes_consumed, 8);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "type_name"),
+            Some("Multicast Router Advertisement")
+        );
+        let ai = buf.field_by_name(layer, "advertisement_interval").unwrap();
+        assert_eq!(ai.value, FieldValue::U8(20));
+        assert_eq!(ai.range, 21..22);
+        assert_eq!(
+            buf.field_by_name(layer, "checksum").unwrap().value,
+            FieldValue::U16(0xcf6c)
+        );
+        let qi = buf.field_by_name(layer, "query_interval").unwrap();
+        assert_eq!(qi.value, FieldValue::U16(125));
+        assert_eq!(qi.range, 24..26);
+        let rv = buf.field_by_name(layer, "robustness_variable").unwrap();
+        assert_eq!(rv.value, FieldValue::U16(2));
+        assert_eq!(rv.range, 26..28);
+        assert!(buf.field_by_name(layer, "group_address").is_none());
+        assert!(buf.field_by_name(layer, "max_resp_time").is_none());
+    }
+
+    #[test]
+    fn parse_mrd_advertisement_truncated() {
+        let raw: &[u8] = &[0x30, 0x14, 0xcf, 0x6c, 0x00, 0x7d];
+        let mut buf = DissectBuffer::new();
+        let err = IgmpDissector.dissect(raw, &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::Truncated {
+                expected: 8,
+                actual: 6
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_mrd_solicitation() {
+        // RFC 4286, Section 4.1 — 4-octet Solicitation.
+        let raw: &[u8] = &[0x31, 0x00, 0xce, 0xff];
+        let mut buf = DissectBuffer::new();
+        let result = IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 4);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "type_name"),
+            Some("Multicast Router Solicitation")
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "reserved").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "checksum").unwrap().value,
+            FieldValue::U16(0xceff)
+        );
+        assert!(buf.field_by_name(layer, "group_address").is_none());
+        assert!(buf.field_by_name(layer, "max_resp_time").is_none());
+
+        // RFC 4286, Section 2 — "Any data beyond the fixed message format
+        // MUST be ignored."
+        let raw: &[u8] = &[0x31, 0x00, 0xce, 0xff, 0xde, 0xad, 0xbe, 0xef];
+        let mut buf = DissectBuffer::new();
+        IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.layer_fields(layer).len(), 3);
+    }
+
+    #[test]
+    fn parse_mrd_termination() {
+        // RFC 4286, Section 5.1 — 4-octet Termination.
+        let raw: &[u8] = &[0x32, 0x00, 0xcd, 0xff];
+        let mut buf = DissectBuffer::new();
+        IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "type_name"),
+            Some("Multicast Router Termination")
+        );
+        assert_eq!(buf.layer_fields(layer).len(), 3);
+    }
+
+    #[test]
+    fn igmp_type_names_from_iana_registry() {
+        for (t, name) in [
+            (0x13, "DVMRP"),
+            (0x14, "PIM version 1"),
+            (0x1e, "Multicast Traceroute Response"),
+            (0x1f, "Multicast Traceroute"),
+            (0x30, "Multicast Router Advertisement"),
+            (0x31, "Multicast Router Solicitation"),
+            (0x32, "Multicast Router Termination"),
+        ] {
+            assert_eq!(igmp_type_name(t), Some(name), "type {t:#x}");
+        }
+        // Named but body not decoded: DVMRP message is kept as raw data.
+        let raw: &[u8] = &[0x13, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0c, 0xff];
+        let mut buf = DissectBuffer::new();
+        IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "code").unwrap().value,
+            FieldValue::U8(2)
+        );
+        assert!(buf.field_by_name(layer, "group_address").is_none());
+    }
+
+    #[test]
+    fn query_version_distinctions() {
+        // RFC 9776, Section 7.1 — Query Version Distinctions.
+        let cases: [(&[u8], Option<u8>); 4] = [
+            (&[0x11, 0x00, 0, 0, 0, 0, 0, 0], Some(1)),
+            (&[0x11, 0x64, 0, 0, 0, 0, 0, 0], Some(2)),
+            (&[0x11, 0x64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], Some(3)),
+            (&[0x11, 0x64, 0, 0, 0, 0, 0, 0, 0, 0], None),
+        ];
+        for (raw, expected) in cases {
+            let mut buf = DissectBuffer::new();
+            IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            let qv = buf
+                .field_by_name(layer, "query_version")
+                .map(|f| f.value.clone());
+            assert_eq!(qv, expected.map(FieldValue::U8), "len {}", raw.len());
+        }
+        // Not a query: no query_version.
+        let raw: &[u8] = &[0x16, 0x00, 0, 0, 239, 1, 1, 1];
+        let mut buf = DissectBuffer::new();
+        IgmpDissector.dissect(raw, &mut buf, 0).unwrap();
+        assert!(
+            buf.field_by_name(&buf.layers()[0], "query_version")
+                .is_none()
         );
     }
 
