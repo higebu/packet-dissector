@@ -333,6 +333,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         .optional()
         .with_children(PAYLOAD_CHILDREN),
     // RFC 2408, Section 3.1 — IKEv1 payloads encrypted under the E bit
+    // <https://www.rfc-editor.org/rfc/rfc2408#section-3.1>
     FieldDescriptor::new("encrypted_payloads", "Encrypted Payloads", FieldType::Bytes).optional(),
 ];
 
@@ -504,6 +505,7 @@ impl Dissector for IkeDissector {
         // The payload headers are ciphertext, so the chain cannot be walked.
         // Next Payload still names the first (encrypted) payload. IKEv2 has
         // no such bit: it encrypts with the SK payload (RFC 7296, Section 3.14).
+        // <https://www.rfc-editor.org/rfc/rfc7296#section-3.14>
         let ikev1_encrypted = major_version == 1 && flags & 0x01 != 0;
         if ikev1_encrypted {
             if !payload_area.is_empty() {
