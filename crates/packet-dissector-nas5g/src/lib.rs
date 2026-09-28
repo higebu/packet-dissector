@@ -631,6 +631,8 @@ mod tests {
     //! | 4.4.5, 9.3   | Ciphered, no payload octets  | push_ciphered_without_payload     |
     //! | 9.3          | Reserved security header type | push_reserved_security_header_type |
     //! | 9.1.1        | Inner message must be plain  | push_nested_security_protected_not_decoded |
+    //! | 9.1.1        | Inner plain 5GSM decoded     | push_integrity_protected_inner_5gsm_decoded |
+    //! | 9.1.1        | Truncated inner 5GMM kept raw | push_integrity_protected_truncated_inner_5gmm_kept_raw |
     //! | 9.1.1        | Deep nesting, no recursion   | push_deeply_nested_security_protected_does_not_overflow |
     //! | 9.1.1        | Dissector: deep nesting      | dissect_nested_security_protected_not_recursed |
     //! | 9.1.1        | Dissector: truncated header  | dissect_truncated_security_protected_5gmm |
@@ -879,6 +881,45 @@ mod tests {
         assert_eq!(nested[0].name(), "raw_nas_message");
         assert_eq!(nested[0].value, FieldValue::Bytes(&inner));
         assert_eq!(nested[0].range, 7..data.len());
+    }
+
+    #[test]
+    fn push_integrity_protected_inner_5gsm_decoded() {
+        // A plain 5GSM message is a "plain 5GS NAS message" (TS 24.501,
+        // 9.1.1 item 1), so it is decoded.
+        let data = security_protected(0x01, &[0x2e, 0x05, 0x01, 0xc1]);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        let FieldValue::Object(ref range) = buf.fields()[4].value else {
+            panic!("expected inner Object");
+        };
+        let nested = buf.nested_fields(range);
+        let names: Vec<_> = nested.iter().map(|f| f.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "extended_protocol_discriminator",
+                "pdu_session_id",
+                "procedure_transaction_identity",
+                "message_type",
+            ]
+        );
+        assert_eq!(nested[1].value, FieldValue::U8(0x05));
+        assert_eq!(nested[3].value, FieldValue::U8(0xc1));
+    }
+
+    #[test]
+    fn push_integrity_protected_truncated_inner_5gmm_kept_raw() {
+        let data = security_protected(0x01, &[0x7e, 0x00]);
+        let mut buf = DissectBuffer::new();
+        assert!(push_nas_pdu(&mut buf, &data, 0));
+        let FieldValue::Object(ref range) = buf.fields()[4].value else {
+            panic!("expected inner Object");
+        };
+        let nested = buf.nested_fields(range);
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].name(), "raw_nas_message");
+        assert_eq!(nested[0].value, FieldValue::Bytes(&[0x7e, 0x00]));
     }
 
     #[test]
