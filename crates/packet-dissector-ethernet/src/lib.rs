@@ -236,6 +236,7 @@ impl Dissector for EthernetDissector {
             current_type = inner_type;
         }
 
+        let mut llc_payload_len = None;
         let dispatch_hint = if current_type <= LENGTH_MAX {
             // IEEE 802.3-2022, clause 3.2.6: values ≤ 1500 indicate a length field
             // (IEEE 802.3 frame with LLC encapsulation).
@@ -273,6 +274,11 @@ impl Dissector for EthernetDissector {
                 offset + llc_start + 2..offset + llc_end,
             );
 
+            // IEEE 802.3-2022, clause 3.2.6: the Length value is the number of
+            // MAC client data octets (the LLC PDU) that follow. Octets after
+            // them are Pad (clause 3.2.8), so the data handed to the LLC
+            // client ends at the Length value.
+            llc_payload_len = Some((current_type as usize).saturating_sub(llc_end - llc_start));
             header_len = llc_end;
             DispatchHint::ByLlcSap(dsap)
         } else if current_type < ETHERTYPE_MIN {
@@ -302,7 +308,9 @@ impl Dissector for EthernetDissector {
             field_range: layer_field_start..layer_field_end,
         });
 
-        Ok(DissectResult::new(header_len, dispatch_hint))
+        let mut result = DissectResult::new(header_len, dispatch_hint);
+        result.payload_len = llc_payload_len;
+        Ok(result)
     }
 }
 

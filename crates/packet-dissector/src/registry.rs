@@ -20,6 +20,19 @@ fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
     false
 }
 
+/// Shrink the dispatch end bound to the payload a dissector declared.
+///
+/// `payload_start` is the absolute offset right after the dissector's header
+/// and `payload_len` is [`DissectResult::payload_len`]. The result never
+/// exceeds `end`, so a captured buffer shorter than the declared length
+/// (snaplen truncation) keeps its actual end.
+fn bound_payload_end(end: usize, payload_start: usize, payload_len: Option<usize>) -> usize {
+    match payload_len {
+        Some(len) => end.min(payload_start.saturating_add(len)),
+        None => end,
+    }
+}
+
 struct TmpRemapContext {
     padded_base: usize,
     padded_end: usize,
@@ -757,7 +770,8 @@ impl DissectorRegistry {
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
     {
         let result = entry.dissect(data, buf, 0)?;
-        self.dispatch_loop(data, buf, result.bytes_consumed, result.next, stop)
+        let end = bound_payload_end(data.len(), result.bytes_consumed, result.payload_len);
+        self.dispatch_loop(data, buf, result.bytes_consumed, end, result.next, stop)
     }
 
     /// Look up the dissector responsible for a dispatch hint.
@@ -792,6 +806,13 @@ impl DissectorRegistry {
 
     /// Run the dispatch loop starting from the given hint and offset.
     ///
+    /// `end` is the exclusive end of the bytes that belong to the enclosing
+    /// layers (at most `data.len()`). Every dissector gets
+    /// `&data[offset..end]`, and a dissector that reports
+    /// [`DissectResult::payload_len`] shrinks `end` further, so bytes past an
+    /// IP datagram or an 802.3 LLC PDU (e.g. Ethernet padding) never reach
+    /// upper layers.
+    ///
     /// `stop` is evaluated with the current buffer state and the pending
     /// dispatch hint before each dissector runs, and again immediately after
     /// each dissector returns (before reassembly / tunnel middleware). When
@@ -807,6 +828,7 @@ impl DissectorRegistry {
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
         mut offset: usize,
+        mut end: usize,
         mut next: DispatchHint,
         stop: &mut F,
     ) -> Result<(), PacketError>
@@ -832,11 +854,11 @@ impl DissectorRegistry {
                 break;
             };
 
-            if offset >= data.len() {
+            if offset >= end {
                 break;
             }
 
-            let result = dissector.dissect(&data[offset..], buf, offset)?;
+            let result = dissector.dissect(&data[offset..end], buf, offset)?;
 
             // Guard against infinite loops: if a dissector consumed zero bytes
             // two iterations in a row, break.  A single zero-consumption
@@ -853,6 +875,7 @@ impl DissectorRegistry {
             }
 
             offset += result.bytes_consumed;
+            end = bound_payload_end(end, offset, result.payload_len);
 
             // Early-termination check on the dissector's own hint, before
             // the reassembly / tunnel middleware below runs. This is what
@@ -869,10 +892,11 @@ impl DissectorRegistry {
             if let Some(ref payload_range) = result.embedded_payload {
                 if let Some(upper) = self.lookup_dissector(&result.next) {
                     let start = payload_range.start;
-                    let end = payload_range.end.min(data.len());
-                    if start < end {
-                        let upper_result = upper.dissect(&data[start..end], buf, start)?;
+                    let range_end = payload_range.end.min(end);
+                    if start < range_end {
+                        let upper_result = upper.dissect(&data[start..range_end], buf, start)?;
                         offset = start + upper_result.bytes_consumed;
+                        end = bound_payload_end(end, offset, upper_result.payload_len);
                         next = upper_result.next;
                         continue;
                     }
@@ -912,6 +936,7 @@ impl DissectorRegistry {
                     &padded,
                     &mut tmp_buf,
                     virtual_start,
+                    padded.len(),
                     decrypted.next,
                     &mut full,
                 )?;
@@ -935,10 +960,23 @@ impl DissectorRegistry {
                         .get_by_tcp_port(low)
                         .or_else(|| self.get_by_tcp_port(high))
                     {
-                        let remaining = data.len().saturating_sub(offset);
+                        let remaining = end.saturating_sub(offset);
                         let payload_end = offset + ctx.payload_len.min(remaining);
                         let payload = &data[offset..payload_end];
-                        match self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)? {
+                        let upper_result = if payload.len() < ctx.payload_len {
+                            // The capture holds fewer bytes than the segment
+                            // occupies in sequence space (snaplen truncation).
+                            // Buffering them would leave a gap before the
+                            // next segment and stall the stream, so dissect
+                            // the captured bytes directly without reassembly.
+                            if payload.is_empty() {
+                                break;
+                            }
+                            Some(upper.dissect(payload, buf, offset)?)
+                        } else {
+                            self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)?
+                        };
+                        match upper_result {
                             Some(upper_result) => {
                                 // Fast path succeeded — propagate the upper
                                 // dissector's result so chaining can continue.
@@ -946,6 +984,7 @@ impl DissectorRegistry {
                                 // so partial consumption is handled correctly.
                                 let consumed = upper_result.bytes_consumed.min(payload.len());
                                 offset += consumed;
+                                end = bound_payload_end(end, offset, upper_result.payload_len);
                                 next = upper_result.next;
                                 continue;
                             }

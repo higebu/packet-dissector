@@ -20,6 +20,9 @@
 //! | IEEE 802.2 §3         | LLC frame parsing (DSAP, SSAP, Ctrl) | parse_ethernet_llc_frame                |
 //! | IEEE 802.2 §3         | LLC frame truncated                  | parse_ethernet_llc_frame_truncated      |
 //! | IEEE 802.2 §3         | LLC SAP dispatch                     | parse_ethernet_llc_dispatch             |
+//! | IEEE 802.3 cl.3.2.6   | LLC data ends at Length (pad cl.3.2.8) | parse_ethernet_llc_payload_len_from_length |
+//! | IEEE 802.3 cl.3.2.6   | Length < LLC header → empty payload  | parse_ethernet_llc_length_shorter_than_llc_header |
+//! | IEEE 802.3 cl.3.2.6   | EtherType frame: payload unbounded   | parse_ethernet_ii_payload_len_unset     |
 //! | —                     | Dissector metadata                   | ethernet_dissector_metadata             |
 
 use packet_dissector::dissector::{DispatchHint, Dissector};
@@ -447,4 +450,54 @@ fn parse_ethernet_triple_vlan_tag() {
         })
         .collect();
     assert_eq!(vlan_ids, vec![10, 20, 30]);
+}
+
+// IEEE 802.3-2022, clause 3.2.6: in a Length-encapsulated frame the Length
+// field counts the MAC client data (the LLC PDU). Clause 3.2.8: octets after
+// it are Pad, so the LLC payload handed upward ends at the Length value.
+#[test]
+fn parse_ethernet_llc_payload_len_from_length() {
+    let mut data = vec![
+        0x01, 0x80, 0xC2, 0x00, 0x00, 0x00, // dst MAC
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // src MAC
+        0x00, 0x07, // Length = 7 (LLC 3 + BPDU 4)
+        0x42, 0x42, 0x03, // LLC
+        0x00, 0x00, 0x00, 0x80, // STP TCN BPDU
+    ];
+    data.resize(60, 0x00); // Pad
+    let mut buf = DissectBuffer::new();
+    let result = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.bytes_consumed, 17);
+    assert_eq!(result.payload_len, Some(4));
+}
+
+#[test]
+fn parse_ethernet_llc_length_shorter_than_llc_header() {
+    let data = [
+        0x01, 0x80, 0xC2, 0x00, 0x00, 0x00, // dst MAC
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // src MAC
+        0x00, 0x02, // Length = 2 (shorter than the 3-byte LLC header)
+        0x42, 0x42, 0x03, // LLC
+        0x00, 0x00, // trailing bytes
+    ];
+    let mut buf = DissectBuffer::new();
+    let result = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.payload_len, Some(0));
+}
+
+#[test]
+fn parse_ethernet_ii_payload_len_unset() {
+    // An EtherType frame carries no length; the upper layer bounds itself.
+    let data = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // dst MAC
+        0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, // src MAC
+        0x08, 0x00, // EtherType: IPv4
+        0xDE, 0xAD, // payload
+    ];
+    let mut buf = DissectBuffer::new();
+    let result = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.payload_len, None);
 }

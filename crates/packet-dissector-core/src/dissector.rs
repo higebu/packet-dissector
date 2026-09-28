@@ -171,6 +171,23 @@ pub struct DissectResult {
     /// When set, the dispatch loop uses the decrypted bytes instead of the
     /// original packet data for further dissection.
     pub decrypted_payload: Option<Box<DecryptedPayload>>,
+    /// Optional length of this layer's payload, counted from the end of the
+    /// consumed header (`bytes_consumed`), as declared by a length field in
+    /// the header.
+    ///
+    /// When set, the dispatch loop ends the input of every subsequent
+    /// dissector at `offset + bytes_consumed + payload_len`, or at the
+    /// current end if that is smaller. Bytes past that point (e.g. Ethernet
+    /// padding after a short IP datagram) are not passed to upper layers.
+    /// A captured buffer shorter than the declared length (snaplen
+    /// truncation) keeps its actual end.
+    ///
+    /// Set by dissectors whose header carries the length of the enclosed
+    /// data, e.g. IPv4 Total Length (RFC 791, Section 3.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc791#section-3.1>) and IPv6
+    /// Payload Length (RFC 8200, Section 3 —
+    /// <https://www.rfc-editor.org/rfc/rfc8200#section-3>).
+    pub payload_len: Option<usize>,
 }
 
 impl DissectResult {
@@ -182,6 +199,7 @@ impl DissectResult {
             tcp_stream_context: None,
             embedded_payload: None,
             decrypted_payload: None,
+            payload_len: None,
         }
     }
 
@@ -197,6 +215,7 @@ impl DissectResult {
             tcp_stream_context: Some(ctx),
             embedded_payload: None,
             decrypted_payload: None,
+            payload_len: None,
         }
     }
 
@@ -215,7 +234,15 @@ impl DissectResult {
             tcp_stream_context: None,
             embedded_payload: Some(payload_range),
             decrypted_payload: None,
+            payload_len: None,
         }
+    }
+
+    /// Bound the payload that follows this layer's header to `payload_len`
+    /// bytes. See [`DissectResult::payload_len`].
+    pub fn with_payload_len(mut self, payload_len: usize) -> Self {
+        self.payload_len = Some(payload_len);
+        self
     }
 
     /// Create a new `DissectResult` with a decrypted payload.
@@ -229,6 +256,7 @@ impl DissectResult {
             tcp_stream_context: None,
             embedded_payload: None,
             decrypted_payload: Some(Box::new(decrypted)),
+            payload_len: None,
         }
     }
 }
@@ -423,6 +451,23 @@ mod tests {
                 url: "https://www.rfc-editor.org/rfc/rfc4271",
             }
         );
+    }
+
+    #[test]
+    fn dissect_result_constructors_leave_payload_len_unset() {
+        assert_eq!(DissectResult::new(20, DispatchHint::End).payload_len, None);
+        assert_eq!(
+            DissectResult::with_embedded_payload(12, DispatchHint::End, 28..32).payload_len,
+            None
+        );
+    }
+
+    #[test]
+    fn dissect_result_with_payload_len_sets_bound() {
+        let result = DissectResult::new(20, DispatchHint::ByIpProtocol(6)).with_payload_len(16);
+        assert_eq!(result.bytes_consumed, 20);
+        assert_eq!(result.next, DispatchHint::ByIpProtocol(6));
+        assert_eq!(result.payload_len, Some(16));
     }
 
     #[test]
