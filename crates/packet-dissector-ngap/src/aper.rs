@@ -238,6 +238,18 @@ impl<'a> AperReader<'a> {
         }
         self.read_constrained_whole_number(0, root_count - 1)
     }
+
+    /// Decodes a fixed-size BIT STRING of `n` (at most 64) bits.
+    ///
+    /// ITU-T Rec. X.691, Section 16.9–16.10: up to 16 bits it is a
+    /// bit-field with no alignment; above 16 bits it is octet-aligned in
+    /// the ALIGNED variant.
+    pub(crate) fn read_fixed_bit_string(&mut self, n: u32) -> Result<u64, PacketError> {
+        if n > 16 {
+            self.align();
+        }
+        self.read_bits(n)
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +285,8 @@ mod tests {
     //! | 14.2          | ENUMERATED, not extensible               | enumerated_not_extensible             |
     //! | 14            | ENUMERATED with empty root               | enumerated_empty_root                 |
     //! | 23.6–23.8     | CHOICE index                             | choice_index                          |
+    //! | 16.9          | Fixed BIT STRING ≤ 16 bits               | fixed_bit_string_unaligned            |
+    //! | 16.10         | Fixed BIT STRING > 16 bits               | fixed_bit_string_aligned              |
     //! | —             | Byte range of read bits                  | byte_range_since_covers_partial_octets|
 
     use super::*;
@@ -512,6 +526,24 @@ mod tests {
         let mut r = AperReader::new(&[0x48]);
         assert_eq!(r.read_choice_index(6, false).unwrap(), 2);
         assert_eq!(r.bit_position(), 3);
+    }
+
+    #[test]
+    fn fixed_bit_string_unaligned() {
+        // 1 bit, then BIT STRING (SIZE(10)) packed right after it.
+        let mut r = AperReader::new(&[0x80, 0x20]);
+        r.read_bit().unwrap();
+        assert_eq!(r.read_fixed_bit_string(10).unwrap(), 1);
+        assert_eq!(r.bit_position(), 11);
+    }
+
+    #[test]
+    fn fixed_bit_string_aligned() {
+        // 1 bit, pad, BIT STRING (SIZE(36)).
+        let mut r = AperReader::new(&[0x80, 0x12, 0x34, 0x56, 0x78, 0x90]);
+        r.read_bit().unwrap();
+        assert_eq!(r.read_fixed_bit_string(36).unwrap(), 0x1_2345_6789);
+        assert_eq!(r.bit_position(), 44);
     }
 
     #[test]

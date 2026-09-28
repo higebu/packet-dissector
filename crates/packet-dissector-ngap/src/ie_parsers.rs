@@ -10,11 +10,11 @@
 
 use core::ops::Range;
 
+use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
 use packet_dissector_core::packet::DissectBuffer;
 
 use crate::aper::AperReader;
-use crate::read_aper_length;
 
 // ── Field descriptors ──────────────────────────────────────────────────
 
@@ -148,6 +148,9 @@ static FD_EUTRA_CELL_IDENTITY: FieldDescriptor = FieldDescriptor::new(
 
 static FD_TAC: FieldDescriptor = FieldDescriptor::new("tac", "TAC", FieldType::U32).optional();
 
+static FD_TIME_STAMP: FieldDescriptor =
+    FieldDescriptor::new("time_stamp", "Time Stamp", FieldType::U32).optional();
+
 static FD_NAS_PDU: FieldDescriptor = FieldDescriptor::new("nas_pdu", "NAS-PDU", FieldType::Object);
 
 static FD_HANDOVER_TYPE: FieldDescriptor = FieldDescriptor {
@@ -198,7 +201,7 @@ pub fn push_ie_value<'pkt>(
     offset: usize,
 ) {
     let pushed = match ie_id {
-        1 => push_visible_string(buf, data, offset),  // AMFName
+        1 => push_printable_name(buf, data, offset),  // AMFName
         10 => push_amf_ue_ngap_id(buf, data, offset), // AMF-UE-NGAP-ID
         15 => push_cause(buf, data, offset),          // Cause
         21 => push_enumerated(
@@ -220,7 +223,7 @@ pub fn push_ie_value<'pkt>(
         ), // HandoverType
         38 => push_nas_pdu(buf, data, offset),        // NAS-PDU
         45 => push_nr_cgi(buf, data, offset),         // NR-CGI
-        82 => push_visible_string(buf, data, offset), // RANNodeName
+        82 => push_printable_name(buf, data, offset), // RANNodeName
         85 => push_ran_ue_ngap_id(buf, data, offset), // RAN-UE-NGAP-ID
         86 => push_relative_amf_capacity(buf, data, offset), // RelativeAMFCapacity
         90 => push_enumerated(
@@ -296,6 +299,23 @@ const TIME_TO_WAIT_ROOT_COUNT: u64 = 6;
 /// 3GPP TS 38.413, Section 9.4.5.
 const CAUSE_CHOICE_COUNT: u64 = 6;
 
+/// Number of alternatives of `GlobalRANNodeID` and
+/// `UserLocationInformation` (no extension marker; the last alternative
+/// is `choice-Extensions`).
+///
+/// 3GPP TS 38.413, Section 9.4.5.
+const RAN_NODE_AND_ULI_CHOICE_COUNT: u64 = 4;
+
+/// Number of alternatives of `GNB-ID` (`gNB-ID`, `choice-Extensions`).
+///
+/// 3GPP TS 38.413, Section 9.4.5.
+const GNB_ID_CHOICE_COUNT: u64 = 2;
+
+/// `maxProtocolExtensions`.
+///
+/// 3GPP TS 38.413, Section 9.4.7.
+const MAX_PROTOCOL_EXTENSIONS: u64 = 65535;
+
 /// Returns the number of root values of the ENUMERATED type carried by
 /// Cause alternative `group`, or `None` for `choice-Extensions`.
 ///
@@ -317,6 +337,152 @@ fn cause_root_count(group: u64) -> Option<u64> {
 /// Shifts a byte range relative to the IE value by `offset`.
 fn shift(range: Range<usize>, offset: usize) -> Range<usize> {
     range.start + offset..range.end + offset
+}
+
+/// Reads an octet-aligned fixed-size OCTET STRING of `n` (> 2) octets and
+/// returns it with its byte range relative to the IE value.
+///
+/// ITU-T Rec. X.691, Section 17.7.
+fn read_aligned_octets<'a>(
+    r: &mut AperReader<'a>,
+    n: usize,
+) -> Result<(&'a [u8], Range<usize>), PacketError> {
+    let octets = r.read_octets(n)?;
+    let end = r.bit_position() / 8;
+    Ok((octets, end - n..end))
+}
+
+/// Reads a fixed-size BIT STRING of `n` bits and returns the value with
+/// its byte range relative to the IE value.
+///
+/// ITU-T Rec. X.691, Section 16.9–16.10.
+fn read_bit_string_field(
+    r: &mut AperReader<'_>,
+    n: u32,
+) -> Result<(u64, Range<usize>), PacketError> {
+    if n > 16 {
+        r.align();
+    }
+    let start = r.bit_position();
+    let value = r.read_fixed_bit_string(n)?;
+    Ok((value, r.byte_range_since(start)))
+}
+
+/// Skips a `ProtocolExtensionContainer`.
+///
+/// 3GPP TS 38.413, Section 9.4.8 — `SEQUENCE (SIZE (1..maxProtocolExtensions))
+/// OF ProtocolExtensionField`, each field being `id` (INTEGER
+/// (0..65535)), `criticality` (ENUMERATED {reject, ignore, notify}) and
+/// `extensionValue` (open type, ITU-T Rec. X.691, Section 11.2).
+fn skip_protocol_extension_container(r: &mut AperReader<'_>) -> Result<(), PacketError> {
+    let count = r.read_length(1, Some(MAX_PROTOCOL_EXTENSIONS))?;
+    for _ in 0..count {
+        r.read_constrained_whole_number(0, 65535)?;
+        r.read_enumerated(3, false)?;
+        let len = r.read_length(0, None)?;
+        r.read_octets(len as usize)?;
+    }
+    Ok(())
+}
+
+/// Skips the extension additions of an extensible SEQUENCE whose
+/// extension bit was set.
+///
+/// ITU-T Rec. X.691, Section 19.8–19.9: a normally small length giving
+/// the size of the presence bitmap, the bitmap, then each present
+/// addition as an open type.
+fn skip_sequence_extension_additions(r: &mut AperReader<'_>) -> Result<(), PacketError> {
+    let count = r.read_normally_small()?.saturating_add(1);
+    let mut present = 0u64;
+    for _ in 0..count {
+        if r.read_bit()? {
+            present += 1;
+        }
+    }
+    for _ in 0..present {
+        let len = r.read_length(0, None)?;
+        r.read_octets(len as usize)?;
+    }
+    Ok(())
+}
+
+/// Reads the preamble of an extensible SEQUENCE with a single OPTIONAL
+/// `iE-Extensions` component. Returns `(extended, has_ie_extensions)`.
+///
+/// ITU-T Rec. X.691, Section 19.1 (extension bit) and 19.2 (bitmap of
+/// OPTIONAL components).
+fn read_sequence_preamble(r: &mut AperReader<'_>) -> Result<(bool, bool), PacketError> {
+    let extended = r.read_bit()?;
+    let has_ie_extensions = r.read_bit()?;
+    Ok((extended, has_ie_extensions))
+}
+
+/// Skips what follows the root components of an extensible SEQUENCE:
+/// the `iE-Extensions` container and the extension additions.
+fn skip_sequence_tail(
+    r: &mut AperReader<'_>,
+    extended: bool,
+    has_ie_extensions: bool,
+) -> Result<(), PacketError> {
+    if has_ie_extensions {
+        skip_protocol_extension_container(r)?;
+    }
+    if extended {
+        skip_sequence_extension_additions(r)?;
+    }
+    Ok(())
+}
+
+/// A decoded NR-CGI or E-UTRA CGI.
+struct Cgi<'a> {
+    plmn: &'a [u8],
+    plmn_range: Range<usize>,
+    cell_identity: u64,
+    cell_identity_range: Range<usize>,
+}
+
+/// Reads an NR-CGI (36-bit cell identity) or E-UTRA CGI (28-bit cell
+/// identity).
+///
+/// 3GPP TS 38.413, Section 9.4.5 — `NR-CGI ::= SEQUENCE { pLMNIdentity,
+/// nRCellIdentity BIT STRING (SIZE(36)), iE-Extensions OPTIONAL, ... }`
+/// and `EUTRA-CGI` with `eUTRACellIdentity BIT STRING (SIZE(28))`.
+fn read_cgi<'a>(r: &mut AperReader<'a>, cell_identity_bits: u32) -> Result<Cgi<'a>, PacketError> {
+    let (extended, has_ie_extensions) = read_sequence_preamble(r)?;
+    let (plmn, plmn_range) = read_aligned_octets(r, 3)?;
+    let (cell_identity, cell_identity_range) = read_bit_string_field(r, cell_identity_bits)?;
+    skip_sequence_tail(r, extended, has_ie_extensions)?;
+    Ok(Cgi {
+        plmn,
+        plmn_range,
+        cell_identity,
+        cell_identity_range,
+    })
+}
+
+/// A decoded TAI.
+struct Tai<'a> {
+    plmn: &'a [u8],
+    plmn_range: Range<usize>,
+    tac: u32,
+    tac_range: Range<usize>,
+}
+
+/// Reads a TAI.
+///
+/// 3GPP TS 38.413, Section 9.4.5 — `TAI ::= SEQUENCE { pLMNIdentity,
+/// tAC OCTET STRING (SIZE(3)), iE-Extensions OPTIONAL, ... }`.
+fn read_tai<'a>(r: &mut AperReader<'a>) -> Result<Tai<'a>, PacketError> {
+    let (extended, has_ie_extensions) = read_sequence_preamble(r)?;
+    let (plmn, plmn_range) = read_aligned_octets(r, 3)?;
+    let (tac, tac_range) = read_aligned_octets(r, 3)?;
+    skip_sequence_tail(r, extended, has_ie_extensions)?;
+    Ok(Tai {
+        plmn,
+        plmn_range,
+        tac: (u32::from(tac[0]) << 16) | (u32::from(tac[1]) << 8) | u32::from(tac[2]),
+        tac_range,
+    })
 }
 
 // ── Individual IE parsers ──────────────────────────────────────────────
@@ -473,358 +639,391 @@ fn push_enumerated<'pkt>(
     true
 }
 
-/// AMFName / RANNodeName (IEs 1, 82) — VisibleString (1..150, ...).
+/// AMFName (IE 1) / RANNodeName (IE 82) — PrintableString (SIZE(1..150, ...)).
 ///
-/// APER encoding: APER length determinant followed by UTF-8 characters.
+/// APER encoding: an extension bit for the size constraint, the length
+/// (an 8-bit constrained whole number 1..150 in the root, or an
+/// unconstrained length determinant otherwise), then the characters as
+/// octet-aligned 8-bit values.
 ///
-/// 3GPP TS 38.413, Sections 9.3.3.6, 9.3.3.10.
-fn push_visible_string<'pkt>(
+/// 3GPP TS 38.413, Sections 9.3.3.21 (AMF Name) and 9.2.6.1 (RAN Node
+/// Name); ITU-T Rec. X.691, Section 30.5.
+fn push_printable_name<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
 ) -> bool {
-    if data.is_empty() {
+    let decode = || -> Result<(&'pkt [u8], Range<usize>), PacketError> {
+        let mut r = AperReader::new(data);
+        let len = if r.read_bit()? {
+            r.read_length(0, None)?
+        } else {
+            r.read_length(1, Some(150))?
+        };
+        read_aligned_octets(&mut r, len as usize)
+    };
+    let Ok((name, range)) = decode() else {
         return false;
-    }
-
-    let ext = (data[0] >> 7) & 0x01;
-    if ext != 0 {
-        return false;
-    }
-
-    let str_len = data[0] as usize + 1;
-    let str_start = 1;
-
-    if str_start + str_len > data.len() {
-        return false;
-    }
+    };
 
     // Store the raw string bytes (zero-copy).
     buf.push_field(
         &FD_NAME_STRING,
-        FieldValue::Bytes(&data[str_start..str_start + str_len]),
-        offset + str_start..offset + str_start + str_len,
+        FieldValue::Bytes(name),
+        shift(range, offset),
     );
     true
 }
 
-/// S-NSSAI (IE 148) — SEQUENCE { sST, sD OPTIONAL }.
+/// S-NSSAI (IE 148) — SEQUENCE { sST, sD OPTIONAL, iE-Extensions OPTIONAL, ... }.
 ///
-/// APER encoding: 1-byte preamble (extension + optional bitmap) +
-/// 1-byte SST + optional 3-byte SD.
+/// APER encoding: an extension bit and two presence bits, then `sST`
+/// (`OCTET STRING (SIZE(1))`, a bit-field with no alignment) and the
+/// octet-aligned `sD` (`OCTET STRING (SIZE(3))`).
 ///
-/// 3GPP TS 38.413, Section 9.3.1.24.
+/// 3GPP TS 38.413, Section 9.3.1.24; ITU-T Rec. X.691, Sections 17.6, 17.7, 19.
 fn push_s_nssai<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    if data.is_empty() {
+    type SNssai = ((u8, Range<usize>), Option<(u32, Range<usize>)>);
+    let decode = || -> Result<SNssai, PacketError> {
+        let mut r = AperReader::new(data);
+        // Extension additions (if any) follow the root components and do
+        // not affect them — ITU-T Rec. X.691, Section 19.7.
+        r.read_bit()?;
+        let sd_present = r.read_bit()?;
+        r.read_bit()?; // iE-Extensions
+        let start = r.bit_position();
+        // Eight bits read from a u64 always fit in a u8.
+        let sst = r.read_bits(8)? as u8;
+        let sst_range = r.byte_range_since(start);
+        let sd = if sd_present {
+            let (sd, range) = read_aligned_octets(&mut r, 3)?;
+            let sd = (u32::from(sd[0]) << 16) | (u32::from(sd[1]) << 8) | u32::from(sd[2]);
+            Some((sd, range))
+        } else {
+            None
+        };
+        Ok(((sst, sst_range), sd))
+    };
+    let Ok(((sst, sst_range), sd)) = decode() else {
         return false;
+    };
+
+    buf.push_field(&FD_SST, FieldValue::U8(sst), shift(sst_range, offset));
+    if let Some((sd, range)) = sd {
+        buf.push_field(&FD_SD, FieldValue::U32(sd), shift(range, offset));
     }
-
-    let ext = (data[0] >> 7) & 0x01;
-    if ext != 0 {
-        return false;
-    }
-
-    let sd_present = (data[0] >> 6) & 0x01;
-
-    if data.len() < 2 {
-        return false;
-    }
-
-    let sst = data[1];
-    buf.push_field(&FD_SST, FieldValue::U8(sst), offset + 1..offset + 2);
-
-    if sd_present != 0 {
-        if data.len() < 5 {
-            return false;
-        }
-        let sd = (u32::from(data[2]) << 16) | (u32::from(data[3]) << 8) | u32::from(data[4]);
-        buf.push_field(&FD_SD, FieldValue::U32(sd), offset + 2..offset + 5);
-    }
-
     true
 }
 
-/// GUAMI (IE 28) — SEQUENCE { pLMNIdentity, aMFRegionID, aMFSetID, aMFPointer }.
+/// GUAMI (IE 28) — SEQUENCE { pLMNIdentity, aMFRegionID, aMFSetID,
+/// aMFPointer, iE-Extensions OPTIONAL, ... }.
 ///
-/// 3GPP TS 38.413, Section 9.3.1.23.
+/// `aMFRegionID`, `aMFSetID` and `aMFPointer` are BIT STRINGs of 8, 10
+/// and 6 bits: bit-fields with no alignment.
+///
+/// 3GPP TS 38.413, Section 9.3.3.3; ITU-T Rec. X.691, Section 16.9.
 fn push_guami<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    if data.is_empty() {
+    type Guami<'a> = (
+        (&'a [u8], Range<usize>),
+        (u64, Range<usize>),
+        (u64, Range<usize>),
+        (u64, Range<usize>),
+    );
+    let decode = || -> Result<Guami<'pkt>, PacketError> {
+        let mut r = AperReader::new(data);
+        read_sequence_preamble(&mut r)?;
+        let plmn = read_aligned_octets(&mut r, 3)?;
+        let region = read_bit_string_field(&mut r, 8)?;
+        let set = read_bit_string_field(&mut r, 10)?;
+        let pointer = read_bit_string_field(&mut r, 6)?;
+        Ok((plmn, region, set, pointer))
+    };
+    let Ok((
+        (plmn, plmn_range),
+        (region, region_range),
+        (set, set_range),
+        (pointer, pointer_range),
+    )) = decode()
+    else {
         return false;
-    }
-
-    let ext = (data[0] >> 7) & 0x01;
-    if ext != 0 {
-        return false;
-    }
-
-    if data.len() < 7 {
-        return false;
-    }
+    };
 
     // Store raw PLMN bytes (3 bytes).
     buf.push_field(
         &FD_PLMN_IDENTITY,
-        FieldValue::Bytes(&data[1..4]),
-        offset + 1..offset + 4,
+        FieldValue::Bytes(plmn),
+        shift(plmn_range, offset),
     );
-    let amf_region_id = data[4];
-    let amf_set_id = (u16::from(data[5]) << 2) | (u16::from(data[6]) >> 6);
-    let amf_pointer = data[6] & 0x3F;
-
+    // Bit widths 8, 10 and 6 guarantee the narrowing casts are lossless.
     buf.push_field(
         &FD_AMF_REGION_ID,
-        FieldValue::U8(amf_region_id),
-        offset + 4..offset + 5,
+        FieldValue::U8(region as u8),
+        shift(region_range, offset),
     );
     buf.push_field(
         &FD_AMF_SET_ID,
-        FieldValue::U16(amf_set_id),
-        offset + 5..offset + 7,
+        FieldValue::U16(set as u16),
+        shift(set_range, offset),
     );
     buf.push_field(
         &FD_AMF_POINTER,
-        FieldValue::U8(amf_pointer),
-        offset + 6..offset + 7,
+        FieldValue::U8(pointer as u8),
+        shift(pointer_range, offset),
     );
     true
 }
 
-/// GlobalRANNodeID (IE 27) — CHOICE { globalGNB-ID, globalNgENB-ID, ... }.
+/// GlobalRANNodeID (IE 27) — CHOICE { globalGNB-ID, globalNgENB-ID,
+/// globalN3IWF-ID, choice-Extensions }.
 ///
-/// 3GPP TS 38.413, Section 9.3.1.5.
+/// APER encoding: a 2-bit choice index (4 alternatives, no extension
+/// marker). For `globalGNB-ID`, the SEQUENCE preamble follows, then the
+/// octet-aligned PLMN identity, the 1-bit `GNB-ID` choice, the 4-bit
+/// length of `gNB-ID` (`BIT STRING (SIZE(22..32))`) and the octet-aligned
+/// identifier. Other alternatives report only the choice.
+///
+/// 3GPP TS 38.413, Sections 9.3.1.5, 9.3.1.6; ITU-T Rec. X.691, Sections
+/// 16.11, 19, 23.
 fn push_global_ran_node_id<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
 ) -> bool {
-    if data.is_empty() {
-        return false;
+    struct GlobalGnbId<'a> {
+        plmn: &'a [u8],
+        plmn_range: Range<usize>,
+        /// `(bit length, length range, identifier, identifier range)`.
+        gnb_id: Option<(u8, Range<usize>, u32, Range<usize>)>,
     }
 
-    let ext = (data[0] >> 7) & 0x01;
-    if ext != 0 {
+    let decode = || -> Result<(u64, Range<usize>, Option<GlobalGnbId<'pkt>>), PacketError> {
+        let mut r = AperReader::new(data);
+        let choice = r.read_choice_index(RAN_NODE_AND_ULI_CHOICE_COUNT, false)?;
+        let choice_range = r.byte_range_since(0);
+        if choice != 0 {
+            return Ok((choice, choice_range, None));
+        }
+        read_sequence_preamble(&mut r)?;
+        let (plmn, plmn_range) = read_aligned_octets(&mut r, 3)?;
+        let gnb_id = if r.read_choice_index(GNB_ID_CHOICE_COUNT, false)? == 0 {
+            let len_start = r.bit_position();
+            let len = r.read_length(22, Some(32))?;
+            let len_range = r.byte_range_since(len_start);
+            r.align();
+            let id_start = r.bit_position();
+            // `len` is at most 32, so both narrowing conversions are lossless.
+            let id = r.read_bits(len as u32)? as u32;
+            Some((len as u8, len_range, id, r.byte_range_since(id_start)))
+        } else {
+            None
+        };
+        Ok((
+            choice,
+            choice_range,
+            Some(GlobalGnbId {
+                plmn,
+                plmn_range,
+                gnb_id,
+            }),
+        ))
+    };
+    let Ok((choice, choice_range, gnb)) = decode() else {
         return false;
-    }
+    };
 
-    let choice_index = (data[0] >> 5) & 0x03;
-
+    // `choice` is at most 3 (2-bit constrained whole number).
     buf.push_field(
         &FD_GNB_ID_CHOICE,
-        FieldValue::U8(choice_index),
-        offset..offset + 1,
+        FieldValue::U8(choice as u8),
+        shift(choice_range, offset),
     );
-
-    // For globalGNB-ID (choice 0):
-    if choice_index == 0 && data.len() >= 9 {
-        // Store raw PLMN bytes.
+    if let Some(gnb) = gnb {
         buf.push_field(
             &FD_PLMN_IDENTITY,
-            FieldValue::Bytes(&data[2..5]),
-            offset + 2..offset + 5,
+            FieldValue::Bytes(gnb.plmn),
+            shift(gnb.plmn_range, offset),
         );
-
-        let gnb_id_bit_len = (data[6] & 0x0F) + 22;
-        let gnb_id_byte_len = (gnb_id_bit_len as usize).div_ceil(8);
-
-        buf.push_field(
-            &FD_GNB_ID_LENGTH,
-            FieldValue::U8(gnb_id_bit_len),
-            offset + 6..offset + 7,
-        );
-
-        if data.len() >= 7 + gnb_id_byte_len {
-            let gnb_id_bytes = &data[7..7 + gnb_id_byte_len];
-            let mut gnb_id: u32 = 0;
-            for &b in gnb_id_bytes {
-                gnb_id = (gnb_id << 8) | u32::from(b);
-            }
-            let shift = (gnb_id_byte_len * 8) as u32 - u32::from(gnb_id_bit_len);
-            gnb_id >>= shift;
-
+        if let Some((len, len_range, id, id_range)) = gnb.gnb_id {
             buf.push_field(
-                &FD_GNB_ID,
-                FieldValue::U32(gnb_id),
-                offset + 7..offset + 7 + gnb_id_byte_len,
+                &FD_GNB_ID_LENGTH,
+                FieldValue::U8(len),
+                shift(len_range, offset),
             );
+            buf.push_field(&FD_GNB_ID, FieldValue::U32(id), shift(id_range, offset));
         }
     }
-
     true
 }
 
 /// UserLocationInformation (IE 121) — CHOICE { userLocationInformationEUTRA,
-/// userLocationInformationNR, ... }.
+/// userLocationInformationNR, userLocationInformationN3IWF-with-PortNumber,
+/// choice-Extensions }.
 ///
-/// 3GPP TS 38.413, Section 9.3.1.16.
+/// APER encoding: a 2-bit choice index (4 alternatives, no extension
+/// marker). The E-UTRA and NR alternatives are `SEQUENCE { CGI, tAI,
+/// timeStamp OPTIONAL, iE-Extensions OPTIONAL, ... }`; their CGI, TAI
+/// and time stamp are decoded. Other alternatives report only the choice.
+///
+/// 3GPP TS 38.413, Section 9.3.1.16; ITU-T Rec. X.691, Sections 19, 23.
 fn push_user_location_information<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
 ) -> bool {
-    if data.is_empty() {
-        return false;
+    struct Uli<'a> {
+        cgi: Cgi<'a>,
+        tai: Tai<'a>,
+        time_stamp: Option<(u32, Range<usize>)>,
     }
 
-    let ext = (data[0] >> 7) & 0x01;
-    if ext != 0 {
+    let decode = || -> Result<(u64, Range<usize>, Option<Uli<'pkt>>), PacketError> {
+        let mut r = AperReader::new(data);
+        let choice = r.read_choice_index(RAN_NODE_AND_ULI_CHOICE_COUNT, false)?;
+        let choice_range = r.byte_range_since(0);
+        let cell_identity_bits = match choice {
+            0 => 28, // EUTRA-CGI.eUTRACellIdentity
+            1 => 36, // NR-CGI.nRCellIdentity
+            _ => return Ok((choice, choice_range, None)),
+        };
+        r.read_bit()?; // extension bit — additions follow the fields decoded here.
+        let time_stamp_present = r.read_bit()?;
+        r.read_bit()?; // iE-Extensions
+        let cgi = read_cgi(&mut r, cell_identity_bits)?;
+        let tai = read_tai(&mut r)?;
+        // TimeStamp ::= OCTET STRING (SIZE(4)) — 3GPP TS 38.413, Section 9.3.1.75.
+        let time_stamp = if time_stamp_present {
+            let (ts, range) = read_aligned_octets(&mut r, 4)?;
+            Some((u32::from_be_bytes([ts[0], ts[1], ts[2], ts[3]]), range))
+        } else {
+            None
+        };
+        Ok((
+            choice,
+            choice_range,
+            Some(Uli {
+                cgi,
+                tai,
+                time_stamp,
+            }),
+        ))
+    };
+    let Ok((choice, choice_range, uli)) = decode() else {
         return false;
-    }
+    };
 
-    let choice_index = (data[0] >> 5) & 0x03;
-
+    // `choice` is at most 3 (2-bit constrained whole number).
     buf.push_field(
         &FD_ULI_CHOICE,
-        FieldValue::U8(choice_index),
-        offset..offset + 1,
+        FieldValue::U8(choice as u8),
+        shift(choice_range, offset),
     );
-
-    match choice_index {
-        // userLocationInformationEUTRA
-        0 if data.len() >= 17 => {
-            let eutra_cgi_offset = offset + 2;
-            buf.push_field(
-                &FD_PLMN_IDENTITY,
-                FieldValue::Bytes(&data[3..6]),
-                eutra_cgi_offset + 1..eutra_cgi_offset + 4,
-            );
-            let eci = packet_dissector_core::util::read_be_u32(data, 6).unwrap_or_default() >> 4;
+    if let Some(uli) = uli {
+        buf.push_field(
+            &FD_PLMN_IDENTITY,
+            FieldValue::Bytes(uli.cgi.plmn),
+            shift(uli.cgi.plmn_range, offset),
+        );
+        let cell_range = shift(uli.cgi.cell_identity_range, offset);
+        if choice == 0 {
+            // A 28-bit identity always fits in a u32.
             buf.push_field(
                 &FD_EUTRA_CELL_IDENTITY,
-                FieldValue::U32(eci),
-                offset + 6..offset + 10,
+                FieldValue::U32(uli.cgi.cell_identity as u32),
+                cell_range,
             );
-            if data.len() >= 17 {
-                let tac =
-                    (u32::from(data[14]) << 16) | (u32::from(data[15]) << 8) | u32::from(data[16]);
-                buf.push_field(&FD_TAC, FieldValue::U32(tac), offset + 14..offset + 17);
-            }
-        }
-        // userLocationInformationNR
-        1 if data.len() >= 18 => {
-            let nr_cgi_offset = offset + 2;
-            buf.push_field(
-                &FD_PLMN_IDENTITY,
-                FieldValue::Bytes(&data[3..6]),
-                nr_cgi_offset + 1..nr_cgi_offset + 4,
-            );
-            let nci = ((u64::from(data[6]) << 32)
-                | u64::from(packet_dissector_core::util::read_be_u32(data, 7).unwrap_or_default()))
-                >> 4;
+        } else {
             buf.push_field(
                 &FD_NR_CELL_IDENTITY,
-                FieldValue::U64(nci),
-                offset + 6..offset + 11,
+                FieldValue::U64(uli.cgi.cell_identity),
+                cell_range,
             );
-            if data.len() >= 18 {
-                let tac =
-                    (u32::from(data[15]) << 16) | (u32::from(data[16]) << 8) | u32::from(data[17]);
-                buf.push_field(&FD_TAC, FieldValue::U32(tac), offset + 15..offset + 18);
-            }
         }
-        _ => {
-            // userLocationInformationN3IWF or unknown — no extra fields.
+        buf.push_field(
+            &FD_PLMN_IDENTITY,
+            FieldValue::Bytes(uli.tai.plmn),
+            shift(uli.tai.plmn_range, offset),
+        );
+        buf.push_field(
+            &FD_TAC,
+            FieldValue::U32(uli.tai.tac),
+            shift(uli.tai.tac_range, offset),
+        );
+        if let Some((ts, range)) = uli.time_stamp {
+            buf.push_field(&FD_TIME_STAMP, FieldValue::U32(ts), shift(range, offset));
         }
     }
-
     true
 }
 
-/// NR-CGI (IE 45) — SEQUENCE { pLMNIdentity, nRCellIdentity }.
+/// NR-CGI (IE 45) — SEQUENCE { pLMNIdentity, nRCellIdentity, iE-Extensions
+/// OPTIONAL, ... }.
 ///
-/// 3GPP TS 38.413, Section 9.3.1.7.
+/// 3GPP TS 38.413, Section 9.3.1.7; ITU-T Rec. X.691, Section 16.10.
 fn push_nr_cgi<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    if data.len() < 9 {
+    let Ok(cgi) = read_cgi(&mut AperReader::new(data), 36) else {
         return false;
-    }
-
-    let ext = (data[0] >> 7) & 0x01;
-    if ext != 0 {
-        return false;
-    }
-
+    };
     buf.push_field(
         &FD_PLMN_IDENTITY,
-        FieldValue::Bytes(&data[1..4]),
-        offset + 1..offset + 4,
+        FieldValue::Bytes(cgi.plmn),
+        shift(cgi.plmn_range, offset),
     );
-    let nci = ((u64::from(data[4]) << 32)
-        | u64::from(packet_dissector_core::util::read_be_u32(data, 5).unwrap_or_default()))
-        >> 4;
-
     buf.push_field(
         &FD_NR_CELL_IDENTITY,
-        FieldValue::U64(nci),
-        offset + 4..offset + 9,
+        FieldValue::U64(cgi.cell_identity),
+        shift(cgi.cell_identity_range, offset),
     );
     true
 }
 
-/// EUTRA-CGI (IE 25) — SEQUENCE { pLMNIdentity, eUTRACellIdentity }.
+/// EUTRA-CGI (IE 25) — SEQUENCE { pLMNIdentity, eUTRACellIdentity,
+/// iE-Extensions OPTIONAL, ... }.
 ///
-/// 3GPP TS 38.413, Section 9.3.1.8.
+/// 3GPP TS 38.413, Section 9.3.1.9; ITU-T Rec. X.691, Section 16.10.
 fn push_eutra_cgi<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    if data.len() < 8 {
+    let Ok(cgi) = read_cgi(&mut AperReader::new(data), 28) else {
         return false;
-    }
-
-    let ext = (data[0] >> 7) & 0x01;
-    if ext != 0 {
-        return false;
-    }
-
+    };
     buf.push_field(
         &FD_PLMN_IDENTITY,
-        FieldValue::Bytes(&data[1..4]),
-        offset + 1..offset + 4,
+        FieldValue::Bytes(cgi.plmn),
+        shift(cgi.plmn_range, offset),
     );
-    let eci = packet_dissector_core::util::read_be_u32(data, 4).unwrap_or_default() >> 4;
-
+    // A 28-bit identity always fits in a u32.
     buf.push_field(
         &FD_EUTRA_CELL_IDENTITY,
-        FieldValue::U32(eci),
-        offset + 4..offset + 8,
+        FieldValue::U32(cgi.cell_identity as u32),
+        shift(cgi.cell_identity_range, offset),
     );
     true
 }
 
 /// NAS-PDU (IE 38) — OCTET STRING.
 ///
-/// Contains a 5G NAS message. The APER encoding wraps it in a length
-/// determinant, but the IE value we receive here is already the raw
-/// OCTET STRING content (length determinant was consumed by the IE
-/// container parser).
+/// Contains a 5G NAS message. An unconstrained OCTET STRING is encoded
+/// as an octet-aligned length determinant followed by the octets.
 ///
-/// 3GPP TS 38.413, Section 9.3.3.4.
+/// 3GPP TS 38.413, Section 9.3.3.4; ITU-T Rec. X.691, Sections 11.9, 17.8.
 fn push_nas_pdu<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    if data.is_empty() {
-        return false;
-    }
-
-    let Ok((nas_len, len_bytes)) = read_aper_length(data, 0) else {
+    let decode = || -> Result<(&'pkt [u8], Range<usize>), PacketError> {
+        let mut r = AperReader::new(data);
+        let len = r.read_length(0, None)?;
+        read_aligned_octets(&mut r, len as usize)
+    };
+    let Ok((nas_data, range)) = decode() else {
         return false;
     };
-    let nas_len = nas_len as usize;
-
-    if len_bytes + nas_len > data.len() {
+    if nas_data.is_empty() {
         return false;
     }
+    let range = shift(range, offset);
+    let nas_offset = range.start;
 
-    let nas_data = &data[len_bytes..len_bytes + nas_len];
-    let nas_offset = offset + len_bytes;
-
-    let obj_idx = buf.begin_container(
-        &FD_NAS_PDU,
-        FieldValue::Object(0..0),
-        nas_offset..nas_offset + nas_len,
-    );
+    let obj_idx = buf.begin_container(&FD_NAS_PDU, FieldValue::Object(0..0), range.clone());
     let ok = packet_dissector_nas5g::push_nas_pdu(buf, nas_data, nas_offset);
     if !ok {
         // Could not parse — store raw bytes.
-        buf.push_field(
-            &FD_IE_VALUE_FALLBACK,
-            FieldValue::Bytes(nas_data),
-            nas_offset..nas_offset + nas_len,
-        );
+        buf.push_field(&FD_IE_VALUE_FALLBACK, FieldValue::Bytes(nas_data), range);
     }
     buf.end_container(obj_idx);
     true
@@ -934,12 +1133,13 @@ fn global_ran_node_id_choice_name(choice: u8) -> &'static str {
 
 /// Returns a human-readable name for the UserLocationInformation CHOICE.
 ///
-/// 3GPP TS 38.413, Section 9.3.1.16.
+/// 3GPP TS 38.413, Section 9.3.1.16 (ASN.1 in Section 9.4.5).
 fn uli_choice_name(choice: u8) -> &'static str {
     match choice {
         0 => "userLocationInformationEUTRA",
         1 => "userLocationInformationNR",
-        2 => "userLocationInformationN3IWF",
+        2 => "userLocationInformationN3IWF-with-PortNumber",
+        3 => "choice-Extensions",
         _ => "Unknown",
     }
 }
@@ -1001,15 +1201,28 @@ mod tests {
     //! | 21    | 9.3.1.90  | DefaultPagingDRX                    | parse_default_paging_drx               |
     //! | 21    | 9.3.1.90  | DefaultPagingDRX, unknown extension | parse_default_paging_drx_unknown_ext   |
     //! | 1     | 9.3.3.21  | AMFName                             | parse_amf_name                         |
+    //! | 1     | 9.3.3.21  | AMFName, size extension             | parse_amf_name_size_extension          |
+    //! | 1     | 9.3.3.21  | AMFName, truncated                  | parse_amf_name_truncated               |
     //! | 82    | 9.2.6.1   | RANNodeName                         | parse_ran_node_name                    |
     //! | 148   | 9.3.1.24  | S-NSSAI                             | parse_s_nssai_with_sd                  |
     //! | 148   | 9.3.1.24  | S-NSSAI (no SD)                     | parse_s_nssai_without_sd               |
+    //! | 148   | 9.3.1.24  | S-NSSAI truncated                   | parse_s_nssai_truncated                |
     //! | 28    | 9.3.3.3   | GUAMI                               | parse_guami                            |
     //! | 38    | 9.3.3.4   | NAS-PDU                             | parse_nas_pdu                          |
+    //! | 38    | 9.3.3.4   | NAS-PDU truncated                   | parse_nas_pdu_truncated                |
     //! | 45    | 9.3.1.7   | NR-CGI                              | parse_nr_cgi                           |
     //! | 25    | 9.3.1.9   | EUTRA-CGI                           | parse_eutra_cgi                        |
     //! | 27    | 9.3.1.5   | GlobalRANNodeID gNB, 32-bit ID      | parse_global_ran_node_id               |
+    //! | 27    | 9.3.1.5   | GlobalRANNodeID gNB, 22-bit ID      | parse_global_ran_node_id_22_bit        |
+    //! | 27    | 9.3.1.5   | GlobalRANNodeID ng-eNB              | parse_global_ran_node_id_ng_enb        |
+    //! | 27    | 9.3.1.5   | GlobalRANNodeID truncated           | parse_global_ran_node_id_truncated     |
     //! | 121   | 9.3.1.16  | UserLocationInformation NR          | parse_uli_nr                           |
+    //! | 121   | 9.3.1.16  | ULI NR with timeStamp               | parse_uli_nr_with_time_stamp           |
+    //! | 121   | 9.3.1.16  | ULI NR, NR-CGI iE-Extensions        | parse_uli_nr_with_cgi_extensions       |
+    //! | 121   | 9.3.1.16  | ULI NR, NR-CGI extension additions  | parse_uli_nr_with_cgi_ext_additions    |
+    //! | 121   | 9.3.1.16  | UserLocationInformation E-UTRA      | parse_uli_eutra                        |
+    //! | 121   | 9.3.1.16  | ULI N3IWF (choice only)             | parse_uli_n3iwf                        |
+    //! | 121   | 9.3.1.16  | ULI truncated                       | parse_uli_truncated                    |
     //! | 29    | 9.3.1.22  | HandoverType                        | parse_handover_type                    |
     //! | 29    | 9.3.1.22  | HandoverType (extension)            | parse_handover_type_extension          |
     //! | 107   | 9.3.1.56  | TimeToWait                          | parse_time_to_wait                     |
@@ -1226,16 +1439,39 @@ mod tests {
 
     #[test]
     fn parse_amf_name() {
-        let data = [0x03, b'a', b'm', b'f', b'1'];
+        // ext 0 | length-1 = 11 (8 bits) | pad | "open5gs-amf0".
+        let data = [
+            0x05, 0x80, b'o', b'p', b'e', b'n', b'5', b'g', b's', b'-', b'a', b'm', b'f', b'0',
+        ];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 1, &data, 0);
+        assert_eq!(buf.fields().len(), 1);
         assert_eq!(buf.fields()[0].name(), "name");
-        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(b"amf1"));
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(b"open5gs-amf0"));
+        assert_eq!(buf.fields()[0].range, 2..14);
+    }
+
+    #[test]
+    fn parse_amf_name_size_extension() {
+        // ext 1 | pad | unconstrained length 3 | "amf".
+        let data = [0x80, 0x03, b'a', b'm', b'f'];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 1, &data, 0);
+        assert_eq!(buf.fields()[0].value, FieldValue::Bytes(b"amf"));
+        assert_eq!(buf.fields()[0].range, 2..5);
+    }
+
+    #[test]
+    fn parse_amf_name_truncated() {
+        let data = [0x05, 0x80, b'o', b'p'];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 1, &data, 0);
+        assert_fallback(&buf, &data);
     }
 
     #[test]
     fn parse_ran_node_name() {
-        let data = [0x02, b'g', b'N', b'B'];
+        let data = [0x01, 0x00, b'g', b'N', b'B'];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 82, &data, 0);
         assert_eq!(buf.fields()[0].value, FieldValue::Bytes(b"gNB"));
@@ -1243,23 +1479,34 @@ mod tests {
 
     #[test]
     fn parse_s_nssai_with_sd() {
-        let data = [0x40, 0x01, 0x01, 0x02, 0x03];
+        // ext 0 | sD 1 | iE-Ext 0 | SST 0x01 (8 bits) | pad | SD.
+        let data = [0x40, 0x20, 0x01, 0x02, 0x03];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 148, &data, 0);
         assert_eq!(buf.fields()[0].name(), "sst");
         assert_eq!(buf.fields()[0].value, FieldValue::U8(1));
+        assert_eq!(buf.fields()[0].range, 0..2);
         assert_eq!(buf.fields()[1].name(), "sd");
         assert_eq!(buf.fields()[1].value, FieldValue::U32(0x010203));
+        assert_eq!(buf.fields()[1].range, 2..5);
     }
 
     #[test]
     fn parse_s_nssai_without_sd() {
-        let data = [0x00, 0x01];
+        let data = [0x00, 0x20];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 148, &data, 0);
         assert_eq!(buf.fields().len(), 1);
         assert_eq!(buf.fields()[0].name(), "sst");
         assert_eq!(buf.fields()[0].value, FieldValue::U8(1));
+    }
+
+    #[test]
+    fn parse_s_nssai_truncated() {
+        let data = [0x40, 0x20, 0x01];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 148, &data, 0);
+        assert_fallback(&buf, &data);
     }
 
     #[test]
@@ -1272,28 +1519,24 @@ mod tests {
             buf.fields()[0].value,
             FieldValue::Bytes(&[0x00, 0xF1, 0x10])
         );
+        assert_eq!(buf.fields()[0].range, 1..4);
         assert_eq!(buf.fields()[1].name(), "amf_region_id");
         assert_eq!(buf.fields()[1].value, FieldValue::U8(0x01));
         assert_eq!(buf.fields()[2].name(), "amf_set_id");
         assert_eq!(buf.fields()[2].value, FieldValue::U16(1));
+        assert_eq!(buf.fields()[2].range, 5..7);
         assert_eq!(buf.fields()[3].name(), "amf_pointer");
         assert_eq!(buf.fields()[3].value, FieldValue::U8(2));
+        assert_eq!(buf.fields()[3].range, 6..7);
+
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 28, &data[..6], 0);
+        assert_fallback(&buf, &data[..6]);
     }
 
     #[test]
     fn parse_nr_cgi() {
-        let nci: u64 = 0x123456789;
-        let nci_shifted = nci << 4;
-        let nci_bytes = [
-            ((nci_shifted >> 32) & 0xFF) as u8,
-            ((nci_shifted >> 24) & 0xFF) as u8,
-            ((nci_shifted >> 16) & 0xFF) as u8,
-            ((nci_shifted >> 8) & 0xFF) as u8,
-            (nci_shifted & 0xFF) as u8,
-        ];
-        let mut data = vec![0x00, 0x00, 0xF1, 0x10];
-        data.extend_from_slice(&nci_bytes);
-
+        let data = [0x00, 0x00, 0xF1, 0x10, 0x12, 0x34, 0x56, 0x78, 0x90];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 45, &data, 0);
         assert_eq!(buf.fields()[0].name(), "plmn_identity");
@@ -1302,17 +1545,17 @@ mod tests {
             FieldValue::Bytes(&[0x00, 0xF1, 0x10])
         );
         assert_eq!(buf.fields()[1].name(), "nr_cell_identity");
-        assert_eq!(buf.fields()[1].value, FieldValue::U64(nci));
+        assert_eq!(buf.fields()[1].value, FieldValue::U64(0x1_2345_6789));
+        assert_eq!(buf.fields()[1].range, 4..9);
+
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 45, &data[..8], 0);
+        assert_fallback(&buf, &data[..8]);
     }
 
     #[test]
     fn parse_eutra_cgi() {
-        let eci: u32 = 0x1234567;
-        let eci_shifted = eci << 4;
-        let eci_bytes = eci_shifted.to_be_bytes();
-        let mut data = vec![0x00, 0x00, 0xF1, 0x10];
-        data.extend_from_slice(&eci_bytes);
-
+        let data = [0x00, 0x00, 0xF1, 0x10, 0x12, 0x34, 0x56, 0x70];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 25, &data, 0);
         assert_eq!(
@@ -1320,61 +1563,188 @@ mod tests {
             FieldValue::Bytes(&[0x00, 0xF1, 0x10])
         );
         assert_eq!(buf.fields()[1].name(), "eutra_cell_identity");
-        assert_eq!(buf.fields()[1].value, FieldValue::U32(eci));
+        assert_eq!(buf.fields()[1].value, FieldValue::U32(0x123_4567));
+        assert_eq!(buf.fields()[1].range, 4..8);
+
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 25, &data[..7], 0);
+        assert_fallback(&buf, &data[..7]);
     }
 
     #[test]
     fn parse_global_ran_node_id() {
-        let data = [
-            0x00, // CHOICE preamble
-            0x00, // SEQUENCE preamble
-            0x00, 0xF1, 0x10, // PLMN
-            0x00, // gNB-ID CHOICE preamble
-            0x0A, // gNB-ID length = 10 + 22 = 32
-            0x00, 0x00, 0x00, 0x01, // gNB-ID = 1
-        ];
+        // choice 00 | ext 0 | opt 0 | pad | PLMN | gNB-ID choice 0 |
+        // length 32-22 = 1010 | pad | 4 octets.
+        let data = [0x00, 0x00, 0xF1, 0x10, 0x50, 0x00, 0x00, 0x00, 0x01];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 27, &data, 0);
+        assert_eq!(buf.fields().len(), 4);
         assert_eq!(buf.fields()[0].name(), "choice");
         assert_eq!(buf.fields()[0].value, FieldValue::U8(0));
-        let display_fn = buf.fields()[0].descriptor.display_fn.unwrap();
-        assert_eq!(
-            display_fn(&buf.fields()[0].value, buf.fields()),
-            Some("globalGNB-ID")
-        );
+        assert_eq!(display(&buf, 0), Some("globalGNB-ID"));
         assert_eq!(buf.fields()[1].name(), "plmn_identity");
+        assert_eq!(
+            buf.fields()[1].value,
+            FieldValue::Bytes(&[0x00, 0xF1, 0x10])
+        );
+        assert_eq!(buf.fields()[1].range, 1..4);
         assert_eq!(buf.fields()[2].name(), "gnb_id_length");
         assert_eq!(buf.fields()[2].value, FieldValue::U8(32));
+        assert_eq!(buf.fields()[2].range, 4..5);
         assert_eq!(buf.fields()[3].name(), "gnb_id");
         assert_eq!(buf.fields()[3].value, FieldValue::U32(1));
+        assert_eq!(buf.fields()[3].range, 5..9);
+    }
+
+    #[test]
+    fn parse_global_ran_node_id_22_bit() {
+        let data = [0x00, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x48, 0xD0];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 27, &data, 0);
+        assert_eq!(buf.fields()[2].value, FieldValue::U8(22));
+        assert_eq!(buf.fields()[3].value, FieldValue::U32(0x1234));
+        assert_eq!(buf.fields()[3].range, 5..8);
+    }
+
+    #[test]
+    fn parse_global_ran_node_id_ng_enb() {
+        // choice 01 (globalNgENB-ID): only the choice is decoded.
+        let data = [0x40, 0x00, 0xF1, 0x10, 0x00, 0x12, 0x34, 0x50];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 27, &data, 0);
+        assert_eq!(buf.fields().len(), 1);
+        assert_eq!(buf.fields()[0].value, FieldValue::U8(1));
+        assert_eq!(display(&buf, 0), Some("globalNgENB-ID"));
+    }
+
+    #[test]
+    fn parse_global_ran_node_id_truncated() {
+        let data = [0x00, 0x00, 0xF1, 0x10, 0x50, 0x00, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 27, &data, 0);
+        assert_fallback(&buf, &data);
     }
 
     #[test]
     fn parse_uli_nr() {
-        let nci: u64 = 0x000000001;
-        let nci_shifted = nci << 4;
-        let mut data = vec![
-            0x20, // CHOICE: NR
-            0x00, // SEQUENCE preamble
-            0x00, // NR-CGI preamble
-            0x00, 0xF1, 0x10, // NR-CGI PLMN
+        // choice 01 | ULI-NR ext 0, opts 00 | NR-CGI ext 0, opt 0 | pad |
+        // PLMN | NCI (36 bits) | TAI ext 0, opt 0 | pad | PLMN | TAC.
+        let data = [
+            0x40, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0xF1, 0x10, 0x00, 0x01,
+            0x02,
         ];
-        data.push(((nci_shifted >> 32) & 0xFF) as u8);
-        data.push(((nci_shifted >> 24) & 0xFF) as u8);
-        data.push(((nci_shifted >> 16) & 0xFF) as u8);
-        data.push(((nci_shifted >> 8) & 0xFF) as u8);
-        data.push((nci_shifted & 0xFF) as u8);
-        data.extend_from_slice(&[0x00, 0x00, 0xF1, 0x10, 0x00, 0x01, 0x02]);
-
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_eq!(buf.fields().len(), 5);
         assert_eq!(buf.fields()[0].name(), "choice");
         assert_eq!(buf.fields()[0].value, FieldValue::U8(1));
+        assert_eq!(display(&buf, 0), Some("userLocationInformationNR"));
         assert_eq!(buf.fields()[1].name(), "plmn_identity");
+        assert_eq!(buf.fields()[1].range, 1..4);
         assert_eq!(buf.fields()[2].name(), "nr_cell_identity");
-        assert_eq!(buf.fields()[2].value, FieldValue::U64(nci));
-        assert_eq!(buf.fields()[3].name(), "tac");
-        assert_eq!(buf.fields()[3].value, FieldValue::U32(258));
+        assert_eq!(buf.fields()[2].value, FieldValue::U64(1));
+        assert_eq!(buf.fields()[2].range, 4..9);
+        assert_eq!(buf.fields()[3].name(), "plmn_identity");
+        assert_eq!(buf.fields()[3].range, 9..12);
+        assert_eq!(buf.fields()[4].name(), "tac");
+        assert_eq!(buf.fields()[4].value, FieldValue::U32(0x000102));
+        assert_eq!(buf.fields()[4].range, 12..15);
+    }
+
+    #[test]
+    fn parse_uli_nr_with_time_stamp() {
+        let data = [
+            0x50, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0xF1, 0x10, 0x00, 0x01,
+            0x02, 0xE1, 0x2B, 0x3C, 0x4D,
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_eq!(buf.fields().len(), 6);
+        assert_eq!(buf.fields()[4].value, FieldValue::U32(0x000102));
+        assert_eq!(buf.fields()[5].name(), "time_stamp");
+        assert_eq!(buf.fields()[5].value, FieldValue::U32(0xE12B_3C4D));
+        assert_eq!(buf.fields()[5].range, 15..19);
+    }
+
+    #[test]
+    fn parse_uli_nr_with_cgi_extensions() {
+        // NR-CGI carries an iE-Extensions container with one field
+        // (id 0x1234, criticality ignore, 1-octet open type value) that
+        // must be skipped before TAI.
+        let data = [
+            0x42, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x10, // NR-CGI
+            0x00, 0x00, // SEQUENCE OF length - 1 = 0 (two-octet case)
+            0x12, 0x34, // id
+            0x40, // criticality ignore | pad
+            0x01, 0xAB, // open type
+            0x00, 0x00, 0xF1, 0x10, 0x00, 0x01, 0x02, // TAI
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_eq!(buf.fields().len(), 5);
+        assert_eq!(buf.fields()[2].value, FieldValue::U64(1));
+        assert_eq!(buf.fields()[3].range, 17..20);
+        assert_eq!(buf.fields()[4].value, FieldValue::U32(0x000102));
+        assert_eq!(buf.fields()[4].range, 20..23);
+    }
+
+    #[test]
+    fn parse_uli_nr_with_cgi_ext_additions() {
+        // NR-CGI extension bit set: a normally small bitmap length (0 → one
+        // bit), bitmap `1`, then one open-type addition that must be
+        // skipped before TAI.
+        let data = [
+            0x44, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x10, // NR-CGI root
+            0x10, // bitmap length (cont.) | bitmap 1 | pad
+            0x01, 0xAB, // open type
+            0x00, 0x00, 0xF1, 0x10, 0x00, 0x01, 0x02, // TAI
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_eq!(buf.fields().len(), 5);
+        assert_eq!(buf.fields()[2].value, FieldValue::U64(1));
+        assert_eq!(buf.fields()[3].range, 13..16);
+        assert_eq!(buf.fields()[4].value, FieldValue::U32(0x000102));
+    }
+
+    #[test]
+    fn parse_uli_eutra() {
+        // The TAI preamble shares the last octet of the 28-bit ECI.
+        let data = [
+            0x00, 0x00, 0xF1, 0x10, 0x12, 0x34, 0x56, 0x70, 0x00, 0xF1, 0x10, 0x00, 0x01, 0x02,
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_eq!(buf.fields().len(), 5);
+        assert_eq!(display(&buf, 0), Some("userLocationInformationEUTRA"));
+        assert_eq!(buf.fields()[2].name(), "eutra_cell_identity");
+        assert_eq!(buf.fields()[2].value, FieldValue::U32(0x123_4567));
+        assert_eq!(buf.fields()[2].range, 4..8);
+        assert_eq!(buf.fields()[3].range, 8..11);
+        assert_eq!(buf.fields()[4].value, FieldValue::U32(0x000102));
+    }
+
+    #[test]
+    fn parse_uli_n3iwf() {
+        let data = [0x80, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_eq!(buf.fields().len(), 1);
+        assert_eq!(buf.fields()[0].value, FieldValue::U8(2));
+        assert_eq!(
+            display(&buf, 0),
+            Some("userLocationInformationN3IWF-with-PortNumber")
+        );
+    }
+
+    #[test]
+    fn parse_uli_truncated() {
+        let data = [
+            0x40, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0xF1, 0x10, 0x00, 0x01,
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_fallback(&buf, &data);
     }
 
     #[test]
@@ -1386,6 +1756,7 @@ mod tests {
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 38, &data, 0);
         assert_eq!(buf.fields()[0].name(), "nas_pdu");
+        assert_eq!(buf.fields()[0].range, 1..4);
         if let FieldValue::Object(ref range) = buf.fields()[0].value {
             let inner = buf.nested_fields(range);
             let mt = inner.iter().find(|f| f.name() == "message_type").unwrap();
@@ -1393,6 +1764,14 @@ mod tests {
         } else {
             panic!("expected Object");
         }
+    }
+
+    #[test]
+    fn parse_nas_pdu_truncated() {
+        let data = [0x05, 0x7E, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 38, &data, 0);
+        assert_fallback(&buf, &data);
     }
 
     #[test]
