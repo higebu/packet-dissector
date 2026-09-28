@@ -8,6 +8,15 @@
 //!   <https://www.rfc-editor.org/rfc/rfc2408>
 //! - RFC 7296: Internet Key Exchange Protocol Version 2 (IKEv2):
 //!   <https://www.rfc-editor.org/rfc/rfc7296>
+//! - RFC 3947: Negotiation of NAT-Traversal in the IKE:
+//!   <https://www.rfc-editor.org/rfc/rfc3947>
+//! - RFC 7383: Internet Key Exchange Protocol Version 2 (IKEv2) Message Fragmentation:
+//!   <https://www.rfc-editor.org/rfc/rfc7383>
+//! - RFC 8019: Protecting Internet Key Exchange Protocol Version 2 (IKEv2) Implementations
+//!   from Distributed Denial-of-Service Attacks:
+//!   <https://www.rfc-editor.org/rfc/rfc8019>
+//! - RFC 9838: Group Key Management Using the Internet Key Exchange Protocol Version 2 (IKEv2):
+//!   <https://www.rfc-editor.org/rfc/rfc9838>
 //! - RFC 3948: UDP Encapsulation of IPsec ESP Packets (NAT Traversal):
 //!   <https://www.rfc-editor.org/rfc/rfc3948>
 //! - RFC 5723: Internet Key Exchange Protocol Version 2 (IKEv2) Session Resumption:
@@ -144,6 +153,10 @@ fn payload_type_name(v: u8) -> Option<&'static str> {
         11 => Some("Notification (v1)"),
         12 => Some("Delete (v1)"),
         13 => Some("Vendor ID (v1)"),
+        // RFC 3947, Section 9 — NAT-D and NAT-OA (IKEv1 NAT-Traversal)
+        // <https://www.rfc-editor.org/rfc/rfc3947#section-9>
+        20 => Some("NAT Discovery (v1)"),
+        21 => Some("NAT Original Address (v1)"),
         // IKEv2 payload types (RFC 7296, Section 3.2)
         33 => Some("Security Association"),
         34 => Some("Key Exchange"),
@@ -163,6 +176,17 @@ fn payload_type_name(v: u8) -> Option<&'static str> {
         48 => Some("Extensible Authentication Protocol"),
         // RFC 6467, Section 4 — Generic Secure Password Method
         49 => Some("Generic Secure Password Method"),
+        // RFC 9838, Sections 4.2, 4.4, 4.5 — G-IKEv2 payloads
+        // <https://www.rfc-editor.org/rfc/rfc9838#section-4>
+        50 => Some("Group Identification"),
+        51 => Some("Group Security Association"),
+        52 => Some("Key Download"),
+        // RFC 7383, Section 2.5 — Encrypted and Authenticated Fragment (SKF)
+        // <https://www.rfc-editor.org/rfc/rfc7383#section-2.5>
+        53 => Some("Encrypted and Authenticated Fragment"),
+        // RFC 8019, Section 8.2 — Puzzle Solution (PS)
+        // <https://www.rfc-editor.org/rfc/rfc8019#section-8.2>
+        54 => Some("Puzzle Solution"),
         _ => None,
     }
 }
@@ -186,6 +210,7 @@ const FD_FLAG_AUTHENTICATION_ONLY: usize = 12;
 const FD_MESSAGE_ID: usize = 13;
 const FD_LENGTH: usize = 14;
 const FD_PAYLOADS: usize = 15;
+const FD_ENCRYPTED_PAYLOADS: usize = 16;
 
 /// Child field descriptor indices for [`PAYLOAD_CHILDREN`].
 const PFD_PAYLOAD_TYPE: usize = 0;
@@ -307,6 +332,8 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("payloads", "Payloads", FieldType::Array)
         .optional()
         .with_children(PAYLOAD_CHILDREN),
+    // RFC 2408, Section 3.1 — IKEv1 payloads encrypted under the E bit
+    FieldDescriptor::new("encrypted_payloads", "Encrypted Payloads", FieldType::Bytes).optional(),
 ];
 
 /// IKE dissector.
@@ -468,11 +495,27 @@ impl Dissector for IkeDissector {
             hdr_offset + 24..hdr_offset + 28,
         );
 
-        // Parse generic payload chain (RFC 7296, Section 3.2)
-        // <https://www.rfc-editor.org/rfc/rfc7296#section-3.2>
         let msg_len = core::cmp::min(length as usize, hdr_data.len());
         let payload_area = &hdr_data[HEADER_SIZE..msg_len];
-        if !payload_area.is_empty() && next_payload != 0 {
+        // RFC 2408, Section 3.1 — "E(ncryption Bit) (1 bit) - If set (1),
+        // all payloads following the header are encrypted using the
+        // encryption algorithm identified in the ISAKMP SA."
+        // <https://www.rfc-editor.org/rfc/rfc2408#section-3.1>
+        // The payload headers are ciphertext, so the chain cannot be walked.
+        // Next Payload still names the first (encrypted) payload. IKEv2 has
+        // no such bit: it encrypts with the SK payload (RFC 7296, Section 3.14).
+        let ikev1_encrypted = major_version == 1 && flags & 0x01 != 0;
+        if ikev1_encrypted {
+            if !payload_area.is_empty() {
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_ENCRYPTED_PAYLOADS],
+                    FieldValue::Bytes(payload_area),
+                    hdr_offset + HEADER_SIZE..hdr_offset + msg_len,
+                );
+            }
+        } else if !payload_area.is_empty() && next_payload != 0 {
+            // Parse generic payload chain (RFC 7296, Section 3.2)
+            // <https://www.rfc-editor.org/rfc/rfc7296#section-3.2>
             let array_idx = buf.begin_container(
                 &FIELD_DESCRIPTORS[FD_PAYLOADS],
                 FieldValue::Array(0..0),
@@ -674,6 +717,14 @@ mod tests {
     //! | 3.1 (2408)         | IKEv1 Commit flag (bit 1)            | parse_ikev1_flag_commit                     |
     //! | 3.1 (2408)         | IKEv1 Authentication Only (bit 2)    | parse_ikev1_flag_authentication_only        |
     //! | 3.2 (2408)         | IKEv1 Generic Payload Header         | parse_ikev1_payload_has_no_critical         |
+    //! | 3.1 (2408)         | IKEv1 E=1: payloads not walked       | parse_ikev1_encrypted_payloads_not_walked   |
+    //! | 3.1 (2408)         | IKEv1 E=0: payloads walked           | parse_ikev1_unencrypted_payloads_walked     |
+    //! | 3.1 (2408)         | IKEv1 E=1, header only               | parse_ikev1_encrypted_header_only           |
+    //! | 3.1 (7296)         | IKEv2 bit 0 is not an E bit          | parse_ikev2_bit0_does_not_mean_encrypted    |
+    //! | 9 (3947)           | Payload types 20/21 (NAT-D, NAT-OA)  | payload_type_name_later_registrations       |
+    //! | 4 (9838)           | Payload types 50-52 (G-IKEv2)        | payload_type_name_later_registrations       |
+    //! | 2.5 (7383)         | Payload type 53 (SKF)                | payload_type_name_later_registrations       |
+    //! | 8.2 (8019)         | Payload type 54 (PS)                 | payload_type_name_later_registrations       |
     //! | 2.2 (3948)         | NAT-T Non-ESP marker                 | parse_nat_t_with_marker                     |
     //! | —                  | Truncated header                     | truncated_header                            |
     //! | —                  | Invalid length                       | invalid_length                              |
@@ -989,7 +1040,7 @@ mod tests {
     #[test]
     fn field_descriptors_match() {
         let descriptors = IkeDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 16);
+        assert_eq!(descriptors.len(), 17);
         assert_eq!(descriptors[0].name, "initiator_spi");
         assert_eq!(descriptors[FD_FLAG_INITIATOR].name, "flag_initiator");
         assert_eq!(descriptors[FD_FLAG_RESPONSE].name, "flag_response");
@@ -1003,6 +1054,11 @@ mod tests {
         assert!(descriptors[FD_FLAG_INITIATOR].optional);
         assert!(descriptors[FD_FLAG_ENCRYPTION].optional);
         assert_eq!(descriptors[FD_PAYLOADS].name, "payloads");
+        assert_eq!(
+            descriptors[FD_ENCRYPTED_PAYLOADS].name,
+            "encrypted_payloads"
+        );
+        assert!(descriptors[FD_ENCRYPTED_PAYLOADS].optional);
         assert!(descriptors[FD_PAYLOADS].children.is_some());
     }
 
@@ -1179,6 +1235,100 @@ mod tests {
         } else {
             panic!("expected Array for payloads");
         }
+    }
+
+    /// RFC 2408, Section 3.1 — with the E bit set, "all payloads following
+    /// the header are encrypted", so the payload chain must not be walked.
+    #[test]
+    fn parse_ikev1_encrypted_payloads_not_walked() {
+        let ciphertext: [u8; 32] = [
+            0x8b, 0x1f, 0x00, 0x0c, 0x3d, 0x5a, 0xe0, 0x41, 0x9c, 0x77, 0x02, 0xb4, 0x0e, 0x00,
+            0x00, 0x14, 0xc4, 0xf1, 0xa7, 0x22, 0x90, 0x6e, 0x5b, 0x0c, 0x38, 0xd9, 0x11, 0x45,
+            0xee, 0x20, 0x7a, 0x51,
+        ];
+        // Main Mode message 5: next payload ID (5), Identity Protection, E=1.
+        let mut data = make_ike_header(
+            &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+            &[0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00],
+            5,
+            1,
+            0,
+            2,
+            0x01,
+            0,
+            60,
+        );
+        data.extend_from_slice(&ciphertext);
+        let mut buf = DissectBuffer::new();
+        let result = IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 60);
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "payloads").is_none());
+        let enc = buf.field_by_name(layer, "encrypted_payloads").unwrap();
+        assert_eq!(enc.value, FieldValue::Bytes(&ciphertext));
+        assert_eq!(enc.range, 28..60);
+        // Next Payload still names the first (encrypted) payload.
+        assert_eq!(
+            buf.field_by_name(layer, "next_payload").unwrap().value,
+            FieldValue::U8(5)
+        );
+    }
+
+    /// RFC 2408, Section 3.1 — with the E bit clear the payloads are
+    /// plaintext and the generic payload chain is walked.
+    #[test]
+    fn parse_ikev1_unencrypted_payloads_walked() {
+        let mut data = make_ike_header(&[0xAA; 8], &[0xBB; 8], 13, 1, 0, 2, 0x00, 0, 28 + 8);
+        data.extend_from_slice(&[0, 0, 0x00, 0x08, 0xde, 0xad, 0xbe, 0xef]); // VID
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "payloads").is_some());
+        assert!(buf.field_by_name(layer, "encrypted_payloads").is_none());
+    }
+
+    /// The IKEv2 header has no E bit (RFC 7296, Section 3.1): bit 0 is
+    /// reserved, so the chain is still walked when it is set.
+    #[test]
+    fn parse_ikev2_bit0_does_not_mean_encrypted() {
+        let mut data = make_ike_header(&[0x01; 8], &[0x00; 8], 43, 2, 0, 34, 0x09, 0, 28 + 8);
+        data.extend_from_slice(&[0, 0, 0x00, 0x08, 0xde, 0xad, 0xbe, 0xef]); // V
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "payloads").is_some());
+        assert!(buf.field_by_name(layer, "encrypted_payloads").is_none());
+    }
+
+    /// IKEv1 E=1 with no bytes after the header: nothing to expose.
+    #[test]
+    fn parse_ikev1_encrypted_header_only() {
+        let data = make_ike_header(&[0xAA; 8], &[0xBB; 8], 8, 1, 0, 32, 0x01, 1, 28);
+        let mut buf = DissectBuffer::new();
+        IkeDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "payloads").is_none());
+        assert!(buf.field_by_name(layer, "encrypted_payloads").is_none());
+    }
+
+    /// Payload types registered after RFC 2408 / RFC 7296.
+    #[test]
+    fn payload_type_name_later_registrations() {
+        // RFC 3947, Section 9 — NAT-D (20), NAT-OA (21)
+        assert_eq!(payload_type_name(20), Some("NAT Discovery (v1)"));
+        assert_eq!(payload_type_name(21), Some("NAT Original Address (v1)"));
+        // RFC 9838, Section 4 — G-IKEv2 payloads
+        assert_eq!(payload_type_name(50), Some("Group Identification"));
+        assert_eq!(payload_type_name(51), Some("Group Security Association"));
+        assert_eq!(payload_type_name(52), Some("Key Download"));
+        // RFC 7383, Section 2.5 — SKF
+        assert_eq!(
+            payload_type_name(53),
+            Some("Encrypted and Authenticated Fragment")
+        );
+        // RFC 8019, Section 8.2 — PS
+        assert_eq!(payload_type_name(54), Some("Puzzle Solution"));
+        assert_eq!(payload_type_name(55), None);
     }
 
     /// IKEv2 payload type 49 = Generic Secure Password Method (RFC 6467, Section 4).
