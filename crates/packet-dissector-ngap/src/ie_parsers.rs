@@ -339,10 +339,27 @@ fn shift(range: Range<usize>, offset: usize) -> Range<usize> {
     range.start + offset..range.end + offset
 }
 
-/// Reads an octet-aligned fixed-size OCTET STRING of `n` (> 2) octets and
-/// returns it with its byte range relative to the IE value.
+/// Checks that the decoder consumed the whole IE value.
 ///
-/// ITU-T Rec. X.691, Section 17.7.
+/// ITU-T Rec. X.691, Section 11.2 — an open type field holds exactly the
+/// complete encoding of its value: the encoded bits padded to an octet
+/// boundary, or a single zero octet for an empty encoding (Section
+/// 10.1.3). Leftover octets mean the value is malformed.
+fn ensure_consumed(r: &AperReader<'_>, data: &[u8]) -> Result<(), PacketError> {
+    if r.bit_position().div_ceil(8).max(1) != data.len() {
+        return Err(PacketError::InvalidHeader(
+            "APER open type value has trailing octets",
+        ));
+    }
+    Ok(())
+}
+
+/// Aligns to an octet boundary, reads `n` octets and returns them with
+/// their byte range relative to the IE value.
+///
+/// Used for octet-aligned fields: fixed-size OCTET STRINGs longer than two
+/// octets (ITU-T Rec. X.691, Section 17.7) and the contents that follow a
+/// length determinant (Sections 17.8, 30.5).
 fn read_aligned_octets<'a>(
     r: &mut AperReader<'a>,
     n: usize,
@@ -503,6 +520,9 @@ fn push_amf_ue_ngap_id<'pkt>(
     let Ok(value) = r.read_constrained_whole_number(0, AMF_UE_NGAP_ID_MAX) else {
         return false;
     };
+    if ensure_consumed(&r, data).is_err() {
+        return false;
+    }
     buf.push_field(
         &FD_AMF_UE_NGAP_ID,
         FieldValue::U64(value),
@@ -529,6 +549,9 @@ fn push_ran_ue_ngap_id<'pkt>(
     else {
         return false;
     };
+    if ensure_consumed(&r, data).is_err() {
+        return false;
+    }
     buf.push_field(
         &FD_RAN_UE_NGAP_ID,
         FieldValue::U32(value),
@@ -562,8 +585,13 @@ fn push_cause<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usi
             else {
                 return false;
             };
+            if ensure_consumed(&r, data).is_err() {
+                return false;
+            }
             Some((value, r.byte_range_since(start)))
         }
+        // choice-Extensions carries a ProtocolIE-SingleContainer that is
+        // not decoded here.
         None => None,
     };
 
@@ -593,6 +621,9 @@ fn push_relative_amf_capacity<'pkt>(
     let Ok(value) = r.read_constrained_whole_number(0, 255) else {
         return false;
     };
+    if ensure_consumed(&r, data).is_err() {
+        return false;
+    }
     // The constraint guarantees `value <= 255`.
     buf.push_field(
         &FD_RELATIVE_AMF_CAPACITY,
@@ -631,6 +662,9 @@ fn push_enumerated<'pkt>(
     else {
         return false;
     };
+    if ensure_consumed(&r, data).is_err() {
+        return false;
+    }
     buf.push_field(
         descriptor,
         FieldValue::U8(value),
@@ -660,7 +694,9 @@ fn push_printable_name<'pkt>(
         } else {
             r.read_length(1, Some(150))?
         };
-        read_aligned_octets(&mut r, len as usize)
+        let name = read_aligned_octets(&mut r, len as usize)?;
+        ensure_consumed(&r, data)?;
+        Ok(name)
     };
     let Ok((name, range)) = decode() else {
         return false;
@@ -688,9 +724,9 @@ fn push_s_nssai<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: u
         let mut r = AperReader::new(data);
         // Extension additions (if any) follow the root components and do
         // not affect them — ITU-T Rec. X.691, Section 19.7.
-        r.read_bit()?;
+        let extended = r.read_bit()?;
         let sd_present = r.read_bit()?;
-        r.read_bit()?; // iE-Extensions
+        let has_ie_extensions = r.read_bit()?;
         let start = r.bit_position();
         // Eight bits read from a u64 always fit in a u8.
         let sst = r.read_bits(8)? as u8;
@@ -702,6 +738,8 @@ fn push_s_nssai<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: u
         } else {
             None
         };
+        skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+        ensure_consumed(&r, data)?;
         Ok(((sst, sst_range), sd))
     };
     let Ok(((sst, sst_range), sd)) = decode() else {
@@ -731,11 +769,13 @@ fn push_guami<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usi
     );
     let decode = || -> Result<Guami<'pkt>, PacketError> {
         let mut r = AperReader::new(data);
-        read_sequence_preamble(&mut r)?;
+        let (extended, has_ie_extensions) = read_sequence_preamble(&mut r)?;
         let plmn = read_aligned_octets(&mut r, 3)?;
         let region = read_bit_string_field(&mut r, 8)?;
         let set = read_bit_string_field(&mut r, 10)?;
         let pointer = read_bit_string_field(&mut r, 6)?;
+        skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+        ensure_consumed(&r, data)?;
         Ok((plmn, region, set, pointer))
     };
     let Ok((
@@ -803,7 +843,7 @@ fn push_global_ran_node_id<'pkt>(
         if choice != 0 {
             return Ok((choice, choice_range, None));
         }
-        read_sequence_preamble(&mut r)?;
+        let (extended, has_ie_extensions) = read_sequence_preamble(&mut r)?;
         let (plmn, plmn_range) = read_aligned_octets(&mut r, 3)?;
         let gnb_id = if r.read_choice_index(GNB_ID_CHOICE_COUNT, false)? == 0 {
             let len_start = r.bit_position();
@@ -813,8 +853,13 @@ fn push_global_ran_node_id<'pkt>(
             let id_start = r.bit_position();
             // `len` is at most 32, so both narrowing conversions are lossless.
             let id = r.read_bits(len as u32)? as u32;
-            Some((len as u8, len_range, id, r.byte_range_since(id_start)))
+            let id_range = r.byte_range_since(id_start);
+            // GlobalGNB-ID iE-Extensions and extension additions follow.
+            skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+            ensure_consumed(&r, data)?;
+            Some((len as u8, len_range, id, id_range))
         } else {
+            // GNB-ID choice-Extensions is not decoded.
             None
         };
         Ok((
@@ -885,9 +930,9 @@ fn push_user_location_information<'pkt>(
             1 => 36, // NR-CGI.nRCellIdentity
             _ => return Ok((choice, choice_range, None)),
         };
-        r.read_bit()?; // extension bit — additions follow the fields decoded here.
+        let extended = r.read_bit()?;
         let time_stamp_present = r.read_bit()?;
-        r.read_bit()?; // iE-Extensions
+        let has_ie_extensions = r.read_bit()?;
         let cgi = read_cgi(&mut r, cell_identity_bits)?;
         let tai = read_tai(&mut r)?;
         // TimeStamp ::= OCTET STRING (SIZE(4)) — 3GPP TS 38.413, Section 9.3.1.75.
@@ -897,6 +942,8 @@ fn push_user_location_information<'pkt>(
         } else {
             None
         };
+        skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+        ensure_consumed(&r, data)?;
         Ok((
             choice,
             choice_range,
@@ -960,7 +1007,13 @@ fn push_user_location_information<'pkt>(
 ///
 /// 3GPP TS 38.413, Section 9.3.1.7; ITU-T Rec. X.691, Section 16.10.
 fn push_nr_cgi<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    let Ok(cgi) = read_cgi(&mut AperReader::new(data), 36) else {
+    let decode = || -> Result<Cgi<'pkt>, PacketError> {
+        let mut r = AperReader::new(data);
+        let cgi = read_cgi(&mut r, 36)?;
+        ensure_consumed(&r, data)?;
+        Ok(cgi)
+    };
+    let Ok(cgi) = decode() else {
         return false;
     };
     buf.push_field(
@@ -981,7 +1034,13 @@ fn push_nr_cgi<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: us
 ///
 /// 3GPP TS 38.413, Section 9.3.1.9; ITU-T Rec. X.691, Section 16.10.
 fn push_eutra_cgi<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    let Ok(cgi) = read_cgi(&mut AperReader::new(data), 28) else {
+    let decode = || -> Result<Cgi<'pkt>, PacketError> {
+        let mut r = AperReader::new(data);
+        let cgi = read_cgi(&mut r, 28)?;
+        ensure_consumed(&r, data)?;
+        Ok(cgi)
+    };
+    let Ok(cgi) = decode() else {
         return false;
     };
     buf.push_field(
@@ -1008,7 +1067,9 @@ fn push_nas_pdu<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: u
     let decode = || -> Result<(&'pkt [u8], Range<usize>), PacketError> {
         let mut r = AperReader::new(data);
         let len = r.read_length(0, None)?;
-        read_aligned_octets(&mut r, len as usize)
+        let nas = read_aligned_octets(&mut r, len as usize)?;
+        ensure_consumed(&r, data)?;
+        Ok(nas)
     };
     let Ok((nas_data, range)) = decode() else {
         return false;
@@ -1226,6 +1287,17 @@ mod tests {
     //! | 29    | 9.3.1.22  | HandoverType                        | parse_handover_type                    |
     //! | 29    | 9.3.1.22  | HandoverType (extension)            | parse_handover_type_extension          |
     //! | 107   | 9.3.1.56  | TimeToWait                          | parse_time_to_wait                     |
+    //! | 85    | 9.3.3.2   | Trailing octets rejected (X.691 11.2)| parse_ran_ue_ngap_id_trailing_octets   |
+    //! | 15    | 9.3.1.2   | Trailing octet rejected             | parse_cause_trailing_octet             |
+    //! | 90    | 9.3.1.111 | Trailing octet rejected             | parse_rrc_establishment_cause_trailing |
+    //! | 148   | 9.3.1.24  | S-NSSAI with iE-Extensions          | parse_s_nssai_with_ie_extensions       |
+    //! | 148   | 9.3.1.24  | S-NSSAI trailing octet rejected     | parse_s_nssai_trailing_octet           |
+    //! | 28    | 9.3.3.3   | GUAMI trailing octet rejected       | parse_guami_trailing_octet             |
+    //! | 27    | 9.3.1.6   | GlobalGNB-ID with iE-Extensions     | parse_global_ran_node_id_with_ie_extensions |
+    //! | 121   | 9.3.1.16  | ULI NR with iE-Extensions           | parse_uli_nr_with_ie_extensions        |
+    //! | 121   | 9.3.1.16  | ULI trailing octet rejected         | parse_uli_trailing_octet               |
+    //! | 1     | 9.3.3.21  | AMFName trailing octet rejected     | parse_amf_name_trailing_octet          |
+    //! | 38    | 9.3.3.4   | NAS-PDU trailing octet rejected     | parse_nas_pdu_trailing_octet           |
     //! | _     | —         | Unknown IE                          | parse_unknown_ie                       |
 
     use super::*;
@@ -1801,6 +1873,118 @@ mod tests {
         push_and_get_fields(&mut buf, 107, &data, 0);
         assert_eq!(buf.fields()[0].value, FieldValue::U8(3));
         assert_eq!(display(&buf, 0), Some("v10s"));
+    }
+
+    // ITU-T X.691, Section 11.2: an open type holds exactly the complete
+    // encoding of its value, padded to an octet boundary. Values that
+    // leave octets unread are malformed and fall back to raw bytes
+    // rather than being reported as a (wrong) decoded value.
+
+    #[test]
+    fn parse_ran_ue_ngap_id_trailing_octets() {
+        // The old fixed 4-octet layout: the 2-bit length says one octet,
+        // so two octets would be left over.
+        let data = [0x00, 0x00, 0x00, 0x2A];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 85, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_cause_trailing_octet() {
+        let data = [0x48, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 15, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_rrc_establishment_cause_trailing() {
+        let data = [0x18, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 90, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_s_nssai_with_ie_extensions() {
+        // ext 0 | sD 0 | iE-Ext 1 | SST 0x01 | pad | container
+        // (count - 1 = 0, id 0x1234, criticality ignore, 1-octet value).
+        let data = [0x20, 0x20, 0x00, 0x00, 0x12, 0x34, 0x40, 0x01, 0xAB];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 148, &data, 0);
+        assert_eq!(buf.fields().len(), 1);
+        assert_eq!(buf.fields()[0].value, FieldValue::U8(1));
+    }
+
+    #[test]
+    fn parse_s_nssai_trailing_octet() {
+        let data = [0x00, 0x20, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 148, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_guami_trailing_octet() {
+        let data = [0x00, 0x00, 0xF1, 0x10, 0x01, 0x00, 0x42, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 28, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_global_ran_node_id_with_ie_extensions() {
+        // choice 00 | ext 0 | iE-Ext 1 | pad | PLMN | gNB-ID (32 bits) |
+        // container (count - 1 = 0, id 0x1234, ignore, 1-octet value).
+        let data = [
+            0x10, 0x00, 0xF1, 0x10, 0x50, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x12, 0x34, 0x40,
+            0x01, 0xAB,
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 27, &data, 0);
+        assert_eq!(buf.fields().len(), 4);
+        assert_eq!(buf.fields()[3].value, FieldValue::U32(1));
+    }
+
+    #[test]
+    fn parse_uli_nr_with_ie_extensions() {
+        // ULI-NR iE-Extensions container after TAI.
+        let data = [
+            0x48, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0xF1, 0x10, 0x00, 0x01,
+            0x02, 0x00, 0x00, 0x12, 0x34, 0x40, 0x01, 0xAB,
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_eq!(buf.fields().len(), 5);
+        assert_eq!(buf.fields()[4].value, FieldValue::U32(0x000102));
+    }
+
+    #[test]
+    fn parse_uli_trailing_octet() {
+        let data = [
+            0x40, 0x00, 0xF1, 0x10, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0xF1, 0x10, 0x00, 0x01,
+            0x02, 0x00,
+        ];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 121, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_amf_name_trailing_octet() {
+        let data = [0x01, 0x00, b'g', b'N', b'B', 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 1, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_nas_pdu_trailing_octet() {
+        let data = [0x03, 0x7E, 0x00, 0x41, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 38, &data, 0);
+        assert_fallback(&buf, &data);
     }
 
     #[test]
