@@ -140,6 +140,11 @@
 //! | 4 | UPDATE top-level afi/safi mirrors MP_UNREACH_NLRI when it is the only MP attribute | `parse_bgp_update_top_level_afi_safi_from_mp_unreach_only` |
 //! | 3/4 | UPDATE top-level afi/safi: first MP attribute in attribute order wins | `parse_bgp_update_top_level_afi_safi_first_attribute_wins` |
 //! | 3/4 | Plain IPv4 unicast UPDATE (no MP attribute) has no top-level afi/safi | `parse_bgp_update_plain_ipv4_unicast_has_no_top_level_afi_safi` |
+//! | 5 | Plain prefix NLRI for SAFI 2 (multicast) | `parse_bgp_update_mp_reach_ipv4_multicast_prefixes` |
+//! | 3 | Unsupported AFI (EVPN) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_evpn_nlri_is_raw` |
+//! | 4 | Unsupported AFI (EVPN) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_evpn_withdrawn_is_raw` |
+//! | 3 | Non-prefix SAFI of AFI 1 (FlowSpec) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw` |
+//! | 4 | Non-prefix SAFI of AFI 1 (SR Policy) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw` |
 //!
 //! # BGP OPEN Capability Decoding Coverage
 //!
@@ -261,6 +266,17 @@ const MUP_ROUTE_TYPE_MAX: u16 = 4;
 
 /// SAFI value for BGP-MUP (draft-ietf-bess-mup-safi-01).
 const SAFI_MUP: u8 = 85;
+
+/// AFI for IPv4 (IANA Address Family Numbers).
+const AFI_IPV4: u16 = 1;
+/// AFI for IPv6 (IANA Address Family Numbers).
+const AFI_IPV6: u16 = 2;
+/// SAFI for unicast forwarding (RFC 4760, Section 6 —
+/// <https://www.rfc-editor.org/rfc/rfc4760#section-6>).
+const SAFI_UNICAST: u8 = 1;
+/// SAFI for multicast forwarding (RFC 4760, Section 6 —
+/// <https://www.rfc-editor.org/rfc/rfc4760#section-6>).
+const SAFI_MULTICAST: u8 = 2;
 
 /// BGP message type: OPEN (RFC 4271, Section 4.1).
 const MSG_OPEN: u8 = 1;
@@ -2858,6 +2874,84 @@ struct MpAfiSafi {
     offset: usize,
 }
 
+/// How the NLRI of an MP_REACH_NLRI / MP_UNREACH_NLRI attribute is encoded,
+/// selected by its (AFI, SAFI).
+///
+/// RFC 4760, Section 5 — <https://www.rfc-editor.org/rfc/rfc4760#section-5>
+#[derive(Clone, Copy)]
+enum MpNlriEncoding {
+    /// `<length, prefix>` tuples (RFC 4760, Section 5) for IPv4/IPv6 unicast
+    /// and multicast.
+    Prefixes { ipv6: bool },
+    /// BGP-MUP NLRI (draft-ietf-bess-mup-safi-01, Section 3).
+    Mup { ipv6: bool },
+    /// Any other (AFI, SAFI): the NLRI is not decoded and kept as raw bytes.
+    Raw,
+}
+
+/// Selects the NLRI encoding for an (AFI, SAFI) pair.
+///
+/// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
+/// Section 5 may go to [`parse_prefixes`]: other SAFIs of AFI 1/2 (labeled
+/// unicast, L3VPN, FlowSpec, SR Policy, ...) have different NLRI layouts, and
+/// the ADD-PATH heuristic would otherwise turn them into plausible looking but
+/// wrong prefixes.
+///
+/// RFC 4760, Section 5 — <https://www.rfc-editor.org/rfc/rfc4760#section-5>
+fn mp_nlri_encoding(afi: u16, safi: u8) -> MpNlriEncoding {
+    let ipv6 = afi == AFI_IPV6;
+    match (afi, safi) {
+        (AFI_IPV4 | AFI_IPV6, SAFI_UNICAST | SAFI_MULTICAST) => MpNlriEncoding::Prefixes { ipv6 },
+        (_, SAFI_MUP) => MpNlriEncoding::Mup { ipv6 },
+        _ => MpNlriEncoding::Raw,
+    }
+}
+
+/// Parses the NLRI / Withdrawn Routes block of an MP_REACH_NLRI /
+/// MP_UNREACH_NLRI attribute.
+///
+/// Decoded entries go into an Array described by `array_desc`; an (AFI, SAFI)
+/// whose encoding is not implemented is pushed as raw bytes with `raw_desc`
+/// so that routes are never silently dropped.
+///
+/// RFC 4760, Sections 3-4 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
+fn parse_mp_nlri_block<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    afi: u16,
+    safi: u8,
+    array_desc: &'static FieldDescriptor,
+    raw_desc: &'static FieldDescriptor,
+) {
+    let encoding = mp_nlri_encoding(afi, safi);
+    if let MpNlriEncoding::Raw = encoding {
+        buf.push_field(
+            raw_desc,
+            FieldValue::Bytes(data),
+            offset..offset + data.len(),
+        );
+        return;
+    }
+
+    let array_idx = buf.begin_container(
+        array_desc,
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
+    let before = buf.field_count();
+    match encoding {
+        MpNlriEncoding::Prefixes { ipv6 } => parse_prefixes(buf, data, offset, ipv6),
+        MpNlriEncoding::Mup { ipv6 } => parse_mup_nlri(buf, data, offset, ipv6),
+        MpNlriEncoding::Raw => {}
+    }
+    if buf.field_count() == before {
+        buf.pop_field(); // remove empty array placeholder
+    } else {
+        buf.end_container(array_idx);
+    }
+}
+
 /// Parses MP_REACH_NLRI attribute value.
 ///
 /// RFC 4760, Section 3 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
@@ -2930,27 +3024,15 @@ fn parse_mp_reach_nlri<'pkt>(
     // Skip Reserved byte
     let nlri_start = nh_end + 1;
     if nlri_start < data.len() {
-        let nlri_data = &data[nlri_start..];
-        let is_mup = safi == SAFI_MUP;
-        let is_ip = afi == 1 || afi == 2;
-        if is_mup || is_ip {
-            let array_idx = buf.begin_container(
-                &MP_CHILDREN[FD_MP_NLRI],
-                FieldValue::Array(0..0),
-                offset + nlri_start..offset + data.len(),
-            );
-            let before = buf.field_count();
-            if is_mup {
-                parse_mup_nlri(buf, nlri_data, offset + nlri_start, afi == 2);
-            } else {
-                parse_prefixes(buf, nlri_data, offset + nlri_start, afi == 2);
-            }
-            if buf.field_count() == before {
-                buf.pop_field(); // remove empty array placeholder
-            } else {
-                buf.end_container(array_idx);
-            }
-        }
+        parse_mp_nlri_block(
+            buf,
+            &data[nlri_start..],
+            offset + nlri_start,
+            afi,
+            safi,
+            &MP_CHILDREN[FD_MP_NLRI],
+            &MP_CHILDREN[FD_MP_NLRI_RAW],
+        );
     }
 
     buf.end_container(obj_idx);
@@ -2988,27 +3070,15 @@ fn parse_mp_unreach_nlri<'pkt>(
 
     let wr_start = 3;
     if wr_start < data.len() {
-        let wr_data = &data[wr_start..];
-        let is_mup = safi == SAFI_MUP;
-        let is_ip = afi == 1 || afi == 2;
-        if is_mup || is_ip {
-            let array_idx = buf.begin_container(
-                &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES],
-                FieldValue::Array(0..0),
-                offset + wr_start..offset + data.len(),
-            );
-            let before = buf.field_count();
-            if is_mup {
-                parse_mup_nlri(buf, wr_data, offset + wr_start, afi == 2);
-            } else {
-                parse_prefixes(buf, wr_data, offset + wr_start, afi == 2);
-            }
-            if buf.field_count() == before {
-                buf.pop_field(); // remove empty array placeholder
-            } else {
-                buf.end_container(array_idx);
-            }
-        }
+        parse_mp_nlri_block(
+            buf,
+            &data[wr_start..],
+            offset + wr_start,
+            afi,
+            safi,
+            &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES],
+            &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES_RAW],
+        );
     }
 
     buf.end_container(obj_idx);
@@ -3558,11 +3628,13 @@ const FD_MP_NEXT_HOP: usize = 2;
 const FD_MP_NEXT_HOP_LINK_LOCAL: usize = 3;
 const FD_MP_NLRI: usize = 4;
 const FD_MP_WITHDRAWN_ROUTES: usize = 5;
+const FD_MP_NLRI_RAW: usize = 6;
+const FD_MP_WITHDRAWN_ROUTES_RAW: usize = 7;
 
 /// Child field descriptors for MP_REACH_NLRI / MP_UNREACH_NLRI objects.
 ///
 /// RFC 4760, Sections 3-4 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
-const MP_FIELDS: [FieldDescriptor; 6] = [
+const MP_FIELDS: [FieldDescriptor; 8] = [
     FieldDescriptor::new("afi", "AFI", FieldType::U16).with_display_fn(|v, _siblings| match v {
         FieldValue::U16(a) => afi_name(*a),
         _ => None,
@@ -3584,6 +3656,15 @@ const MP_FIELDS: [FieldDescriptor; 6] = [
     FieldDescriptor::new("withdrawn_routes", "Withdrawn Routes", FieldType::Array)
         .optional()
         .with_children(NLRI_ENTRY_CHILDREN),
+    // Raw NLRI / Withdrawn Routes of an (AFI, SAFI) whose encoding is not
+    // decoded (e.g. EVPN, FlowSpec, SR Policy, BGP-LS).
+    FieldDescriptor::new("nlri_raw", "NLRI (raw)", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "withdrawn_routes_raw",
+        "Withdrawn Routes (raw)",
+        FieldType::Bytes,
+    )
+    .optional(),
 ];
 
 /// Slice form of [`MP_FIELDS`].
@@ -3790,6 +3871,8 @@ static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &[
     MP_FIELDS[FD_MP_NEXT_HOP_LINK_LOCAL],
     MP_FIELDS[FD_MP_NLRI],
     MP_FIELDS[FD_MP_WITHDRAWN_ROUTES],
+    MP_FIELDS[FD_MP_NLRI_RAW],
+    MP_FIELDS[FD_MP_WITHDRAWN_ROUTES_RAW],
     // BGP Prefix-SID TLV element fields (RFC 8669, RFC 9252).
     PREFIX_SID_TLV_FIELDS[FD_PSID_TYPE].optional(),
     PREFIX_SID_TLV_FIELDS[FD_PSID_LENGTH].optional(),
@@ -5562,6 +5645,9 @@ mod tests {
         // structured shape it can take.
         let pa = find(descs, "path_attributes").expect("path_attributes missing");
         let pa_children = pa.children.expect("path_attributes has no children");
+        let as_number_size = find(pa_children, "as_number_size").expect("as_number_size missing");
+        assert_eq!(as_number_size.field_type, FieldType::U8);
+        assert!(as_number_size.optional);
         let value = find(pa_children, "value").expect("value missing");
         assert_eq!(value.field_type, FieldType::Any);
         assert!(value.optional);
@@ -5573,6 +5659,8 @@ mod tests {
             "next_hop_link_local",
             "nlri",
             "withdrawn_routes",
+            "nlri_raw",
+            "withdrawn_routes_raw",
             "label_index",
             "srgb_entries",
             "sub_tlvs",
@@ -8046,5 +8134,137 @@ mod tests {
         assert!(!as_path_fits(&[5, 1, 0, 0, 0, 1], 4));
         assert!(!as_path_fits(&[2, 0], 2));
         assert!(!as_path_fits(&[2], 2));
+    }
+
+    // -------------------------------------------------------------------
+    // MP_REACH_NLRI / MP_UNREACH_NLRI NLRI selection by AFI/SAFI
+    // (RFC 4760, Sections 3-5 — https://www.rfc-editor.org/rfc/rfc4760#section-3).
+    // -------------------------------------------------------------------
+
+    /// Helper: build an MP_REACH_NLRI attribute value.
+    fn build_mp_reach(afi: u16, safi: u8, next_hop: &[u8], nlri: &[u8]) -> Vec<u8> {
+        let mut val = afi.to_be_bytes().to_vec();
+        val.push(safi);
+        val.push(next_hop.len() as u8);
+        val.extend_from_slice(next_hop);
+        val.push(0); // Reserved
+        val.extend_from_slice(nlri);
+        val
+    }
+
+    /// Helper: build an MP_UNREACH_NLRI attribute value.
+    fn build_mp_unreach(afi: u16, safi: u8, withdrawn: &[u8]) -> Vec<u8> {
+        let mut val = afi.to_be_bytes().to_vec();
+        val.push(safi);
+        val.extend_from_slice(withdrawn);
+        val
+    }
+
+    /// Helper: build an UPDATE whose only path attribute is an optional,
+    /// extended-length attribute `type_code` carrying `value`.
+    fn build_single_attr_update(type_code: u8, value: &[u8]) -> Vec<u8> {
+        build_update(&build_attr(0x90, type_code, value), &[])
+    }
+
+    /// Helper: the child range of the first path attribute's Object `value`.
+    fn first_attr_value_obj_range(buf: &DissectBuffer<'_>) -> core::ops::Range<u32> {
+        let obj_range = first_pa_obj_range(buf);
+        let FieldValue::Object(ref mp_range) = *nested_field_value(buf, &obj_range, "value") else {
+            panic!("expected Object value");
+        };
+        mp_range.clone()
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_nlri_is_raw() {
+        // EVPN IMET route (AFI 25, SAFI 70) from the issue: the NLRI must be
+        // kept as raw bytes, not dropped.
+        let nlri = [
+            0x03, 0x11, 0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64, 0, 0, 0, 0, 0x20, 0xc0, 0, 2, 1,
+        ];
+        let val = build_mp_reach(25, 70, &[0xc0, 0, 2, 1], &nlri);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "nlri_raw"),
+            FieldValue::Bytes(&nlri)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_evpn_withdrawn_is_raw() {
+        let wr = [0x03, 0x02, 0xaa, 0xbb];
+        let val = build_mp_unreach(25, 70, &wr);
+        let data = build_single_attr_update(15, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "withdrawn_routes_raw"),
+            FieldValue::Bytes(&wr)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "withdrawn_routes").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw() {
+        // IPv4 FlowSpec (AFI 1, SAFI 133; RFC 8955, Section 4) has a
+        // zero-length next hop and an NLRI that is not a plain prefix list
+        // (length 5: destination prefix 10.0.0.0/8, IP protocol == 6).
+        let nlri = [0x05, 0x01, 0x08, 0x0a, 0x81, 0x06];
+        let val = build_mp_reach(1, 133, &[], &nlri);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "nlri_raw"),
+            FieldValue::Bytes(&nlri)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw() {
+        // SR Policy (AFI 1, SAFI 73): not a plain prefix list.
+        let wr = [0x60, 0, 0, 0, 1, 0, 0, 0, 5, 0xc0, 0, 2, 1];
+        let val = build_mp_unreach(1, 73, &wr);
+        let data = build_single_attr_update(15, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "withdrawn_routes_raw"),
+            FieldValue::Bytes(&wr)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "withdrawn_routes").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_ipv4_multicast_prefixes() {
+        // SAFI 2 (multicast) uses the plain prefix encoding (RFC 4760, Section 5).
+        let val = build_mp_reach(1, 2, &[192, 0, 2, 1], &[24, 198, 51, 100]);
+        let data = build_single_attr_update(14, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let mp = first_attr_value_obj_range(&buf);
+        let FieldValue::Array(ref nlri) = *nested_field_value(&buf, &mp, "nlri") else {
+            panic!("expected Array");
+        };
+        let entries = nlri_entry_ranges(&buf, nlri);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "prefix"),
+            FieldValue::Bytes(&[24, 198, 51, 100])
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri_raw").is_none());
     }
 }
