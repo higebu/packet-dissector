@@ -71,7 +71,9 @@ ethernet = ["dep:packet-dissector-ethernet"]
 linux_sll = ["dep:packet-dissector-linux-sll"]
 linux_sll2 = ["dep:packet-dissector-linux-sll2"]
 null = ["dep:packet-dissector-null"]
-raw_ip = ["dep:packet-dissector-raw-ip"]
+# The raw IP dispatchers add no layer of their own; without IPv4/IPv6 a
+# raw IP packet would dissect to nothing.
+raw_ip = ["dep:packet-dissector-raw-ip", "ipv4", "ipv6"]
 arp = ["dep:packet-dissector-arp"]
 lacp = ["dep:packet-dissector-lacp"]
 ipv4 = ["dep:packet-dissector-ipv4"]
