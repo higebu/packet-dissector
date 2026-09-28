@@ -293,10 +293,15 @@ impl Dissector for Ipv4Dissector {
 
         buf.end_layer();
 
-        Ok(DissectResult::new(
-            header_len,
-            DispatchHint::ByIpProtocol(protocol),
-        ))
+        // RFC 791, Section 3.1 — "Total Length is the length of the datagram,
+        // measured in octets, including internet header and data." Octets
+        // past it (e.g. link-layer padding) are not part of the datagram, so
+        // the payload handed upward ends at Total Length.
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
+        Ok(
+            DissectResult::new(header_len, DispatchHint::ByIpProtocol(protocol))
+                .with_payload_len(total_length as usize - header_len),
+        )
     }
 }
 

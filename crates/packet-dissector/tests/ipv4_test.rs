@@ -30,6 +30,8 @@
 //! | 791 §3.1       | Version must be 4               | parse_ipv4_invalid_version          |
 //! | 791 §3.1       | Total Length < IHL*4 invalid    | parse_ipv4_total_length_too_small   |
 //! | 791 §3.1       | Total Length > data truncated   | parse_ipv4_total_length_exceeds_data|
+//! | 791 §3.1       | Payload ends at Total Length    | parse_ipv4_payload_len_from_total_length |
+//! | 791 §3.1       | Payload length excludes options | parse_ipv4_payload_len_with_options |
 //! | —              | Offset handling                 | parse_ipv4_with_offset              |
 //! | —              | Dissector metadata              | ipv4_dissector_metadata             |
 
@@ -406,4 +408,30 @@ fn parse_ipv4_atomic_identification() {
         buf.field_by_name(layer, "fragment_offset").unwrap().value,
         FieldValue::U16(0)
     );
+}
+
+#[test]
+fn parse_ipv4_payload_len_from_total_length() {
+    // RFC 791, Section 3.1 — "Total Length is the length of the datagram,
+    // measured in octets, including internet header and data."
+    // Bytes past Total Length (e.g. Ethernet padding) are not IP payload.
+    let mut data = build_ipv4_packet(1, [10, 0, 0, 1], [10, 0, 0, 2], 28);
+    data.resize(46, 0x00); // 18 bytes of trailing link-layer padding
+    let mut buf = DissectBuffer::new();
+    let result = Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.bytes_consumed, 20);
+    assert_eq!(result.payload_len, Some(8));
+}
+
+#[test]
+fn parse_ipv4_payload_len_with_options() {
+    // RFC 791, Section 3.1 — the payload is Total Length minus IHL * 4.
+    let mut data = build_ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], 36);
+    data[0] = 0x46; // IHL = 6 (4 bytes of options)
+    let mut buf = DissectBuffer::new();
+    let result = Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.bytes_consumed, 24);
+    assert_eq!(result.payload_len, Some(12));
 }

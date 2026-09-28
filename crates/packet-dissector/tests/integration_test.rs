@@ -95,6 +95,16 @@
 //! | Ethernet → IPv4 → TCP → HTTP/2 (h2c)                        | integration_ethernet_ipv4_tcp_http2_settings         |
 //! | Ethernet → IPv4 → TCP → HTTP/1.1 (via HttpDispatcher)       | integration_ethernet_ipv4_tcp_http_dispatcher_http11 |
 //! | Ethernet → IPv4 → TCP → HTTP 301 (Content-Type dispatch)   | integration_ethernet_ipv4_tcp_http_response_content_type |
+//! | Ethernet → IPv4 → SCTP COOKIE ACK + Ethernet pad            | integration_ethernet_ipv4_sctp_padded                |
+//! | Ethernet → IPv6 → SCTP COOKIE ACK + trailer                  | integration_ethernet_ipv6_sctp_trailer               |
+//! | Ethernet → IPv4 → ICMP Echo (no data) + Ethernet pad         | integration_ethernet_ipv4_icmp_echo_padded           |
+//! | Ethernet → IPv4 → ESP (NULL transport) → UDP + Ethernet pad  | integration_ethernet_ipv4_esp_null_transport_udp_padded |
+//! | Ethernet → IPv4 → UDP (surplus area, RFC 9868 §7) → probe    | integration_ethernet_ipv4_udp_surplus_area_not_passed_to_application |
+//! | Ethernet → IPv4 → IPv4 → probe (inner Total Length bound)    | integration_ethernet_ipv4_in_ipv4_payload_bounded_by_inner_total_length |
+//! | Ethernet → IPv6 → probe (Payload Length bound)               | integration_ethernet_ipv6_payload_bounded_by_payload_length |
+//! | Ethernet → IPv6 (Payload Length 0) → HBH Jumbo → probe       | integration_ethernet_ipv6_zero_payload_length_hop_by_hop_not_bounded |
+//! | Ethernet (802.3 Length) → LLC → probe + Ethernet pad         | integration_ethernet_802_3_llc_payload_bounded_by_length |
+//! | Ethernet → IPv4 → TCP SYN + Ethernet pad + trailer           | integration_ethernet_ipv4_tcp_syn_padded             |
 
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
@@ -6876,4 +6886,313 @@ fn integration_ethernet_ipv4_tcp_http_dispatcher_http11() {
         buf.field_by_name(http, "method").unwrap().value,
         FieldValue::Str("GET")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Payload bounds: IPv4 Total Length / IPv6 Payload Length / UDP Length /
+// IEEE 802.3 Length end the payload handed to upper layers.
+//
+// RFC 791, Section 3.1 — https://www.rfc-editor.org/rfc/rfc791#section-3.1
+// RFC 8200, Section 3 — https://www.rfc-editor.org/rfc/rfc8200#section-3
+// RFC 9868, Section 7 — https://www.rfc-editor.org/rfc/rfc9868#section-7
+// IEEE 802.3-2022, clause 3.2.6 (Length/Type) and clause 3.2.8 (Pad).
+// ---------------------------------------------------------------------------
+
+/// Minimum Ethernet frame length without FCS (IEEE 802.3-2022, clause 3.2.8:
+/// frames shorter than the minimum are padded after the client data).
+const MIN_ETHERNET_FRAME_LEN_NO_FCS: usize = 60;
+
+/// Append zero padding until the frame reaches the Ethernet minimum size.
+fn pad_ethernet_frame(pkt: &mut Vec<u8>) {
+    if pkt.len() < MIN_ETHERNET_FRAME_LEN_NO_FCS {
+        pkt.resize(MIN_ETHERNET_FRAME_LEN_NO_FCS, 0x00);
+    }
+}
+
+/// Test dissector that claims every byte it is given, so its layer range
+/// shows exactly which slice the dispatch loop handed to it.
+struct PayloadProbe;
+
+impl Dissector for PayloadProbe {
+    fn name(&self) -> &'static str {
+        "Payload Probe"
+    }
+    fn short_name(&self) -> &'static str {
+        "Probe"
+    }
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        &[]
+    }
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<DissectResult, PacketError> {
+        buf.begin_layer("Probe", None, &[], offset..offset + data.len());
+        buf.end_layer();
+        Ok(DissectResult::new(data.len(), DispatchHint::End))
+    }
+}
+
+/// Assert that no layer extends past `end` (the end of the enclosing
+/// datagram / LLC PDU).
+fn assert_layers_end_within(buf: &DissectBuffer<'_>, end: usize) {
+    for layer in buf.layers() {
+        assert!(
+            layer.range.end <= end,
+            "Layer '{}' ends at {} past the datagram end {}",
+            layer.name,
+            layer.range.end,
+            end
+        );
+    }
+}
+
+/// Ethernet → IPv4 → SCTP COOKIE ACK with Ethernet padding.
+///
+/// The 10 pad octets must not be walked as another SCTP chunk.
+#[test]
+fn integration_ethernet_ipv4_sctp_padded() {
+    let reg = DissectorRegistry::default();
+    #[rustfmt::skip]
+    let pkt: [u8; 60] = [
+        // Ethernet, EtherType IPv4
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00,
+        // IPv4, total_length 36, proto 132 (SCTP)
+        0x45, 0x00, 0x00, 0x24, 0x00, 0x01, 0x00, 0x00, 0x40, 0x84, 0x00, 0x00,
+        0x0a, 0x00, 0x00, 0x01, 0x0a, 0x00, 0x00, 0x02,
+        // SCTP 5000 -> 5000, vtag 1, checksum 0
+        0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        // COOKIE ACK chunk (type 11, flags 0, length 4)
+        0x0b, 0x00, 0x00, 0x04,
+        // Ethernet pad (10 bytes)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP"]);
+    assert_layers_contiguous(&buf);
+    assert_layers_end_within(&buf, 14 + 36);
+    let sctp = buf.layer_by_name("SCTP").unwrap();
+    assert_eq!(sctp.range, 34..50);
+}
+
+/// Ethernet → IPv6 → SCTP COOKIE ACK followed by a 4-byte trailer
+/// (e.g. a captured FCS). The trailer is outside the IPv6 payload.
+#[test]
+fn integration_ethernet_ipv6_sctp_trailer() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x86DD);
+    let ip_start = push_ipv6(&mut pkt, 132, IPV6_SRC, IPV6_DST);
+    push_sctp(&mut pkt, 5000, 5000);
+    pkt.extend_from_slice(&[0x0b, 0x00, 0x00, 0x04]); // COOKIE ACK
+    fixup_ipv6_payload_length(&mut pkt, ip_start);
+    let datagram_end = pkt.len();
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // trailer
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "SCTP"]);
+    assert_layers_contiguous(&buf);
+    assert_layers_end_within(&buf, datagram_end);
+}
+
+/// Ethernet → IPv4 → ICMP Echo Request without data, padded to 60 bytes.
+///
+/// The pad must not show up as ICMP echo `data`.
+#[test]
+fn integration_ethernet_ipv4_icmp_echo_padded() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = build_eth_ipv4_icmp_echo();
+    let datagram_end = pkt.len();
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let icmp = buf.layer_by_name("ICMP").unwrap();
+    assert_eq!(icmp.range, 34..datagram_end);
+    assert!(buf.field_by_name(icmp, "data").is_none());
+    assert_layers_end_within(&buf, datagram_end);
+}
+
+/// Ethernet → IPv4 → ESP (NULL, transport mode) → UDP with Ethernet padding.
+///
+/// ESP locates its trailer from the end of its input, so the pad must be
+/// excluded for the NULL-encryption heuristic to find `next_header = 17`.
+#[test]
+fn integration_ethernet_ipv4_esp_null_transport_udp_padded() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 50, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(&0x0000_3003u32.to_be_bytes()); // SPI
+    pkt.extend_from_slice(&7u32.to_be_bytes()); // Sequence Number
+    let udp_start = push_udp(&mut pkt, 10000, 20000);
+    pkt.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]); // UDP payload
+    fixup_udp_length(&mut pkt, udp_start);
+    pkt.push(0x00); // pad_length
+    pkt.push(17); // next_header = UDP
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    let datagram_end = pkt.len();
+    pad_ethernet_frame(&mut pkt);
+    assert!(pkt.len() > datagram_end);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "ESP", "UDP"]);
+    let esp = buf.layer_by_name("ESP").unwrap();
+    assert_eq!(
+        buf.field_by_name(esp, "next_header").unwrap().value,
+        FieldValue::U8(17)
+    );
+    // ESP covers exactly the IP payload. Decrypted inner layers are placed
+    // after it in virtual offsets, so only ESP is checked against the datagram.
+    assert_eq!(esp.range, 34..datagram_end);
+}
+
+/// Ethernet → IPv4 → UDP → probe: UDP user data ends at the UDP Length.
+///
+/// RFC 9868, Section 7 — bytes past the UDP Length but within the IP
+/// payload are the surplus area, not UDP user data.
+#[test]
+fn integration_ethernet_ipv4_udp_surplus_area_not_passed_to_application() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_udp_port_or_replace(9999, Box::new(PayloadProbe));
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, IPV4_SRC, IPV4_DST);
+    let udp_start = push_udp(&mut pkt, 9999, 9999);
+    pkt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // UDP user data
+    fixup_udp_length(&mut pkt, udp_start);
+    let user_data_end = pkt.len();
+    pkt.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]); // surplus area
+    fixup_ipv4_length(&mut pkt, ip_start);
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let probe = buf.layer_by_name("Probe").unwrap();
+    assert_eq!(probe.range, udp_start + 8..user_data_end);
+}
+
+/// Ethernet → IPv4 → IPv4 → probe: the inner datagram is bounded by its
+/// own Total Length, and the outer bound still applies.
+#[test]
+fn integration_ethernet_ipv4_in_ipv4_payload_bounded_by_inner_total_length() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_ip_protocol_or_replace(253, Box::new(PayloadProbe));
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let outer_start = push_ipv4(&mut pkt, 4, IPV4_SRC, IPV4_DST);
+    let inner_start = push_ipv4(&mut pkt, 253, [192, 168, 0, 1], [192, 168, 0, 2]);
+    pkt.extend_from_slice(&[0xAA, 0xBB]); // inner payload
+    fixup_ipv4_length(&mut pkt, inner_start);
+    let inner_end = pkt.len();
+    pkt.extend_from_slice(&[0xCC; 3]); // outer payload bytes past the inner datagram
+    fixup_ipv4_length(&mut pkt, outer_start);
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let probe = buf.layer_by_name("Probe").unwrap();
+    assert_eq!(probe.range, inner_start + 20..inner_end);
+}
+
+/// Ethernet → IPv6 (Payload Length) → probe: the IPv6 payload ends at
+/// `40 + payload_length`.
+#[test]
+fn integration_ethernet_ipv6_payload_bounded_by_payload_length() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_ip_protocol_or_replace(253, Box::new(PayloadProbe));
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x86DD);
+    let ip_start = push_ipv6(&mut pkt, 253, IPV6_SRC, IPV6_DST);
+    pkt.extend_from_slice(&[0xAA; 6]);
+    fixup_ipv6_payload_length(&mut pkt, ip_start);
+    let datagram_end = pkt.len();
+    pkt.extend_from_slice(&[0x00; 4]); // trailer
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let probe = buf.layer_by_name("Probe").unwrap();
+    assert_eq!(probe.range, ip_start + 40..datagram_end);
+}
+
+/// Ethernet → IPv6 with Payload Length 0 and a Hop-by-Hop header: a
+/// possible Jumbo Payload, so the payload is not bounded by the IPv6
+/// header.
+///
+/// RFC 2675, Section 3 — https://www.rfc-editor.org/rfc/rfc2675#section-3
+#[test]
+fn integration_ethernet_ipv6_zero_payload_length_hop_by_hop_not_bounded() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_ip_protocol_or_replace(253, Box::new(PayloadProbe));
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x86DD);
+    push_ipv6(&mut pkt, 0, IPV6_SRC, IPV6_DST); // Payload Length stays 0
+    // Hop-by-Hop header with a Jumbo Payload option (type 0xC2, len 4).
+    let hbh_start = pkt.len();
+    pkt.extend_from_slice(&[253, 0, 0xC2, 4]);
+    let jumbo_len = 8u32 + 4;
+    pkt.extend_from_slice(&jumbo_len.to_be_bytes());
+    pkt.extend_from_slice(&[0xAA; 4]);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let probe = buf.layer_by_name("Probe").unwrap();
+    assert_eq!(probe.range, hbh_start + 8..pkt.len());
+}
+
+/// Ethernet (IEEE 802.3 Length) → LLC → probe: the LLC PDU ends at the
+/// Length field, and the pad after it is not LLC data.
+///
+/// IEEE 802.3-2022, clause 3.2.6 (Length/Type) and clause 3.2.8 (Pad).
+#[test]
+fn integration_ethernet_802_3_llc_payload_bounded_by_length() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_llc_sap_or_replace(0x42, Box::new(PayloadProbe));
+    let mut pkt = Vec::new();
+    let length_offset = push_ethernet_llc(&mut pkt, [0x01, 0x80, 0xC2, 0, 0, 0], MAC_SRC);
+    push_stp_tcn_bpdu(&mut pkt);
+    fixup_802_3_length(&mut pkt, length_offset);
+    let llc_pdu_end = pkt.len();
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let probe = buf.layer_by_name("Probe").unwrap();
+    assert_eq!(probe.range, 17..llc_pdu_end);
+}
+
+/// Ethernet → IPv4 → TCP SYN with Ethernet padding and a trailer: the TCP payload
+/// is already derived from the IP layer and must stay unchanged.
+#[test]
+fn integration_ethernet_ipv4_tcp_syn_padded() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = build_eth_ipv4_tcp_syn();
+    let datagram_end = pkt.len();
+    pad_ethernet_frame(&mut pkt);
+    pkt.extend_from_slice(&[0xFF; 6]); // extra trailer beyond the minimum frame
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "TCP"]);
+    assert_layers_end_within(&buf, datagram_end);
 }
