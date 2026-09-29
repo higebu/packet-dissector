@@ -834,6 +834,7 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-ethernet",
  "packet-dissector-test-alloc",
 ]
 
@@ -843,6 +844,7 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-ethernet",
  "packet-dissector-test-alloc",
 ]
 
