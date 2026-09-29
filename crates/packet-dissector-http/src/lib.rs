@@ -1554,6 +1554,8 @@ mod tests {
 
         assert_eq!(result.next, DispatchHint::ByContentType("application/json"));
         assert_eq!(result.bytes_consumed, header.len());
+        // RFC 9112, Section 6.2 — the body is Content-Length bytes long.
+        assert_eq!(result.payload_len, Some(body.len()));
 
         let layer = buf.layer_by_name("HTTP").unwrap();
         assert_eq!(layer.range, 0..header.len());

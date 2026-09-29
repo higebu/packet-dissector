@@ -51,3 +51,23 @@ fn zero_alloc_dissect_stp_tcn() {
     });
     assert_eq!(allocs, 0, "STP TCN dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_mst_with_msti() {
+    // MST BPDU (IEEE 802.1Q-2022, Clause 14.4) with one MSTI message: 118 bytes.
+    let mut raw = vec![0u8; 118];
+    raw[2] = 0x03; // Version 3
+    raw[3] = 0x02; // Type
+    raw[36..38].copy_from_slice(&80u16.to_be_bytes()); // Version 3 Length
+    raw[39..42].copy_from_slice(b"MST");
+    raw[102] = 0x7C; // MSTI flags
+    raw[103..105].copy_from_slice(&0x800Au16.to_be_bytes());
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        StpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "MST dissect allocated {allocs} times");
+    assert_eq!(buf.layers()[0].range, 0..118);
+}

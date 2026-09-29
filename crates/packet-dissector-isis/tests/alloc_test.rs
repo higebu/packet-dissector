@@ -59,3 +59,32 @@ fn zero_alloc_dissect_isis_l1_lsp() {
     });
     assert_eq!(allocs, 0, "ISIS L1 LSP dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_isis_lsp_with_sub_tlvs() {
+    // L1 LSP with TLV 22 (Adj-SID sub-TLV), TLV 135 (Prefix-SID sub-TLV)
+    // and TLV 242 (SR-Capabilities sub-TLV).
+    let tlvs: &[u8] = &[
+        // TLV 22: neighbor, metric 10, sub-TLV Adj-SID (label 16000)
+        22, 18, 1, 2, 3, 4, 5, 6, 0, 0, 0, 10, 7, 31, 5, 0x30, 1, 0, 0x3e, 0x80,
+        // TLV 135: 10.0.0.1/32 metric 10, S bit, Prefix-SID index 101
+        135, 18, 0, 0, 0, 10, 0x60, 10, 0, 0, 1, 8, 3, 6, 0x40, 0, 0, 0, 0, 0x65,
+        // TLV 242: router ID, flags, SR-Capabilities with one range
+        242, 16, 1, 1, 1, 1, 0, 2, 9, 0xC0, 0, 0x1f, 0x40, 1, 3, 0, 0x3e, 0x80,
+    ];
+    let mut raw = vec![0x83, 27, 0x01, 0x00, 18, 0x01, 0x00, 0x00];
+    raw.extend_from_slice(&((27 + tlvs.len()) as u16).to_be_bytes());
+    raw.extend_from_slice(&[
+        0x04, 0xB0, 1, 2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 1, 0xAB, 0xCD, 3,
+    ]);
+    raw.extend_from_slice(tlvs);
+
+    let mut buf = DissectBuffer::new();
+    IsisDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        IsisDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "ISIS LSP with sub-TLVs allocated {allocs} times");
+}

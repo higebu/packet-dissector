@@ -11,70 +11,19 @@
 #![deny(missing_docs)]
 
 mod aper;
+mod container;
 pub mod ie_id;
 pub mod ie_parsers;
+mod pdu_session;
 pub mod procedure_code;
 
+use aper::{Extent, read_extent};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::read_be_u16;
-
-static FD_INLINE_CRITICALITY: FieldDescriptor = FieldDescriptor {
-    name: "criticality",
-    display_name: "Criticality",
-    field_type: FieldType::U8,
-    optional: false,
-    children: None,
-    display_fn: Some(|v, _siblings| match v {
-        FieldValue::U8(c) => Some(criticality_name(*c)),
-        _ => None,
-    }),
-    format_fn: None,
-};
-
-static FD_INLINE_ID: FieldDescriptor = FieldDescriptor {
-    name: "id",
-    display_name: "ID",
-    field_type: FieldType::U16,
-    optional: false,
-    children: None,
-    display_fn: Some(|v, _siblings| match v {
-        FieldValue::U16(id) => Some(ie_id::ie_id_name(*id)),
-        _ => None,
-    }),
-    format_fn: None,
-};
-
-/// Descriptor for the ProtocolIE-Field Object container itself.
-///
-/// `display_fn` is invoked by
-/// [`DissectBuffer::resolve_container_display_name`] with the container's
-/// children, so the outer label resolves to the IE name instead of
-/// colliding with the inner `ID` field.
-static FD_IE: FieldDescriptor = FieldDescriptor {
-    name: "ie",
-    display_name: "IE",
-    field_type: FieldType::Object,
-    optional: false,
-    children: None,
-    display_fn: Some(|v, children| match v {
-        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
-            ("id", FieldValue::U16(id)) => Some(ie_id::ie_id_name(*id)),
-            _ => None,
-        }),
-        _ => None,
-    }),
-    format_fn: None,
-};
-
-static FD_INLINE_LENGTH: FieldDescriptor = FieldDescriptor::new("length", "Length", FieldType::U32);
-
-// Note: FD_INLINE_VALUE was removed — IE values are now pushed by
-// ie_parsers::push_ie_value using their own descriptors or a fallback.
 
 /// Minimum NGAP-PDU header size: PDU type (1) + procedure code (1) +
 /// criticality (1) = 3 bytes, before the value length determinant.
@@ -98,38 +47,6 @@ const CFD_CRITICALITY: usize = 1;
 const CFD_LENGTH: usize = 2;
 #[cfg(test)]
 const CFD_VALUE: usize = 3;
-
-/// Child field descriptors for each IE element in the `ies` array.
-///
-/// 3GPP TS 38.413, Section 9.4 — ProtocolIE-Field structure.
-static IE_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor {
-        name: "id",
-        display_name: "ID",
-        field_type: FieldType::U16,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U16(id) => Some(ie_id::ie_id_name(*id)),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor {
-        name: "criticality",
-        display_name: "Criticality",
-        field_type: FieldType::U8,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(c) => Some(criticality_name(*c)),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("length", "Length", FieldType::U32),
-    FieldDescriptor::new("value", "Value", FieldType::Bytes),
-];
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor {
@@ -171,7 +88,9 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("value_length", "Value Length", FieldType::U32),
     FieldDescriptor::new("ies", "Information Elements", FieldType::Array)
         .optional()
-        .with_children(IE_CHILD_FIELDS),
+        .with_children(container::IE_CHILD_FIELDS),
+    container::FD_IE_CONTAINER_ERROR,
+    container::FD_UNDECODED_IES,
 ];
 
 /// Returns a human-readable name for the NGAP-PDU CHOICE index.
@@ -189,7 +108,7 @@ fn pdu_type_name(pdu_type: u8) -> &'static str {
 /// Returns a human-readable name for the NGAP criticality value.
 ///
 /// 3GPP TS 38.413, Section 9.4 — Criticality ENUMERATED.
-fn criticality_name(criticality: u8) -> &'static str {
+pub(crate) fn criticality_name(criticality: u8) -> &'static str {
     match criticality {
         0 => "reject",
         1 => "ignore",
@@ -204,107 +123,15 @@ fn criticality_name(criticality: u8) -> &'static str {
 ///
 /// ITU-T Rec. X.691, Section 11.9.
 pub fn read_aper_length(data: &[u8], pos: usize) -> Result<(u32, usize), PacketError> {
-    if pos >= data.len() {
-        return Err(PacketError::Truncated {
-            expected: pos + 1,
-            actual: data.len(),
-        });
-    }
-    let first = data[pos];
-    if first & 0x80 == 0 {
-        // Short form: 0..127, encoded in 1 byte.
-        Ok((u32::from(first), 1))
-    } else if first & 0xC0 == 0x80 {
-        // Long form: 128..16383, encoded in 2 bytes.
-        if pos + 2 > data.len() {
-            return Err(PacketError::Truncated {
-                expected: pos + 2,
-                actual: data.len(),
-            });
-        }
-        let len = u32::from(first & 0x3F) << 8 | u32::from(data[pos + 1]);
-        Ok((len, 2))
-    } else {
-        // Fragmented form (>=16384) — not expected in typical NGAP messages.
-        Err(PacketError::InvalidHeader(
+    match read_extent(data, pos)? {
+        // At most 16383 octets: always fits in a u32.
+        Extent::Contiguous { len_octets, len } => Ok((len as u32, len_octets)),
+        // ITU-T Rec. X.691, Section 11.9.3.8: a fragmented length has no
+        // single (length, determinant size) pair.
+        Extent::Fragmented { .. } => Err(PacketError::InvalidHeader(
             "APER fragmented length determinant not supported",
-        ))
+        )),
     }
-}
-
-/// Parses NGAP ProtocolIE-Container from `data` starting at `pos`,
-/// pushing fields directly into the [`DissectBuffer`].
-///
-/// Returns `bytes_consumed`.
-///
-/// 3GPP TS 38.413, Section 9.4 — ProtocolIE-Container.
-fn parse_ies<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    data: &'pkt [u8],
-    base_offset: usize,
-) -> Result<usize, PacketError> {
-    // IE count: constrained whole number 0..65535 → 2 bytes.
-    if data.len() < 2 {
-        return Err(PacketError::Truncated {
-            expected: 2,
-            actual: data.len(),
-        });
-    }
-    let ie_count = read_be_u16(data, 0)? as usize;
-    let mut pos: usize = 2;
-
-    for _ in 0..ie_count {
-        // Each IE: id (2 bytes) + criticality (1 byte) + value (length + data).
-        if pos + 3 > data.len() {
-            break;
-        }
-
-        let ie_id = read_be_u16(data, pos)?;
-        let ie_criticality = (data[pos + 2] >> 6) & 0x03;
-        let ie_start = base_offset + pos;
-        pos += 3;
-
-        // IE value: APER length determinant + raw bytes.
-        let (ie_value_len, len_bytes) = read_aper_length(data, pos)?;
-        pos += len_bytes;
-
-        let ie_value_len_usize = ie_value_len as usize;
-        if pos + ie_value_len_usize > data.len() {
-            break;
-        }
-
-        let ie_value_data = &data[pos..pos + ie_value_len_usize];
-        let ie_end = base_offset + pos + ie_value_len_usize;
-        let ie_value_offset = base_offset + pos;
-
-        // Begin Object container for this IE element.
-        let obj_idx = buf.begin_container(&FD_IE, FieldValue::Object(0..0), ie_start..ie_end);
-
-        buf.push_field(
-            &FD_INLINE_ID,
-            FieldValue::U16(ie_id),
-            ie_start..ie_start + 2,
-        );
-        buf.push_field(
-            &FD_INLINE_CRITICALITY,
-            FieldValue::U8(ie_criticality),
-            ie_start + 2..ie_start + 3,
-        );
-        buf.push_field(
-            &FD_INLINE_LENGTH,
-            FieldValue::U32(ie_value_len),
-            base_offset + pos - len_bytes..base_offset + pos,
-        );
-
-        // Parse the IE value into structured fields if possible.
-        ie_parsers::push_ie_value(buf, ie_id, ie_value_data, ie_value_offset);
-
-        buf.end_container(obj_idx);
-
-        pos += ie_value_len_usize;
-    }
-
-    Ok(pos)
 }
 
 /// NGAP (NG Application Protocol) dissector.
@@ -388,23 +215,28 @@ impl Dissector for NgapDissector {
         let crit = (data[2] >> 6) & 0x03;
 
         // Value field: APER OPEN TYPE with length determinant.
-        let mut pos: usize = 3;
-        let (value_length, len_bytes) = read_aper_length(data, pos)?;
-        pos += len_bytes;
-
-        let value_length_usize = value_length as usize;
-        if pos + value_length_usize > data.len() {
+        // ITU-T Rec. X.691, Sections 11.2 and 11.9.
+        let pos: usize = 3;
+        let (value_length, value_start, total_consumed) = match read_extent(data, pos)? {
+            Extent::Contiguous { len_octets, len } => {
+                (len, pos + len_octets, pos + len_octets + len)
+            }
+            Extent::Fragmented { total, end } => (total, pos, end),
+        };
+        if total_consumed > data.len() {
             return Err(PacketError::Truncated {
-                expected: pos + value_length_usize,
+                expected: total_consumed,
                 actual: data.len(),
             });
         }
-
-        let total_consumed = pos + value_length_usize;
+        let fragmented = value_start == pos;
+        let len_bytes = if fragmented { 1 } else { value_start - pos };
+        let value_length = value_length as u32;
+        let value_length_usize = total_consumed - value_start;
 
         // Parse ProtocolIE-Container from the value field.
-        let value_data = &data[pos..pos + value_length_usize];
-        let ie_base_offset = offset + pos;
+        let value_data = &data[value_start..value_start + value_length_usize];
+        let ie_base_offset = offset + value_start;
 
         buf.begin_layer(
             "NGAP",
@@ -444,25 +276,45 @@ impl Dissector for NgapDissector {
         // ITU-T Rec. X.691, Section 18.1 — SEQUENCE preamble encoding.
         const SEQUENCE_PREAMBLE_SIZE: usize = 1;
 
-        // Attempt to parse IEs; if the container is present.
-        if value_data.len() > SEQUENCE_PREAMBLE_SIZE {
+        if fragmented {
+            // ITU-T Rec. X.691, Section 11.9.3.8: the message value is split
+            // into fragments separated by length determinants, so the IE
+            // container is not contiguous in the packet and is not decoded.
+            buf.push_field(
+                &container::FD_IE_CONTAINER_ERROR,
+                FieldValue::Str("fragmented message value not decoded"),
+                offset + pos..offset + total_consumed,
+            );
+            buf.push_field(
+                &container::FD_UNDECODED_IES,
+                FieldValue::Bytes(value_data),
+                offset + pos..offset + total_consumed,
+            );
+        } else if value_data.len() > SEQUENCE_PREAMBLE_SIZE {
             let ie_data = &value_data[SEQUENCE_PREAMBLE_SIZE..];
             let ie_offset = ie_base_offset + SEQUENCE_PREAMBLE_SIZE;
-
-            let arr_idx = buf.begin_container(
+            // ITU-T Rec. X.691, Section 19.1: the first bit of the message
+            // SEQUENCE is its extension bit.
+            let extended = value_data[0] & 0x80 != 0;
+            if !container::push_ie_container(
+                buf,
                 &FIELD_DESCRIPTORS[FD_IES],
-                FieldValue::Array(0..0),
-                ie_offset..ie_offset + ie_data.len(),
-            );
-            match parse_ies(buf, ie_data, ie_offset) {
-                Ok(_) => {}
-                Err(_) => {
-                    // Gracefully handle IE parse failures by exposing the
-                    // header fields without IEs, rather than failing the
-                    // entire dissection.
-                }
+                ie_data,
+                ie_offset,
+                container::IeContext::Message,
+                extended,
+            ) {
+                buf.push_field(
+                    &container::FD_IE_CONTAINER_ERROR,
+                    FieldValue::Str("IE count truncated"),
+                    ie_offset..ie_offset + ie_data.len(),
+                );
+                buf.push_field(
+                    &container::FD_UNDECODED_IES,
+                    FieldValue::Bytes(ie_data),
+                    ie_offset..ie_offset + ie_data.len(),
+                );
             }
-            buf.end_container(arr_idx);
         }
 
         buf.end_layer();
@@ -487,6 +339,10 @@ mod tests {
     //! | 9.5          | APER IE values (InitialUEMessage) | parse_aper_initial_ue_message |
     //! | 9.5          | APER IE values (NGSetupRequest)   | parse_aper_ng_setup_request   |
     //! | 9.5          | APER IE values (UEContextReleaseRequest) | parse_aper_ue_context_release_request |
+    //! | 9.4.5        | PDUSessionResourceSetupRequest: N3 TEID | parse_aper_pdu_session_resource_setup_request |
+    //! | 9.4.4        | IE count missing                 | parse_ngap_ie_count_truncated     |
+    //! | X.691 11.9.3.8 | Fragmented message value       | parse_ngap_fragmented_value       |
+    //! | X.691 11.9   | Public length determinant reader | read_aper_length_forms            |
 
     use super::*;
 
@@ -797,10 +653,10 @@ mod tests {
     #[test]
     fn field_descriptors_accessible() {
         let d = NgapDissector;
-        assert_eq!(d.field_descriptors().len(), 5);
+        assert_eq!(d.field_descriptors().len(), 7);
         assert_eq!(
             d.field_descriptors()[FD_IES].children,
-            Some(IE_CHILD_FIELDS)
+            Some(container::IE_CHILD_FIELDS)
         );
     }
 
@@ -808,10 +664,10 @@ mod tests {
     #[allow(unused_variables)]
     fn unused_child_field_indices_compile() {
         // Ensure all CFD_* constants are used and valid.
-        let _ = IE_CHILD_FIELDS[CFD_ID];
-        let _ = IE_CHILD_FIELDS[CFD_CRITICALITY];
-        let _ = IE_CHILD_FIELDS[CFD_LENGTH];
-        let _ = IE_CHILD_FIELDS[CFD_VALUE];
+        let _ = container::IE_CHILD_FIELDS[CFD_ID];
+        let _ = container::IE_CHILD_FIELDS[CFD_CRITICALITY];
+        let _ = container::IE_CHILD_FIELDS[CFD_LENGTH];
+        let _ = container::IE_CHILD_FIELDS[CFD_VALUE];
     }
 
     #[test]
@@ -961,5 +817,103 @@ mod tests {
                 ("cause_value", FieldValue::U8(2)),
             ]
         );
+    }
+
+    #[test]
+    fn parse_aper_pdu_session_resource_setup_request() {
+        // AMF-UE-NGAP-ID 1, RAN-UE-NGAP-ID 1, PDUSessionResourceSetupListSUReq
+        // with one item: PDU session 1, NAS-PDU (DL NAS transport), SST 1
+        // and a PDUSessionResourceSetupRequestTransfer carrying
+        // UL-NGU-UP-TNLInformation 10.0.0.1 / TEID 1 (pycrate).
+        let data = decode_hex(concat!(
+            "001d0055000003000a00020001005500020001004a00420040010c7e00680100",
+            "062e0501c2120000202f0000040082000a0c3b9aca00301dcd6500008b000a01",
+            "f00a0000010000000100860001000088000700090000091c00",
+        ));
+        let mut buf = DissectBuffer::new();
+        let result = NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        let find = |name: &str| {
+            buf.fields()
+                .iter()
+                .find(|f| f.name() == name)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        assert_eq!(find("pdu_session_id").value, FieldValue::U8(1));
+        let addr = find("ipv4_address");
+        assert_eq!(addr.value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
+        assert_eq!(&data[addr.range.clone()], &[10, 0, 0, 1]);
+        let teid = find("gtp_teid");
+        assert_eq!(teid.value, FieldValue::U32(1));
+        assert_eq!(&data[teid.range.clone()], &[0, 0, 0, 1]);
+        assert!(
+            buf.fields()
+                .iter()
+                .all(|f| f.name() != "ie_container_error")
+        );
+    }
+
+    #[test]
+    fn parse_ngap_ie_count_truncated() {
+        // Value: SEQUENCE preamble and a single octet of the IE count.
+        let data = build_ngap_pdu(0, 15, 0, &[0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("NGAP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "ie_container_error")
+                .unwrap()
+                .value,
+            FieldValue::Str("IE count truncated")
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "undecoded_ies").unwrap().value,
+            FieldValue::Bytes(&[0x00])
+        );
+    }
+
+    #[test]
+    fn parse_ngap_fragmented_value() {
+        // Value of one 16K fragment followed by a final 3-octet part.
+        let mut data = vec![0x00, 0x15, 0x00, 0xc1];
+        data.extend(std::iter::repeat_n(0u8, 16384));
+        data.extend_from_slice(&[0x03, 0x00, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        let result = NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        let layer = buf.layer_by_name("NGAP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "value_length").unwrap().value,
+            FieldValue::U32(16387)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "ie_container_error")
+                .unwrap()
+                .value,
+            FieldValue::Str("fragmented message value not decoded")
+        );
+        assert!(buf.field_by_name(layer, "ies").is_none());
+
+        // A fragmented value that runs past the data is truncated.
+        let mut buf = DissectBuffer::new();
+        let result = NgapDissector.dissect(&data[..100], &mut buf, 0);
+        assert!(matches!(result, Err(PacketError::Truncated { .. })));
+    }
+
+    #[test]
+    fn read_aper_length_forms() {
+        assert_eq!(read_aper_length(&[0x05], 0).unwrap(), (5, 1));
+        assert_eq!(read_aper_length(&[0x00, 0x81, 0x00], 1).unwrap(), (256, 2));
+        assert!(matches!(
+            read_aper_length(&[0x81], 0),
+            Err(PacketError::Truncated { .. })
+        ));
+        let mut data = vec![0xc1];
+        data.extend(std::iter::repeat_n(0u8, 16384));
+        data.push(0x00);
+        assert!(matches!(
+            read_aper_length(&data, 0),
+            Err(PacketError::InvalidHeader(_))
+        ));
     }
 }

@@ -50,6 +50,13 @@ VXLAN / NVGRE / VXLAN GPE Encapsulation Extended Community
 ([RFC 8365, Section 5.1.3](https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3)),
 and as `mpls_label` otherwise.
 
+EXTENDED COMMUNITIES and IPv6 Address Specific Extended Community entries are
+objects with `type`, `sub_type` (each with a `_name`) and the value sub-fields
+of their layout (`global_admin` / `local_admin`, `color`, `mac`,
+`sequence_number`, ...), per
+[RFC 4360](https://www.rfc-editor.org/rfc/rfc4360#section-2) and the IANA
+registries; sub-types that are not decoded keep a 6-octet `value`.
+
 Top-level `afi` / `safi` are set for ROUTE-REFRESH and, for UPDATE, mirror the
 first `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attribute so the address family can
 be filtered without descending into `path_attributes`. UPDATEs without an MP

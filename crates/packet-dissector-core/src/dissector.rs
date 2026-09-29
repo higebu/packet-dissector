@@ -27,6 +27,24 @@ pub enum DispatchHint {
     /// The registry tries the lower port first, then the higher port as a
     /// fallback, mirroring Wireshark's `sctp.port` dual-port dispatch strategy.
     BySctpPort(u16, u16),
+    /// Look up the next dissector for one SCTP user message by its Payload
+    /// Protocol Identifier, falling back to the SCTP ports.
+    ///
+    /// The registry tries the PPID table first (unless `ppid` is 0, which
+    /// means "unspecified"), then the lower and the higher port like
+    /// [`BySctpPort`](Self::BySctpPort).
+    ///
+    /// RFC 9260, Section 3.3.1 — "The value 0 indicates that no application
+    /// identifier is specified by the upper layer for this payload data." —
+    /// <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+    BySctpPpid {
+        /// Payload Protocol Identifier of the DATA / I-DATA chunk.
+        ppid: u32,
+        /// SCTP source port.
+        src_port: u16,
+        /// SCTP destination port.
+        dst_port: u16,
+    },
     /// Look up the next dissector by IPv6 Routing Header type.
     ///
     /// Uses a dedicated routing-type table, mirroring Wireshark's
@@ -80,6 +98,11 @@ pub enum DissectorTable {
     UdpPort(u16),
     /// Register by SCTP port number.
     SctpPort(u16),
+    /// Register by SCTP Payload Protocol Identifier (e.g., `46` for
+    /// Diameter), from the IANA "SCTP Payload Protocol Identifiers"
+    /// registry. PPID 0 ("unspecified") is never looked up; see
+    /// [`DispatchHint::BySctpPpid`].
+    SctpPpid(u32),
     /// Register by IPv6 Routing Header type (e.g., `4` for SRv6).
     Ipv6RoutingType(u8),
     /// Register by MIME content type (e.g., `"application/sdp"`).
@@ -129,6 +152,7 @@ pub trait DissectorPlugin {
 /// The registry uses this information to drive centralized TCP stream
 /// reassembly, buffering segments until enough contiguous data is
 /// available for the upper-layer dissector.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpStreamContext {
     /// Directional stream key identifying the TCP flow (src_ip, dst_ip, src_port, dst_port).
@@ -136,10 +160,81 @@ pub struct TcpStreamContext {
     /// (dst→src) maintains a separate reassembly buffer and sequence space.
     /// IP addresses are encoded as 16 bytes (IPv4-mapped for IPv4).
     pub stream_key: ([u8; 16], [u8; 16], u16, u16),
-    /// TCP sequence number of this segment's payload.
+    /// TCP sequence number of this segment's first payload octet.
+    ///
+    /// For a SYN segment this is ISN+1, not the header's Sequence Number:
+    /// RFC 9293, Section 3.1 — "If SYN is set, the sequence number is the
+    /// initial sequence number (ISN) and the first data octet is ISN+1."
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
     pub seq: u32,
     /// Length of the TCP payload in this segment.
     pub payload_len: usize,
+    /// TCP control bits of this segment (the header's 8-bit flags field).
+    ///
+    /// The registry uses SYN, FIN and RST to start and release per-stream
+    /// reassembly state (RFC 9293, Sections 3.5 and 3.6 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>).
+    pub flags: u8,
+    /// Sequence number of the first data octet of this direction (ISN+1),
+    /// when the direction's SYN has been seen.
+    ///
+    /// Data at or after it that was never handed to the upper layer can be
+    /// placed in front of a buffered stream when it arrives late.
+    pub stream_start: Option<u32>,
+}
+
+impl TcpStreamContext {
+    /// FIN control bit — RFC 9293, Section 3.1 — "No more data from sender."
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
+    pub const FLAG_FIN: u8 = 0x01;
+    /// SYN control bit — RFC 9293, Section 3.1 — "Synchronize sequence numbers."
+    pub const FLAG_SYN: u8 = 0x02;
+    /// RST control bit — RFC 9293, Section 3.1 — "Reset the connection."
+    pub const FLAG_RST: u8 = 0x04;
+
+    /// Create a stream context. `seq` is the sequence number of the first
+    /// payload octet (see [`TcpStreamContext::seq`]).
+    pub fn new(
+        stream_key: ([u8; 16], [u8; 16], u16, u16),
+        seq: u32,
+        payload_len: usize,
+        flags: u8,
+    ) -> Self {
+        Self {
+            stream_key,
+            seq,
+            payload_len,
+            flags,
+            stream_start: None,
+        }
+    }
+
+    /// Set [`TcpStreamContext::stream_start`].
+    pub fn with_stream_start(mut self, stream_start: Option<u32>) -> Self {
+        self.stream_start = stream_start;
+        self
+    }
+
+    /// Whether the SYN control bit is set.
+    pub fn is_syn(&self) -> bool {
+        self.flags & Self::FLAG_SYN != 0
+    }
+
+    /// Whether the FIN control bit is set.
+    pub fn is_fin(&self) -> bool {
+        self.flags & Self::FLAG_FIN != 0
+    }
+
+    /// Whether the RST control bit is set.
+    pub fn is_rst(&self) -> bool {
+        self.flags & Self::FLAG_RST != 0
+    }
+
+    /// Stream key of the opposite direction of the same connection.
+    pub fn reverse_key(&self) -> ([u8; 16], [u8; 16], u16, u16) {
+        let (src, dst, sport, dport) = self.stream_key;
+        (dst, src, dport, sport)
+    }
 }
 
 /// Decrypted payload produced by a protocol dissector (e.g. ESP).

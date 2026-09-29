@@ -34,6 +34,14 @@
 //! | —           | Stream ID with IPv6                            | tcp_stream_id_present_ipv6              |
 //! | —           | Stream ID (bidirectional)                      | tcp_stream_id_bidirectional             |
 //! | —           | Stream ID is sequential                        | tcp_stream_id_sequential                |
+//! | 3.5         | Stream ID kept after RST (retransmitted RST)   | tcp_stream_id_kept_after_rst            |
+//! | 3.5         | Stream ID rotates on SYN with a new ISN        | tcp_stream_id_rotates_on_new_syn        |
+//! | 3.5         | Stream ID kept on retransmitted SYN            | tcp_stream_id_kept_on_retransmitted_syn |
+//! | 3.5         | Stream ID kept on simultaneous open            | tcp_stream_id_kept_on_simultaneous_open |
+//! | 3.5         | Stream ID rotates on SYN after mid-stream data | tcp_stream_id_rotates_on_syn_after_data |
+//! | 3.1         | Reassembly context carries flags and ISN+1     | tcp_stream_context_syn_seq_and_flags    |
+//! | 3.1         | ISN+1 carried per direction (stream_start)     | tcp_stream_context_stream_start_per_direction |
+//! | —           | Oldest connection evicted past the table limit | tcp_stream_id_table_evicts_oldest       |
 //!
 //! # TCP Option RFC Coverage
 //!
@@ -1089,4 +1097,138 @@ fn tcp_stream_id_sequential() {
 
     assert_eq!(sid1, 0, "first stream should get id 0");
     assert_eq!(sid2, 1, "second stream should get id 1");
+}
+
+/// Dissect one segment between 10.0.0.1:`sport` and 10.0.0.2:`dport`
+/// (swapped when `reverse`) and return its stream_id.
+fn stream_id_of(dissector: &TcpDissector, reverse: bool, seq: u32, flags: u8) -> u32 {
+    let (sport, dport, src, dst) = if reverse {
+        (80, 40000, [10, 0, 0, 2], [10, 0, 0, 1])
+    } else {
+        (40000, 80, [10, 0, 0, 1], [10, 0, 0, 2])
+    };
+    let tcp_data = build_tcp_packet(sport, dport, seq, 0, flags);
+    let mut buf = DissectBuffer::new();
+    add_ipv4_layer(&mut buf, src, dst);
+    dissector.dissect(&tcp_data, &mut buf, 20).unwrap();
+    let layer = buf.layer_by_name("TCP").unwrap();
+    buf.field_u32(layer, "stream_id").unwrap()
+}
+
+/// RFC 9293, Section 3.5.3 — a RST ends the connection, but later packets
+/// of that connection (a retransmitted RST, the peer's RST, a late ACK)
+/// still belong to it.
+#[test]
+fn tcp_stream_id_kept_after_rst() {
+    let d = TcpDissector::new();
+    let syn = stream_id_of(&d, false, 1000, 0x02);
+    assert_eq!(stream_id_of(&d, true, 5000, 0x12), syn);
+    assert_eq!(stream_id_of(&d, false, 1001, 0x18), syn);
+    assert_eq!(stream_id_of(&d, true, 5001, 0x14), syn);
+    assert_eq!(stream_id_of(&d, true, 5001, 0x14), syn);
+    assert_eq!(stream_id_of(&d, false, 1001, 0x10), syn);
+}
+
+/// RFC 9293, Section 3.5 — a SYN with a new ISN on a known 4-tuple opens a
+/// new connection (e.g. reuse after FIN), which gets a new stream_id.
+#[test]
+fn tcp_stream_id_rotates_on_new_syn() {
+    let d = TcpDissector::new();
+    let first = stream_id_of(&d, false, 1000, 0x02);
+    assert_eq!(stream_id_of(&d, false, 1001, 0x11), first);
+    assert_eq!(stream_id_of(&d, true, 5001, 0x11), first);
+
+    let second = stream_id_of(&d, false, 90000, 0x02);
+    assert_ne!(second, first);
+    assert_eq!(stream_id_of(&d, true, 7000, 0x12), second);
+    assert_eq!(stream_id_of(&d, false, 90001, 0x10), second);
+}
+
+/// A retransmitted SYN (same ISN) belongs to the same connection.
+#[test]
+fn tcp_stream_id_kept_on_retransmitted_syn() {
+    let d = TcpDissector::new();
+    let first = stream_id_of(&d, false, 1000, 0x02);
+    assert_eq!(stream_id_of(&d, false, 1000, 0x02), first);
+}
+
+/// RFC 9293, Section 3.1 — "If SYN is set, the sequence number is the
+/// initial sequence number (ISN) and the first data octet is ISN+1."
+#[test]
+fn tcp_stream_context_syn_seq_and_flags() {
+    let d = TcpDissector::new();
+    let tcp_data = build_tcp_packet(40000, 80, 1000, 0, 0x02);
+    let mut buf = DissectBuffer::new();
+    add_ipv4_layer(&mut buf, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let result = d.dissect(&tcp_data, &mut buf, 20).unwrap();
+    let ctx = result.tcp_stream_context.unwrap();
+    assert_eq!(ctx.seq, 1001);
+    assert_eq!(ctx.flags, 0x02);
+    assert_eq!(ctx.stream_start, Some(1001));
+    assert!(ctx.is_syn());
+    assert!(!ctx.is_fin());
+    assert!(!ctx.is_rst());
+}
+
+/// RFC 9293, Section 3.5 (Figure 8) — in a simultaneous open both ends send
+/// a SYN without ACK; they are one connection.
+#[test]
+fn tcp_stream_id_kept_on_simultaneous_open() {
+    let d = TcpDissector::new();
+    let first = stream_id_of(&d, false, 1000, 0x02);
+    assert_eq!(stream_id_of(&d, true, 5000, 0x02), first);
+    assert_eq!(stream_id_of(&d, false, 1000, 0x12), first);
+}
+
+/// A SYN on a 4-tuple first seen mid-connection (capture started late)
+/// opens a new connection.
+#[test]
+fn tcp_stream_id_rotates_on_syn_after_data() {
+    let d = TcpDissector::new();
+    let first = stream_id_of(&d, false, 1000, 0x18);
+    assert_ne!(stream_id_of(&d, false, 90000, 0x02), first);
+}
+
+/// The ISN of each direction is carried to later segments as stream_start.
+#[test]
+fn tcp_stream_context_stream_start_per_direction() {
+    let d = TcpDissector::new();
+    let ctx_of = |reverse: bool, seq: u32, flags: u8| {
+        let (sport, dport, src, dst) = if reverse {
+            (80, 40000, [10, 0, 0, 2], [10, 0, 0, 1])
+        } else {
+            (40000, 80, [10, 0, 0, 1], [10, 0, 0, 2])
+        };
+        let tcp_data = build_tcp_packet(sport, dport, seq, 0, flags);
+        let mut buf = DissectBuffer::new();
+        add_ipv4_layer(&mut buf, src, dst);
+        d.dissect(&tcp_data, &mut buf, 20)
+            .unwrap()
+            .tcp_stream_context
+            .unwrap()
+    };
+    assert_eq!(ctx_of(false, 1000, 0x18).stream_start, None);
+    ctx_of(false, 2000, 0x02);
+    ctx_of(true, 7000, 0x12);
+    assert_eq!(ctx_of(false, 2001, 0x18).stream_start, Some(2001));
+    assert_eq!(ctx_of(true, 7001, 0x18).stream_start, Some(7001));
+}
+
+/// The stream-ID table is bounded: past 65,536 connections the oldest one
+/// is forgotten and gets a new ID when seen again.
+#[test]
+fn tcp_stream_id_table_evicts_oldest() {
+    let d = TcpDissector::new();
+    let first = stream_id_of(&d, false, 1, 0x10);
+    let tcp_data = build_tcp_packet(1, 2, 1, 0, 0x10);
+    for i in 0..65_536u32 {
+        let mut buf = DissectBuffer::new();
+        add_ipv4_layer(
+            &mut buf,
+            [11, (i >> 16) as u8, (i >> 8) as u8, i as u8],
+            [10, 0, 0, 2],
+        );
+        d.dissect(&tcp_data, &mut buf, 20).unwrap();
+    }
+    assert_ne!(stream_id_of(&d, false, 2, 0x10), first);
 }
