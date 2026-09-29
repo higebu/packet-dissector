@@ -98,3 +98,19 @@ fn zero_alloc_dissect_quic_version_negotiation() {
         "QUIC version negotiation dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_quic_coalesced() {
+    // RFC 9000, Section 12.2 — Initial + Initial + Short Header in one datagram.
+    // https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    let mut raw = build_initial(&[0x01, 0x02], &[0x03], &[0xAA; 10]);
+    raw.extend_from_slice(&build_initial(&[0x01, 0x02], &[0x03], &[0xCC; 12]));
+    raw.extend_from_slice(&build_short_header(&[0xBB; 20]));
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        QuicDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "QUIC coalesced dissect allocated {allocs} times");
+}

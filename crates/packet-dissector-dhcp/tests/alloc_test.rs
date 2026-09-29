@@ -63,3 +63,54 @@ fn zero_alloc_dissect_dhcp_offer() {
     });
     assert_eq!(allocs, 0, "DHCP offer dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_dhcp_extended_options() {
+    let chaddr = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let mut opts = Vec::new();
+    opts.extend_from_slice(&[53, 1, 1]); // DHCP Discover
+    // Option 82 with Link Selection, Subscriber-ID, RADIUS Attributes,
+    // Authentication, Vendor-Specific, Flags and Server Identifier Override.
+    let mut relay = vec![5, 4, 10, 0, 0, 1];
+    relay.extend_from_slice(&[6, 2, b'i', b'd']);
+    relay.extend_from_slice(&[7, 3, 1, 3, b'a']);
+    relay.extend_from_slice(&[8, 14, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 3, 4]);
+    relay.extend_from_slice(&[9, 6, 0, 0, 0x0d, 0xe9, 1, 0xff]);
+    relay.extend_from_slice(&[10, 1, 0x80, 11, 4, 192, 0, 2, 1]);
+    opts.extend_from_slice(&[82, relay.len() as u8]);
+    opts.extend_from_slice(&relay);
+    opts.extend_from_slice(&[68, 0]); // Mobile IP Home Agent (empty)
+    opts.extend_from_slice(&[69, 4, 192, 0, 2, 25]); // SMTP Server
+    opts.extend_from_slice(&[77, 3, 2, b'u', b'c']); // User Class
+    opts.extend_from_slice(&[80, 0]); // Rapid Commit
+    opts.extend_from_slice(&[81, 6, 0x05, 0, 0, 1, b'h', 0]); // Client FQDN
+    opts.extend_from_slice(&[90, 11, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // Authentication
+    opts.extend_from_slice(&[93, 2, 0, 7]); // Client System Architecture
+    opts.extend_from_slice(&[94, 3, 1, 3, 16]); // Client NII
+    opts.extend_from_slice(&[97, 17, 0]); // Client Machine Identifier
+    opts.extend_from_slice(&[0x11; 16]);
+    opts.extend_from_slice(&[108, 4, 0, 0, 7, 8]); // IPv6-Only Preferred
+    opts.extend_from_slice(&[114, 5, b'u', b'r', b'n', b':', b'x']); // Captive-Portal
+    opts.extend_from_slice(&[118, 4, 10, 1, 2, 0]); // Subnet Selection
+    opts.extend_from_slice(&[124, 6, 0, 0, 0x11, 0x8b, 1, 0]); // V-I Vendor Class
+    opts.extend_from_slice(&[125, 6, 0, 0, 0x11, 0x8b, 1, 0]); // V-I Vendor-Specific
+    opts.extend_from_slice(&[145, 1, 1]); // FORCERENEW_NONCE_CAPABLE
+    opts.extend_from_slice(&[150, 4, 192, 0, 2, 69]); // TFTP Server Address
+    opts.push(255); // end
+
+    let raw = build_dhcp(1, 0xDEADBEEF, [0; 4], chaddr, &opts);
+    let mut buf = DissectBuffer::new();
+    // This message produces more fields than the buffer's default capacity;
+    // warm the buffer once so the measurement covers the steady state
+    // (`DissectBuffer::clear` keeps the capacity).
+    DhcpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        DhcpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "DHCP extended options dissect allocated {allocs} times"
+    );
+}

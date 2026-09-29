@@ -27,3 +27,24 @@ fn zero_alloc_dissect_sip_invite() {
     });
     assert_eq!(allocs, 0, "SIP dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_sip_many_headers_datagram() {
+    let mut raw = b"OPTIONS sip:bob@example.com SIP/2.0\r\n".to_vec();
+    for _ in 0..100 {
+        raw.extend_from_slice(b"X-H: v\r\n");
+    }
+    raw.extend_from_slice(b"Content-Type: text/plain\r\n\r\nbody without length");
+    let mut buf = DissectBuffer::new();
+    packet_dissector_sip::SipDatagramDissector
+        .dissect(&raw, &mut buf, 0)
+        .unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        packet_dissector_sip::SipDatagramDissector
+            .dissect(&raw, &mut buf, 0)
+            .unwrap();
+    });
+    assert_eq!(allocs, 0, "SIP datagram dissect allocated {allocs} times");
+}

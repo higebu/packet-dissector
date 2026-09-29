@@ -1,6 +1,6 @@
 # packet-dissector-tls
 
-TLS (RFC 5246, RFC 8446) record layer dissector for packet-dissector
+TLS (RFC 5246, RFC 9846) record layer dissector for packet-dissector
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
 ecosystem. It is used automatically when you enable the `tls` feature flag

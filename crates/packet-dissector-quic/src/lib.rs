@@ -1,8 +1,10 @@
 //! QUIC protocol dissector (header parsing only — payload is encrypted).
 //!
 //! Parses QUIC Long Headers (Initial, 0-RTT, Handshake, Retry, Version
-//! Negotiation) and Short Headers. Since QUIC payload is encrypted, the
-//! dissector terminates the chain and does not dispatch to further dissectors.
+//! Negotiation) and Short Headers. Packets coalesced into one UDP datagram
+//! (RFC 9000, Section 12.2) are split using the Length field and each packet
+//! becomes its own layer. Since QUIC payload is encrypted, the dissector
+//! terminates the chain and does not dispatch to further dissectors.
 //!
 //! ## References
 //! - RFC 8999 (QUIC Invariants): <https://www.rfc-editor.org/rfc/rfc8999>
@@ -107,12 +109,24 @@ fn packet_kind_display(kind: PacketKind) -> &'static str {
     }
 }
 
+/// Mask and pattern of the versions reserved to force version negotiation.
+///
+/// RFC 9000, Section 15 — <https://www.rfc-editor.org/rfc/rfc9000#section-15>:
+/// "Versions that follow the pattern 0x?a?a?a?a are reserved for use in
+/// forcing version negotiation to be exercised -- that is, any version
+/// number where the low four bits of all bytes is 1010 (in binary)."
+const RESERVED_VERSION_MASK: u32 = 0x0f0f_0f0f;
+const RESERVED_VERSION_PATTERN: u32 = 0x0a0a_0a0a;
+
 /// Returns a human-readable name for the QUIC version field.
 fn version_name(version: u32) -> Option<&'static str> {
     match version {
         VERSION_NEGOTIATION => Some("Version Negotiation"),
         VERSION_1 => Some("QUIC v1"),
         VERSION_2 => Some("QUIC v2"),
+        v if v & RESERVED_VERSION_MASK == RESERVED_VERSION_PATTERN => {
+            Some("Reserved (Forcing Version Negotiation)")
+        }
         _ => None,
     }
 }
@@ -173,7 +187,6 @@ const FD_SUPPORTED_VERSIONS: usize = 11;
 const FD_RETRY_TOKEN: usize = 12;
 const FD_RETRY_INTEGRITY_TAG: usize = 13;
 const FD_SPIN_BIT: usize = 14;
-const FD_KEY_PHASE: usize = 15;
 
 /// Field descriptors for the QUIC dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -265,9 +278,11 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     )
     .optional(),
     // 14: spin_bit (short header only)
+    //
+    // The Key Phase bit is not listed: it is header-protected and cannot be
+    // read without keys (RFC 9001, Section 5.4.1 —
+    // <https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1>).
     FieldDescriptor::new("spin_bit", "Spin Bit", FieldType::U8).optional(),
-    // 15: key_phase (short header only)
-    FieldDescriptor::new("key_phase", "Key Phase", FieldType::U8).optional(),
 ];
 
 /// Dummy descriptor for version entries inside the supported_versions Array.
@@ -335,14 +350,57 @@ impl Dissector for QuicDissector {
             });
         }
 
-        let first_byte = data[0];
-        let header_form = (first_byte >> 7) & 1;
+        // RFC 9000, Section 12.2 — <https://www.rfc-editor.org/rfc/rfc9000#section-12.2>
+        // "Receivers MUST be able to process coalesced packets." Initial,
+        // 0-RTT and Handshake packets end where their Length field says;
+        // Retry, Version Negotiation and short-header packets "do not contain
+        // a Length field and so cannot be followed by other packets in the
+        // same UDP datagram."
+        let mut pos = 0;
+        loop {
+            let packet = &data[pos..];
+            let first_byte = packet[0];
+            let header_form = (first_byte >> 7) & 1;
 
-        if header_form == 1 {
-            self.dissect_long_header(data, buf, offset, first_byte)
-        } else {
-            self.dissect_short_header(data, buf, offset, first_byte)
+            if header_form == 0 {
+                self.dissect_short_header(packet, buf, offset + pos, first_byte);
+                pos = data.len();
+                break;
+            }
+
+            match self
+                .dissect_long_header(packet, buf, offset + pos, first_byte)
+                .map_err(|e| shift_truncated(e, pos))?
+            {
+                Some(len) => pos += len,
+                None => {
+                    pos = data.len();
+                    break;
+                }
+            }
+
+            // Zero bytes after the last packet are not a QUIC packet: a first
+            // byte of 0x00 has the Fixed Bit cleared (RFC 9000, Section 17.2 —
+            // <https://www.rfc-editor.org/rfc/rfc9000#section-17.2>). Leave
+            // them unconsumed rather than dissecting them as a packet.
+            if data[pos..].iter().all(|&b| b == 0) {
+                break;
+            }
         }
+
+        Ok(DissectResult::new(pos, DispatchHint::End))
+    }
+}
+
+/// Re-base a `Truncated` error from a coalesced packet starting at `pos` so
+/// that `expected` and `actual` are relative to the whole datagram.
+fn shift_truncated(err: PacketError, pos: usize) -> PacketError {
+    match err {
+        PacketError::Truncated { expected, actual } => PacketError::Truncated {
+            expected: expected.saturating_add(pos),
+            actual: actual + pos,
+        },
+        other => other,
     }
 }
 
@@ -389,7 +447,13 @@ impl QuicDissector {
         );
     }
 
-    /// Parse a QUIC Long Header packet.
+    /// Parse a QUIC Long Header packet at the start of `data`.
+    ///
+    /// Returns `Some(len)` when the packet carries a Length field and ends
+    /// after `len` bytes, so another packet may follow it in the datagram.
+    /// Returns `None` when the packet runs to the end of `data` (Retry,
+    /// Version Negotiation, an unknown version, or a Length that goes past
+    /// the end of `data`).
     ///
     /// RFC 9000, Section 17.2 — <https://www.rfc-editor.org/rfc/rfc9000#section-17.2>
     fn dissect_long_header<'pkt>(
@@ -398,7 +462,7 @@ impl QuicDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
         first_byte: u8,
-    ) -> Result<DissectResult, PacketError> {
+    ) -> Result<Option<usize>, PacketError> {
         if data.len() < MIN_LONG_HEADER_SIZE {
             return Err(PacketError::Truncated {
                 expected: MIN_LONG_HEADER_SIZE,
@@ -435,6 +499,7 @@ impl QuicDissector {
         let mut cursor = scid_end;
 
         let display_name: Option<&'static str>;
+        let mut packet_end = None;
 
         if version == VERSION_NEGOTIATION {
             // RFC 9000, Section 17.2.1 — Version Negotiation
@@ -551,14 +616,18 @@ impl QuicDissector {
                 );
                 cursor += token_vi_size;
 
-                let token_len_usize = token_len as usize;
-                if data.len() < cursor + token_len_usize {
+                let token_end = usize::try_from(token_len)
+                    .ok()
+                    .and_then(|len| cursor.checked_add(len))
+                    .unwrap_or(usize::MAX);
+                if data.len() < token_end {
                     return Err(PacketError::Truncated {
-                        expected: cursor + token_len_usize,
+                        expected: token_end,
                         actual: data.len(),
                     });
                 }
-                let token = &data[cursor..cursor + token_len_usize];
+                let token_len_usize = token_end - cursor;
+                let token = &data[cursor..token_end];
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_TOKEN],
                     FieldValue::Bytes(token),
@@ -613,6 +682,26 @@ impl QuicDissector {
                         FieldValue::U64(length),
                         offset + cursor..offset + cursor + length_vi_size,
                     );
+
+                    // RFC 9000, Section 12.2 — "Initial (Section 17.2.2),
+                    // 0-RTT (Section 17.2.3), and Handshake (Section 17.2.4)
+                    // packets contain a Length field that determines the end
+                    // of the packet."
+                    //
+                    // A Length past the end of `data` is what a
+                    // snaplen-limited capture holds. The header fields above
+                    // do not need the protected bytes, so the packet is kept
+                    // as the last one and its layer runs to the end of `data`.
+                    let body_start = cursor + length_vi_size;
+                    let end = usize::try_from(length)
+                        .ok()
+                        .and_then(|len| body_start.checked_add(len));
+                    if let Some(end) = end.filter(|&end| end <= data.len()) {
+                        if let Some(layer) = buf.last_layer_mut() {
+                            layer.range.end = offset + end;
+                        }
+                        packet_end = Some(end);
+                    }
                 }
                 None => {
                     // Unknown version: the type-specific layout of the first
@@ -624,26 +713,30 @@ impl QuicDissector {
 
         buf.end_layer();
 
-        Ok(DissectResult::new(data.len(), DispatchHint::End))
+        Ok(packet_end)
     }
 
-    /// Parse a QUIC Short Header (1-RTT) packet.
+    /// Parse a QUIC Short Header (1-RTT) packet. It has no Length field, so
+    /// it always runs to the end of `data`.
     ///
     /// RFC 9000, Section 17.3 — <https://www.rfc-editor.org/rfc/rfc9000#section-17.3>
     ///
     /// Without connection state, the DCID length is unknown, so we only parse
-    /// the first byte flags.
+    /// the first byte flags that are not header-protected. The Reserved Bits,
+    /// Key Phase and Packet Number Length are masked by header protection
+    /// (RFC 9001, Section 5.4.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1>: "Short header:
+    /// 5 bits masked") and are therefore not emitted.
     fn dissect_short_header<'pkt>(
         &self,
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
         first_byte: u8,
-    ) -> Result<DissectResult, PacketError> {
+    ) {
         let header_form = (first_byte >> 7) & 1;
         let fixed_bit = (first_byte >> 6) & 1;
         let spin_bit = (first_byte >> 5) & 1;
-        let key_phase = (first_byte >> 2) & 1;
 
         buf.begin_layer(
             self.short_name(),
@@ -666,14 +759,7 @@ impl QuicDissector {
             FieldValue::U8(spin_bit),
             offset..offset + 1,
         );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_KEY_PHASE],
-            FieldValue::U8(key_phase),
-            offset..offset + 1,
-        );
         buf.end_layer();
-
-        Ok(DissectResult::new(data.len(), DispatchHint::End))
     }
 }
 
@@ -697,6 +783,15 @@ mod tests {
     // | 9001 §5.8           | Retry Integrity Tag (16 bytes)     | test_parse_retry                     |
     // | 9001 §5.8           | Retry truncated below 16-byte tag  | test_truncated_retry_integrity_tag   |
     // | 9000 §17.3, §17.3.1 | Short Header (1-RTT)               | test_parse_short_header              |
+    // | 9001 §5.4.1         | Key Phase protected: not emitted   | test_parse_short_header              |
+    // | 9000 §12.2          | Coalesced Initial + Handshake      | test_coalesced_initial_handshake     |
+    // | 9000 §12.2          | Short header only as last packet   | test_coalesced_short_header_last     |
+    // | 9000 §12.2          | Trailing zero bytes not a packet   | test_coalesced_trailing_zero_padding_not_consumed |
+    // | 9000 §12.2, §17.2   | Length exceeds data (snaplen) kept | test_length_exceeds_datagram_accepted |
+    // | 9000 §12.2, §16     | Length = 2^62-1 (no overflow)      | test_length_huge_varint_accepted     |
+    // | 9000 §12.2          | Second packet Length exceeds data  | test_coalesced_second_packet_length_exceeds_datagram |
+    // | 9000 §12.2          | Second packet header truncated     | test_coalesced_second_header_truncated |
+    // | 9000 §15            | Reserved version 0x?a?a?a?a        | test_version_name_reserved_pattern   |
     // | 9000 §16            | Variable-Length Integer (1 byte)   | test_decode_varint_1byte             |
     // | 9000 §16            | Variable-Length Integer (2 bytes)  | test_decode_varint_2byte             |
     // | 9000 §16            | Variable-Length Integer (4 bytes)  | test_decode_varint_4byte             |
@@ -1182,10 +1277,10 @@ mod tests {
             buf.field_by_name(layer, "spin_bit").unwrap().value,
             FieldValue::U8(1)
         );
-        assert_eq!(
-            buf.field_by_name(layer, "key_phase").unwrap().value,
-            FieldValue::U8(1)
-        );
+        // RFC 9001 §5.4.1 — Key Phase is header-protected, so the on-wire
+        // bit is masked and must not be shown as a decoded value.
+        // https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1
+        assert!(buf.field_by_name(layer, "key_phase").is_none());
         // Short header doesn't have version or packet_type
         assert!(buf.field_by_name(layer, "version").is_none());
         assert!(buf.field_by_name(layer, "packet_type").is_none());
@@ -1203,10 +1298,7 @@ mod tests {
             buf.field_by_name(layer, "spin_bit").unwrap().value,
             FieldValue::U8(0)
         );
-        assert_eq!(
-            buf.field_by_name(layer, "key_phase").unwrap().value,
-            FieldValue::U8(0)
-        );
+        assert!(buf.field_by_name(layer, "key_phase").is_none());
     }
 
     // --- QUIC v2 (RFC 9369 §3.2) ---
@@ -1410,6 +1502,239 @@ mod tests {
         assert!(buf.field_by_name(layer, "retry_token").is_none());
     }
 
+    // --- Coalesced packets (RFC 9000 §12.2) ---
+
+    /// The coalesced datagram from the issue: an Initial with Length 20
+    /// followed by a Handshake with Length 16 (RFC 9000 §12.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc9000#section-12.2>).
+    fn coalesced_initial_handshake() -> Vec<u8> {
+        let dcid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let mut data = build_long_header(
+            VERSION_1,
+            PacketKind::Initial,
+            &dcid,
+            &[],
+            None,
+            &[0xaa; 20],
+        );
+        data.extend_from_slice(&build_long_header(
+            VERSION_1,
+            PacketKind::Handshake,
+            &dcid,
+            &[],
+            None,
+            &[0xbb; 16],
+        ));
+        data
+    }
+
+    #[test]
+    fn test_coalesced_initial_handshake() {
+        let data = coalesced_initial_handshake();
+        assert_eq!(data.len(), 69);
+
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(&data, &mut buf, 42).unwrap();
+
+        assert_eq!(result.bytes_consumed, 69);
+        assert!(matches!(result.next, DispatchHint::End));
+        let layers = buf.layers();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].display_name, Some("QUIC Initial"));
+        assert_eq!(layers[0].range, 42..79);
+        assert_eq!(layers[1].display_name, Some("QUIC Handshake"));
+        assert_eq!(layers[1].range, 79..111);
+
+        let fields = buf.layer_fields(&layers[1]);
+        let length = fields.iter().find(|f| f.name() == "length").unwrap();
+        assert_eq!(length.value, FieldValue::U64(16));
+        assert_eq!(length.range, 79 + 15..79 + 16);
+    }
+
+    #[test]
+    fn test_coalesced_short_header_last() {
+        // RFC 9000 §12.2 — a short-header packet has no Length, so it can
+        // only be the last packet in the datagram and runs to its end.
+        // https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        let mut data = coalesced_initial_handshake();
+        data.extend_from_slice(&build_short_header(1, 0, &[0xcc; 30]));
+
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(result.bytes_consumed, data.len());
+        let layers = buf.layers();
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0].range, 0..37);
+        assert_eq!(layers[1].range, 37..69);
+        assert_eq!(layers[2].display_name, Some("QUIC Short Header"));
+        assert_eq!(layers[2].range, 69..data.len());
+        let fields = buf.layer_fields(&layers[2]);
+        let spin = fields.iter().find(|f| f.name() == "spin_bit").unwrap();
+        assert_eq!(spin.value, FieldValue::U8(1));
+        assert_eq!(spin.range, 69..70);
+    }
+
+    #[test]
+    fn test_coalesced_trailing_zero_padding_not_consumed() {
+        // Zero bytes after the last Length-delimited packet are not a QUIC
+        // packet (a first byte of 0x00 has the Fixed Bit cleared, RFC 9000
+        // §17.2/§17.3.1); they are left unconsumed instead of being
+        // dissected as a bogus short-header packet.
+        // https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+        let dcid = [0x01, 0x02, 0x03, 0x04];
+        let mut data = build_long_header(
+            VERSION_1,
+            PacketKind::Initial,
+            &dcid,
+            &[],
+            None,
+            &[0xaa; 20],
+        );
+        let packet_len = data.len();
+        data.extend_from_slice(&[0x00; 25]);
+
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(result.bytes_consumed, packet_len);
+        assert_eq!(buf.layers().len(), 1);
+        assert_eq!(buf.layers()[0].range, 0..packet_len);
+    }
+
+    #[test]
+    fn test_length_exceeds_datagram_accepted() {
+        // Initial with Length = 100 (2-byte varint 0x4064) but only 10
+        // bytes left in the datagram. A snaplen-limited capture looks the
+        // same, and the header does not need the protected bytes, so the
+        // packet is kept as the last one and its layer ends at the data end.
+        // RFC 9000, Section 17.2 — https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+        let mut data = vec![0xc0];
+        data.extend_from_slice(&VERSION_1.to_be_bytes());
+        data.push(8);
+        data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        data.push(0); // SCID length
+        data.push(0); // Token Length
+        data.extend_from_slice(&[0x40, 0x64]); // Length = 100
+        data.extend_from_slice(&[0xaa; 10]);
+
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(result.bytes_consumed, data.len());
+        assert_eq!(buf.layers().len(), 1);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..data.len());
+        assert_eq!(
+            buf.field_by_name(layer, "length").unwrap().value,
+            FieldValue::U64(100)
+        );
+    }
+
+    #[test]
+    fn test_length_huge_varint_accepted() {
+        // Handshake with the largest 8-byte Length varint (2^62 - 1): no
+        // overflow, and the packet runs to the end of the data.
+        // RFC 9000, Section 16 — https://www.rfc-editor.org/rfc/rfc9000#section-16
+        let mut data = vec![0xe0];
+        data.extend_from_slice(&VERSION_1.to_be_bytes());
+        data.push(0); // DCID length
+        data.push(0); // SCID length
+        data.extend_from_slice(&[0xff; 8]); // Length = 2^62 - 1
+        data.extend_from_slice(&[0xbb; 4]);
+
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(result.bytes_consumed, data.len());
+        assert_eq!(buf.layers().len(), 1);
+        assert_eq!(buf.layers()[0].range, 0..data.len());
+    }
+
+    #[test]
+    fn test_coalesced_second_packet_length_exceeds_datagram() {
+        // The first packet is complete; the second one declares a Length
+        // beyond the datagram. Both are kept and the second ends at the
+        // data end.
+        // RFC 9000, Section 12.2 — https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        let dcid = [0x01, 0x02, 0x03, 0x04];
+        let mut data = build_long_header(
+            VERSION_1,
+            PacketKind::Initial,
+            &dcid,
+            &[],
+            None,
+            &[0xaa; 20],
+        );
+        let first_len = data.len();
+        let mut second = build_long_header(
+            VERSION_1,
+            PacketKind::Handshake,
+            &dcid,
+            &[],
+            None,
+            &[0xbb; 40],
+        );
+        second.truncate(second.len() - 30);
+        data.extend_from_slice(&second);
+
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(result.bytes_consumed, data.len());
+        let layers = buf.layers();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].range, 0..first_len);
+        assert_eq!(layers[1].display_name, Some("QUIC Handshake"));
+        assert_eq!(layers[1].range, first_len..data.len());
+    }
+
+    #[test]
+    fn test_coalesced_second_header_truncated() {
+        // The second packet's long header is cut short. The error is
+        // reported relative to the whole input and the first packet's layer
+        // is kept.
+        // RFC 9000, Section 12.2 — https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        let mut data = build_long_header(
+            VERSION_1,
+            PacketKind::Initial,
+            &[0x01, 0x02],
+            &[],
+            None,
+            &[0xaa; 20],
+        );
+        let first_len = data.len();
+        data.extend_from_slice(&[0xe0, 0x00, 0x00]);
+
+        let mut buf = DissectBuffer::new();
+        let err = QuicDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert_eq!(
+            err,
+            PacketError::Truncated {
+                expected: first_len + MIN_LONG_HEADER_SIZE,
+                actual: data.len()
+            }
+        );
+        assert_eq!(buf.layers().len(), 1);
+        assert_eq!(buf.layers()[0].range, 0..first_len);
+    }
+
+    #[test]
+    fn test_version_name_reserved_pattern() {
+        // RFC 9000 §15 — versions matching 0x?a?a?a?a are reserved for
+        // exercising version negotiation.
+        // https://www.rfc-editor.org/rfc/rfc9000#section-15
+        assert_eq!(
+            version_name(0x1a2a_3a4a),
+            Some("Reserved (Forcing Version Negotiation)")
+        );
+        assert_eq!(
+            version_name(0xfafa_fafa),
+            Some("Reserved (Forcing Version Negotiation)")
+        );
+        assert_eq!(version_name(0x1a2a_3a4b), None);
+    }
+
     // --- Truncation errors ---
 
     #[test]
@@ -1472,14 +1797,15 @@ mod tests {
     #[test]
     fn test_field_descriptors() {
         let descriptors = QuicDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 16);
+        assert_eq!(descriptors.len(), 15);
         assert_eq!(descriptors[FD_HEADER_FORM].name, "header_form");
         assert_eq!(descriptors[FD_RETRY_TOKEN].name, "retry_token");
         assert_eq!(
             descriptors[FD_RETRY_INTEGRITY_TAG].name,
             "retry_integrity_tag"
         );
-        assert_eq!(descriptors[FD_KEY_PHASE].name, "key_phase");
+        assert_eq!(descriptors[FD_SPIN_BIT].name, "spin_bit");
+        assert!(descriptors.iter().all(|d| d.name != "key_phase"));
     }
 
     #[test]
