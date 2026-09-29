@@ -145,30 +145,6 @@ pub(crate) struct OptionalIe {
     pub value: Value,
 }
 
-/// Build a [`MandatoryIe`].
-pub(crate) const fn m(name: &'static str, format: MandatoryFormat, value: Value) -> MandatoryIe {
-    MandatoryIe {
-        name,
-        format,
-        value,
-    }
-}
-
-/// Build an [`OptionalIe`].
-pub(crate) const fn o(
-    iei: u8,
-    name: &'static str,
-    format: OptionalFormat,
-    value: Value,
-) -> OptionalIe {
-    OptionalIe {
-        iei,
-        name,
-        format,
-        value,
-    }
-}
-
 // ── Name tables ────────────────────────────────────────────────────────
 
 /// 5GMM cause value name.
