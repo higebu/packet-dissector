@@ -4,7 +4,17 @@
 
 /// Returns a human-readable name for an L2TPv3 control message type code.
 ///
-/// Message types are defined in RFC 3931, Section 3.1 and Section 6.1.
+/// Message types are defined in RFC 3931, Section 3.1 and Section 6.1;
+/// later values follow the IANA "Message Type AVP (Attribute Type 0)
+/// Values" registry (17 RFC 3573, 18-19 RFC 3817, 21-22 RFC 4951,
+/// 23-27 RFC 4045, 28-29 RFC 5515).
+/// <https://www.rfc-editor.org/rfc/rfc3931#section-3.1>
+/// <https://www.rfc-editor.org/rfc/rfc3573>
+/// <https://www.rfc-editor.org/rfc/rfc3817>
+/// <https://www.rfc-editor.org/rfc/rfc4951>
+/// <https://www.rfc-editor.org/rfc/rfc4045>
+/// <https://www.rfc-editor.org/rfc/rfc5515>
+/// <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-2>
 pub(crate) fn message_type_name(code: u16) -> &'static str {
     match code {
         1 => "SCCRQ",
@@ -21,7 +31,24 @@ pub(crate) fn message_type_name(code: u16) -> &'static str {
         14 => "CDN",
         15 => "WEN",
         16 => "SLI",
+        // RFC 3573 — https://www.rfc-editor.org/rfc/rfc3573
+        17 => "MDMST",
+        // RFC 3817 — https://www.rfc-editor.org/rfc/rfc3817
+        18 => "SRRQ",
+        19 => "SRRP",
         20 => "ACK",
+        // RFC 4951, Sections 4.1-4.2 — https://www.rfc-editor.org/rfc/rfc4951#section-4.1
+        21 => "FSQ",
+        22 => "FSR",
+        // RFC 4045 — https://www.rfc-editor.org/rfc/rfc4045
+        23 => "MSRQ",
+        24 => "MSRP",
+        25 => "MSE",
+        26 => "MSI",
+        27 => "MSEN",
+        // RFC 5515 — https://www.rfc-editor.org/rfc/rfc5515
+        28 => "CSUN",
+        29 => "CSURQ",
         _ => "Unknown",
     }
 }
@@ -47,12 +74,29 @@ mod tests {
         assert_eq!(message_type_name(15), "WEN");
         assert_eq!(message_type_name(16), "SLI");
         assert_eq!(message_type_name(20), "ACK");
+        assert_eq!(message_type_name(21), "FSQ");
+        assert_eq!(message_type_name(22), "FSR");
+        for (code, name) in [
+            (17, "MDMST"),
+            (18, "SRRQ"),
+            (19, "SRRP"),
+            (23, "MSRQ"),
+            (24, "MSRP"),
+            (25, "MSE"),
+            (26, "MSI"),
+            (27, "MSEN"),
+            (28, "CSUN"),
+            (29, "CSURQ"),
+        ] {
+            assert_eq!(message_type_name(code), name);
+        }
     }
 
     #[test]
     fn unknown_message_type() {
         assert_eq!(message_type_name(0), "Unknown");
         assert_eq!(message_type_name(5), "Unknown");
+        assert_eq!(message_type_name(30), "Unknown");
         assert_eq!(message_type_name(99), "Unknown");
     }
 }

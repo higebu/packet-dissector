@@ -55,3 +55,28 @@ fn zero_alloc_dissect_lldp_with_mgmt_address() {
     });
     assert_eq!(allocs, 0, "LLDP dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_lldp_org_tlvs_and_capabilities() {
+    let raw: &[u8] = &[
+        // Chassis ID (network address, IPv4), Port ID, TTL
+        0x02, 0x06, 0x05, 0x01, 192, 0, 2, 1, 0x04, 0x04, 0x07, b'g', b'e', b'0', 0x06, 0x02, 0x00,
+        0x78, // System Capabilities: bridge + router
+        0x0E, 0x04, 0x00, 0x14, 0x00, 0x14, // IEEE 802.1 Port VLAN ID 100
+        0xFE, 0x06, 0x00, 0x80, 0xC2, 0x01, 0x00, 0x64,
+        // IEEE 802.1 Application Priority, one entry
+        0xFE, 0x08, 0x00, 0x80, 0xC2, 0x0C, 0x00, 0x61, 0x89, 0x06,
+        // LLDP-MED Network Policy
+        0xFE, 0x08, 0x00, 0x12, 0xBB, 0x02, 0x01, 0x40, 0xC9, 0x6E, // End
+        0x00, 0x00,
+    ];
+    let mut buf = DissectBuffer::new();
+    // Warm up so the buffer's field storage has grown to fit this LLDPDU.
+    LldpDissector.dissect(raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        LldpDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "LLDP org TLV dissect allocated {allocs} times");
+}

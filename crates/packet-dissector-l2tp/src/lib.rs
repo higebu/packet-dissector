@@ -2,7 +2,8 @@
 //!
 //! Implements parsing of the L2TPv2 header defined in RFC 2661,
 //! Section 3.1. Data messages dispatch their payload to PPP; control
-//! messages are terminal (AVPs are not dissected by this crate).
+//! messages are terminal and their AVPs (RFC 2661, Section 4) are
+//! dissected, with typed values for the common RFC 2661 AVPs.
 //!
 //! ## References
 //! - RFC 2661 (L2TPv2): <https://www.rfc-editor.org/rfc/rfc2661>
@@ -14,6 +15,8 @@
 //! modify the L2TPv2 header format.
 
 #![deny(missing_docs)]
+
+mod avp;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -71,6 +74,8 @@ const FD_SESSION_ID: usize = 8;
 const FD_NS: usize = 9;
 const FD_NR: usize = 10;
 const FD_OFFSET_SIZE: usize = 11;
+const FD_MESSAGE_TYPE: usize = 12;
+const FD_AVPS: usize = 13;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("is_control", "Type (T)", FieldType::U8),
@@ -85,6 +90,18 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("ns", "Ns", FieldType::U16).optional(),
     FieldDescriptor::new("nr", "Nr", FieldType::U16).optional(),
     FieldDescriptor::new("offset_size", "Offset Size", FieldType::U16).optional(),
+    // RFC 2661, Section 4.4.1 — Message Type AVP value, surfaced at the
+    // message level. <https://www.rfc-editor.org/rfc/rfc2661#section-4.4.1>
+    FieldDescriptor::new("message_type", "Message Type", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(t) => avp::message_type_name(*t),
+            _ => None,
+        }),
+    // RFC 2661, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc2661#section-4.1>
+    FieldDescriptor::new("avps", "AVPs", FieldType::Array)
+        .optional()
+        .with_children(avp::AVP_CHILD_FIELDS),
 ];
 
 /// L2TP dissector.
@@ -398,6 +415,27 @@ impl Dissector for L2tpDissector {
             );
         }
 
+        // RFC 2661, Section 4 — control message body: a sequence of AVPs.
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-4>
+        if t_flag == 1 && pos < consumed {
+            let body = &data[pos..consumed];
+            if let Some(mt) = avp::extract_message_type(body) {
+                let at = offset + pos + avp::MIN_AVP_SIZE;
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_MESSAGE_TYPE],
+                    FieldValue::U16(mt),
+                    at..at + 2,
+                );
+            }
+            let idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_AVPS],
+                FieldValue::Array(0..0),
+                offset + pos..offset + consumed,
+            );
+            avp::parse_avps(body, offset + pos, buf);
+            buf.end_container(idx);
+        }
+
         buf.end_layer();
 
         // RFC 2661, Section 1 — "L2TP facilitates the tunneling of PPP packets."
@@ -458,6 +496,14 @@ mod tests {
     // | §3.1        | Length < header (invalid)        | parse_l2tp_length_too_small |
     // | §3.1        | Length > data (truncated)        | parse_l2tp_length_exceeds_data |
     // | §3.1        | Reserved (x) bits ignored        | parse_l2tp_reserved_bits_ignored |
+    // | §3.2        | Message types                    | l2tp_message_type_names |
+    // | §4.1        | AVP header walk, M/H/Length      | parse_l2tp_sccrq_avps |
+    // | §4.4.1      | Message Type AVP                 | parse_l2tp_sccrq_avps |
+    // | §4.4.2      | Result Code AVP                  | parse_l2tp_result_code_and_ids |
+    // | §4.4.3      | Protocol Version, Host Name, Assigned Tunnel ID | parse_l2tp_sccrq_avps |
+    // | §4.4.4      | Assigned Session ID, Tx Connect Speed | parse_l2tp_result_code_and_ids |
+    // | §4.3        | Hidden / vendor AVPs stay raw    | parse_l2tp_hidden_and_vendor_avps_stay_raw |
+    // | §4.1        | Malformed AVP length             | parse_l2tp_malformed_avp_stops |
 
     /// Helper: dissect raw bytes at offset 0 and return the result.
     fn dissect(data: &[u8]) -> Result<(DissectBuffer<'_>, DissectResult), PacketError> {
@@ -934,7 +980,9 @@ mod tests {
     #[test]
     fn field_descriptors_consistent() {
         let descs = L2tpDissector.field_descriptors();
-        assert_eq!(descs.len(), 12);
+        assert_eq!(descs.len(), 14);
+        assert_eq!(descs[FD_MESSAGE_TYPE].name, "message_type");
+        assert_eq!(descs[FD_AVPS].name, "avps");
         assert_eq!(descs[FD_IS_CONTROL].name, "is_control");
         assert_eq!(descs[FD_LENGTH_PRESENT].name, "length_present");
         assert_eq!(descs[FD_SEQUENCE_PRESENT].name, "sequence_present");
@@ -1099,5 +1147,217 @@ mod tests {
             assert!(r.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Tunnel));
+    }
+
+    /// Object ranges of the top-level AVPs.
+    fn avp_objects(buf: &DissectBuffer<'_>) -> Vec<core::ops::Range<u32>> {
+        let layer = buf.layer_by_name("L2TP").unwrap();
+        let FieldValue::Array(a) = &buf.field_by_name(layer, "avps").unwrap().value else {
+            panic!("avps");
+        };
+        let mut out = Vec::new();
+        let mut idx = a.start;
+        while idx < a.end {
+            match &buf.fields()[idx as usize].value {
+                FieldValue::Object(r) => {
+                    out.push(r.clone());
+                    idx = r.end;
+                }
+                _ => idx += 1,
+            }
+        }
+        out
+    }
+
+    fn avp_value<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        r: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Option<&'a FieldValue<'pkt>> {
+        buf.nested_fields(r)
+            .iter()
+            .find(|f| f.name() == name)
+            .map(|f| &f.value)
+    }
+
+    #[test]
+    fn parse_l2tp_sccrq_avps() {
+        // Issue example: SCCRQ with Message Type, Protocol Version, Host
+        // Name "lac" and Assigned Tunnel ID 1 (RFC 2661, Sections 4.4.1-4.4.3).
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-4.4>
+        let raw: &[u8] = &[
+            0xc8, 0x02, 0x00, 0x2d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x80, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, //
+            0x80, 0x08, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, //
+            0x80, 0x09, 0x00, 0x00, 0x00, 0x07, 0x6c, 0x61, 0x63, //
+            0x80, 0x08, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01,
+        ];
+        let (buf, result) = dissect(raw).unwrap();
+        assert_eq!(result.bytes_consumed, 45);
+        let layer = buf.layer_by_name("L2TP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "message_type").unwrap().value,
+            FieldValue::U16(1)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "message_type_name"),
+            Some("SCCRQ")
+        );
+        let avps = avp_objects(&buf);
+        assert_eq!(avps.len(), 4);
+        assert_eq!(
+            avp_value(&buf, &avps[0], "mandatory"),
+            Some(&FieldValue::U8(1))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[0], "typed_value"),
+            Some(&FieldValue::U16(1))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[1], "protocol_version"),
+            Some(&FieldValue::U8(1))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[1], "protocol_revision"),
+            Some(&FieldValue::U8(0))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[2], "typed_value"),
+            Some(&FieldValue::Str("lac"))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[3], "typed_value"),
+            Some(&FieldValue::U16(1))
+        );
+        // Container label resolves to the AVP name.
+        let obj_idx = avps[3].start - 1;
+        assert_eq!(
+            buf.resolve_container_display_name(obj_idx),
+            Some("Assigned Tunnel ID")
+        );
+        assert_eq!(
+            buf.resolve_container_display_name(avps[2].start - 1),
+            Some("Host Name")
+        );
+    }
+
+    /// Build a control message with the given AVPs.
+    fn control_with(avps: &[u8]) -> Vec<u8> {
+        let len = (12 + avps.len()) as u16;
+        let mut m = vec![0xc8, 0x02];
+        m.extend_from_slice(&len.to_be_bytes());
+        m.extend_from_slice(&[0, 1, 0, 2, 0, 0, 0, 0]);
+        m.extend_from_slice(avps);
+        m
+    }
+
+    #[test]
+    fn parse_l2tp_result_code_and_ids() {
+        // RFC 2661, Section 4.4.2 — Result Code AVP; Section 4.4.4 —
+        // Assigned Session ID and Tx Connect Speed.
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-4.4.2>
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-4.4.4>
+        let avps: &[u8] = &[
+            0x80, 0x0d, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06, b'b', b'a', b'd', //
+            0x80, 0x08, 0x00, 0x00, 0x00, 0x0e, 0x12, 0x34, //
+            0x80, 0x0a, 0x00, 0x00, 0x00, 0x18, 0x00, 0x98, 0x96, 0x80,
+        ];
+        let raw = control_with(avps);
+        let (buf, _) = dissect(&raw).unwrap();
+        let avps = avp_objects(&buf);
+        assert_eq!(
+            avp_value(&buf, &avps[0], "result_code"),
+            Some(&FieldValue::U16(2))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[0], "error_code"),
+            Some(&FieldValue::U16(6))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[0], "error_message"),
+            Some(&FieldValue::Str("bad"))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[1], "typed_value"),
+            Some(&FieldValue::U16(0x1234))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[2], "typed_value"),
+            Some(&FieldValue::U32(10_000_000))
+        );
+    }
+
+    #[test]
+    fn parse_l2tp_hidden_and_vendor_avps_stay_raw() {
+        // RFC 2661, Section 4.3 — hidden AVP values are opaque.
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-4.3>
+        let avps: &[u8] = &[
+            0xc0, 0x08, 0x00, 0x00, 0x00, 0x09, 0xaa, 0xbb, // H=1 Assigned Tunnel ID
+            0x00, 0x08, 0x00, 0x09, 0x00, 0x01, 0x00, 0x01, // vendor 9
+            0x80, 0x07, 0x00, 0x00, 0x00, 0x09, 0x01, // wrong length
+        ];
+        let raw = control_with(avps);
+        let (buf, _) = dissect(&raw).unwrap();
+        let avps = avp_objects(&buf);
+        assert_eq!(avps.len(), 3);
+        assert_eq!(
+            avp_value(&buf, &avps[0], "hidden"),
+            Some(&FieldValue::U8(1))
+        );
+        assert_eq!(
+            avp_value(&buf, &avps[0], "value"),
+            Some(&FieldValue::Bytes(&[0xaa, 0xbb]))
+        );
+        for r in &avps {
+            assert!(avp_value(&buf, r, "typed_value").is_none());
+        }
+        assert_eq!(
+            buf.resolve_container_display_name(avps[1].start - 1),
+            Some("Vendor-Specific AVP")
+        );
+    }
+
+    #[test]
+    fn parse_l2tp_malformed_avp_stops() {
+        // AVP length smaller than the 6-octet header: walking stops.
+        let raw = control_with(&[0x80, 0x04, 0x00, 0x00, 0x00, 0x00]);
+        let (buf, result) = dissect(&raw).unwrap();
+        assert_eq!(result.bytes_consumed, raw.len());
+        let layer = buf.layer_by_name("L2TP").unwrap();
+        assert!(buf.field_by_name(layer, "message_type").is_none());
+        assert!(avp_objects(&buf).is_empty());
+    }
+
+    #[test]
+    fn l2tp_message_type_names() {
+        // RFC 2661, Section 3.2 and IANA.
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-3.2>
+        for (code, name) in [
+            (1, "SCCRQ"),
+            (4, "StopCCN"),
+            (6, "HELLO"),
+            (14, "CDN"),
+            (16, "SLI"),
+        ] {
+            assert_eq!(avp::message_type_name(code), Some(name));
+        }
+        assert_eq!(avp::message_type_name(5), None);
+        assert_eq!(avp::avp_name(0), Some("Message Type"));
+        assert_eq!(avp::avp_name(103), Some("ECN Capability"));
+        assert_eq!(avp::avp_name(15), Some("Call Serial Number"));
+        assert_eq!(avp::avp_name(34), Some("Call Errors"));
+        assert_eq!(avp::avp_name(20), None);
+        // IANA registries: AVPs 0-103 except the reserved 20; message
+        // types 1-29 except the reserved 5 and 13.
+        assert_eq!(
+            (0..1024).filter(|t| avp::avp_name(*t).is_some()).count(),
+            103
+        );
+        assert_eq!(
+            (0..1024)
+                .filter(|t| avp::message_type_name(*t).is_some())
+                .count(),
+            27
+        );
     }
 }

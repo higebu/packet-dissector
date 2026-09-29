@@ -2026,6 +2026,15 @@ impl Default for DissectorRegistry {
         #[cfg(feature = "stp")]
         assert_builtin(reg.register_by_llc_sap(0x42, Box::new(packet_dissector_stp::StpDissector)));
 
+        // SNAP follows an IEEE 802.2 LLC header with SAP 0xAA
+        // (RFC 1042 — https://www.rfc-editor.org/rfc/rfc1042). Ethernet and
+        // Linux cooked captures (protocol type 0x0004) both carry LLC.
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        assert_builtin(reg.register_by_llc_sap(
+            packet_dissector_ethernet::llc::SAP_SNAP,
+            Box::new(packet_dissector_ethernet::SnapDissector),
+        ));
+
         // IS-IS runs over IEEE 802.2 LLC with SAP 0xFE (ISO 10589)
         #[cfg(feature = "isis")]
         assert_builtin(
@@ -2340,9 +2349,15 @@ impl Default for DissectorRegistry {
         // SIP runs over UDP and TCP on port 5060 (RFC 3261)
         #[cfg(feature = "sip")]
         {
+            // RFC 3261, Section 18.3 — body framing differs between UDP and
+            // stream transports, so UDP gets the datagram variant.
+            // https://www.rfc-editor.org/rfc/rfc3261#section-18.3
             #[cfg(feature = "udp")]
             assert_builtin(
-                reg.register_by_udp_port(5060, Box::new(packet_dissector_sip::SipDissector)),
+                reg.register_by_udp_port(
+                    5060,
+                    Box::new(packet_dissector_sip::SipDatagramDissector),
+                ),
             );
 
             #[cfg(feature = "tcp")]
@@ -2351,6 +2366,9 @@ impl Default for DissectorRegistry {
             );
 
             reg.register_dissector_factory("sip", || Box::new(packet_dissector_sip::SipDissector));
+            reg.register_dissector_factory("sip.udp", || {
+                Box::new(packet_dissector_sip::SipDatagramDissector)
+            });
         }
 
         // SDP is carried as a message body, dispatched by MIME content type
@@ -2458,6 +2476,15 @@ impl Default for DissectorRegistry {
             );
             reg.register_dissector_factory("vxlan", || {
                 Box::new(packet_dissector_vxlan::VxlanDissector)
+            });
+            // VXLAN-GPE runs over UDP port 4790 (draft-ietf-nvo3-vxlan-gpe-13,
+            // Section 11.1 — https://datatracker.ietf.org/doc/html/draft-ietf-nvo3-vxlan-gpe-13#section-11.1)
+            #[cfg(feature = "udp")]
+            assert_builtin(
+                reg.register_by_udp_port(4790, Box::new(packet_dissector_vxlan::VxlanGpeDissector)),
+            );
+            reg.register_dissector_factory("vxlan-gpe", || {
+                Box::new(packet_dissector_vxlan::VxlanGpeDissector)
             });
         }
 
@@ -2989,6 +3016,8 @@ mod tests {
         assert!(reg.create_dissector_by_name("bgp").is_some());
         #[cfg(feature = "sip")]
         assert!(reg.create_dissector_by_name("sip").is_some());
+        #[cfg(feature = "sip")]
+        assert!(reg.create_dissector_by_name("sip.udp").is_some());
     }
 
     #[test]
@@ -4008,6 +4037,8 @@ mod tests {
 
         #[cfg(all(feature = "vxlan", feature = "udp"))]
         assert!(reg.get_by_udp_port(4789).is_some());
+        #[cfg(all(feature = "vxlan", feature = "udp"))]
+        assert!(reg.get_by_udp_port(4790).is_some());
 
         // G-ACh channel types: RFC 4385, Section 6
         // (https://www.rfc-editor.org/rfc/rfc4385#section-6), RFC 5885
@@ -4097,6 +4128,8 @@ mod tests {
 
         #[cfg(feature = "vxlan")]
         assert!(reg.create_dissector_by_name("vxlan").is_some());
+        #[cfg(feature = "vxlan")]
+        assert!(reg.create_dissector_by_name("vxlan-gpe").is_some());
 
         #[cfg(feature = "ike")]
         assert!(reg.create_dissector_by_name("ike").is_some());
