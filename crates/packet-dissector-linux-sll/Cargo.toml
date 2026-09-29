@@ -12,6 +12,7 @@ description = "Linux cooked capture v1 (SLL / LINKTYPE_LINUX_SLL) dissector for 
 
 [dependencies]
 packet-dissector-core = { workspace = true }
+packet-dissector-ethernet = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

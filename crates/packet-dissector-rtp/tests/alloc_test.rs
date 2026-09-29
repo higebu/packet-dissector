@@ -71,3 +71,25 @@ fn zero_alloc_dissect_rtp_with_csrc() {
     assert_eq!(fields.len(), 12);
     assert_eq!(fields[3].value, FieldValue::U8(2)); // csrc_count
 }
+
+#[test]
+fn zero_alloc_dissect_rtp_header_extension_elements() {
+    // RTP with an RFC 8285 one-byte header extension carrying two elements
+    // (https://www.rfc-editor.org/rfc/rfc8285#section-4.2).
+    let raw: &[u8] = &[
+        0x90, 0x60, 0x00, 0x01, // V=2 X=1, PT=96, seq=1
+        0x00, 0x00, 0x00, 0x00, // timestamp
+        0x12, 0x34, 0x56, 0x78, // SSRC
+        0xBE, 0xDE, 0x00, 0x02, // profile 0xBEDE, length 2 words
+        0x10, 0x7F, 0x22, 0x01, 0x02, 0x03, 0x00, 0x00, // ID1 1B, ID2 3B, pad
+        0xAA, 0xBB, // payload
+    ];
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        RtpDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "RTP dissect allocated {allocs} times");
+    assert!(buf.fields().iter().any(|f| f.name() == "ext_elements"));
+}

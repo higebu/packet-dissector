@@ -72,6 +72,10 @@ cbc = "0.2"
 aes-gcm = "0.11"
 hkdf = "0.13"
 sha2 = "0.11"
+ccm = "0.6"
+chacha20poly1305 = "0.11"
+ctr = "0.10"
+des = "0.9"
 thiserror = "2"
 criterion = { version = "0.8", features = ["html_reports"] }
 serde = { version = "1", features = ["derive"] }
