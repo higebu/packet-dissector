@@ -1252,6 +1252,9 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+        // StunDissector emits TURN ChannelData layers on the shared STUN port.
+        #[cfg(feature = "stun")]
+        push(&packet_dissector_stun::TurnChannelDataDissector);
     }
 
     /// Returns field metadata for all registered dissectors.
@@ -2331,7 +2334,8 @@ impl Default for DissectorRegistry {
             });
         }
 
-        // STUN runs over UDP and TCP on port 3478 (RFC 8489).
+        // STUN runs over UDP and TCP on port 3478 (RFC 8489), shared with
+        // TURN ChannelData (RFC 8656), whose framing differs on TCP.
         #[cfg(feature = "stun")]
         {
             #[cfg(feature = "udp")]
@@ -2340,7 +2344,7 @@ impl Default for DissectorRegistry {
             );
             #[cfg(feature = "tcp")]
             assert_builtin(
-                reg.register_by_tcp_port(3478, Box::new(packet_dissector_stun::StunDissector)),
+                reg.register_by_tcp_port(3478, Box::new(packet_dissector_stun::StunTcpDissector)),
             );
             reg.register_dissector_factory("stun", || {
                 Box::new(packet_dissector_stun::StunDissector)
