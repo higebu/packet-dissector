@@ -10,7 +10,7 @@
 
 use core::ops::Range;
 
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{
     read_be_u16, read_be_u24, read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr,
@@ -78,14 +78,6 @@ impl<'a, 'pkt> Obj<'a, 'pkt> {
         let r = self.range(pos, len);
         let v = &self.data[pos..pos + len];
         self.buf.push_field(fd, FieldValue::Bytes(v), r);
-    }
-
-    /// Push `len` octets as a UTF-8 string, or raw bytes if not UTF-8.
-    fn text(&mut self, fd: &'static FieldDescriptor, pos: usize, len: usize) {
-        let r = self.range(pos, len);
-        let v = &self.data[pos..pos + len];
-        let value = core::str::from_utf8(v).map_or(FieldValue::Bytes(v), FieldValue::Str);
-        self.buf.push_field(fd, value, r);
     }
 
     /// Push octets from `pos` to the end, if any, as `additional_octets`.
@@ -770,7 +762,8 @@ static SDF_FLAGS: &[Flag] = &[
     flag(5, 6, "smmii", "SMMII"),
 ];
 static FD_FLOW_DESCRIPTION: FieldDescriptor =
-    FieldDescriptor::new("flow_description", "Flow Description", FieldType::Str);
+    FieldDescriptor::new("flow_description", "Flow Description", FieldType::Bytes)
+        .with_format_fn(format_utf8_lossy);
 static FD_TOS: FieldDescriptor =
     FieldDescriptor::new("tos_traffic_class", "ToS Traffic Class", FieldType::U8);
 static FD_TOS_MASK: FieldDescriptor = FieldDescriptor::new(
@@ -839,7 +832,7 @@ pub(crate) fn sdf_filter<'pkt>(
     if let Some((at, len)) = fd {
         // "encoded as an OctetString as specified in clause 5.4.2 of
         // TS 29.212" (IPFilterRule text)
-        o.text(&FD_FLOW_DESCRIPTION, at, len);
+        o.bytes(&FD_FLOW_DESCRIPTION, at, len);
     }
     if f & 0x02 != 0 {
         let at = starts[0];
@@ -1010,11 +1003,16 @@ static FD_USER_IDS: [FieldDescriptor; 7] = [
     FieldDescriptor::new("imsi", "IMSI", FieldType::Bytes),
     FieldDescriptor::new("imei", "IMEI", FieldType::Bytes),
     FieldDescriptor::new("msisdn", "MSISDN", FieldType::Bytes),
-    FieldDescriptor::new("nai", "NAI", FieldType::Str),
-    FieldDescriptor::new("supi", "SUPI", FieldType::Str),
-    FieldDescriptor::new("gpsi", "GPSI", FieldType::Str),
-    FieldDescriptor::new("pei", "PEI", FieldType::Str),
+    FieldDescriptor::new("nai", "NAI", FieldType::Bytes).with_format_fn(format_utf8_lossy),
+    FieldDescriptor::new("supi", "SUPI", FieldType::Bytes).with_format_fn(format_utf8_lossy),
+    FieldDescriptor::new("gpsi", "GPSI", FieldType::Bytes).with_format_fn(format_utf8_lossy),
+    FieldDescriptor::new("pei", "PEI", FieldType::Bytes).with_format_fn(format_utf8_lossy),
 ];
+
+/// TBCD digit characters: "1010" is '*', "1011" is '#' and "1100" to
+/// "1110" are 'a' to 'c' (3GPP TS 29.002, TBCD-STRING; TS 24.008, Table
+/// 10.5.118); "1111" is the filler and is skipped.
+const TBCD_DIGITS: &[u8; 16] = b"0123456789*#abc?";
 
 /// Push TBCD digits (low nibble first, 0xF filler skipped) into scratch.
 fn push_tbcd(o: &mut Obj<'_, '_>, fd: &'static FieldDescriptor, pos: usize, len: usize) {
@@ -1029,7 +1027,7 @@ fn push_tbcd(o: &mut Obj<'_, '_>, fd: &'static FieldDescriptor, pos: usize, len:
     for b in src {
         for d in [b & 0x0F, b >> 4] {
             if d != 0x0F {
-                digits[n] = if d < 10 { b'0' + d } else { b'A' + d - 10 };
+                digits[n] = TBCD_DIGITS[usize::from(d)];
                 n += 1;
             }
         }
@@ -1071,7 +1069,7 @@ pub(crate) fn user_id<'pkt>(
             if i < 3 {
                 push_tbcd(&mut o, &FD_USER_IDS[i], start, len);
             } else {
-                o.text(&FD_USER_IDS[i], start, len);
+                o.bytes(&FD_USER_IDS[i], start, len);
             }
         }
     }
@@ -1111,13 +1109,15 @@ static FD_REDIRECT_ADDRESS_TYPE: FieldDescriptor = FieldDescriptor::new(
 static FD_REDIRECT_SERVER_ADDRESS: FieldDescriptor = FieldDescriptor::new(
     "redirect_server_address",
     "Redirect Server Address",
-    FieldType::Str,
-);
+    FieldType::Bytes,
+)
+.with_format_fn(format_utf8_lossy);
 static FD_OTHER_REDIRECT_SERVER_ADDRESS: FieldDescriptor = FieldDescriptor::new(
     "other_redirect_server_address",
     "Other Redirect Server Address",
-    FieldType::Str,
-);
+    FieldType::Bytes,
+)
+.with_format_fn(format_utf8_lossy);
 static FD_REDIRECT_PORT: FieldDescriptor =
     FieldDescriptor::new("redirect_port", "Redirect Port", FieldType::U16);
 
@@ -1144,6 +1144,13 @@ pub(crate) fn redirect_information<'pkt>(
         })
     };
     let address = if t == 5 {
+        // Figure 8.2.20-1 draws the Redirect Server Address Length without
+        // a condition, but the text says the address "shall not be
+        // present" for Port. Accept both encodings: a zero length followed
+        // by the port, or the port alone.
+        if data.len() >= 5 && read_be_u16(data, 1) == Ok(0) {
+            pos = 3;
+        }
         None
     } else {
         match take_lv(&mut pos) {
@@ -1170,10 +1177,10 @@ pub(crate) fn redirect_information<'pkt>(
     let mut o = Obj::begin(buf, data, offset);
     o.u8(&FD_REDIRECT_ADDRESS_TYPE, t, 0);
     if let Some((start, len)) = address {
-        o.text(&FD_REDIRECT_SERVER_ADDRESS, start, len);
+        o.bytes(&FD_REDIRECT_SERVER_ADDRESS, start, len);
     }
     if let Some((start, len)) = other {
-        o.text(&FD_OTHER_REDIRECT_SERVER_ADDRESS, start, len);
+        o.bytes(&FD_OTHER_REDIRECT_SERVER_ADDRESS, start, len);
     }
     if let Some((at, p)) = port {
         o.u16(&FD_REDIRECT_PORT, p, at, 2);
@@ -1597,6 +1604,11 @@ mod tests {
         assert_eq!(text(&buf, "gpsi"), b"ex");
         assert_eq!(text(&buf, "pei"), b"mac");
 
+        // TBCD non-digit nibbles: 1010 '*', 1011 '#', 1100-1110 'a'-'c'
+        let data = [0x04, 3, 0xBA, 0xDC, 0xFE];
+        let (_, buf) = parse(141, &data);
+        assert_eq!(text(&buf, "msisdn"), b"*#abc");
+
         // Length past the value
         let data = [0x01, 9, 0x00];
         let (v, _) = parse(141, &data);
@@ -1628,6 +1640,10 @@ mod tests {
         let (_, buf) = parse(38, &[0x05, 0x00, 0x50]);
         assert!(!has(&buf, "redirect_server_address"));
         assert_eq!(*val(&buf, "redirect_port"), FieldValue::U16(80));
+        // Port only, sent with a zero Redirect Server Address Length
+        let (_, buf) = parse(38, &[0x05, 0x00, 0x00, 0x00, 0x50]);
+        assert_eq!(*val(&buf, "redirect_port"), FieldValue::U16(80));
+        assert!(!has(&buf, "additional_octets"));
 
         // Address length past the value
         let data = [0x02, 0x00, 0x09, b'a'];
