@@ -21,6 +21,10 @@
 //! | Ethernet → IPv6 → UDP → DNS             | integration_ethernet_ipv6_udp_dns             |
 //! | Ethernet → IPv4 → SCTP                   | integration_ethernet_ipv4_sctp                |
 //! | Ethernet → IPv4 → SCTP → Diameter (CER)  | integration_ethernet_ipv4_sctp_diameter       |
+//! | Ethernet → IPv4 → SCTP (2 bundled DATA) → Diameter ×2 | integration_ethernet_ipv4_sctp_bundled_data_chunks |
+//! | Ethernet → IPv4 → SCTP (DATA fragment, not dispatched) | integration_ethernet_ipv4_sctp_fragment_not_dispatched |
+//! | Ethernet → IPv4 → SCTP (bundled, 2nd malformed) → Diameter ×2 + Err | integration_ethernet_ipv4_sctp_bundled_error_keeps_other_chunks |
+//! | Ethernet → IPv4 → SCTP (bundled) summary stops at SCTP | integration_ethernet_ipv4_sctp_bundled_summary |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
 //! | 802.1ad QinQ → IPv4 → UDP                | integration_qinq_ipv4_udp                     |
@@ -994,6 +998,130 @@ fn integration_ethernet_ipv4_sctp_diameter() {
         buf.resolve_display_name(diameter, "command_code_name"),
         Some("Capabilities-Exchange-Request")
     );
+}
+
+/// 20-byte Diameter CER header without AVPs.
+///
+/// RFC 6733, Section 3 — <https://www.rfc-editor.org/rfc/rfc6733#section-3>
+fn diameter_cer_header(hop_by_hop: u32) -> [u8; 20] {
+    let mut h = [0u8; 20];
+    h[0] = 1; // Version
+    h[1..4].copy_from_slice(&[0x00, 0x00, 0x14]); // Message Length = 20
+    h[4] = 0x80; // R flag
+    h[5..8].copy_from_slice(&[0x00, 0x01, 0x01]); // Command Code 257 (CER)
+    h[12..16].copy_from_slice(&hop_by_hop.to_be_bytes());
+    h[16..20].copy_from_slice(&hop_by_hop.to_be_bytes());
+    h
+}
+
+/// Ethernet → IPv4 → SCTP(49152 → 3868) with the given DATA chunks
+/// (`flags`, user data).
+fn build_eth_ipv4_sctp_data_chunks(chunks: &[(u8, &[u8])]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 49152, 3868);
+    for (i, (flags, user_data)) in chunks.iter().enumerate() {
+        push_sctp_data_chunk(&mut pkt, *flags, i as u32 + 1, 46, user_data);
+    }
+    fixup_ipv4_length(&mut pkt, ip_start);
+    pkt
+}
+
+fn diameter_hop_by_hop_ids(buf: &DissectBuffer<'_>) -> Vec<u32> {
+    buf.layers()
+        .iter()
+        .filter(|l| l.name == "Diameter")
+        .map(
+            |l| match buf.field_by_name(l, "hop_by_hop_id").unwrap().value {
+                FieldValue::U32(v) => v,
+                ref other => panic!("expected U32, got {other:?}"),
+            },
+        )
+        .collect()
+}
+
+/// Two bundled unfragmented DATA chunks each carry a Diameter message, and
+/// both are dissected.
+///
+/// RFC 9260, Section 6.10 — <https://www.rfc-editor.org/rfc/rfc9260#section-6.10>
+#[test]
+fn integration_ethernet_ipv4_sctp_bundled_data_chunks() {
+    let reg = DissectorRegistry::default();
+    let first = diameter_cer_header(1);
+    let second = diameter_cer_header(2);
+    let data = build_eth_ipv4_sctp_data_chunks(&[(0x03, &first), (0x03, &second)]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "Diameter", "Diameter"]);
+    assert_eq!(diameter_hop_by_hop_ids(&buf), [1, 2]);
+
+    // Each Diameter layer covers its own DATA chunk's user data:
+    // Ethernet(14) + IPv4(20) + SCTP common header(12) + DATA header(16).
+    let sctp = buf.layer_by_name("SCTP").unwrap();
+    assert_eq!(sctp.range, 34..data.len());
+    assert_eq!(buf.layers()[3].range, 62..82);
+    assert_eq!(buf.layers()[4].range, 98..118);
+}
+
+/// A DATA chunk with only the B bit set holds the first fragment of a user
+/// message. It is shown in the SCTP layer but not handed to Diameter, and
+/// the packet is not an error.
+///
+/// RFC 9260, Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+/// RFC 9260, Section 6.9 — <https://www.rfc-editor.org/rfc/rfc9260#section-6.9>
+#[test]
+fn integration_ethernet_ipv4_sctp_fragment_not_dispatched() {
+    let reg = DissectorRegistry::default();
+    let cer = diameter_cer_header(1);
+    let data = build_eth_ipv4_sctp_data_chunks(&[(0x02, &cer[..12])]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP"]);
+}
+
+/// A malformed user message in one bundled DATA chunk does not stop the
+/// other chunks from being dissected. The error is still reported, and the
+/// SCTP layer plus the well-formed Diameter messages are kept.
+#[test]
+fn integration_ethernet_ipv4_sctp_bundled_error_keeps_other_chunks() {
+    let reg = DissectorRegistry::default();
+    let first = diameter_cer_header(1);
+    let malformed = [0x01, 0x00, 0x00, 0x14, 0x80, 0x00, 0x01, 0x01]; // 8 of 20 bytes
+    let third = diameter_cer_header(3);
+    let data =
+        build_eth_ipv4_sctp_data_chunks(&[(0x03, &first), (0x03, &malformed), (0x03, &third)]);
+    let mut buf = DissectBuffer::new();
+    let err = reg.dissect(&data, &mut buf).unwrap_err();
+    assert!(
+        matches!(err, PacketError::Truncated { .. }),
+        "unexpected error {err:?}"
+    );
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "Diameter", "Diameter"]);
+    assert_eq!(diameter_hop_by_hop_ids(&buf), [1, 3]);
+}
+
+/// `dissect_summary` stops at the SCTP layer for bundled DATA chunks and
+/// reports the upper protocol.
+#[test]
+fn integration_ethernet_ipv4_sctp_bundled_summary() {
+    let reg = DissectorRegistry::default();
+    let first = diameter_cer_header(1);
+    let second = diameter_cer_header(2);
+    let data = build_eth_ipv4_sctp_data_chunks(&[(0x03, &first), (0x03, &second)]);
+    let mut buf = DissectBuffer::new();
+    let summary = reg.dissect_summary(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP"]);
+    assert_eq!(summary.next_protocol, Some("Diameter"));
+    assert!(buf.embedded_payloads().is_empty());
 }
 
 // ---------------------------------------------------------------------------
