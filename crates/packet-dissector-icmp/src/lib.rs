@@ -5,6 +5,8 @@
 //! - RFC 950 (updates RFC 792 — Address Mask): <https://www.rfc-editor.org/rfc/rfc950>
 //! - RFC 1191 (Path MTU Discovery — updates Type 3 Code 4): <https://www.rfc-editor.org/rfc/rfc1191>
 //! - RFC 1256 (Router Discovery): <https://www.rfc-editor.org/rfc/rfc1256>
+//! - RFC 1122, Section 3.2.2.1 (Destination Unreachable codes 6-12): <https://www.rfc-editor.org/rfc/rfc1122#section-3.2.2.1>
+//! - RFC 1812, Section 5.2.7.1 (Destination Unreachable codes 13-15): <https://www.rfc-editor.org/rfc/rfc1812#section-5.2.7.1>
 //! - RFC 2521 (ICMP Security Failures / Photuris): <https://www.rfc-editor.org/rfc/rfc2521>
 //! - RFC 4065 (Seamoby Experimental Mobility): <https://www.rfc-editor.org/rfc/rfc4065>
 //! - RFC 4884 (Extended ICMP — adds Length at offset 5 for Types 3/11/12): <https://www.rfc-editor.org/rfc/rfc4884>
@@ -89,15 +91,69 @@ static REFERENCES: &[SpecReference] = &[
     ),
 ];
 
-/// Returns a human-readable name for well-known ICMP type values.
+/// Returns a human-readable name for ICMP type values.
+///
+/// Names follow the IANA "ICMP Type Numbers" registry.
+/// <https://www.iana.org/assignments/icmp-parameters>
 fn icmp_type_name(v: u8) -> Option<&'static str> {
     match v {
         0 => Some("Echo Reply"),
         3 => Some("Destination Unreachable"),
+        4 => Some("Source Quench (Deprecated)"),
         5 => Some("Redirect"),
         8 => Some("Echo Request"),
+        9 => Some("Router Advertisement"),
+        10 => Some("Router Solicitation"),
         11 => Some("Time Exceeded"),
         12 => Some("Parameter Problem"),
+        13 => Some("Timestamp"),
+        14 => Some("Timestamp Reply"),
+        15 => Some("Information Request (Deprecated)"),
+        16 => Some("Information Reply (Deprecated)"),
+        17 => Some("Address Mask Request (Deprecated)"),
+        18 => Some("Address Mask Reply (Deprecated)"),
+        40 => Some("Photuris"),
+        41 => Some("ICMP messages utilized by experimental mobility protocols such as Seamoby"),
+        42 => Some("Extended Echo Request"),
+        43 => Some("Extended Echo Reply"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for an ICMP code of the given type.
+///
+/// Names follow the IANA "Code Fields" registry for Types 3, 5, 11 and 12
+/// (RFC 792; RFC 1122, Section 3.2.2.1; RFC 1812, Section 5.2.7.1;
+/// RFC 1108).
+/// <https://www.iana.org/assignments/icmp-parameters>
+/// <https://www.rfc-editor.org/rfc/rfc1812#section-5.2.7.1>
+fn icmp_code_name(icmp_type: u8, code: u8) -> Option<&'static str> {
+    match (icmp_type, code) {
+        (3, 0) => Some("Net Unreachable"),
+        (3, 1) => Some("Host Unreachable"),
+        (3, 2) => Some("Protocol Unreachable"),
+        (3, 3) => Some("Port Unreachable"),
+        (3, 4) => Some("Fragmentation Needed and Don't Fragment was Set"),
+        (3, 5) => Some("Source Route Failed"),
+        (3, 6) => Some("Destination Network Unknown"),
+        (3, 7) => Some("Destination Host Unknown"),
+        (3, 8) => Some("Source Host Isolated"),
+        (3, 9) => Some("Communication with Destination Network is Administratively Prohibited"),
+        (3, 10) => Some("Communication with Destination Host is Administratively Prohibited"),
+        (3, 11) => Some("Destination Network Unreachable for Type of Service"),
+        (3, 12) => Some("Destination Host Unreachable for Type of Service"),
+        (3, 13) => Some("Communication Administratively Prohibited"),
+        (3, 14) => Some("Host Precedence Violation"),
+        (3, 15) => Some("Precedence cutoff in effect"),
+        (5, 0) => Some("Redirect Datagram for the Network (or subnet)"),
+        (5, 1) => Some("Redirect Datagram for the Host"),
+        (5, 2) => Some("Redirect Datagram for the Type of Service and Network"),
+        (5, 3) => Some("Redirect Datagram for the Type of Service and Host"),
+        (11, 0) => Some("Time to Live exceeded in Transit"),
+        (11, 1) => Some("Fragment Reassembly Time Exceeded"),
+        (12, 0) => Some("Pointer indicates the error"),
+        (12, 1) => Some("Missing a Required Option"),
+        (12, 2) => Some("Bad Length"),
         _ => None,
     }
 }
@@ -187,7 +243,21 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         }),
         format_fn: None,
     },
-    FieldDescriptor::new("code", "Code", FieldType::U8),
+    FieldDescriptor {
+        name: "code",
+        display_name: "Code",
+        field_type: FieldType::U8,
+        optional: false,
+        children: None,
+        display_fn: Some(|v, siblings| match v {
+            FieldValue::U8(c) => siblings.iter().find_map(|f| match (f.name(), &f.value) {
+                ("type", FieldValue::U8(t)) => icmp_code_name(*t, *c),
+                _ => None,
+            }),
+            _ => None,
+        }),
+        format_fn: None,
+    },
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
     FieldDescriptor::new("identifier", "Identifier", FieldType::U16).optional(),
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U16).optional(),
@@ -837,6 +907,11 @@ mod tests {
     //! | RFC 8335 §2.1 Interface ID         | Class 3 C-Type 3 (by IPv4 Address)     | parse_extension_interface_id_class3_by_address_ipv4 |
     //! | RFC 8335 §2.1 Interface ID         | Class 3 C-Type 3 (by IPv6 Address)     | parse_extension_interface_id_class3_by_address_ipv6 |
     //! | RFC 8335 §2 + RFC 4884             | Type 42 body IS Extension Structure    | parse_extended_echo_request_with_interface_id_extension |
+    //! | IANA ICMP Type Numbers             | Names for every parsed type            | icmp_type_names                                |
+    //! | RFC 792 / RFC 1122 / RFC 1812      | Destination Unreachable code names     | icmp_code_names_destination_unreachable        |
+    //! | RFC 792                            | Redirect / Time Exceeded code names    | icmp_code_names_redirect_time_exceeded         |
+    //! | RFC 792 / RFC 1108                 | Parameter Problem code names           | icmp_code_names_parameter_problem              |
+    //! | —                                  | Unknown code has no name               | icmp_code_name_unknown                         |
 
     use super::*;
 
@@ -1878,5 +1953,93 @@ mod tests {
             assert!(r.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
+    }
+
+    fn code_name_of(icmp_type: u8, code: u8) -> Option<&'static str> {
+        let mut pkt = vec![icmp_type, code, 0, 0, 0, 0, 0, 0];
+        pkt.resize(20, 0);
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        buf.resolve_display_name(layer, "code_name")
+    }
+
+    #[test]
+    fn icmp_type_names() {
+        // IANA "ICMP Type Numbers" registry.
+        let cases: &[(u8, &str)] = &[
+            (4, "Source Quench (Deprecated)"),
+            (9, "Router Advertisement"),
+            (10, "Router Solicitation"),
+            (13, "Timestamp"),
+            (14, "Timestamp Reply"),
+            (15, "Information Request (Deprecated)"),
+            (16, "Information Reply (Deprecated)"),
+            (17, "Address Mask Request (Deprecated)"),
+            (18, "Address Mask Reply (Deprecated)"),
+            (40, "Photuris"),
+            (
+                41,
+                "ICMP messages utilized by experimental mobility protocols such as Seamoby",
+            ),
+            (42, "Extended Echo Request"),
+            (43, "Extended Echo Reply"),
+        ];
+        for &(t, name) in cases {
+            let mut pkt = vec![t, 0, 0, 0, 0, 0, 0, 0];
+            pkt.resize(20, 0);
+            let mut buf = DissectBuffer::new();
+            IcmpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert_eq!(
+                buf.resolve_display_name(layer, "type_name"),
+                Some(name),
+                "type {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn icmp_code_names_destination_unreachable() {
+        // RFC 792 (codes 0-5), RFC 1122 Section 3.2.2.1 (6-12), RFC 1812
+        // Section 5.2.7.1 (13-15).
+        assert_eq!(code_name_of(3, 0), Some("Net Unreachable"));
+        assert_eq!(code_name_of(3, 3), Some("Port Unreachable"));
+        assert_eq!(
+            code_name_of(3, 4),
+            Some("Fragmentation Needed and Don't Fragment was Set")
+        );
+        assert_eq!(code_name_of(3, 7), Some("Destination Host Unknown"));
+        assert_eq!(
+            code_name_of(3, 13),
+            Some("Communication Administratively Prohibited")
+        );
+        assert_eq!(code_name_of(3, 15), Some("Precedence cutoff in effect"));
+    }
+
+    #[test]
+    fn icmp_code_names_redirect_time_exceeded() {
+        assert_eq!(code_name_of(5, 1), Some("Redirect Datagram for the Host"));
+        assert_eq!(
+            code_name_of(11, 0),
+            Some("Time to Live exceeded in Transit")
+        );
+        assert_eq!(
+            code_name_of(11, 1),
+            Some("Fragment Reassembly Time Exceeded")
+        );
+    }
+
+    #[test]
+    fn icmp_code_names_parameter_problem() {
+        assert_eq!(code_name_of(12, 0), Some("Pointer indicates the error"));
+        assert_eq!(code_name_of(12, 1), Some("Missing a Required Option"));
+        assert_eq!(code_name_of(12, 2), Some("Bad Length"));
+    }
+
+    #[test]
+    fn icmp_code_name_unknown() {
+        assert_eq!(code_name_of(3, 16), None);
+        assert_eq!(code_name_of(0, 0), None);
     }
 }

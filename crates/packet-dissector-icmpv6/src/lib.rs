@@ -124,7 +124,7 @@ fn icmpv6_type_name(v: u8) -> Option<&'static str> {
         147 => Some("Mobile Prefix Advertisement"),
         148 => Some("Certification Path Solicitation Message"),
         149 => Some("Certification Path Advertisement Message"),
-        150 => Some("Experimental Mobility Protocols"),
+        150 => Some("ICMP messages utilized by experimental mobility protocols such as Seamoby"),
         151 => Some("Multicast Router Advertisement"),
         152 => Some("Multicast Router Solicitation"),
         153 => Some("Multicast Router Termination"),
