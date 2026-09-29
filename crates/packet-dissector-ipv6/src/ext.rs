@@ -17,6 +17,16 @@
 //!   <https://www.rfc-editor.org/rfc/rfc9673>
 //! - RFC 6275, Section 6.1: Mobility Header:
 //!   <https://www.rfc-editor.org/rfc/rfc6275#section-6.1>
+//! - RFC 6275, Section 6.4: Type 2 Routing Header:
+//!   <https://www.rfc-editor.org/rfc/rfc6275#section-6.4>
+//! - RFC 2460, Section 4.4 (Type 0 Routing Header layout):
+//!   <https://www.rfc-editor.org/rfc/rfc2460#section-4.4>
+//! - RFC 5095 (deprecates Type 0 Routing Headers):
+//!   <https://www.rfc-editor.org/rfc/rfc5095>
+//! - RFC 6554, Section 3: RPL Source Route Header (Routing Type 3):
+//!   <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+//! - Option and mobility message decoders: see the `options` and
+//!   `mobility` modules.
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -26,33 +36,145 @@ use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
-/// Specification references for [`HopByHopDissector`].
-static HOP_BY_HOP_REFERENCES: &[SpecReference] = &[
+/// Option specifications shared by the Hop-by-Hop and Destination Options
+/// headers (see the `options` module).
+const OPTION_REFERENCES: [SpecReference; 11] = [
     SpecReference::new(
-        "RFC 8200",
-        "Internet Protocol, Version 6 (IPv6) Specification",
-        "https://www.rfc-editor.org/rfc/rfc8200#section-4.3",
+        "RFC 2711",
+        "IPv6 Router Alert Option",
+        "https://www.rfc-editor.org/rfc/rfc2711",
     ),
     SpecReference::new(
-        "RFC 9673",
-        "IPv6 Hop-by-Hop Options Processing Procedures",
-        "https://www.rfc-editor.org/rfc/rfc9673",
+        "RFC 2675",
+        "IPv6 Jumbograms",
+        "https://www.rfc-editor.org/rfc/rfc2675",
+    ),
+    SpecReference::new(
+        "RFC 2473",
+        "Generic Packet Tunneling in IPv6 Specification",
+        "https://www.rfc-editor.org/rfc/rfc2473",
+    ),
+    SpecReference::new(
+        "RFC 6275",
+        "Mobility Support in IPv6",
+        "https://www.rfc-editor.org/rfc/rfc6275#section-6.3",
+    ),
+    SpecReference::new(
+        "RFC 5570",
+        "Common Architecture Label IPv6 Security Option (CALIPSO)",
+        "https://www.rfc-editor.org/rfc/rfc5570",
+    ),
+    SpecReference::new(
+        "RFC 6553",
+        "The Routing Protocol for Low-Power and Lossy Networks (RPL) Option for Carrying RPL Information in Data-Plane Datagrams",
+        "https://www.rfc-editor.org/rfc/rfc6553",
+    ),
+    SpecReference::new(
+        "RFC 9008",
+        "Using RPI Option Type, Routing Header for Source Routes, and IPv6-in-IPv6 Encapsulation in the RPL Data Plane",
+        "https://www.rfc-editor.org/rfc/rfc9008",
+    ),
+    SpecReference::new(
+        "RFC 7731",
+        "Multicast Protocol for Low-Power and Lossy Networks (MPL)",
+        "https://www.rfc-editor.org/rfc/rfc7731",
+    ),
+    SpecReference::new(
+        "RFC 9486",
+        "IPv6 Options for In Situ Operations, Administration, and Maintenance (IOAM)",
+        "https://www.rfc-editor.org/rfc/rfc9486",
+    ),
+    SpecReference::new(
+        "RFC 8250",
+        "IPv6 Performance and Diagnostic Metrics (PDM) Destination Option",
+        "https://www.rfc-editor.org/rfc/rfc8250",
+    ),
+    SpecReference::new(
+        "RFC 4782",
+        "Quick-Start for TCP and IP",
+        "https://www.rfc-editor.org/rfc/rfc4782",
     ),
 ];
 
+/// Specification references for [`HopByHopDissector`].
+static HOP_BY_HOP_REFERENCES: &[SpecReference] = &{
+    let [a, b, c, d, e, f, g, h, i, j, k] = OPTION_REFERENCES;
+    [
+        SpecReference::new(
+            "RFC 8200",
+            "Internet Protocol, Version 6 (IPv6) Specification",
+            "https://www.rfc-editor.org/rfc/rfc8200#section-4.3",
+        ),
+        SpecReference::new(
+            "RFC 9673",
+            "IPv6 Hop-by-Hop Options Processing Procedures",
+            "https://www.rfc-editor.org/rfc/rfc9673",
+        ),
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+        g,
+        h,
+        i,
+        j,
+        k,
+    ]
+};
+
 /// Specification references for [`DestinationOptionsDissector`].
-static DESTINATION_OPTIONS_REFERENCES: &[SpecReference] = &[SpecReference::new(
-    "RFC 8200",
-    "Internet Protocol, Version 6 (IPv6) Specification",
-    "https://www.rfc-editor.org/rfc/rfc8200#section-4.6",
-)];
+static DESTINATION_OPTIONS_REFERENCES: &[SpecReference] = &{
+    let [a, b, c, d, e, f, g, h, i, j, k] = OPTION_REFERENCES;
+    [
+        SpecReference::new(
+            "RFC 8200",
+            "Internet Protocol, Version 6 (IPv6) Specification",
+            "https://www.rfc-editor.org/rfc/rfc8200#section-4.6",
+        ),
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+        g,
+        h,
+        i,
+        j,
+        k,
+    ]
+};
 
 /// Specification references for [`RoutingDissector`] and [`GenericRoutingDissector`].
-static ROUTING_REFERENCES: &[SpecReference] = &[SpecReference::new(
-    "RFC 8200",
-    "Internet Protocol, Version 6 (IPv6) Specification",
-    "https://www.rfc-editor.org/rfc/rfc8200#section-4.4",
-)];
+static ROUTING_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 8200",
+        "Internet Protocol, Version 6 (IPv6) Specification",
+        "https://www.rfc-editor.org/rfc/rfc8200#section-4.4",
+    ),
+    SpecReference::new(
+        "RFC 2460",
+        "Internet Protocol, Version 6 (IPv6) Specification",
+        "https://www.rfc-editor.org/rfc/rfc2460#section-4.4",
+    ),
+    SpecReference::new(
+        "RFC 5095",
+        "Deprecation of Type 0 Routing Headers in IPv6",
+        "https://www.rfc-editor.org/rfc/rfc5095",
+    ),
+    SpecReference::new(
+        "RFC 6275",
+        "Mobility Support in IPv6",
+        "https://www.rfc-editor.org/rfc/rfc6275#section-6.4",
+    ),
+    SpecReference::new(
+        "RFC 6554",
+        "An IPv6 Routing Header for Source Routes with the Routing Protocol for Low-Power and Lossy Networks (RPL)",
+        "https://www.rfc-editor.org/rfc/rfc6554",
+    ),
+];
 
 /// Specification references for [`FragmentDissector`].
 static FRAGMENT_REFERENCES: &[SpecReference] = &[SpecReference::new(
@@ -114,7 +236,9 @@ static TLV_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("hdr_ext_len", "Header Extension Length", FieldType::U8),
     // RFC 8200, Section 4.2 — Options (TLV-encoded, variable length)
     // <https://www.rfc-editor.org/rfc/rfc8200#section-4.2>
-    FieldDescriptor::new("options", "Options", FieldType::Bytes).optional(),
+    FieldDescriptor::new("options", "Options", FieldType::Array)
+        .optional()
+        .with_children(crate::options::OPTION_CHILDREN),
 ];
 
 impl Dissector for HopByHopDissector {
@@ -144,7 +268,7 @@ impl Dissector for HopByHopDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        dissect_tlv_ext_header(data, buf, offset, "IPv6 Hop-by-Hop")
+        dissect_tlv_ext_header(data, buf, offset, "IPv6 Hop-by-Hop", true)
     }
 }
 
@@ -184,7 +308,7 @@ impl Dissector for DestinationOptionsDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        dissect_tlv_ext_header(data, buf, offset, "IPv6 Destination Options")
+        dissect_tlv_ext_header(data, buf, offset, "IPv6 Destination Options", false)
     }
 }
 
@@ -197,11 +321,15 @@ impl Dissector for DestinationOptionsDissector {
 ///
 /// <https://www.rfc-editor.org/rfc/rfc8200#section-4.3>
 /// <https://www.rfc-editor.org/rfc/rfc8200#section-4.6>
+///
+/// `hop_by_hop` selects whether a Jumbo Payload option bounds the payload
+/// (RFC 2675 defines it for the Hop-by-Hop Options header only).
 fn dissect_tlv_ext_header<'pkt>(
     data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
     name: &'static str,
+    hop_by_hop: bool,
 ) -> Result<DissectResult, PacketError> {
     if data.len() < TLV_HEADER_MIN {
         return Err(PacketError::Truncated {
@@ -243,20 +371,40 @@ fn dissect_tlv_ext_header<'pkt>(
 
     // RFC 8200, Section 4.2 — Options are TLV-encoded after the 2-byte fixed header
     // <https://www.rfc-editor.org/rfc/rfc8200#section-4.2>
-    if total_len > TLV_HEADER_MIN {
-        buf.push_field(
-            &TLV_FIELD_DESCRIPTORS[2],
-            FieldValue::Bytes(&data[TLV_HEADER_MIN..total_len]),
-            offset + TLV_HEADER_MIN..offset + total_len,
-        );
-    }
+    // The Options area is at least 6 octets because the header is a
+    // multiple of 8 octets.
+    let idx = buf.begin_container(
+        &TLV_FIELD_DESCRIPTORS[2],
+        FieldValue::Array(0..0),
+        offset + TLV_HEADER_MIN..offset + total_len,
+    );
+    let jumbo = crate::options::push_options(
+        buf,
+        &data[TLV_HEADER_MIN..total_len],
+        offset + TLV_HEADER_MIN,
+    );
+    buf.end_container(idx);
 
     buf.end_layer();
 
-    Ok(DissectResult::new(
-        total_len,
-        DispatchHint::ByIpProtocol(next_header),
-    ))
+    let result = DissectResult::new(total_len, DispatchHint::ByIpProtocol(next_header));
+
+    // RFC 2675, Section 2 — Jumbo Payload Length is the "Length of the IPv6
+    // packet in octets, excluding the IPv6 header but including the
+    // Hop-by-Hop Options header and any other extension headers present.
+    // Must be greater than 65,535." The payload after this header therefore
+    // ends that many octets after the start of this header. A value of
+    // 65,535 or less is invalid and is not used as a bound; a valid one is
+    // larger than any non-zero IPv6 Payload Length, and the dispatch loop
+    // never widens an earlier bound, so it cannot shrink a packet whose
+    // IPv6 header already gives the length.
+    // <https://www.rfc-editor.org/rfc/rfc2675#section-2>
+    match jumbo {
+        Some(len) if hop_by_hop && len > u32::from(u16::MAX) => {
+            Ok(result.with_payload_len((len as usize).saturating_sub(total_len)))
+        }
+        _ => Ok(result),
+    }
 }
 
 // --- Routing Header (Section 4.4) ---
@@ -327,13 +475,59 @@ impl Dissector for RoutingDissector {
     }
 }
 
-/// Generic Routing Header dissector (fallback for unrecognised Routing Types).
+/// Generic Routing Header dissector (fallback for Routing Types without a
+/// dedicated dissector).
 ///
 /// RFC 8200, Section 4.4: <https://www.rfc-editor.org/rfc/rfc8200#section-4.4>
 ///
-/// Parses the common Routing Header fields and stores type-specific data as
-/// raw bytes. Registered as the routing fallback in `DissectorRegistry`.
+/// Parses the common Routing Header fields. The type-specific data of
+/// Type 0 (RFC 2460 Section 4.4, deprecated by RFC 5095), Type 2 (RFC 6275
+/// Section 6.4) and Type 3 (RFC 6554 Section 3) is decoded; other types keep
+/// it as raw bytes. Registered as the routing fallback in
+/// `DissectorRegistry`.
 pub struct GenericRoutingDissector;
+
+/// Returns the name of an IPv6 Routing Type.
+///
+/// Names follow the IANA "Routing Types" registry
+/// (<https://www.iana.org/assignments/ipv6-parameters>).
+fn routing_type_name(t: u8) -> Option<&'static str> {
+    match t {
+        // RFC 5095 — deprecates Type 0.
+        // <https://www.rfc-editor.org/rfc/rfc5095>
+        ROUTING_TYPE_0 => Some("Source Route (deprecated)"),
+        // RFC 6275, Section 6.4
+        // <https://www.rfc-editor.org/rfc/rfc6275#section-6.4>
+        ROUTING_TYPE_2 => Some("Type 2 Routing Header"),
+        // RFC 6554, Section 3
+        // <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+        ROUTING_TYPE_RPL => Some("RPL Source Route Header"),
+        // RFC 8754, Section 2
+        // <https://www.rfc-editor.org/rfc/rfc8754#section-2>
+        4 => Some("Segment Routing Header"),
+        _ => None,
+    }
+}
+
+/// RFC 5095 — Type 0 Routing Header (deprecated). Layout from RFC 2460,
+/// Section 4.4: <https://www.rfc-editor.org/rfc/rfc2460#section-4.4>
+const ROUTING_TYPE_0: u8 = 0;
+/// RFC 6275, Section 6.4 — Type 2 Routing Header.
+/// <https://www.rfc-editor.org/rfc/rfc6275#section-6.4>
+const ROUTING_TYPE_2: u8 = 2;
+/// RFC 6554, Section 3 — RPL Source Route Header.
+/// <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+const ROUTING_TYPE_RPL: u8 = 3;
+
+/// Field descriptor indices for [`GENERIC_ROUTING_DESCRIPTORS`].
+const RT_FD_DATA: usize = 4;
+const RT_FD_RESERVED: usize = 5;
+const RT_FD_ADDRESSES: usize = 6;
+const RT_FD_HOME_ADDRESS: usize = 7;
+const RT_FD_CMPR_I: usize = 8;
+const RT_FD_CMPR_E: usize = 9;
+const RT_FD_PAD: usize = 10;
+const RT_FD_COMPRESSED_ADDRESSES: usize = 11;
 
 static GENERIC_ROUTING_DESCRIPTORS: &[FieldDescriptor] = &[
     // RFC 8200, Section 4.4 — Next Header (8-bit IANA Protocol Number)
@@ -341,14 +535,191 @@ static GENERIC_ROUTING_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("next_header", "Next Header", FieldType::U8),
     // RFC 8200, Section 4.4 — Hdr Ext Len (length in 8-octet units,
     // excluding the first 8 octets)
+    // <https://www.rfc-editor.org/rfc/rfc8200#section-4.4>
     FieldDescriptor::new("hdr_ext_len", "Header Extension Length", FieldType::U8),
     // RFC 8200, Section 4.4 — Routing Type (8-bit variant selector)
-    FieldDescriptor::new("routing_type", "Routing Type", FieldType::U8),
+    // <https://www.rfc-editor.org/rfc/rfc8200#section-4.4>
+    FieldDescriptor::new("routing_type", "Routing Type", FieldType::U8).with_display_fn(|v, _| {
+        match v {
+            FieldValue::U8(t) => routing_type_name(*t),
+            _ => None,
+        }
+    }),
     // RFC 8200, Section 4.4 — Segments Left (8-bit unsigned)
+    // <https://www.rfc-editor.org/rfc/rfc8200#section-4.4>
     FieldDescriptor::new("segments_left", "Segments Left", FieldType::U8),
-    // RFC 8200, Section 4.4 — type-specific data (variable length)
+    // RFC 8200, Section 4.4 — type-specific data (variable length), kept raw
+    // for Routing Types without a decoder here
+    // <https://www.rfc-editor.org/rfc/rfc8200#section-4.4>
     FieldDescriptor::new("data", "Type-Specific Data", FieldType::Bytes).optional(),
+    // RFC 2460, Section 4.4 (Type 0) / RFC 6275, Section 6.4 (Type 2) —
+    // 32-bit Reserved; RFC 6554, Section 3 (Type 3) — 20-bit Reserved
+    // <https://www.rfc-editor.org/rfc/rfc2460#section-4.4>
+    FieldDescriptor::new("reserved", "Reserved", FieldType::U32).optional(),
+    // RFC 2460, Section 4.4 (Type 0) — Address[1..n], 128 bits each
+    // <https://www.rfc-editor.org/rfc/rfc2460#section-4.4>
+    FieldDescriptor::new("addresses", "Addresses", FieldType::Array).optional(),
+    // RFC 6275, Section 6.4 — Home Address
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-6.4>
+    FieldDescriptor::new("home_address", "Home Address", FieldType::Ipv6Addr).optional(),
+    // RFC 6554, Section 3 — CmprI, CmprE, Pad (4 bits each)
+    // <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+    FieldDescriptor::new("cmpr_i", "CmprI", FieldType::U8).optional(),
+    FieldDescriptor::new("cmpr_e", "CmprE", FieldType::U8).optional(),
+    FieldDescriptor::new("pad", "Pad", FieldType::U8).optional(),
+    // RFC 6554, Section 3 — Addresses[1..n] with the elided prefix octets
+    // left out (16 - CmprI or 16 - CmprE octets each)
+    // <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+    FieldDescriptor::new(
+        "compressed_addresses",
+        "Compressed Addresses",
+        FieldType::Array,
+    )
+    .optional(),
 ];
+
+/// Push the type-specific data of Routing Types 0, 2 and 3.
+///
+/// `body` is the Routing header after the 4 fixed octets and `offset` its
+/// absolute position. Returns `false` when the Routing Type has no decoder
+/// or the body does not match its layout, in which case the caller keeps
+/// the body as raw `data`.
+fn push_routing_body<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    routing_type: u8,
+    body: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    match routing_type {
+        // RFC 2460, Section 4.4 — Type 0: 32-bit Reserved, then
+        // Address[1..n], each 128 bits. Deprecated by RFC 5095.
+        // <https://www.rfc-editor.org/rfc/rfc2460#section-4.4>
+        // <https://www.rfc-editor.org/rfc/rfc5095>
+        ROUTING_TYPE_0 if (body.len() - 4) % 16 == 0 => {
+            push_reserved(buf, &body[..4], offset);
+            let addrs = &body[4..];
+            let idx = buf.begin_container(
+                &GENERIC_ROUTING_DESCRIPTORS[RT_FD_ADDRESSES],
+                FieldValue::Array(0..0),
+                offset + 4..offset + body.len(),
+            );
+            for (i, a) in addrs.chunks_exact(16).enumerate() {
+                let mut addr = [0u8; 16];
+                addr.copy_from_slice(a);
+                let start = offset + 4 + i * 16;
+                buf.push_field(
+                    &GENERIC_ROUTING_DESCRIPTORS[RT_FD_ADDRESSES],
+                    FieldValue::Ipv6Addr(addr),
+                    start..start + 16,
+                );
+            }
+            buf.end_container(idx);
+            true
+        }
+        // RFC 6275, Section 6.4 — "For a type 2 routing header, the Hdr Ext
+        // Len MUST be 2." Reserved (32 bits) and one Home Address.
+        // <https://www.rfc-editor.org/rfc/rfc6275#section-6.4>
+        ROUTING_TYPE_2 if body.len() == 20 => {
+            push_reserved(buf, &body[..4], offset);
+            let mut addr = [0u8; 16];
+            addr.copy_from_slice(&body[4..20]);
+            buf.push_field(
+                &GENERIC_ROUTING_DESCRIPTORS[RT_FD_HOME_ADDRESS],
+                FieldValue::Ipv6Addr(addr),
+                offset + 4..offset + 20,
+            );
+            true
+        }
+        ROUTING_TYPE_RPL => push_rpl_source_route(buf, body, offset),
+        _ => false,
+    }
+}
+
+fn push_reserved(buf: &mut DissectBuffer<'_>, b: &[u8], offset: usize) {
+    buf.push_field(
+        &GENERIC_ROUTING_DESCRIPTORS[RT_FD_RESERVED],
+        FieldValue::U32(u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
+        offset..offset + 4,
+    );
+}
+
+/// Push the RPL Source Route Header (Routing Type 3) data.
+///
+/// RFC 6554, Section 3 — CmprI (4 bits), CmprE (4 bits), Pad (4 bits),
+/// Reserved (20 bits), then Addresses[1..n]: "Each vector element in
+/// [1..n-1] has size (16 - CmprI) and element [n] has size (16-CmprE)."
+/// "The Pad field indicates the number of unused octets that are used for
+/// padding."
+/// <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+///
+/// The elided prefix octets come from the IPv6 Destination Address, which
+/// this dissector does not see, so each address is pushed as the octets
+/// carried in the header.
+fn push_rpl_source_route<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    body: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    let cmpr_i = body[0] >> 4;
+    let cmpr_e = body[0] & 0x0F;
+    let pad = body[1] >> 4;
+    let size_i = 16 - cmpr_i as usize;
+    let size_e = 16 - cmpr_e as usize;
+    // Octets after the 8-octet fixed part (Hdr Ext Len * 8).
+    let area = body.len() - 4;
+    // RFC 6554, Section 3 — n = (((Hdr Ext Len * 8) - Pad - (16 - CmprE))
+    // / (16 - CmprI)) + 1.
+    // <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+    let Some(rest) = area.checked_sub(pad as usize + size_e) else {
+        return false;
+    };
+    if rest % size_i != 0 {
+        return false;
+    }
+    let reserved = u32::from_be_bytes([0, body[1] & 0x0F, body[2], body[3]]);
+    buf.push_field(
+        &GENERIC_ROUTING_DESCRIPTORS[RT_FD_CMPR_I],
+        FieldValue::U8(cmpr_i),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &GENERIC_ROUTING_DESCRIPTORS[RT_FD_CMPR_E],
+        FieldValue::U8(cmpr_e),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &GENERIC_ROUTING_DESCRIPTORS[RT_FD_PAD],
+        FieldValue::U8(pad),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &GENERIC_ROUTING_DESCRIPTORS[RT_FD_RESERVED],
+        FieldValue::U32(reserved),
+        offset + 1..offset + 4,
+    );
+    let addrs_len = rest + size_e;
+    let idx = buf.begin_container(
+        &GENERIC_ROUTING_DESCRIPTORS[RT_FD_COMPRESSED_ADDRESSES],
+        FieldValue::Array(0..0),
+        offset + 4..offset + 4 + addrs_len,
+    );
+    let mut pos = 4;
+    for _ in 0..rest / size_i {
+        buf.push_field(
+            &GENERIC_ROUTING_DESCRIPTORS[RT_FD_COMPRESSED_ADDRESSES],
+            FieldValue::Bytes(&body[pos..pos + size_i]),
+            offset + pos..offset + pos + size_i,
+        );
+        pos += size_i;
+    }
+    buf.push_field(
+        &GENERIC_ROUTING_DESCRIPTORS[RT_FD_COMPRESSED_ADDRESSES],
+        FieldValue::Bytes(&body[pos..pos + size_e]),
+        offset + pos..offset + pos + size_e,
+    );
+    buf.end_container(idx);
+    true
+}
 
 impl Dissector for GenericRoutingDissector {
     fn name(&self) -> &'static str {
@@ -430,12 +801,15 @@ impl Dissector for GenericRoutingDissector {
             offset + 3..offset + 4,
         );
 
-        // Type-specific data after the 4 fixed bytes
-        if total_len > ROUTING_FIXED_SIZE {
+        // Type-specific data after the 4 fixed bytes (always at least 4
+        // octets because the header is a multiple of 8 octets).
+        let body = &data[ROUTING_FIXED_SIZE..total_len];
+        let body_offset = offset + ROUTING_FIXED_SIZE;
+        if !push_routing_body(buf, routing_type, body, body_offset) {
             buf.push_field(
-                &GENERIC_ROUTING_DESCRIPTORS[4],
-                FieldValue::Bytes(&data[ROUTING_FIXED_SIZE..total_len]),
-                offset + ROUTING_FIXED_SIZE..offset + total_len,
+                &GENERIC_ROUTING_DESCRIPTORS[RT_FD_DATA],
+                FieldValue::Bytes(body),
+                body_offset..offset + total_len,
             );
         }
 
@@ -595,8 +969,18 @@ const MH_FD_MH_TYPE: usize = 2;
 const MH_FD_RESERVED: usize = 3;
 const MH_FD_CHECKSUM: usize = 4;
 const MH_FD_MESSAGE_DATA: usize = 5;
+pub(crate) const MH_FD_SEQUENCE_NUMBER: usize = 6;
+pub(crate) const MH_FD_FLAGS: usize = 7;
+pub(crate) const MH_FD_LIFETIME: usize = 8;
+pub(crate) const MH_FD_STATUS: usize = 9;
+pub(crate) const MH_FD_ACK_FLAGS: usize = 10;
+pub(crate) const MH_FD_HOME_ADDRESS: usize = 11;
+pub(crate) const MH_FD_NONCE_INDEX: usize = 12;
+pub(crate) const MH_FD_INIT_COOKIE: usize = 13;
+pub(crate) const MH_FD_KEYGEN_TOKEN: usize = 14;
+pub(crate) const MH_FD_MOBILITY_OPTIONS: usize = 15;
 
-static MOBILITY_DESCRIPTORS: &[FieldDescriptor] = &[
+pub(crate) static MOBILITY_DESCRIPTORS: &[FieldDescriptor] = &[
     // RFC 6275, Section 6.1.1 — Payload Proto (8-bit IANA Protocol Number)
     // <https://www.rfc-editor.org/rfc/rfc6275#section-6.1.1>
     FieldDescriptor::new("payload_proto", "Payload Protocol", FieldType::U8),
@@ -604,14 +988,46 @@ static MOBILITY_DESCRIPTORS: &[FieldDescriptor] = &[
     // excluding the first 8 octets)
     FieldDescriptor::new("header_len", "Header Length", FieldType::U8),
     // RFC 6275, Section 6.1.1 — MH Type (8-bit mobility message selector)
-    FieldDescriptor::new("mh_type", "MH Type", FieldType::U8),
+    FieldDescriptor::new("mh_type", "MH Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => crate::mobility::mh_type_name(*t),
+        _ => None,
+    }),
     // RFC 6275, Section 6.1.1 — Reserved (8-bit, zero on transmission,
     // ignored on reception). Exposed for dissection fidelity.
     FieldDescriptor::new("reserved", "Reserved", FieldType::U8),
     // RFC 6275, Section 6.1.1 — Checksum (16-bit one's complement)
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
-    // RFC 6275, Section 6.1.1 — Message Data (variable length)
+    // RFC 6275, Section 6.1.1 — Message Data (variable length), kept raw for
+    // MH Types without a decoder here
     FieldDescriptor::new("message_data", "Message Data", FieldType::Bytes).optional(),
+    // RFC 6275, Sections 6.1.7 / 6.1.8 — Sequence # (16 bits)
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-6.1.7>
+    FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U16).optional(),
+    // RFC 6275, Section 6.1.7 — A|H|L|K|Reserved (16 bits)
+    FieldDescriptor::new("flags", "Flags", FieldType::U16).optional(),
+    // RFC 6275, Sections 6.1.7 / 6.1.8 — Lifetime (16 bits, 4-second units)
+    FieldDescriptor::new("lifetime", "Lifetime", FieldType::U16).optional(),
+    // RFC 6275, Sections 6.1.8 / 6.1.9 — Status (8 bits)
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-6.1.8>
+    FieldDescriptor::new("status", "Status", FieldType::U8).optional(),
+    // RFC 6275, Section 6.1.8 — K|Reserved (8 bits)
+    FieldDescriptor::new("ack_flags", "Flags", FieldType::U8).optional(),
+    // RFC 6275, Section 6.1.9 — Home Address
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-6.1.9>
+    FieldDescriptor::new("home_address", "Home Address", FieldType::Ipv6Addr).optional(),
+    // RFC 6275, Sections 6.1.5 / 6.1.6 — Home / Care-of Nonce Index
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-6.1.5>
+    FieldDescriptor::new("nonce_index", "Nonce Index", FieldType::U16).optional(),
+    // RFC 6275, Sections 6.1.3-6.1.6 — Home / Care-of Init Cookie (64 bits)
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-6.1.3>
+    FieldDescriptor::new("init_cookie", "Init Cookie", FieldType::Bytes).optional(),
+    // RFC 6275, Sections 6.1.5 / 6.1.6 — Home / Care-of Keygen Token (64 bits)
+    FieldDescriptor::new("keygen_token", "Keygen Token", FieldType::Bytes).optional(),
+    // RFC 6275, Section 6.2 — Mobility Options
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-6.2>
+    FieldDescriptor::new("mobility_options", "Mobility Options", FieldType::Array)
+        .optional()
+        .with_children(crate::mobility::MOBILITY_OPTION_CHILDREN),
 ];
 
 /// Byte offset where Mobility Header message data begins
@@ -706,11 +1122,13 @@ impl Dissector for MobilityDissector {
 
         // RFC 6275, Section 6.1.1 — Message Data follows the 6-byte fixed fields
         // <https://www.rfc-editor.org/rfc/rfc6275#section-6.1.1>
-        if total_len > MH_MESSAGE_DATA_OFFSET {
+        let body = &data[MH_MESSAGE_DATA_OFFSET..total_len];
+        let body_offset = offset + MH_MESSAGE_DATA_OFFSET;
+        if !crate::mobility::push_message(buf, mh_type, body, body_offset) {
             buf.push_field(
                 &MOBILITY_DESCRIPTORS[MH_FD_MESSAGE_DATA],
-                FieldValue::Bytes(&data[MH_MESSAGE_DATA_OFFSET..total_len]),
-                offset + MH_MESSAGE_DATA_OFFSET..offset + total_len,
+                FieldValue::Bytes(body),
+                body_offset..offset + total_len,
             );
         }
 
@@ -730,7 +1148,7 @@ mod tests {
     //! | RFC Section | Description                        | Test                                       |
     //! |-------------|------------------------------------|--------------------------------------------|
     //! | 4.3         | Hop-by-Hop Options Header          | hop_by_hop_basic                           |
-    //! | 4.3         | Hop-by-Hop with options bytes      | hop_by_hop_with_options                    |
+    //! | 4.2 / 4.3   | Hop-by-Hop options walked (Pad1)   | hop_by_hop_with_options                    |
     //! | 4.3         | Hop-by-Hop truncated (< 2 bytes)   | hop_by_hop_truncated_min                   |
     //! | 4.3         | Hop-by-Hop truncated (< total_len) | hop_by_hop_truncated_total_len             |
     //! | 4.3         | Hop-by-Hop metadata                | hop_by_hop_metadata                        |
@@ -757,7 +1175,7 @@ mod tests {
     //! | RFC Section | Description                        | Test                                       |
     //! |-------------|------------------------------------|--------------------------------------------|
     //! | 6.1         | MH Header Format                   | mobility_basic                             |
-    //! | 6.1         | MH with message data               | mobility_with_data                         |
+    //! | 6.1         | MH with undecoded message data     | mobility_with_data                         |
     //! | 6.1         | MH reserved byte                   | mobility_reserved_field                    |
     //! | 6.1         | MH truncated (fixed)               | mobility_truncated_fixed                   |
     //! | 6.1         | MH truncated (payload)             | mobility_truncated_total_len               |
@@ -804,10 +1222,19 @@ mod tests {
         assert_eq!(result.bytes_consumed, 16);
         assert_eq!(result.next, DispatchHint::ByIpProtocol(17));
 
+        // RFC 8200, Section 4.2 — each zero octet is a Pad1 option.
         let layer = buf.layer_by_name("IPv6 Hop-by-Hop").unwrap();
         let options = buf.field_by_name(layer, "options").unwrap();
-        assert_eq!(options.value, FieldValue::Bytes(&[0u8; 14]));
         assert_eq!(options.range, 2..16);
+        let FieldValue::Array(range) = &options.value else {
+            panic!("options must be an array");
+        };
+        let opts: Vec<_> = buf
+            .nested_fields(range)
+            .iter()
+            .filter(|f| f.name() == "option")
+            .collect();
+        assert_eq!(opts.len(), 14);
     }
 
     #[test]
@@ -1007,7 +1434,7 @@ mod tests {
         let d = GenericRoutingDissector;
         assert_eq!(d.name(), "IPv6 Routing Header");
         assert_eq!(d.short_name(), "IPv6 Routing");
-        assert_eq!(d.field_descriptors().len(), 5);
+        assert_eq!(d.field_descriptors().len(), 12);
     }
 
     // ---- Fragment Header (Section 4.5) ----
@@ -1154,7 +1581,8 @@ mod tests {
     #[test]
     fn mobility_with_data() {
         // Header Len=1 → (1+1)*8 = 16 bytes, message data = 10 bytes.
-        let mut data = vec![59u8, 1, 5, 0, 0x12, 0x34]; // NH=No Next Header, MH Type=5
+        // NH=No Next Header, MH Type=200 (no decoder, so the body stays raw)
+        let mut data = vec![59u8, 1, 200, 0, 0x12, 0x34];
         data.extend_from_slice(&[0xBB; 10]); // 10 bytes message data
         let mut buf = DissectBuffer::new();
         let result = MobilityDissector.dissect(&data, &mut buf, 40).unwrap();
@@ -1222,7 +1650,8 @@ mod tests {
     #[test]
     fn mobility_field_count() {
         // With Header Len=0 (total=8): 6 fields (including reserved and message_data).
-        let data: [u8; 8] = [59, 0, 0, 0, 0, 0, 0, 0];
+        // MH Type 0xFF has no decoder, so the body is kept as message_data.
+        let data: [u8; 8] = [59, 0, 0xFF, 0, 0, 0, 0, 0];
         let mut buf = DissectBuffer::new();
         MobilityDissector.dissect(&data, &mut buf, 0).unwrap();
         let layer = buf.layer_by_name("IPv6 Mobility").unwrap();

@@ -7,10 +7,17 @@
 //! ## References
 //! - 3GPP TS 24.501: <https://www.3gpp.org/ftp/Specs/archive/24_series/24.501/>
 //! - 3GPP TS 24.007, Section 11.2 — Extended Protocol Discriminator
+//!
+//! After the header, the information elements of the message are decoded
+//! into an `information_elements` array (TS 24.501, Sections 8.2, 8.3 and
+//! 9.11). An N1 SM payload container of a UL or DL NAS transport message is
+//! decoded as a nested 5GSM message.
 
 #![deny(missing_docs)]
 
+mod ie;
 pub mod message_type;
+mod messages;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -32,7 +39,7 @@ const EPD_5GMM: u8 = 0x7E;
 /// Extended protocol discriminator for 5GS Session Management.
 ///
 /// 3GPP TS 24.007, Table 11.2.
-const EPD_5GSM: u8 = 0x2E;
+pub(crate) const EPD_5GSM: u8 = 0x2E;
 
 /// Minimum message size: EPD (1) + security header / PDU session ID (1) +
 /// message type (1) = 3 bytes for plain 5GMM. 5GSM requires 4 bytes.
@@ -79,7 +86,7 @@ const SHT_INTEGRITY_PROTECTED_AND_CIPHERED_NEW_CONTEXT: u8 = 4;
 
 // ── Field descriptors for 5GMM plain messages ──────────────────────────
 
-static FD_EPD: FieldDescriptor = FieldDescriptor {
+pub(crate) static FD_EPD: FieldDescriptor = FieldDescriptor {
     name: "extended_protocol_discriminator",
     display_name: "Extended Protocol Discriminator",
     field_type: FieldType::U8,
@@ -143,16 +150,16 @@ static FD_RAW_NAS: FieldDescriptor =
 
 // ── Field descriptors for 5GSM messages ────────────────────────────────
 
-static FD_PDU_SESSION_ID: FieldDescriptor =
+pub(crate) static FD_PDU_SESSION_ID: FieldDescriptor =
     FieldDescriptor::new("pdu_session_id", "PDU Session ID", FieldType::U8);
 
-static FD_PTI: FieldDescriptor = FieldDescriptor::new(
+pub(crate) static FD_PTI: FieldDescriptor = FieldDescriptor::new(
     "procedure_transaction_identity",
     "Procedure Transaction Identity",
     FieldType::U8,
 );
 
-static FD_SM_MESSAGE_TYPE: FieldDescriptor = FieldDescriptor {
+pub(crate) static FD_SM_MESSAGE_TYPE: FieldDescriptor = FieldDescriptor {
     name: "message_type",
     display_name: "Message Type",
     field_type: FieldType::U8,
@@ -226,6 +233,9 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     )
     .optional(),
     FieldDescriptor::new("raw_nas_message", "Raw NAS Message", FieldType::Bytes).optional(),
+    ie::FD_INFORMATION_ELEMENTS,
+    ie::FD_UNDECODED_OCTETS,
+    ie::FD_MISSING_MANDATORY_IE,
 ];
 
 /// Push parsed 5G NAS PDU fields into the given [`DissectBuffer`].
@@ -297,7 +307,45 @@ fn push_5gmm_plain<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset
         FieldValue::U8(message_type),
         offset + 2..offset + 3,
     );
+    push_5gmm_body(buf, data, offset);
     true
+}
+
+/// Push the IEs of a plain 5GMM message (octet 4 onwards).
+///
+/// 3GPP TS 24.501, Section 8.2. The body of a message type without an IE
+/// table is kept as raw bytes.
+fn push_5gmm_body<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    let body = &data[MIN_5GMM_SIZE..];
+    match messages::mm_message_ies(data[2]) {
+        Some(ies) => ie::push_message_ies(buf, body, offset + MIN_5GMM_SIZE, ies, true),
+        None => push_raw_body(buf, body, offset + MIN_5GMM_SIZE),
+    }
+}
+
+/// Push the IEs of a 5GSM message (octet 5 onwards).
+///
+/// 3GPP TS 24.501, Section 8.3. The body of a message type without an IE
+/// table is kept as raw bytes.
+fn push_5gsm_body<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    let body = &data[MIN_5GSM_SIZE..];
+    match messages::sm_message_ies(data[3]) {
+        // A 5GSM message never carries another NAS message.
+        Some(ies) => ie::push_message_ies(buf, body, offset + MIN_5GSM_SIZE, ies, false),
+        None => push_raw_body(buf, body, offset + MIN_5GSM_SIZE),
+    }
+}
+
+/// Push the body of a message type without an IE table as
+/// `undecoded_octets`.
+fn push_raw_body<'pkt>(buf: &mut DissectBuffer<'pkt>, body: &'pkt [u8], offset: usize) {
+    if !body.is_empty() {
+        buf.push_field(
+            &ie::FD_UNDECODED_OCTETS,
+            FieldValue::Bytes(body),
+            offset..offset + body.len(),
+        );
+    }
 }
 
 /// Push a security-protected 5GMM message.
@@ -431,7 +479,11 @@ fn push_reserved_sht_body<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8],
 /// Push 5GSM fields into the buffer.
 ///
 /// 3GPP TS 24.501, Section 8.3.
-fn push_5gsm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
+pub(crate) fn push_5gsm<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
     if data.len() < MIN_5GSM_SIZE {
         return false;
     }
@@ -452,6 +504,7 @@ fn push_5gsm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usiz
         FieldValue::U8(message_type),
         offset + 3..offset + 4,
     );
+    push_5gsm_body(buf, data, offset);
     true
 }
 
@@ -563,6 +616,7 @@ impl Dissector for Nas5gDissector {
                             FieldValue::U8(data[2]),
                             offset + 2..offset + 3,
                         );
+                        push_5gmm_body(buf, data, offset);
                     }
                     SHT_INTEGRITY_PROTECTED..=SHT_INTEGRITY_PROTECTED_AND_CIPHERED_NEW_CONTEXT => {
                         push_security_protected_body(buf, data, offset, security_header_type);
@@ -599,6 +653,7 @@ impl Dissector for Nas5gDissector {
                     FieldValue::U8(data[3]),
                     offset + 3..offset + 4,
                 );
+                push_5gsm_body(buf, data, offset);
             }
             _ => {
                 buf.end_layer();
@@ -658,12 +713,14 @@ mod tests {
             0x7E, // EPD: 5GMM
             0x00, // Security header: plain
             0x41, // Message type: Registration request
-            0xAA, // Dummy IE data
         ];
         let mut buf = DissectBuffer::new();
         let ok = push_nas_pdu(&mut buf, &data, 0);
         assert!(ok);
-        assert_eq!(buf.fields().len(), 3);
+        // No octets after the header: the mandatory IEs are reported as
+        // missing.
+        assert_eq!(buf.fields().len(), 4);
+        assert_eq!(buf.fields()[3].name(), "missing_mandatory_ie");
         assert_eq!(buf.fields()[0].name(), "extended_protocol_discriminator");
         assert_eq!(buf.fields()[0].value, FieldValue::U8(0x7E));
         assert_eq!(buf.fields()[1].name(), "security_header_type");
@@ -687,12 +744,14 @@ mod tests {
             0x01, // PDU session ID
             0x00, // PTI
             0xC1, // Message type: PDU session establishment request
-            0xBB, // Dummy IE data
         ];
         let mut buf = DissectBuffer::new();
         let ok = push_nas_pdu(&mut buf, &data, 10);
         assert!(ok);
-        assert_eq!(buf.fields().len(), 4);
+        // No octets after the header: the mandatory IE is reported as
+        // missing.
+        assert_eq!(buf.fields().len(), 5);
+        assert_eq!(buf.fields()[4].name(), "missing_mandatory_ie");
         assert_eq!(buf.fields()[0].name(), "extended_protocol_discriminator");
         assert_eq!(buf.fields()[0].value, FieldValue::U8(0x2E));
         assert_eq!(buf.fields()[1].name(), "pdu_session_id");
@@ -886,8 +945,9 @@ mod tests {
     #[test]
     fn push_integrity_protected_inner_5gsm_decoded() {
         // A plain 5GSM message is a "plain 5GS NAS message" (TS 24.501,
-        // 9.1.1 item 1), so it is decoded.
-        let data = security_protected(0x01, &[0x2e, 0x05, 0x01, 0xc1]);
+        // 9.1.1 item 1), so it is decoded. PDU session release complete has
+        // no mandatory IE after the header.
+        let data = security_protected(0x01, &[0x2e, 0x05, 0x01, 0xd4]);
         let mut buf = DissectBuffer::new();
         assert!(push_nas_pdu(&mut buf, &data, 0));
         let FieldValue::Object(ref range) = buf.fields()[4].value else {
@@ -905,7 +965,7 @@ mod tests {
             ]
         );
         assert_eq!(nested[1].value, FieldValue::U8(0x05));
-        assert_eq!(nested[3].value, FieldValue::U8(0xc1));
+        assert_eq!(nested[3].value, FieldValue::U8(0xd4));
     }
 
     #[test]
@@ -1135,7 +1195,7 @@ mod tests {
     #[test]
     fn field_descriptors_accessible() {
         let d = Nas5gDissector;
-        assert_eq!(d.field_descriptors().len(), 10);
+        assert_eq!(d.field_descriptors().len(), 13);
     }
 
     #[test]

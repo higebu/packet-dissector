@@ -41,7 +41,14 @@ array.
 
 A path attribute `value` is declared `FieldType::Any`; its `children` list the
 union of sub-fields it can contain (MP_REACH/MP_UNREACH, Prefix-SID TLVs,
-AS_PATH segments).
+AS_PATH segments, and the PMSI_TUNNEL, Tunnel Encapsulation (`tunnels`),
+BGP-LS Attribute (`tlvs`), BGPsec_Path, ATTR_SET, AIGP, SFP and BFD
+Discriminator shapes). An ATTR_SET value nests `path_attributes` one level
+deep; a structured attribute that does not parse exactly keeps its raw bytes.
+The PMSI_TUNNEL MPLS Label field is shown as `vni` when the UPDATE carries a
+VXLAN / NVGRE / VXLAN GPE Encapsulation Extended Community
+([RFC 8365, Section 5.1.3](https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3)),
+and as `mpls_label` otherwise.
 
 Top-level `afi` / `safi` are set for ROUTE-REFRESH and, for UPDATE, mirror the
 first `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attribute so the address family can

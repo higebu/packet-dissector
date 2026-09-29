@@ -1,10 +1,20 @@
 //! SCTP (Stream Control Transmission Protocol) dissector.
 //!
 //! Parses the SCTP common header (12 bytes) and individual chunks.
-//! Each chunk is represented as a sub-layer with its type, flags, and value.
+//! Each chunk is represented as an object with its type, flags, and value;
+//! DATA chunks are decoded into their header fields and user data.
+//!
+//! The user data of every unfragmented DATA chunk in the packet is recorded
+//! with [`DissectBuffer::push_embedded_payload`], so bundled user messages
+//! (RFC 9260, Section 6.10) are each dispatched to the upper layer. Fragments
+//! of a user message (B and E bits not both set, Section 6.9) are shown but
+//! not dispatched.
 //!
 //! ## References
 //! - RFC 9260: <https://www.rfc-editor.org/rfc/rfc9260>
+//!   - Section 3.3.1 (DATA): <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+//!   - Section 6.9 (Fragmentation and Reassembly): <https://www.rfc-editor.org/rfc/rfc9260#section-6.9>
+//!   - Section 6.10 (Bundling): <https://www.rfc-editor.org/rfc/rfc9260#section-6.10>
 
 #![deny(missing_docs)]
 
@@ -32,6 +42,14 @@ const CHUNK_TYPE_DATA: u8 = 0;
 /// Stream Identifier(2) + Stream Sequence Number(2) + Payload Protocol Identifier(4) = 16 bytes.
 /// RFC 9260, Section 3.3.1.
 const DATA_CHUNK_HEADER_SIZE: usize = 16;
+
+/// DATA chunk flag bits.
+/// RFC 9260, Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+/// `|  Res  |I|U|B|E|`
+const DATA_FLAG_I: u8 = 0x08;
+const DATA_FLAG_U: u8 = 0x04;
+const DATA_FLAG_B: u8 = 0x02;
+const DATA_FLAG_E: u8 = 0x01;
 
 /// Returns a human-readable name for SCTP chunk type values.
 ///
@@ -72,6 +90,15 @@ const CFD_TYPE: usize = 0;
 const CFD_FLAGS: usize = 1;
 const CFD_LENGTH: usize = 2;
 const CFD_VALUE: usize = 3;
+const CFD_I: usize = 4;
+const CFD_U: usize = 5;
+const CFD_B: usize = 6;
+const CFD_E: usize = 7;
+const CFD_TSN: usize = 8;
+const CFD_STREAM_ID: usize = 9;
+const CFD_SSN: usize = 10;
+const CFD_PPID: usize = 11;
+const CFD_USER_DATA: usize = 12;
 
 /// Container descriptor for a chunk Object.
 ///
@@ -111,6 +138,16 @@ static CHUNK_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("flags", "Chunk Flags", FieldType::U8),
     FieldDescriptor::new("length", "Chunk Length", FieldType::U16),
     FieldDescriptor::new("value", "Chunk Value", FieldType::Bytes).optional(),
+    // RFC 9260, Section 3.3.1 — DATA chunk fields — https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1
+    FieldDescriptor::new("i", "I (Immediate)", FieldType::U8).optional(),
+    FieldDescriptor::new("u", "U (Unordered)", FieldType::U8).optional(),
+    FieldDescriptor::new("b", "B (Beginning Fragment)", FieldType::U8).optional(),
+    FieldDescriptor::new("e", "E (Ending Fragment)", FieldType::U8).optional(),
+    FieldDescriptor::new("tsn", "TSN", FieldType::U32).optional(),
+    FieldDescriptor::new("stream_id", "Stream Identifier", FieldType::U16).optional(),
+    FieldDescriptor::new("ssn", "Stream Sequence Number", FieldType::U16).optional(),
+    FieldDescriptor::new("ppid", "Payload Protocol Identifier", FieldType::U32).optional(),
+    FieldDescriptor::new("user_data", "User Data", FieldType::Bytes).optional(),
 ];
 
 /// Common header fields plus a `chunks` Array field whose child descriptors
@@ -222,8 +259,7 @@ impl Dissector for SctpDissector {
         let mut pos = COMMON_HEADER_SIZE;
         let mut has_chunks = false;
         let mut array_idx = 0u32;
-        // Track the first DATA chunk's user data range for upper-layer dispatch.
-        let mut first_data_payload: Option<core::ops::Range<usize>> = None;
+        let hint = DispatchHint::BySctpPort(src_port, dst_port);
 
         while pos + MIN_CHUNK_SIZE <= data.len() {
             let chunk_type = data[pos];
@@ -254,17 +290,6 @@ impl Dissector for SctpDissector {
                 );
             }
 
-            // RFC 9260, Section 3.3.1 — Track the first DATA chunk's user data
-            // for embedded payload dispatch to upper-layer dissectors.
-            if chunk_type == CHUNK_TYPE_DATA
-                && first_data_payload.is_none()
-                && chunk_length > DATA_CHUNK_HEADER_SIZE
-            {
-                let payload_start = offset + pos + DATA_CHUNK_HEADER_SIZE;
-                let payload_end = offset + pos + chunk_length;
-                first_data_payload = Some(payload_start..payload_end);
-            }
-
             let obj_idx = buf.begin_container(
                 &FD_CHUNK,
                 FieldValue::Object(0..0),
@@ -286,7 +311,9 @@ impl Dissector for SctpDissector {
                 FieldValue::U16(chunk_length as u16),
                 offset + pos + 2..offset + pos + 4,
             );
-            if chunk_length > MIN_CHUNK_SIZE {
+            if chunk_type == CHUNK_TYPE_DATA && chunk_length >= DATA_CHUNK_HEADER_SIZE {
+                push_data_chunk_fields(buf, &data[pos..pos + chunk_length], offset + pos, &hint)?;
+            } else if chunk_length > MIN_CHUNK_SIZE {
                 buf.push_field(
                     &CHUNK_CHILD_FIELDS[CFD_VALUE],
                     FieldValue::Bytes(&data[pos + MIN_CHUNK_SIZE..pos + chunk_length]),
@@ -308,17 +335,89 @@ impl Dissector for SctpDissector {
 
         buf.end_layer();
 
-        let hint = DispatchHint::BySctpPort(src_port, dst_port);
-        if let Some(payload_range) = first_data_payload {
-            Ok(DissectResult::with_embedded_payload(
-                total_consumed,
-                hint,
-                payload_range,
-            ))
-        } else {
-            Ok(DissectResult::new(total_consumed, hint))
-        }
+        Ok(DissectResult::new(total_consumed, hint))
     }
+}
+
+/// Push the fields of a DATA chunk and record its user data for dispatch.
+///
+/// `chunk` spans the chunk from its Type byte to the end of User Data
+/// (excluding padding) and is at least [`DATA_CHUNK_HEADER_SIZE`] bytes long;
+/// `abs` is its absolute offset in the packet. Type, Flags and Length have
+/// already been pushed.
+///
+/// RFC 9260, Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+fn push_data_chunk_fields<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    chunk: &'pkt [u8],
+    abs: usize,
+    hint: &DispatchHint,
+) -> Result<(), PacketError> {
+    let flags = chunk[1];
+    let tsn = read_be_u32(chunk, 4)?;
+    let stream_id = read_be_u16(chunk, 8)?;
+    let ssn = read_be_u16(chunk, 10)?;
+    let ppid = read_be_u32(chunk, 12)?;
+    let user_data = &chunk[DATA_CHUNK_HEADER_SIZE..];
+
+    let flags_range = abs + 1..abs + 2;
+    for (fd, mask) in [
+        (CFD_I, DATA_FLAG_I),
+        (CFD_U, DATA_FLAG_U),
+        (CFD_B, DATA_FLAG_B),
+        (CFD_E, DATA_FLAG_E),
+    ] {
+        buf.push_field(
+            &CHUNK_CHILD_FIELDS[fd],
+            FieldValue::U8(u8::from(flags & mask != 0)),
+            flags_range.clone(),
+        );
+    }
+    buf.push_field(
+        &CHUNK_CHILD_FIELDS[CFD_TSN],
+        FieldValue::U32(tsn),
+        abs + 4..abs + 8,
+    );
+    buf.push_field(
+        &CHUNK_CHILD_FIELDS[CFD_STREAM_ID],
+        FieldValue::U16(stream_id),
+        abs + 8..abs + 10,
+    );
+    buf.push_field(
+        &CHUNK_CHILD_FIELDS[CFD_SSN],
+        FieldValue::U16(ssn),
+        abs + 10..abs + 12,
+    );
+    buf.push_field(
+        &CHUNK_CHILD_FIELDS[CFD_PPID],
+        FieldValue::U32(ppid),
+        abs + 12..abs + 16,
+    );
+
+    // RFC 9260, Section 3.3.1 — https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1
+    // "L MUST be greater than 0". An empty User Data field is shown by its
+    // absence and is not dispatched.
+    if user_data.is_empty() {
+        return Ok(());
+    }
+    let user_data_range = abs + DATA_CHUNK_HEADER_SIZE..abs + chunk.len();
+    buf.push_field(
+        &CHUNK_CHILD_FIELDS[CFD_USER_DATA],
+        FieldValue::Bytes(user_data),
+        user_data_range.clone(),
+    );
+
+    // RFC 9260, Section 3.3.1 — https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1
+    // "An unfragmented user message MUST have both the B and E bits set to
+    // 1." Any other combination is one fragment of a user message that is
+    // only complete after reassembly (Section 6.9 —
+    // https://www.rfc-editor.org/rfc/rfc9260#section-6.9), so it is not
+    // handed to the upper layer on its own.
+    let unfragmented = DATA_FLAG_B | DATA_FLAG_E;
+    if flags & unfragmented == unfragmented {
+        buf.push_embedded_payload(user_data_range, hint.clone());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -341,8 +440,12 @@ mod tests {
     // | 3.2         | chunk_length < 4 rejected                      | invalid_chunk_length_below_minimum    |
     // | 3.2         | Truncated chunk (pos + length > data)          | truncated_chunk_value                 |
     // | 3.2         | Multiple chunks in one packet                  | multiple_chunks                       |
-    // | 3.3.1       | DATA chunk user data exposed as embedded pl    | parse_data_chunk_embedded_payload     |
+    // | 3.3.1       | DATA chunk user data recorded as payload       | parse_data_chunk_embedded_payload     |
+    // | 3.3.1       | DATA chunk header fields and I/U/B/E bits      | parse_data_chunk_fields               |
     // | 3.3.1       | DATA chunk with L == 0 does not dispatch       | empty_data_chunk_no_dispatch          |
+    // | 3.3.1       | DATA chunk shorter than its header             | short_data_chunk_generic_value        |
+    // | 3.3.1, 6.9  | Fragments (B/E not both set) not dispatched    | fragmented_data_chunks_not_dispatched |
+    // | 6.10        | Every bundled DATA chunk recorded as payload   | bundled_data_chunks_each_dispatched   |
     // | ---         | No chunks => no `chunks` array field           | common_header_only_no_chunks_field    |
     // | ---         | Offset handling in byte ranges                 | dissect_with_offset                   |
     // | ---         | Field descriptors                              | field_descriptors_list                |
@@ -549,12 +652,179 @@ mod tests {
 
         let mut buf = DissectBuffer::new();
         let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
-        let range = result
-            .embedded_payload
-            .expect("DATA chunk must produce embedded_payload");
+        assert_eq!(result.bytes_consumed, data.len());
+        assert_eq!(result.next, DispatchHint::BySctpPort(36412, 36412));
+        assert!(result.embedded_payload.is_none());
+
+        let payloads = buf.embedded_payloads();
+        assert_eq!(payloads.len(), 1);
+        let range = payloads[0].range.clone();
         assert_eq!(range.start, COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE);
         assert_eq!(range.end - range.start, payload.len());
         assert_eq!(&data[range], payload);
+        assert_eq!(payloads[0].next, DispatchHint::BySctpPort(36412, 36412));
+    }
+
+    /// Return the direct children of the `index`-th chunk Object.
+    fn chunk_children<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        layer: &Layer,
+        index: usize,
+    ) -> &'a [packet_dissector_core::field::Field<'pkt>] {
+        let chunks = buf.field_by_name(layer, "chunks").expect("chunks present");
+        let FieldValue::Array(ref range) = chunks.value else {
+            panic!("expected Array, got {:?}", chunks.value);
+        };
+        let mut idx = range.start;
+        let mut seen = 0usize;
+        while idx < range.end {
+            let field = &buf.fields()[idx as usize];
+            if let FieldValue::Object(ref inner) = field.value {
+                if seen == index {
+                    return buf.nested_fields(inner);
+                }
+                seen += 1;
+                idx = inner.end;
+            } else {
+                idx += 1;
+            }
+        }
+        panic!("chunk {index} not found");
+    }
+
+    fn child<'a, 'pkt>(
+        fields: &'a [packet_dissector_core::field::Field<'pkt>],
+        name: &str,
+    ) -> Option<&'a FieldValue<'pkt>> {
+        fields.iter().find(|f| f.name() == name).map(|f| &f.value)
+    }
+
+    #[test]
+    fn parse_data_chunk_fields() {
+        // RFC 9260, Section 3.3.1 — Type = 0 | Res | I | U | B | E | Length,
+        // TSN, Stream Identifier S, Stream Sequence Number n, Payload
+        // Protocol Identifier, User Data.
+        let mut data = build_common_header(40000, 40001, 1, 0);
+        // I=1, U=1, B=1, E=1 plus reserved bits set (ignored on receipt).
+        push_data_chunk(&mut data, 0xFF, 0xDEAD_BEEF, 7, 9, 46, b"abcde");
+
+        let mut buf = DissectBuffer::new();
+        SctpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let c = chunk_children(&buf, layer, 0);
+
+        assert_eq!(child(c, "type"), Some(&FieldValue::U8(0)));
+        assert_eq!(child(c, "flags"), Some(&FieldValue::U8(0xFF)));
+        assert_eq!(child(c, "i"), Some(&FieldValue::U8(1)));
+        assert_eq!(child(c, "u"), Some(&FieldValue::U8(1)));
+        assert_eq!(child(c, "b"), Some(&FieldValue::U8(1)));
+        assert_eq!(child(c, "e"), Some(&FieldValue::U8(1)));
+        assert_eq!(child(c, "length"), Some(&FieldValue::U16(21)));
+        assert_eq!(child(c, "tsn"), Some(&FieldValue::U32(0xDEAD_BEEF)));
+        assert_eq!(child(c, "stream_id"), Some(&FieldValue::U16(7)));
+        assert_eq!(child(c, "ssn"), Some(&FieldValue::U16(9)));
+        assert_eq!(child(c, "ppid"), Some(&FieldValue::U32(46)));
+        assert_eq!(
+            child(c, "user_data"),
+            Some(&FieldValue::Bytes(b"abcde".as_slice()))
+        );
+        // The decoded DATA chunk has no generic `value` field.
+        assert_eq!(child(c, "value"), None);
+
+        let tsn = c.iter().find(|f| f.name() == "tsn").unwrap();
+        assert_eq!(tsn.range, 16..20);
+        let user_data = c.iter().find(|f| f.name() == "user_data").unwrap();
+        assert_eq!(user_data.range, 28..33);
+
+        // B = 0, E = 0, U = 0, I = 0 (middle fragment of an ordered message).
+        let mut data = build_common_header(40000, 40001, 1, 0);
+        push_data_chunk(&mut data, 0x00, 1, 0, 0, 0, b"x");
+        let mut buf = DissectBuffer::new();
+        SctpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let c = chunk_children(&buf, layer, 0);
+        for bit in ["i", "u", "b", "e"] {
+            assert_eq!(child(c, bit), Some(&FieldValue::U8(0)), "bit {bit}");
+        }
+    }
+
+    #[test]
+    fn bundled_data_chunks_each_dispatched() {
+        // RFC 9260, Section 6.10 — multiple DATA chunks bundled into one
+        // SCTP packet each carry a complete user message.
+        let mut data = build_common_header(49152, 3868, 1, 0);
+        push_data_chunk(&mut data, 0x03, 1, 0, 0, 46, b"first");
+        let second_chunk = data.len();
+        push_data_chunk(&mut data, 0x03, 2, 0, 1, 46, b"second!!");
+
+        let mut buf = DissectBuffer::new();
+        let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        assert!(result.embedded_payload.is_none());
+
+        let payloads = buf.embedded_payloads();
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(&data[payloads[0].range.clone()], b"first");
+        assert_eq!(&data[payloads[1].range.clone()], b"second!!");
+        assert_eq!(
+            payloads[1].range.start,
+            second_chunk + DATA_CHUNK_HEADER_SIZE
+        );
+        for p in payloads {
+            assert_eq!(p.next, DispatchHint::BySctpPort(49152, 3868));
+        }
+    }
+
+    #[test]
+    fn fragmented_data_chunks_not_dispatched() {
+        // RFC 9260, Section 3.3.1 — "An unfragmented user message MUST have
+        // both the B and E bits set to 1." First (B=1, E=0), middle (B=0,
+        // E=0) and last (B=0, E=1) fragments carry only part of a user
+        // message (Section 6.9) and must not reach the upper layer.
+        let mut data = build_common_header(49152, 3868, 1, 0);
+        push_data_chunk(&mut data, 0x02, 1, 0, 0, 46, b"first-fragment");
+        push_data_chunk(&mut data, 0x00, 2, 0, 0, 46, b"middle");
+        push_data_chunk(&mut data, 0x01, 3, 0, 0, 46, b"last");
+        push_data_chunk(&mut data, 0x03, 4, 1, 0, 46, b"whole");
+
+        let mut buf = DissectBuffer::new();
+        let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+
+        let payloads = buf.embedded_payloads();
+        assert_eq!(payloads.len(), 1, "only the unfragmented chunk");
+        assert_eq!(&data[payloads[0].range.clone()], b"whole");
+
+        let layer = &buf.layers()[0];
+        assert_eq!(count_chunk_objects(&buf, layer), 4);
+        let first = chunk_children(&buf, layer, 0);
+        assert_eq!(child(first, "b"), Some(&FieldValue::U8(1)));
+        assert_eq!(child(first, "e"), Some(&FieldValue::U8(0)));
+        assert_eq!(
+            child(first, "user_data"),
+            Some(&FieldValue::Bytes(b"first-fragment".as_slice()))
+        );
+    }
+
+    #[test]
+    fn short_data_chunk_generic_value() {
+        // A DATA chunk whose Length is below the 16-byte DATA header cannot
+        // hold TSN/SID/SSN/PPID; show its body as raw bytes and do not
+        // dispatch it (Postel's Law).
+        let mut data = build_common_header(49152, 3868, 1, 0);
+        push_chunk(&mut data, CHUNK_TYPE_DATA, 0x03, &[0xAA; 8]);
+
+        let mut buf = DissectBuffer::new();
+        SctpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert!(buf.embedded_payloads().is_empty());
+
+        let layer = &buf.layers()[0];
+        let c = chunk_children(&buf, layer, 0);
+        assert_eq!(
+            child(c, "value"),
+            Some(&FieldValue::Bytes([0xAA; 8].as_slice()))
+        );
+        assert_eq!(child(c, "tsn"), None);
     }
 
     #[test]
@@ -641,11 +911,9 @@ mod tests {
         let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
         assert_eq!(result.bytes_consumed, data.len());
 
-        // Only the first DATA chunk's user data is surfaced.
-        let range = result
-            .embedded_payload
-            .expect("first DATA chunk should yield embedded payload");
-        assert_eq!(&data[range], b"X");
+        let payloads = buf.embedded_payloads();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(&data[payloads[0].range.clone()], b"X");
 
         let layer = &buf.layers()[0];
         assert_eq!(count_chunk_objects(&buf, layer), 3);
@@ -658,7 +926,7 @@ mod tests {
         // expose an embedded payload (Postel's Law).
         let mut data = build_common_header(12345, 3868, 0, 0);
         data.push(CHUNK_TYPE_DATA);
-        data.push(0);
+        data.push(0x03); // B|E: unfragmented, so only L == 0 blocks dispatch
         data.extend_from_slice(&(DATA_CHUNK_HEADER_SIZE as u16).to_be_bytes());
         data.extend_from_slice(&0u32.to_be_bytes()); // TSN
         data.extend_from_slice(&0u16.to_be_bytes()); // SID
@@ -668,6 +936,7 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
         assert!(result.embedded_payload.is_none());
+        assert!(buf.embedded_payloads().is_empty());
     }
 
     #[test]

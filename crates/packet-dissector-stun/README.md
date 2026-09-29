@@ -1,6 +1,6 @@
 # packet-dissector-stun
 
-STUN (RFC 8489) dissector for packet-dissector
+STUN (RFC 8489) and TURN ChannelData (RFC 8656) dissector for packet-dissector
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
 ecosystem. It is used automatically when you enable the `stun` feature flag

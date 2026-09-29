@@ -54,3 +54,25 @@ fn zero_alloc_dissect_ethernet_vlan() {
     assert_eq!(fields.len(), 7); // dst, src, tpid, pcp, dei, vid, ethertype
     assert_eq!(fields[5].value, FieldValue::U16(100)); // VID
 }
+
+#[test]
+fn zero_alloc_dissect_llc_i_frame_and_snap() {
+    use packet_dissector_ethernet::SnapDissector;
+
+    // IEEE 802.3 frame with an LLC I-format PDU (2-octet control field).
+    let llc_i: &[u8] = &[
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x00, 0x06, 0xF0,
+        0xF0, 0x00, 0x02, 0x01, 0x02,
+    ];
+    // SNAP header, RFC 1042: OUI 00-00-00, PID 0x0800.
+    let snap: &[u8] = &[0x00, 0x00, 0x00, 0x08, 0x00];
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        EthernetDissector.dissect(llc_i, &mut buf, 0).unwrap();
+        SnapDissector.dissect(snap, &mut buf, 18).unwrap();
+    });
+    assert_eq!(allocs, 0, "LLC/SNAP dissect allocated {allocs} times");
+    assert_eq!(buf.layers().len(), 2);
+}

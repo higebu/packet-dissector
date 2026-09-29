@@ -84,3 +84,62 @@ fn zero_alloc_dissect_ntp_control_message() {
     assert_eq!(allocs, 0, "NTP mode 6 dissect allocated {allocs} times");
     assert_eq!(buf.layers().len(), 1);
 }
+
+/// Build an extension field (RFC 7822, Section 3).
+///   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+fn build_ef(field_type: u16, body: &[u8]) -> Vec<u8> {
+    let mut ef = field_type.to_be_bytes().to_vec();
+    ef.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+    ef.extend_from_slice(body);
+    ef
+}
+
+#[test]
+fn zero_alloc_dissect_ntp_nts_client() {
+    // RFC 8915, Section 5.7 — Unique Identifier, NTS Cookie, NTS Cookie
+    // Placeholder and NTS Authenticator and Encrypted Extension Fields.
+    //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.7>
+    let mut raw = build_ntp(0, 4, 3, 0, [0; 4]);
+    raw.extend_from_slice(&build_ef(0x0104, &[0x11; 32]));
+    raw.extend_from_slice(&build_ef(0x0204, &[0x22; 100]));
+    raw.extend_from_slice(&build_ef(0x0304, &[0; 100]));
+    let mut auth = vec![0x00, 0x10, 0x00, 0x10];
+    auth.extend_from_slice(&[0x33; 32]);
+    raw.extend_from_slice(&build_ef(0x0404, &auth));
+
+    let mut buf = DissectBuffer::new();
+    // Warm up so the buffer's vectors reach their steady-state capacity.
+    NtpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        NtpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "NTS dissect allocated {allocs} times");
+    assert_eq!(buf.layers().len(), 1);
+    let layer = &buf.layers()[0];
+    assert!(buf.field_by_name(layer, "extension_fields").is_some());
+    assert!(buf.field_by_name(layer, "trailing_data").is_none());
+}
+
+#[test]
+fn zero_alloc_dissect_ntp_mac() {
+    // RFC 5905, Section 7.3 — 20-octet MAC (Key Identifier + digest).
+    //   <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>
+    let mut raw = build_ntp(0, 4, 3, 0, [0; 4]);
+    raw.extend_from_slice(&1u32.to_be_bytes());
+    raw.extend_from_slice(&[0x44; 16]);
+
+    let mut buf = DissectBuffer::new();
+    NtpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    let allocs = count_allocs(|| {
+        buf.clear();
+        NtpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "NTP MAC dissect allocated {allocs} times");
+    let layer = &buf.layers()[0];
+    assert_eq!(
+        buf.field_by_name(layer, "key_id").unwrap().value,
+        FieldValue::U32(1)
+    );
+}
