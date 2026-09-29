@@ -74,6 +74,8 @@
 //! | Ethernet → IPv4 → TCP → ChannelData split in padding | integration_ethernet_ipv4_tcp_turn_channeldata_split_padding |
 //! | Ethernet → IPv4 → TCP → classic STUN rejected      | integration_ethernet_ipv4_tcp_classic_stun_rejected  |
 //! | Ethernet → IPv4 → GRE (Key) → IPv4 → UDP          | integration_ethernet_ipv4_gre_key_ipv4               |
+//! | Ethernet → IPv4 → Enhanced GRE (v1) → PPP → IPv4 → UDP | integration_ethernet_ipv4_gre_v1_ppp_ipv4       |
+//! | Ethernet → IPv4 → Enhanced GRE (v1, ack only)     | integration_ethernet_ipv4_gre_v1_ack_only            |
 //! | link_type=1 (Ethernet) via dissect_with_link_type  | integration_dissect_with_link_type_ethernet          |
 //! | link_type=0 (NULL, LE/BE) → IPv4/IPv6 → UDP         | integration_link_type_null_ipv4_le, integration_link_type_null_ipv4_be, integration_link_type_null_ipv6 |
 //! | link_type=108 (LOOP) → IPv4 → UDP                   | integration_link_type_loop_ipv4                      |
@@ -4096,6 +4098,75 @@ fn integration_ethernet_ipv4_gre_key_ipv4() {
         buf.field_by_name(gre, "key").unwrap().value,
         FieldValue::U32(0xDEADBEEF)
     );
+}
+
+/// Ethernet → IPv4 → Enhanced GRE (PPTP, RFC 2637 §4.1) → PPP → IPv4 → UDP
+/// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
+#[test]
+fn integration_ethernet_ipv4_gre_v1_ppp_ipv4() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+
+    // Enhanced GRE: K=1 S=1 A=1, ver=1, Protocol Type 0x880B (PPP)
+    pkt.extend_from_slice(&[0x30, 0x81, 0x88, 0x0B]);
+    let payload_length_offset = pkt.len();
+    pkt.extend_from_slice(&[0x00, 0x00]); // Payload Length (placeholder)
+    pkt.extend_from_slice(&42u16.to_be_bytes()); // Call ID
+    pkt.extend_from_slice(&1u32.to_be_bytes()); // Sequence Number
+    pkt.extend_from_slice(&0u32.to_be_bytes()); // Acknowledgment Number
+    let gre_payload_start = pkt.len();
+
+    // PPP without HDLC framing, Protocol 0x0021 (IPv4)
+    pkt.extend_from_slice(&[0x00, 0x21]);
+    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
+    let payload_length = (pkt.len() - gre_payload_start) as u16;
+    pkt[payload_length_offset..payload_length_offset + 2]
+        .copy_from_slice(&payload_length.to_be_bytes());
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "GRE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+
+    let gre = buf.layer_by_name("GRE").unwrap();
+    assert_eq!(gre.range.len(), 16);
+    assert_eq!(buf.field_u8(gre, "version"), Some(1));
+    assert_eq!(buf.field_u16(gre, "payload_length"), Some(payload_length));
+    assert_eq!(buf.field_u16(gre, "call_id"), Some(42));
+    assert_eq!(buf.field_u32(gre, "sequence_number"), Some(1));
+    assert_eq!(buf.field_u32(gre, "acknowledgment_number"), Some(0));
+}
+
+/// Ethernet → IPv4 → Enhanced GRE acknowledgment-only packet (RFC 2637 §4.1)
+/// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
+#[test]
+fn integration_ethernet_ipv4_gre_v1_ack_only() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+    // K=1 A=1, ver=1, PPP, Payload Length 0, Call ID 42, Ack 5
+    pkt.extend_from_slice(&[
+        0x20, 0x81, 0x88, 0x0B, 0x00, 0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x05,
+    ]);
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "GRE"]);
+    assert_layers_contiguous(&buf);
+    let gre = buf.layer_by_name("GRE").unwrap();
+    assert_eq!(buf.field_u32(gre, "acknowledgment_number"), Some(5));
 }
 
 // STP / RSTP helpers
