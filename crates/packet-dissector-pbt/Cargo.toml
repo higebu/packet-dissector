@@ -18,5 +18,6 @@ proptest = "1"
 packet-dissector-dns = { workspace = true }
 packet-dissector-ipv4 = { workspace = true }
 packet-dissector-mdns = { workspace = true }
+packet-dissector-ospf = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcp = { workspace = true }
