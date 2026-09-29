@@ -147,6 +147,7 @@
 //! | Ethernet → IPv4 → UDP → QUIC Initial                          | integration_ethernet_ipv4_udp_quic_initial            |
 //! | Ethernet → IPv4 → UDP → QUIC Short Header                     | integration_ethernet_ipv4_udp_quic_short              |
 //! | Ethernet → IPv4 → UDP → QUIC Initial + Handshake (coalesced)  | integration_ethernet_ipv4_udp_quic_coalesced          |
+//! | Ethernet → IPv4 → UDP → QUIC Initial (decrypted, RFC 9001 A.2) | integration_ethernet_ipv4_udp_quic_initial_decrypted  |
 //! | Ethernet → IPv4 → TCP → HTTP/2 (h2c)                        | integration_ethernet_ipv4_tcp_http2_settings         |
 //! | Ethernet → IPv4 → TCP → HTTP/1.1 (via HttpDispatcher)       | integration_ethernet_ipv4_tcp_http_dispatcher_http11 |
 //! | Ethernet → IPv4 → TCP → HTTP 301 (Content-Type dispatch)   | integration_ethernet_ipv4_tcp_http_response_content_type |
@@ -8097,6 +8098,53 @@ fn integration_ethernet_ipv4_udp_quic_coalesced() {
     assert_eq!(buf.layers()[4].display_name, Some("QUIC Handshake"));
     assert_eq!(buf.layers()[4].range, 79..111);
     assert_eq!(pkt.len(), 111);
+}
+
+/// RFC 9001, Section 5 — with `quic-decrypt`, the client Initial from RFC 9001
+/// Appendix A.2 is decrypted and its CRYPTO frame is shown.
+/// <https://www.rfc-editor.org/rfc/rfc9001#appendix-A.2>
+#[cfg(feature = "quic-decrypt")]
+#[test]
+fn integration_ethernet_ipv4_udp_quic_initial_decrypted() {
+    let text = include_str!("data/rfc9001_a2_client_initial.hex");
+    let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let initial: Vec<u8> = digits
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 443);
+    pkt.extend_from_slice(&initial);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let quic = &buf.layers()[3];
+    assert_eq!(quic.display_name, Some("QUIC Initial"));
+    assert_eq!(
+        buf.field_by_name(quic, "packet_number").unwrap().value,
+        FieldValue::U64(2)
+    );
+    let frames = buf.field_by_name(quic, "frames").unwrap();
+    assert_eq!(frames.range, 42 + 22..42 + 1200 - 16);
+    let FieldValue::Array(ref range) = frames.value else {
+        panic!("expected Array");
+    };
+    let FieldValue::Object(ref crypto) = buf.nested_fields(range)[0].value else {
+        panic!("expected Object");
+    };
+    let crypto = buf.nested_fields(crypto);
+    assert_eq!(crypto[0].name(), "frame_type");
+    assert_eq!(crypto[0].value, FieldValue::U64(0x06));
+    assert_eq!(crypto[2].name(), "length");
+    assert_eq!(crypto[2].value, FieldValue::U64(241));
 }
 
 // ---------------------------------------------------------------------------

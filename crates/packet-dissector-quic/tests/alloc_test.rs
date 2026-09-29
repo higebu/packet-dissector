@@ -114,3 +114,39 @@ fn zero_alloc_dissect_quic_coalesced() {
     });
     assert_eq!(allocs, 0, "QUIC coalesced dissect allocated {allocs} times");
 }
+
+/// RFC 9001, Appendix A.2 client Initial (1200 bytes).
+/// <https://www.rfc-editor.org/rfc/rfc9001#appendix-A.2>
+#[cfg(feature = "decrypt")]
+fn rfc9001_a2_client_initial() -> Vec<u8> {
+    let text = include_str!("data/rfc9001_a2_client_initial.hex");
+    let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    digits
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
+}
+
+#[cfg(feature = "decrypt")]
+#[test]
+fn zero_alloc_dissect_quic_decrypted_initial() {
+    // RFC 9001, Section 5 — key derivation, header protection removal and
+    // AEAD decryption of an Initial that fits the stack work buffer do not
+    // allocate. The first run grows the scratch buffer to hold the CRYPTO
+    // data, so it is not counted.
+    // https://www.rfc-editor.org/rfc/rfc9001#section-5
+    let raw = rfc9001_a2_client_initial();
+    let mut buf = DissectBuffer::new();
+    QuicDissector.dissect(&raw, &mut buf, 0).unwrap();
+    let layer = &buf.layers()[0];
+    assert!(buf.field_by_name(layer, "frames").is_some());
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        QuicDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "QUIC decrypted Initial dissect allocated {allocs} times"
+    );
+}

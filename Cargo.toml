@@ -70,6 +70,8 @@ packet-dissector-test-alloc = { path = "crates/packet-dissector-test-alloc" }
 aes = "0.9"
 cbc = "0.2"
 aes-gcm = "0.11"
+hkdf = "0.13"
+sha2 = "0.11"
 ccm = "0.6"
 chacha20poly1305 = "0.11"
 ctr = "0.10"
