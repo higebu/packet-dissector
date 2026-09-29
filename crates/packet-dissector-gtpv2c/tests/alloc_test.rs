@@ -36,3 +36,43 @@ fn zero_alloc_dissect_gtpv2c() {
     });
     assert_eq!(allocs, 0, "GTPv2-C dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_gtpv2c_decoded_ies_and_piggyback() {
+    // IEs decoded by the TS 29.274 v19.6.0 decoders: Indication, Bearer TFT,
+    // FQ-CSID, Node Features, GUTI, Target Identification and TWAN
+    // Identifier; followed by a piggybacked message (P=1).
+    let ies: &[&[u8]] = &[
+        &[77, 0, 2, 0, 0x80, 0x04],
+        &[84, 0, 6, 0, 0x21, 0x31, 0xFF, 0x02, 0x30, 17],
+        &[132, 0, 7, 0, 0x01, 10, 0, 0, 1, 0x00, 0x01],
+        &[152, 0, 1, 0, 0x01],
+        &[
+            117, 0, 10, 0, 0x44, 0xF0, 0x01, 0x80, 0x01, 0x01, 0xC0, 0, 0, 1,
+        ],
+        &[
+            121, 0, 9, 0, 1, 0x44, 0xF0, 0x01, 0x0A, 0xBC, 0xDE, 0x01, 0x02,
+        ],
+        &[169, 0, 6, 0, 0x04, 1, b'x', 0x44, 0xF0, 0x01],
+    ];
+    let body: Vec<u8> = ies.iter().flat_map(|ie| ie.iter().copied()).collect();
+    let msg_length = (8 + body.len()) as u16;
+
+    let mut raw = vec![0x58, 33]; // version=2, P=1, T=1; Create Session Response
+    raw.extend_from_slice(&msg_length.to_be_bytes());
+    raw.extend_from_slice(&1u32.to_be_bytes()); // TEID
+    raw.extend_from_slice(&[0, 0, 1, 0]); // sequence number + spare
+    raw.extend_from_slice(&body);
+    // Piggybacked Create Bearer Request with no IEs
+    raw.extend_from_slice(&[0x48, 95, 0, 8, 0, 0, 0, 2, 0, 0, 2, 0]);
+
+    let mut buf = DissectBuffer::new();
+    Gtpv2cDissector.dissect(&raw, &mut buf, 0).unwrap();
+    assert_eq!(buf.layers().len(), 2);
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        Gtpv2cDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "GTPv2-C decoded IEs allocated {allocs} times");
+}

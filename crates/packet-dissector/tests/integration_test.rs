@@ -12,6 +12,7 @@
 //! | Ethernet → IPv4 → TCP (SYN)             | integration_ethernet_ipv4_tcp_syn             |
 //! | Ethernet → ARP                           | integration_ethernet_arp                      |
 //! | Ethernet → LLDP                          | integration_ethernet_lldp                     |
+//! | Ethernet → LLDP (IEEE 802.1 Port VLAN ID TLV)   | integration_ethernet_lldp_org_port_vlan_id    |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -56,6 +57,7 @@
 //! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
+//! | Ethernet → IPv4 → UDP → GTPv2-C + piggyback      | integration_ethernet_ipv4_udp_gtpv2c_piggyback      |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
@@ -88,6 +90,10 @@
 //! | Ethernet → LLC → STP Config BPDU                    | integration_ethernet_llc_stp_config                  |
 //! | Ethernet → LLC → STP TCN BPDU                       | integration_ethernet_llc_stp_tcn                     |
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
+//! | Ethernet → LLC → SNAP (RFC 1042) → IPv4 → ICMP      | integration_ethernet_llc_snap_ipv4_icmp              |
+//! | Ethernet → LLC → SNAP (non-zero OUI) ends the chain | integration_ethernet_llc_snap_other_oui              |
+//! | SLL (protocol 0x0004) → LLC → STP                   | integration_sll_llc_stp                              |
+//! | SLL2 (protocol 0x0004) → LLC → SNAP → IPv4          | integration_sll2_llc_snap_ipv4                       |
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
 //! | Ethernet → MPLS (2 labels) → IPv4 → UDP              | integration_ethernet_mpls_two_labels_ipv4_udp        |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
@@ -3478,6 +3484,37 @@ fn integration_ethernet_ipv4_udp_gtpv2c_create_session() {
     assert!(buf.field_by_name(gtpv2c, "ies").is_some());
 }
 
+/// Ethernet → IPv4 → UDP → GTPv2-C Create Session Response with a
+/// piggybacked Create Bearer Request (3GPP TS 29.274, Section 5.5.1)
+#[test]
+fn integration_ethernet_ipv4_udp_gtpv2c_piggyback() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xAA; 6], [0xBB; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 2123, 2123);
+    let first = push_gtpv2c_with_teid(&mut pkt, 33, 0x11, 1, &[3, 0, 1, 0, 5]);
+    pkt[first] |= 0x10; // P flag
+    push_gtpv2c_with_teid(&mut pkt, 95, 0x22, 2, &[]);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 5);
+    assert_eq!(buf.layers()[3].name, "GTPv2-C");
+    assert_eq!(buf.layers()[4].name, "GTPv2-C");
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[4].range.end, pkt.len());
+    let piggybacked = &buf.layers()[4];
+    assert_eq!(
+        display_name_for(&buf, piggybacked, "message_type"),
+        Some("Create Bearer Request")
+    );
+}
+
 /// Ethernet → IPv4 → UDP → GTPv2-C (Echo Request, no TEID)
 #[test]
 fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
@@ -4399,6 +4436,44 @@ fn build_eth_lldp() -> Vec<u8> {
     // End Of LLDPDU
     pkt.extend_from_slice(&0x0000u16.to_be_bytes());
     pkt
+}
+
+/// Ethernet → LLDP with an IEEE 802.1 Port VLAN ID TLV decoded into `org`
+/// (IEEE 802.1AB-2005 Annex F.2).
+#[test]
+fn integration_ethernet_lldp_org_port_vlan_id() {
+    let reg = DissectorRegistry::default();
+    let mut data = build_eth_lldp();
+    data.truncate(data.len() - 2); // drop End Of LLDPDU
+    data.extend_from_slice(&[0xFE, 0x06, 0x00, 0x80, 0xC2, 0x01, 0x00, 0x64]);
+    data.extend_from_slice(&[0x00, 0x00]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+
+    // tlvs[4] (after Chassis ID, Port ID, TTL, System Name) → org → pvid.
+    let lldp = buf.layer_by_name("LLDP").unwrap();
+    let FieldValue::Array(tlvs) = &buf.field_by_name(lldp, "tlvs").unwrap().value else {
+        panic!("tlvs")
+    };
+    let org_tlv = buf
+        .nested_fields(tlvs)
+        .iter()
+        .filter_map(|f| match &f.value {
+            FieldValue::Object(r) => Some(buf.nested_fields(r)),
+            _ => None,
+        })
+        .nth(4)
+        .unwrap();
+    let FieldValue::Object(org) = &org_tlv.iter().find(|f| f.name() == "org").unwrap().value else {
+        panic!("org")
+    };
+    let pvid = buf
+        .nested_fields(org)
+        .iter()
+        .find(|f| f.name() == "pvid")
+        .unwrap();
+    assert_eq!(pvid.value, FieldValue::U16(100));
 }
 
 #[test]
@@ -8289,6 +8364,103 @@ fn integration_ethernet_802_3_llc_payload_bounded_by_length() {
 
     let probe = buf.layer_by_name("Probe").unwrap();
     assert_eq!(probe.range, 17..llc_pdu_end);
+}
+
+/// IPv4 (total length 28, ICMP) + ICMP Echo Request (8 octets).
+fn ipv4_icmp_echo_bytes() -> Vec<u8> {
+    vec![
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x00,
+        0x01, 0x0a, 0x00, 0x00, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+    ]
+}
+
+/// Ethernet (802.3 Length) → LLC (0xAA, UI) → SNAP OUI 00-00-00 → IPv4 → ICMP.
+///
+/// RFC 1042, "Frame Format and MAC Level Issues".
+#[test]
+fn integration_ethernet_llc_snap_ipv4_icmp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let mut llc = vec![0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00];
+    llc.extend_from_slice(&ipv4_icmp_echo_bytes());
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP", "IPv4", "ICMP"]);
+    assert_layers_contiguous(&buf);
+    let snap = buf.layer_by_name("SNAP").unwrap();
+    assert_eq!(snap.range, 17..22);
+    assert_eq!(buf.field_u16(snap, "pid"), Some(0x0800));
+}
+
+/// Ethernet → LLC → SNAP with Cisco OUI 00-00-0C (CDP): the SNAP layer is
+/// shown and the chain ends.
+#[test]
+fn integration_ethernet_llc_snap_other_oui() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let llc = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x00, 0x02, 0xB4];
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP"]);
+}
+
+/// SLL header (LINKTYPE_LINUX_SLL) with the given protocol type.
+fn sll_header(protocol_type: u16) -> Vec<u8> {
+    let mut pkt = vec![0x00, 0x02, 0x00, 0x01, 0x00, 0x06];
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00]);
+    pkt.extend_from_slice(&protocol_type.to_be_bytes());
+    pkt
+}
+
+/// SLL with protocol type 0x0004 → LLC (0x42) → STP Configuration BPDU.
+///
+/// LINKTYPE_LINUX_SLL: 0x0004 "if the payload begins with an 802.2 LLC header".
+#[test]
+fn integration_sll_llc_stp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = sll_header(0x0004);
+    pkt.extend_from_slice(&[0x42, 0x42, 0x03]);
+    push_stp_config_bpdu(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect_with_link_type(&pkt, 113, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL", "STP"]);
+    assert_layers_contiguous(&buf);
+    let sll = buf.layer_by_name("SLL").unwrap();
+    assert_eq!(sll.range, 0..19);
+    assert_eq!(buf.field_u8(sll, "llc_dsap"), Some(0x42));
+}
+
+/// SLL2 with protocol type 0x0004 → LLC (0xAA) → SNAP → IPv4 → ICMP.
+#[test]
+fn integration_sll2_llc_snap_ipv4() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x06,
+    ];
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+    pkt.extend_from_slice(&ipv4_icmp_echo_bytes());
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect_with_link_type(&pkt, 276, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL2", "SNAP", "IPv4", "ICMP"]);
+    assert_layers_contiguous(&buf);
 }
 
 /// Ethernet → IPv4 → TCP SYN with Ethernet padding and a trailer: the TCP payload

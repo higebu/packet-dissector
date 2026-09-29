@@ -7,6 +7,11 @@
 //!
 //! ## References
 //! - IEEE 802.1AB-2016: <https://standards.ieee.org/ieee/802.1AB/6047/>
+//! - IEEE 802.1AB-2005, Annexes F and G (IEEE 802.1 / 802.3 TLVs):
+//!   <https://standards.ieee.org/standard/802_1AB-2005.html>
+//! - IEEE 802.1Q-2022, Annex D (IEEE 802.1 TLVs): <https://standards.ieee.org/ieee/802.1Q/10323/>
+//! - IEEE 802.3-2022, Clause 79 (IEEE 802.3 TLVs): <https://standards.ieee.org/ieee/802.3/10422/>
+//! - ANSI/TIA-1057 (LLDP-MED TLVs): <https://tiaonline.org/>
 //!
 //! ## Coverage (IEEE 802.1AB-2016)
 //!
@@ -24,16 +29,22 @@
 //! | 8.5.7 | System Description TLV | `parse_lldp_optional_tlvs` |
 //! | 8.5.8 | System Capabilities TLV | `parse_lldp_system_capabilities` |
 //! | 8.5.8 | System Capabilities length != 4 | `parse_lldp_system_capabilities_invalid_length` |
+//! | 8.5.8.1, 8.5.8.2 | Capability bits (available / enabled) | `parse_lldp_system_capability_flags` |
+//! | 8.5.2.2 | Chassis ID network address (IPv4 / IPv6 / other) | `parse_lldp_network_address_ids` |
+//! | 8.5.3.2 | Port ID network address | `parse_lldp_network_address_ids` |
 //! | 8.5.9 | Management Address TLV (IPv4) | `parse_lldp_management_address` |
 //! | 8.5.9 | Management Address TLV (IPv6) | `parse_lldp_management_address_ipv6` |
 //! | 8.5.9 | Management Address TLV with OID | `parse_lldp_management_address_with_oid` |
 //! | 8.5.9 | Management Address length < 9 | `parse_lldp_management_address_too_short` |
 //! | 8.5.9 | Management Address length > 167 | `parse_lldp_management_address_too_long` |
 //! | 8.6 | Organizationally Specific TLV | `parse_lldp_org_specific` |
+//! | 8.6 | Known org TLVs decoded (see `org` module tests) | `org::tests::*` |
 //! | — | Truncated LLDPDU | `parse_lldp_truncated` |
 //! | — | Empty LLDPDU | `parse_lldp_empty_data` |
 
 #![deny(missing_docs)]
+
+mod org;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -97,6 +108,9 @@ const TLV_TYPE_ORG_SPECIFIC: u8 = 127;
 /// Chassis ID subtype whose value is a MAC address (6 bytes).
 /// IEEE 802.1AB-2016, Table 8-2, entry 4.
 const CHASSIS_ID_SUBTYPE_MAC: u8 = 4;
+/// Chassis ID subtype whose value is a network address.
+/// IEEE 802.1AB-2016, Table 8-2, entry 5.
+const CHASSIS_ID_SUBTYPE_NETWORK_ADDRESS: u8 = 5;
 /// Returns a human-readable name for a Chassis ID subtype.
 ///
 /// IEEE 802.1AB-2016, Section 8.5.2.2 — chassis ID subtype.
@@ -114,12 +128,15 @@ fn chassis_id_subtype_name(v: u8) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Port ID subtypes — IEEE 802.1AB-2016, Table 8-4
+// Port ID subtypes — IEEE 802.1AB-2016, Table 8-3
 // ---------------------------------------------------------------------------
 
 /// Port ID subtype whose value is a MAC address (6 bytes).
-/// IEEE 802.1AB-2016, Table 8-4, entry 3.
+/// IEEE 802.1AB-2016, Table 8-3, entry 3.
 const PORT_ID_SUBTYPE_MAC: u8 = 3;
+/// Port ID subtype whose value is a network address.
+/// IEEE 802.1AB-2016, Table 8-3, entry 4.
+const PORT_ID_SUBTYPE_NETWORK_ADDRESS: u8 = 4;
 
 /// Returns a human-readable name for a Port ID subtype.
 ///
@@ -192,6 +209,31 @@ const FD_TLV_IFACE_NUMBERING_SUBTYPE: usize = 15;
 const FD_TLV_IFACE_NUMBER: usize = 16;
 const FD_TLV_OID_LENGTH: usize = 17;
 const FD_TLV_OID: usize = 18;
+const FD_TLV_ORG: usize = 19;
+const FD_TLV_ID_ADDRESS_FAMILY: usize = 20;
+const FD_TLV_ID_ADDRESS: usize = 21;
+const FD_TLV_AVAILABLE_CAPABILITY_FLAGS: usize = 22;
+const FD_TLV_ENABLED_CAPABILITY_FLAGS: usize = 23;
+
+/// System capability bits, least significant first.
+///
+/// IEEE 802.1AB-2016, 8.5.8.1, Table 8-4 (bits 0–7 also IEEE 802.1AB-2005,
+/// Table 9-4): Other, Repeater, MAC Bridge component, WLAN Access Point,
+/// Router, Telephone, DOCSIS cable device, Station Only, C-VLAN component,
+/// S-VLAN component, Two-port MAC Relay component; bits 11–15 reserved.
+static CAPABILITY_BITS: &[FieldDescriptor] = &[
+    FieldDescriptor::new("other", "Other", FieldType::U8),
+    FieldDescriptor::new("repeater", "Repeater", FieldType::U8),
+    FieldDescriptor::new("mac_bridge", "MAC Bridge", FieldType::U8),
+    FieldDescriptor::new("wlan_access_point", "WLAN Access Point", FieldType::U8),
+    FieldDescriptor::new("router", "Router", FieldType::U8),
+    FieldDescriptor::new("telephone", "Telephone", FieldType::U8),
+    FieldDescriptor::new("docsis_cable_device", "DOCSIS Cable Device", FieldType::U8),
+    FieldDescriptor::new("station_only", "Station Only", FieldType::U8),
+    FieldDescriptor::new("c_vlan_component", "C-VLAN Component", FieldType::U8),
+    FieldDescriptor::new("s_vlan_component", "S-VLAN Component", FieldType::U8),
+    FieldDescriptor::new("two_port_mac_relay", "Two-port MAC Relay", FieldType::U8),
+];
 
 /// Container descriptor for a TLV Object.
 ///
@@ -268,7 +310,9 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
     )
     .optional(),
     FieldDescriptor::new("oui", "OUI", FieldType::Bytes).optional(),
-    FieldDescriptor::new("org_subtype", "Organization Subtype", FieldType::U8).optional(),
+    FieldDescriptor::new("org_subtype", "Organization Subtype", FieldType::U8)
+        .optional()
+        .with_display_fn(org::org_subtype_display),
     FieldDescriptor::new("info", "Information", FieldType::Bytes).optional(),
     FieldDescriptor::new("raw", "Raw Value", FieldType::Bytes).optional(),
     // Management Address TLV subfields — IEEE 802.1AB-2016, Section 8.5.9.
@@ -289,14 +333,57 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("iface_number", "Interface Number", FieldType::U32).optional(),
     FieldDescriptor::new("oid_length", "OID String Length", FieldType::U8).optional(),
     FieldDescriptor::new("oid", "Object Identifier", FieldType::Bytes).optional(),
+    // Decoded organizationally specific TLVs (see the `org` module).
+    FieldDescriptor::new(
+        "org",
+        "Organizationally Specific Information",
+        FieldType::Object,
+    )
+    .optional()
+    .with_children(org::ORG_FIELDS),
+    // Network address Chassis ID (subtype 5) / Port ID (subtype 4) —
+    // IEEE 802.1AB-2016, 8.5.2.2 / 8.5.3.2: IANA address family, address.
+    FieldDescriptor::new("id_address_family", "ID Address Family", FieldType::U8).optional(),
+    FieldDescriptor::new("id_address", "ID Network Address", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "available_capability_flags",
+        "Available Capabilities",
+        FieldType::Object,
+    )
+    .optional()
+    .with_children(CAPABILITY_BITS),
+    FieldDescriptor::new(
+        "enabled_capability_flags",
+        "Enabled Capabilities",
+        FieldType::Object,
+    )
+    .optional()
+    .with_children(CAPABILITY_BITS),
 ];
 
 /// Specification references for the LLDP dissector.
-static REFERENCES: &[SpecReference] = &[SpecReference::new(
-    "IEEE 802.1AB-2016",
-    "IEEE Standard for Local and Metropolitan Area Networks--Station and Media Access Control Connectivity Discovery",
-    "https://standards.ieee.org/ieee/802.1AB/6047/",
-)];
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "IEEE 802.1AB-2016",
+        "IEEE Standard for Local and Metropolitan Area Networks--Station and Media Access Control Connectivity Discovery",
+        "https://standards.ieee.org/ieee/802.1AB/6047/",
+    ),
+    SpecReference::new(
+        "IEEE 802.1Q-2022",
+        "Bridges and Bridged Networks, Annex D (IEEE 802.1 Organizationally Specific TLVs)",
+        "https://standards.ieee.org/ieee/802.1Q/10323/",
+    ),
+    SpecReference::new(
+        "IEEE 802.3-2022",
+        "IEEE Standard for Ethernet, Clause 79 (IEEE 802.3 Organizationally Specific Link Layer Discovery Protocol (LLDP) type, length, and value (TLV) information elements)",
+        "https://standards.ieee.org/ieee/802.3/10422/",
+    ),
+    SpecReference::new(
+        "ANSI/TIA-1057",
+        "Link Layer Discovery Protocol for Media Endpoint Devices (LLDP-MED)",
+        "https://tiaonline.org/",
+    ),
+];
 
 /// LLDP dissector.
 pub struct LldpDissector;
@@ -394,6 +481,7 @@ impl Dissector for LldpDissector {
                         tlv_value,
                         offset + tlv_value_start,
                         CHASSIS_ID_SUBTYPE_MAC,
+                        CHASSIS_ID_SUBTYPE_NETWORK_ADDRESS,
                     )?;
                 }
                 // IEEE 802.1AB-2016, Section 8.5.3 — Port ID TLV
@@ -403,6 +491,7 @@ impl Dissector for LldpDissector {
                         tlv_value,
                         offset + tlv_value_start,
                         PORT_ID_SUBTYPE_MAC,
+                        PORT_ID_SUBTYPE_NETWORK_ADDRESS,
                     )?;
                 }
                 // IEEE 802.1AB-2016, Section 8.5.4 — Time To Live TLV (length = 2).
@@ -446,6 +535,19 @@ impl Dissector for LldpDissector {
                         FieldValue::U16(enabled),
                         offset + tlv_value_start + 2..offset + tlv_value_start + 4,
                     );
+                    // IEEE 802.1AB-2016, 8.5.8.1 / 8.5.8.2 — one flag per bit.
+                    push_capability_flags(
+                        buf,
+                        FD_TLV_AVAILABLE_CAPABILITY_FLAGS,
+                        available,
+                        offset + tlv_value_start,
+                    );
+                    push_capability_flags(
+                        buf,
+                        FD_TLV_ENABLED_CAPABILITY_FLAGS,
+                        enabled,
+                        offset + tlv_value_start + 2,
+                    );
                 }
                 // IEEE 802.1AB-2016, Section 8.5.9 — Management Address TLV.
                 TLV_TYPE_MANAGEMENT_ADDRESS => {
@@ -475,6 +577,17 @@ impl Dissector for LldpDissector {
                             offset + tlv_value_start + 4..offset + tlv_value_start + tlv_length,
                         );
                     }
+                    // Known (OUI, subtype) pairs are also decoded; the raw
+                    // `info` above is kept for every organizationally
+                    // specific TLV.
+                    org::push_org_fields(
+                        buf,
+                        &TLV_CHILD_FIELDS[FD_TLV_ORG],
+                        &tlv_value[..3],
+                        tlv_value[3],
+                        &tlv_value[4..],
+                        offset + tlv_value_start + 4,
+                    );
                 }
                 // IEEE 802.1AB-2016, Section 8.5.1 — End Of LLDPDU TLV (length = 0).
                 TLV_TYPE_END => {
@@ -527,13 +640,15 @@ impl Dissector for LldpDissector {
 /// Both TLV types share the same structure: 1-byte subtype followed by the ID value.
 /// IEEE 802.1AB-2016, Sections 8.5.2 and 8.5.3.
 ///
-/// `mac_subtype` encodes the subtype number for MAC address IDs
-/// (Chassis ID: 4, Port ID: 3).
+/// `mac_subtype` and `network_subtype` encode the subtype numbers for MAC
+/// address IDs (Chassis ID: 4, Port ID: 3) and network address IDs
+/// (Chassis ID: 5, Port ID: 4).
 fn parse_id_tlv<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     abs_offset: usize,
     mac_subtype: u8,
+    network_subtype: u8,
 ) -> Result<(), PacketError> {
     if value.is_empty() {
         return Err(PacketError::InvalidHeader(
@@ -567,7 +682,56 @@ fn parse_id_tlv<'pkt>(
         id_offset..id_offset + id_data.len(),
     );
 
+    // IEEE 802.1AB-2016, 8.5.2.2 / 8.5.3.2 — a network address ID is an
+    // IANA Address Family Number octet followed by the address.
+    if subtype == network_subtype && id_data.len() >= 2 {
+        let family = id_data[0];
+        let addr = &id_data[1..];
+        buf.push_field(
+            &TLV_CHILD_FIELDS[FD_TLV_ID_ADDRESS_FAMILY],
+            FieldValue::U8(family),
+            id_offset..id_offset + 1,
+        );
+        buf.push_field(
+            &TLV_CHILD_FIELDS[FD_TLV_ID_ADDRESS],
+            typed_address(family, addr),
+            id_offset + 1..id_offset + id_data.len(),
+        );
+    }
+
     Ok(())
+}
+
+/// An address as IPv4 / IPv6 when the IANA Address Family Number and the
+/// length agree, otherwise raw bytes.
+fn typed_address(family: u8, addr: &[u8]) -> FieldValue<'_> {
+    match (family, addr.len()) {
+        (ADDR_FAMILY_IPV4, 4) => FieldValue::Ipv4Addr([addr[0], addr[1], addr[2], addr[3]]),
+        (ADDR_FAMILY_IPV6, 16) => {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(addr);
+            FieldValue::Ipv6Addr(a)
+        }
+        _ => FieldValue::Bytes(addr),
+    }
+}
+
+/// Push an Object with one 0/1 field per defined capability bit.
+fn push_capability_flags(buf: &mut DissectBuffer<'_>, fd: usize, bits: u16, start: usize) {
+    let range = start..start + 2;
+    let idx = buf.begin_container(
+        &TLV_CHILD_FIELDS[fd],
+        FieldValue::Object(0..0),
+        range.clone(),
+    );
+    for (bit, descriptor) in CAPABILITY_BITS.iter().enumerate() {
+        buf.push_field(
+            descriptor,
+            FieldValue::U8(((bits >> bit) & 1) as u8),
+            range.clone(),
+        );
+    }
+    buf.end_container(idx);
 }
 
 /// Parse a Management Address TLV value (IEEE 802.1AB-2016, Section 8.5.9).
@@ -655,17 +819,7 @@ fn parse_management_address_tlv<'pkt>(
     // Address Family Numbers. Surface IPv4/IPv6 as typed addresses when the
     // address-bytes length matches, otherwise keep raw bytes.
     let addr_range = abs_offset + 2..abs_offset + iface_subtype_off;
-    let addr_value = match (addr_subtype, addr_bytes.len()) {
-        (ADDR_FAMILY_IPV4, 4) => {
-            FieldValue::Ipv4Addr([addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]])
-        }
-        (ADDR_FAMILY_IPV6, 16) => {
-            let mut buf16 = [0u8; 16];
-            buf16.copy_from_slice(addr_bytes);
-            FieldValue::Ipv6Addr(buf16)
-        }
-        _ => FieldValue::Bytes(addr_bytes),
-    };
+    let addr_value = typed_address(addr_subtype, addr_bytes);
     buf.push_field(
         &TLV_CHILD_FIELDS[FD_TLV_MGMT_ADDRESS],
         addr_value,
@@ -913,6 +1067,148 @@ mod tests {
     }
 
     #[test]
+    fn parse_lldp_system_capability_flags() {
+        // Available: Other, Bridge, Router, C-VLAN, TPMR; Enabled: Bridge, Router.
+        let caps_value = [0x05u8, 0x15, 0x00, 0x14];
+        let data = build_lldp_with_optional(0x0E04, &caps_value);
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let array_range = tlvs_array_range(&buf);
+        let caps_range = tlv_object_range(&buf, &array_range, 3);
+
+        let flags = |name: &str| match obj_field_value(&buf, &caps_range, name) {
+            FieldValue::Object(r) => buf
+                .nested_fields(r)
+                .iter()
+                .map(|f| (f.name(), f.value.as_u8().unwrap(), f.range.clone()))
+                .collect::<Vec<_>>(),
+            _ => panic!("{name} is not an object"),
+        };
+        let available = flags("available_capability_flags");
+        let names: Vec<_> = available.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "other",
+                "repeater",
+                "mac_bridge",
+                "wlan_access_point",
+                "router",
+                "telephone",
+                "docsis_cable_device",
+                "station_only",
+                "c_vlan_component",
+                "s_vlan_component",
+                "two_port_mac_relay",
+            ]
+        );
+        let set: Vec<_> = available
+            .iter()
+            .filter(|(_, v, _)| *v == 1)
+            .map(|(n, _, _)| *n)
+            .collect();
+        assert_eq!(
+            set,
+            [
+                "other",
+                "mac_bridge",
+                "router",
+                "c_vlan_component",
+                "two_port_mac_relay"
+            ]
+        );
+        let base = data.len() - 2 - 4;
+        assert!(available.iter().all(|(_, _, r)| *r == (base..base + 2)));
+        let enabled = flags("enabled_capability_flags");
+        let set: Vec<_> = enabled
+            .iter()
+            .filter(|(_, v, _)| *v == 1)
+            .map(|(n, _, _)| *n)
+            .collect();
+        assert_eq!(set, ["mac_bridge", "router"]);
+        assert!(enabled.iter().all(|(_, _, r)| *r == (base + 2..base + 4)));
+    }
+
+    #[test]
+    fn parse_lldp_network_address_ids() {
+        // Chassis ID subtype 5 (IPv4 192.0.2.1), Port ID subtype 4 (IPv6 2001:db8::1).
+        let mut data = vec![0x02, 0x06, 5, 1, 192, 0, 2, 1];
+        let mut v6 = [0u8; 16];
+        v6[..4].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
+        v6[15] = 1;
+        data.extend_from_slice(&[0x04, 0x12, 4, 2]);
+        data.extend_from_slice(&v6);
+        data.extend_from_slice(&[0x06, 0x02, 0x00, 0x78, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let array_range = tlvs_array_range(&buf);
+
+        let chassis = tlv_object_range(&buf, &array_range, 0);
+        assert_eq!(
+            *obj_field_value(&buf, &chassis, "id"),
+            FieldValue::Bytes(&[1, 192, 0, 2, 1])
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &chassis, "id_address_family"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &chassis, "id_address"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        let f = buf
+            .nested_fields(&chassis)
+            .iter()
+            .find(|f| f.name() == "id_address")
+            .unwrap();
+        assert_eq!(f.range, 4..8);
+
+        let port = tlv_object_range(&buf, &array_range, 1);
+        assert_eq!(
+            *obj_field_value(&buf, &port, "id_address_family"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &port, "id_address"),
+            FieldValue::Ipv6Addr(v6)
+        );
+
+        // Other address families, or a length mismatch, keep raw bytes.
+        let data = [
+            0x02, 0x05, 5, 6, 0xAA, 0xBB, 0xCC, // family 6 (802), 3 octets
+            0x04, 0x04, 4, 1, 10, 0, // IPv4 family with 2 octets
+            0x06, 0x02, 0x00, 0x78, 0x00, 0x00,
+        ];
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let array_range = tlvs_array_range(&buf);
+        let chassis = tlv_object_range(&buf, &array_range, 0);
+        assert_eq!(
+            *obj_field_value(&buf, &chassis, "id_address"),
+            FieldValue::Bytes(&[0xAA, 0xBB, 0xCC])
+        );
+        let port = tlv_object_range(&buf, &array_range, 1);
+        assert_eq!(
+            *obj_field_value(&buf, &port, "id_address"),
+            FieldValue::Bytes(&[10, 0])
+        );
+
+        // Network address subtype with only the family octet: no address.
+        let data = [
+            0x02, 0x02, 5, 1, 0x04, 0x02, 7, b'x', 0x06, 0x02, 0x00, 0x78, 0x00, 0x00,
+        ];
+        let mut buf = DissectBuffer::new();
+        LldpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let array_range = tlvs_array_range(&buf);
+        let chassis = tlv_object_range(&buf, &array_range, 0);
+        assert!(
+            buf.nested_fields(&chassis)
+                .iter()
+                .all(|f| f.name() != "id_address_family")
+        );
+    }
+
+    #[test]
     fn parse_lldp_management_address() {
         // Management Address TLV: type=8; addr=IPv4 192.168.1.1, ifIndex=1
         let mgmt_value: &[u8] = &[
@@ -1091,6 +1387,11 @@ mod tests {
         assert_eq!(
             *obj_field_value(&buf, &org_range, "info"),
             FieldValue::Bytes(&[0x01, 0x02, 0x03])
+        );
+        // The subtype is named through the sibling OUI.
+        assert_eq!(
+            buf.resolve_nested_display_name(&org_range, "org_subtype_name"),
+            Some("Port VLAN ID")
         );
     }
 
