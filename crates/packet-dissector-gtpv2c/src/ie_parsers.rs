@@ -1500,6 +1500,15 @@ mod tests {
         buf.resolve_nested_display_name(r, name)
     }
 
+    #[test]
+    fn plmn_fields_short_input_is_empty() {
+        let mut buf = DissectBuffer::new();
+        push_plmn_fields(&[0x21, 0x43], 0, 2, &mut buf);
+        assert_eq!(buf.fields().len(), 2);
+        assert_eq!(buf.fields()[0].value, FieldValue::Scratch(0..0));
+        assert_eq!(buf.fields()[1].value, FieldValue::Scratch(0..0));
+    }
+
     // 1. IMSI (type 1)
     #[test]
     fn imsi_bcd_decode() {

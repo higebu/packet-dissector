@@ -475,6 +475,7 @@ mod tests {
     // | 10.5.6.12  | Parameters list (E bit)                   | tft_parameters_list                |
     // | 10.5.6.12  | Malformed filters / components            | tft_malformed_is_kept_raw          |
     // | 29.274 8.19| Empty Bearer TFT value                    | tft_empty_is_raw                   |
+    // | 10.5.6.12  | Value name tables                         | tft_name_tables_and_display_fns    |
 
     static FD_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value", FieldType::Bytes);
 
@@ -755,5 +756,24 @@ mod tests {
     fn tft_empty_is_raw() {
         let buf = push(&[]);
         assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&[]));
+    }
+
+    #[test]
+    fn tft_name_tables_and_display_fns() {
+        use super::*;
+        assert!((0..=6).all(|v| operation_code_name(v).is_some()));
+        assert_eq!(operation_code_name(7), None);
+        assert!((0..=3).all(|v| direction_name(v).is_some()));
+        assert_eq!(direction_name(4), None);
+        assert!((1..=3).all(|v| parameter_name(v).is_some()));
+        assert_eq!(parameter_name(4), None);
+        for fd in [
+            &FD_OPERATION_CODE,
+            &FD_DIRECTION,
+            &FD_COMPONENT_TYPE,
+            &FD_PARAMETER_ID,
+        ] {
+            assert_eq!((fd.display_fn.unwrap())(&FieldValue::U16(0), &[]), None);
+        }
     }
 }

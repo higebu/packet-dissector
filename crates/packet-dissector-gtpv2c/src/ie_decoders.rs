@@ -1374,6 +1374,8 @@ mod tests {
     // | 8.132           | Secondary RAT Usage Data Report      | secondary_rat_usage_data_report        |
     // | 8.x             | Short values fall back to raw        | short_values_fall_back_to_raw          |
     // | 8.50            | BCD nibble above 9 shown as hex      | plmn_nibble_above_nine_is_visible      |
+    // | 8.x             | Value name tables                    | name_tables_and_display_fns            |
+    // | 8.100 / 8.51.7  | Relay IPv6, gNodeB ID length 0       | twan_relay_ipv6_and_gnb_zero_length    |
 
     static FD_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value", FieldType::Bytes);
 
@@ -1928,5 +1930,90 @@ mod tests {
             let buf = push(ie_type, data);
             assert!(is_raw(&buf, data), "IE {ie_type} should be raw");
         }
+    }
+
+    #[test]
+    fn name_tables_and_display_fns() {
+        use super::*;
+        // Table 8.61-1
+        let actions: Vec<_> = (0..=9).map(change_reporting_action_name).collect();
+        assert!(actions[..9].iter().all(Option::is_some));
+        assert_eq!(actions[9], None);
+        // Table 8.81-1
+        assert_eq!(detach_type_name(1), Some("PS Detach"));
+        assert_eq!(detach_type_name(0), None);
+        // Table 8.46-1
+        assert_eq!(
+            complete_request_message_type_name(0),
+            Some("Complete Attach Request Message")
+        );
+        assert_eq!(complete_request_message_type_name(2), None);
+        // Table 8.48-2
+        assert!((1..=6).all(|v| container_type_name(v).is_some()));
+        assert_eq!(container_type_name(0), None);
+        // Tables 8.49-1 / 8.103-1
+        assert!((0..=4).all(|v| ran_cause_type_name(v).is_some()));
+        assert_eq!(ran_cause_type_name(5), None);
+        // Table 8.103-0
+        assert!((1..=5).all(|v| ran_nas_protocol_type_name(v).is_some()));
+        assert_eq!(ran_nas_protocol_type_name(0), None);
+        // Table 8.51-1
+        assert!((0..=8).all(|v| target_type_name(v).is_some()));
+        assert_eq!(target_type_name(9), None);
+        // Section 8.62
+        assert!((0..=2).all(|v| node_id_type_name(v).is_some()));
+        assert_eq!(node_id_type_name(3), None);
+        // Table 8.85.1
+        for (v, name) in [
+            (0, "2 seconds"),
+            (1, "1 minute"),
+            (2, "10 minutes"),
+            (3, "1 hour"),
+            (4, "10 hours"),
+            (5, "1 minute"),
+            (7, "deactivated"),
+        ] {
+            assert_eq!(throttling_unit_name(v), Some(name));
+        }
+        // Table 8.132-1
+        assert_eq!(secondary_rat_type_name(1), Some("Unlicensed Spectrum"));
+        assert_eq!(secondary_rat_type_name(2), None);
+        assert_eq!(low_bits(0xFFFF_FFFF, 0), 0);
+
+        // Display functions ignore values of another type.
+        for fd in [
+            &FD_ACTION,
+            &FD_DETACH_TYPE,
+            &FD_CRM_TYPE,
+            &FD_CONTAINER_TYPE,
+            &FD_CAUSE_TYPE,
+            &FD_PROTOCOL_TYPE,
+            &FD_TARGET_TYPE,
+            &FD_NODE_ID_TYPE,
+            &FD_THROTTLING_UNIT,
+            &FD_SECONDARY_RAT_TYPE,
+        ] {
+            assert_eq!((fd.display_fn.unwrap())(&FieldValue::U16(0), &[]), None);
+        }
+    }
+
+    #[test]
+    fn twan_relay_ipv6_and_gnb_zero_length() {
+        let mut data = vec![0x10, 0];
+        data.extend_from_slice(&[0, 16]);
+        data.extend_from_slice(&[0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        data.push(0);
+        let buf = push(169, &data);
+        assert!(matches!(
+            val(&buf, "relay_identity"),
+            FieldValue::Ipv6Addr(_)
+        ));
+
+        // gNodeB ID Length 0 yields an empty ID.
+        let buf = push(
+            121,
+            &[5, 0x44, 0xF0, 0x01, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 1],
+        );
+        assert_eq!(*val(&buf, "gnodeb_id"), FieldValue::U32(0));
     }
 }

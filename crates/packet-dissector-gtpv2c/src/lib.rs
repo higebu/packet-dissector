@@ -345,6 +345,7 @@ mod tests {
     // | 5.5.1     | Piggybacked message (P=1)  | parse_gtpv2c_piggybacked_message  |
     // | 5.5.1     | Piggyback is one level     | parse_gtpv2c_piggyback_only_one_level |
     // | 5.5.1     | Malformed piggyback / P=0  | parse_gtpv2c_piggyback_malformed_is_ignored |
+    // | 5.1/5.5.1 | Version, length, MP priority | parse_gtpv2c_header_errors_and_priority |
 
     /// Helper to build a GTPv2-C header with T=1 (TEID present).
     fn make_gtpv2c_with_teid(msg_type: u8, teid: u32, seq: u32, ies: &[u8]) -> Vec<u8> {
@@ -587,5 +588,53 @@ mod tests {
         let result = Gtpv2cDissector.dissect(&data, &mut buf, 0).unwrap();
         assert_eq!(result.bytes_consumed, len);
         assert_eq!(buf.layers().len(), 1);
+    }
+
+    #[test]
+    fn parse_gtpv2c_header_errors_and_priority() {
+        let d = Gtpv2cDissector;
+        assert_eq!(d.name(), "GPRS Tunnelling Protocol Control Plane v2");
+        assert_eq!(d.field_descriptors().len(), 10);
+
+        // Version 1
+        let mut data = make_gtpv2c_with_teid(32, 1, 1, &[]);
+        data[0] = (data[0] & 0x1F) | 0x20;
+        let mut buf = DissectBuffer::new();
+        assert!(matches!(
+            d.dissect(&data, &mut buf, 0),
+            Err(PacketError::InvalidFieldValue {
+                field: "version",
+                ..
+            })
+        ));
+
+        // Message Length shorter than the T=1 header
+        let data = [0x48, 32, 0x00, 0x04, 0, 0, 0, 1, 0, 0, 1, 0];
+        let mut buf = DissectBuffer::new();
+        assert!(matches!(
+            d.dissect(&data, &mut buf, 0),
+            Err(PacketError::InvalidHeader(_))
+        ));
+
+        // MP = 1 with T = 1: priority in bits 8-5 of octet 12
+        let mut data = make_gtpv2c_with_teid(32, 1, 1, &[]);
+        data[0] |= 0x04;
+        data[11] = 0x50;
+        let (_, buf) = dissect_ok(&data);
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.field_u8(layer, "message_priority"), Some(5));
+
+        // MP = 1 with T = 0: octet 8
+        let mut data = make_gtpv2c_without_teid(1, 1, &[]);
+        data[0] |= 0x04;
+        data[7] = 0x03;
+        let (_, buf) = dissect_ok(&data);
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.field_u8(layer, "message_priority"), Some(3));
+
+        // Stray octets that do not form an IE leave no empty IE array.
+        let data = make_gtpv2c_with_teid(32, 1, 1, &[0x01, 0x00]);
+        let (_, buf) = dissect_ok(&data);
+        assert!(buf.field_by_name(&buf.layers()[0], "ies").is_none());
     }
 }
