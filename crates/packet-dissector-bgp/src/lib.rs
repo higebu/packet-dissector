@@ -37,7 +37,14 @@
 //! - RFC 7313 (Enhanced Route Refresh): <https://www.rfc-editor.org/rfc/rfc7313>
 //! - RFC 7911 (ADD-PATH Capability): <https://www.rfc-editor.org/rfc/rfc7911>
 //! - RFC 8092 (Large Communities): <https://www.rfc-editor.org/rfc/rfc8092>
-//! - RFC 8203 (Hard Reset Cease subcode): <https://www.rfc-editor.org/rfc/rfc8203>
+//! - RFC 9003 (Extended BGP Administrative Shutdown Communication, obsoletes RFC 8203): <https://www.rfc-editor.org/rfc/rfc9003>
+//! - RFC 8538 (Notification Message Support for BGP Graceful Restart / Hard Reset): <https://www.rfc-editor.org/rfc/rfc8538>
+//! - RFC 9384 (BFD Down Cease NOTIFICATION subcode): <https://www.rfc-editor.org/rfc/rfc9384>
+//! - RFC 6608 (Subcodes for BGP Finite State Machine Error): <https://www.rfc-editor.org/rfc/rfc6608>
+//! - RFC 5291 (Outbound Route Filtering Capability): <https://www.rfc-editor.org/rfc/rfc5291>
+//! - RFC 5292 (Address-Prefix-Based Outbound Route Filter): <https://www.rfc-editor.org/rfc/rfc5292>
+//! - RFC 8205 (BGPsec Protocol Specification / BGPsec Capability): <https://www.rfc-editor.org/rfc/rfc8205>
+//! - IANA BGP Parameters (Error Subcodes, ORF Types): <https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml>
 //! - RFC 8277 (Using BGP to Bind MPLS Labels to Address Prefixes): <https://www.rfc-editor.org/rfc/rfc8277>
 //! - RFC 8654 (Extended Message): <https://www.rfc-editor.org/rfc/rfc8654>
 //! - RFC 8669 (BGP Prefix-SID): <https://www.rfc-editor.org/rfc/rfc8669>
@@ -131,11 +138,31 @@
 //! |-------------|-------------|------|
 //! | 2 | Extended OPEN encoding + 2-octet param length | `parse_bgp_open_extended_optional_parameters` |
 //!
-//! # RFC 4486 / RFC 8203 (Cease NOTIFICATION subcodes) Coverage
+//! # NOTIFICATION Coverage (RFC 4486 / RFC 9003 / RFC 8538 / RFC 9384 / RFC 6608 / RFC 7313)
 //!
 //! | RFC Section | Description | Test |
 //! |-------------|-------------|------|
-//! | RFC 4486 §4 | Cease subcodes 1–8 + RFC 8203 §4 subcode 9 | `parse_bgp_notification_cease_subcode_name` |
+//! | RFC 4486 §4; RFC 8538 §3 | Cease subcodes 1–9; subcodes of other codes not read as Cease | `parse_bgp_notification_cease_subcode_name` |
+//! | RFC 4271 §6.1-6.3; RFC 6608 §4; RFC 7313 §5; RFC 9384 §3 | Error Subcode names for every Error Code | `notification_subcode_names` |
+//! | RFC 9003 §2 | Shutdown Communication (UTF-8, zero length, invalid UTF-8, overrun) | `parse_bgp_notification_shutdown_communication` |
+//! | RFC 8538 §3.1 | Hard Reset encapsulated Error Code / Subcode / Data | `parse_bgp_notification_hard_reset` |
+//!
+//! # RFC 5291 / RFC 5292 (ORF) Coverage
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 5291 §5 | Outbound Route Filtering Capability | `parse_bgp_open_capability_orf` |
+//! | RFC 5291 §5 | Malformed ORF Capability left undecoded | `parse_bgp_open_capability_orf_malformed_is_raw` |
+//! | RFC 5291 §4; RFC 5292 §3 | ROUTE-REFRESH When-to-refresh and Address Prefix ORF entries (ADD, REMOVE-ALL) | `parse_bgp_route_refresh_address_prefix_orf` |
+//! | RFC 5291 §4; RFC 5292 §3 | IPv6 Address Prefix ORF entry and undecoded ORF type | `parse_bgp_route_refresh_orf_other_types` |
+//! | RFC 5291 §4; RFC 7313 §4 | Malformed ORFs and BoRR trailing octets kept as `data` | `parse_bgp_route_refresh_malformed_orf_is_raw` |
+//! | RFC 5291 §4-5 | ORF, When-to-refresh, Action, Match and BGPsec Direction name tables | `open_notification_refresh_name_tables` |
+//!
+//! # Message Type Coverage (RFC 4271 §4.4, §6.1)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | 4.4, 6.1 | Unknown message type / long KEEPALIVE body kept as `data` | `parse_bgp_unknown_message_type_keeps_body` |
 //!
 //! # Extended Communities Coverage (RFC 4360 / RFC 7153 / RFC 5701 / RFC 9012 / RFC 7432 / RFC 9135 / RFC 8955 / RFC 4577 / RFC 10005 / RFC 8097)
 //!
@@ -250,6 +277,8 @@
 //! | RFC 8950 §4 | Extended Next Hop Encoding Capability (2-octet safi) | `parse_bgp_open_capability_extended_next_hop` |
 //! | RFC 9234 §4.1 | BGP Role Capability (role_name) | `parse_bgp_open_capability_role` |
 //! | draft-walton-bgp-hostname-capability-02 §3 | FQDN Capability (hostname, domain_name) | `parse_bgp_open_capability_fqdn` |
+//! | RFC 8277 §2.1 | Multiple Labels Capability (afi_safis, label_count) | `parse_bgp_open_capability_multiple_labels` |
+//! | RFC 8205 §2.1 | BGPsec Capability (bgpsec_version, bgpsec_direction, afi) | `parse_bgp_open_capability_bgpsec` |
 //! | IANA Capability Codes | Unknown capability code (no code_name / decoded fields) | `parse_bgp_open_capability_unknown_code` |
 //! | IANA Capability Codes | Zero-length capabilities (Route Refresh, Extended Message, Enhanced RR, deprecated RR) | `parse_bgp_open_capability_zero_length_code_names` |
 //! | RFC 5492 | `optional_parameters` / `afi_safis` schema union | `bgp_optional_parameters_schema_has_afi_safis_send_receive` |
@@ -406,6 +435,15 @@ const CAP_MULTIPROTOCOL: u8 = 1;
 const CAP_ROUTE_REFRESH: u8 = 2;
 /// BGP OPEN Capability Code: Extended Next Hop Encoding (RFC 8950, Section 4).
 const CAP_EXTENDED_NEXT_HOP: u8 = 5;
+/// Outbound Route Filtering Capability (RFC 5291, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc5291#section-5>).
+const CAP_ORF: u8 = 3;
+/// BGPsec Capability (RFC 8205, Section 2.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8205#section-2.1>).
+const CAP_BGPSEC: u8 = 7;
+/// Multiple Labels Capability (RFC 8277, Section 2.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8277#section-2.1>).
+const CAP_MULTIPLE_LABELS: u8 = 8;
 /// BGP OPEN Capability Code: BGP Extended Message (RFC 8654).
 const CAP_EXTENDED_MESSAGE: u8 = 6;
 /// BGP OPEN Capability Code: BGP Role (RFC 9234, Section 4.1).
@@ -488,11 +526,11 @@ fn capability_code_name(v: u8) -> Option<&'static str> {
     match v {
         CAP_MULTIPROTOCOL => Some("Multiprotocol Extensions for BGP-4"),
         CAP_ROUTE_REFRESH => Some("Route Refresh Capability for BGP-4"),
-        3 => Some("Outbound Route Filtering Capability"),
+        CAP_ORF => Some("Outbound Route Filtering Capability"),
         CAP_EXTENDED_NEXT_HOP => Some("Extended Next Hop Encoding"),
         CAP_EXTENDED_MESSAGE => Some("BGP Extended Message"),
-        7 => Some("BGPsec Capability"),
-        8 => Some("Multiple Labels Capability"),
+        CAP_BGPSEC => Some("BGPsec Capability"),
+        CAP_MULTIPLE_LABELS => Some("Multiple Labels Capability"),
         CAP_ROLE => Some("BGP Role"),
         CAP_GRACEFUL_RESTART => Some("Graceful Restart Capability"),
         CAP_AS4 => Some("Support for 4-octet AS number capability"),
@@ -658,11 +696,165 @@ fn parse_capability_value<'pkt>(
         CAP_LLGR => parse_cap_llgr(buf, value, offset),
         CAP_FQDN => parse_cap_fqdn(buf, value, offset),
         CAP_PATHS_LIMIT => parse_cap_paths_limit(buf, value, offset),
+        CAP_ORF => parse_cap_orf(buf, value, offset),
+        CAP_BGPSEC => parse_cap_bgpsec(buf, value, offset),
+        CAP_MULTIPLE_LABELS => parse_cap_multiple_labels(buf, value, offset),
         // Route Refresh / Enhanced Route Refresh / Extended Message /
         // deprecated Route Refresh carry no Capability Value beyond
         // `code_name`; other/unknown codes are left as raw `value` only.
         _ => {}
     }
+}
+
+/// Returns a human-readable name for ORF Types.
+///
+/// IANA BGP Outbound Route Filtering (ORF) Types —
+/// <https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-10>
+fn orf_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        // RFC 5292, Section 3 — https://www.rfc-editor.org/rfc/rfc5292#section-3
+        ORF_TYPE_ADDRESS_PREFIX => Some("Address Prefix ORF"),
+        // RFC 7543 — https://www.rfc-editor.org/rfc/rfc7543
+        65 => Some("CP-ORF"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for the ORF Capability Send/Receive value.
+///
+/// RFC 5291, Section 5 — <https://www.rfc-editor.org/rfc/rfc5291#section-5>
+fn orf_send_receive_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("receive"),
+        2 => Some("send"),
+        3 => Some("both"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for the BGPsec Capability Direction bit.
+///
+/// RFC 8205, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc8205#section-2.1>
+fn bgpsec_direction_name(v: u8) -> Option<&'static str> {
+    match v {
+        0 => Some("receive"),
+        1 => Some("send"),
+        _ => None,
+    }
+}
+
+/// Parses the Outbound Route Filtering Capability Value into `afi_safis`
+/// entries, each with its `orfs` (ORF Type, Send/Receive) list.
+///
+/// RFC 5291, Section 5 — <https://www.rfc-editor.org/rfc/rfc5291#section-5>
+///
+///   One or more entries: AFI (2) + Reserved (1) + SAFI (1) + Number of
+///   ORFs (1) + Number × (ORF Type (1) + Send/Receive (1)).
+///
+/// A value that is not exactly a sequence of such entries is left undecoded.
+fn parse_cap_orf<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    if value.is_empty() {
+        return;
+    }
+    let mark = buf.fields().len();
+    let array_idx = buf.begin_container(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI_SAFIS],
+        FieldValue::Array(0..0),
+        offset..offset + value.len(),
+    );
+    let mut pos = 0;
+    while pos < value.len() {
+        let Some(entry_len) = value
+            .get(pos + 4)
+            .map(|&n| 5 + 2 * usize::from(n))
+            .filter(|len| pos + len <= value.len())
+        else {
+            buf.truncate_fields(mark);
+            return;
+        };
+        let abs = offset + pos;
+        let obj_idx = buf.begin_container(
+            &AFI_SAFI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + entry_len,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_AFI],
+            FieldValue::U16(read_be_u16(value, pos).unwrap_or_default()),
+            abs..abs + 2,
+        );
+        buf.push_field(
+            &AFI_SAFI_CHILDREN[FD_AS_SAFI],
+            FieldValue::U16(u16::from(value[pos + 3])),
+            abs + 3..abs + 4,
+        );
+        let orfs_idx = buf.begin_container(
+            &AFI_SAFI_CHILDREN[FD_AS_ORFS],
+            FieldValue::Array(0..0),
+            abs + 5..abs + entry_len,
+        );
+        for p in (pos + 5..pos + entry_len).step_by(2) {
+            let a = offset + p;
+            let orf_idx = buf.begin_container(
+                &ORF_CAP_OBJECT_DESCRIPTOR,
+                FieldValue::Object(0..0),
+                a..a + 2,
+            );
+            buf.push_field(&ORF_CAP_FIELDS[0], FieldValue::U8(value[p]), a..a + 1);
+            buf.push_field(
+                &ORF_CAP_FIELDS[1],
+                FieldValue::U8(value[p + 1]),
+                a + 1..a + 2,
+            );
+            buf.end_container(orf_idx);
+        }
+        buf.end_container(orfs_idx);
+        buf.end_container(obj_idx);
+        pos += entry_len;
+    }
+    buf.end_container(array_idx);
+}
+
+/// Parses the Multiple Labels Capability Value into `afi_safis`.
+///
+/// RFC 8277, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.1>
+///
+///   One or more triples: AFI (2) + SAFI (1) + Count (1). A value whose
+///   length is not a positive multiple of 4 is left undecoded.
+fn parse_cap_multiple_labels<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+) {
+    parse_cap_afi_safi_quads(buf, value, offset, &AFI_SAFI_CHILDREN[FD_AS_LABEL_COUNT]);
+}
+
+/// Parses the BGPsec Capability Value (`bgpsec_version`,
+/// `bgpsec_direction`, `afi`).
+///
+/// RFC 8205, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc8205#section-2.1>
+///
+///   Version (4 bits) + Dir (1 bit) + Unassigned (3 bits) + AFI (2 octets).
+///   "The capability length for this capability MUST be set to 3."
+fn parse_cap_bgpsec<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    if value.len() != 3 {
+        return;
+    }
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_BGPSEC_VERSION],
+        FieldValue::U8(value[0] >> 4),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_BGPSEC_DIRECTION],
+        FieldValue::U8((value[0] >> 3) & 1),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &OPT_PARAM_CHILDREN[FD_OPT_AFI],
+        FieldValue::U16(u16::from_be_bytes([value[1], value[2]])),
+        offset + 1..offset + 3,
+    );
 }
 
 /// Parses the Multiprotocol Extensions Capability Value (`afi`, `safi`).
@@ -724,6 +916,24 @@ fn parse_cap_role<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset
 /// A `value` whose length is not a positive multiple of 4 (e.g. truncated)
 /// is left undecoded.
 fn parse_cap_add_path<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], offset: usize) {
+    parse_cap_afi_safi_quads(buf, value, offset, &AFI_SAFI_CHILDREN[FD_AS_SEND_RECEIVE]);
+}
+
+/// Parses a Capability Value made of `<AFI (2), SAFI (1), X (1)>` tuples into
+/// `afi_safis`, with the fourth octet pushed as `fourth` (ADD-PATH
+/// Send/Receive, RFC 7911, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc7911#section-4>; Multiple Labels
+/// Count, RFC 8277, Section 2.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8277#section-2.1>).
+///
+/// A `value` whose length is not a positive multiple of 4 (e.g. truncated)
+/// is left undecoded.
+fn parse_cap_afi_safi_quads<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+    fourth: &'static FieldDescriptor,
+) {
     if value.is_empty() || value.len() % 4 != 0 {
         return;
     }
@@ -732,13 +942,8 @@ fn parse_cap_add_path<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], of
         FieldValue::Array(0..0),
         offset..offset + value.len(),
     );
-    let mut pos = 0;
-    while pos + 4 <= value.len() {
-        let abs = offset + pos;
-        let afi = read_be_u16(value, pos).unwrap_or_default();
-        let safi = value[pos + 2];
-        let send_receive = value[pos + 3];
-
+    for (i, t) in value.chunks_exact(4).enumerate() {
+        let abs = offset + 4 * i;
         let obj_idx = buf.begin_container(
             &AFI_SAFI_OBJECT_DESCRIPTOR,
             FieldValue::Object(0..0),
@@ -746,22 +951,16 @@ fn parse_cap_add_path<'pkt>(buf: &mut DissectBuffer<'pkt>, value: &'pkt [u8], of
         );
         buf.push_field(
             &AFI_SAFI_CHILDREN[FD_AS_AFI],
-            FieldValue::U16(afi),
+            FieldValue::U16(u16::from_be_bytes([t[0], t[1]])),
             abs..abs + 2,
         );
         buf.push_field(
             &AFI_SAFI_CHILDREN[FD_AS_SAFI],
-            FieldValue::U16(u16::from(safi)),
+            FieldValue::U16(u16::from(t[2])),
             abs + 2..abs + 3,
         );
-        buf.push_field(
-            &AFI_SAFI_CHILDREN[FD_AS_SEND_RECEIVE],
-            FieldValue::U8(send_receive),
-            abs + 3..abs + 4,
-        );
+        buf.push_field(fourth, FieldValue::U8(t[3]), abs + 3..abs + 4);
         buf.end_container(obj_idx);
-
-        pos += 4;
     }
     buf.end_container(array_idx);
 }
@@ -1143,7 +1342,10 @@ fn error_code_name(v: u8) -> Option<&'static str> {
         5 => Some("Finite State Machine Error"),
         6 => Some("Cease"),
         7 => Some("ROUTE-REFRESH Message Error"),
+        // RFC 9687 — https://www.rfc-editor.org/rfc/rfc9687
         8 => Some("Send Hold Timer Expired"),
+        // RFC 9815 — https://www.rfc-editor.org/rfc/rfc9815
+        9 => Some("Loss of LSDB Synchronization"),
         _ => None,
     }
 }
@@ -1151,7 +1353,7 @@ fn error_code_name(v: u8) -> Option<&'static str> {
 /// Returns a human-readable name for Cease NOTIFICATION subcodes.
 ///
 /// RFC 4486, Section 4 — <https://www.rfc-editor.org/rfc/rfc4486#section-4>
-/// RFC 8203, Section 4 — <https://www.rfc-editor.org/rfc/rfc8203#section-4>
+/// RFC 9003, Section 2 — <https://www.rfc-editor.org/rfc/rfc9003#section-2>
 fn cease_subcode_name(v: u8) -> Option<&'static str> {
     match v {
         1 => Some("Maximum Number of Prefixes Reached"),
@@ -1162,14 +1364,121 @@ fn cease_subcode_name(v: u8) -> Option<&'static str> {
         6 => Some("Other Configuration Change"),
         7 => Some("Connection Collision Resolution"),
         8 => Some("Out of Resources"),
+        // RFC 8538, Section 3 — https://www.rfc-editor.org/rfc/rfc8538#section-3
         9 => Some("Hard Reset"),
+        // RFC 9384, Section 3 — https://www.rfc-editor.org/rfc/rfc9384#section-3
+        10 => Some("BFD Down"),
         _ => None,
+    }
+}
+
+/// Returns a human-readable name for a BGP Error Subcode of `error_code`.
+///
+/// IANA BGP Error Subcodes —
+/// <https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-5>
+fn error_subcode_name(error_code: u8, subcode: u8) -> Option<&'static str> {
+    match (error_code, subcode) {
+        // "Unspecific" (RFC 4271 Errata ID 4493 —
+        // https://www.rfc-editor.org/errata/eid4493).
+        (1..=3, 0) => Some("Unspecific"),
+        // Message Header Error subcodes (RFC 4271, Section 6.1 —
+        // https://www.rfc-editor.org/rfc/rfc4271#section-6.1).
+        (1, 1) => Some("Connection Not Synchronized"),
+        (1, 2) => Some("Bad Message Length"),
+        (1, 3) => Some("Bad Message Type"),
+        // OPEN Message Error subcodes (RFC 4271, Section 6.2 —
+        // https://www.rfc-editor.org/rfc/rfc4271#section-6.2; RFC 5492,
+        // Section 5 — https://www.rfc-editor.org/rfc/rfc5492#section-5;
+        // RFC 9234, Section 4.2 — https://www.rfc-editor.org/rfc/rfc9234#section-4.2).
+        (2, 1) => Some("Unsupported Version Number"),
+        (2, 2) => Some("Bad Peer AS"),
+        (2, 3) => Some("Bad BGP Identifier"),
+        (2, 4) => Some("Unsupported Optional Parameter"),
+        (2, 6) => Some("Unacceptable Hold Time"),
+        (2, 7) => Some("Unsupported Capability"),
+        (2, 11) => Some("Role Mismatch"),
+        // UPDATE Message Error subcodes (RFC 4271, Section 6.3 —
+        // https://www.rfc-editor.org/rfc/rfc4271#section-6.3).
+        (3, 1) => Some("Malformed Attribute List"),
+        (3, 2) => Some("Unrecognized Well-known Attribute"),
+        (3, 3) => Some("Missing Well-known Attribute"),
+        (3, 4) => Some("Attribute Flags Error"),
+        (3, 5) => Some("Attribute Length Error"),
+        (3, 6) => Some("Invalid ORIGIN Attribute"),
+        (3, 8) => Some("Invalid NEXT_HOP Attribute"),
+        (3, 9) => Some("Optional Attribute Error"),
+        (3, 10) => Some("Invalid Network Field"),
+        (3, 11) => Some("Malformed AS_PATH"),
+        // Finite State Machine Error subcodes (RFC 6608, Section 4 —
+        // https://www.rfc-editor.org/rfc/rfc6608#section-4).
+        (5, 0) => Some("Unspecified Error"),
+        (5, 1) => Some("Receive Unexpected Message in OpenSent State"),
+        (5, 2) => Some("Receive Unexpected Message in OpenConfirm State"),
+        (5, 3) => Some("Receive Unexpected Message in Established State"),
+        (6, _) => cease_subcode_name(subcode),
+        // ROUTE-REFRESH Message Error subcodes (RFC 7313, Section 5 —
+        // https://www.rfc-editor.org/rfc/rfc7313#section-5).
+        (7, 1) => Some("Invalid Message Length"),
+        _ => None,
+    }
+}
+
+/// Cease subcodes whose data may carry a Shutdown Communication (RFC 9003,
+/// Section 2 — <https://www.rfc-editor.org/rfc/rfc9003#section-2>).
+const CEASE_ADMINISTRATIVE_SHUTDOWN: u8 = 2;
+const CEASE_ADMINISTRATIVE_RESET: u8 = 4;
+/// Cease subcode "Hard Reset" (RFC 8538, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc8538#section-3>).
+const CEASE_HARD_RESET: u8 = 9;
+/// Error Code "Cease" (RFC 4271, Section 4.5 —
+/// <https://www.rfc-editor.org/rfc/rfc4271#section-4.5>).
+const ERROR_CODE_CEASE: u8 = 6;
+
+/// Pushes the Shutdown Communication of a Cease / Administrative Shutdown or
+/// Administrative Reset NOTIFICATION `data` with the `length_fd` / `text_fd`
+/// descriptors.
+///
+/// RFC 9003, Section 2 — <https://www.rfc-editor.org/rfc/rfc9003#section-2>:
+/// "When the length value is zero, no Shutdown Communication field follows",
+/// and "A receiving BGP speaker MUST NOT interpret invalid UTF-8 sequences":
+/// nothing is pushed when the Length does not cover exactly the rest of
+/// `data` or the text is not UTF-8 (the raw `data` still holds it).
+fn push_shutdown_communication<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    length_fd: &'static FieldDescriptor,
+    text_fd: &'static FieldDescriptor,
+    data: &'pkt [u8],
+    offset: usize,
+) {
+    let Some((&len, text)) = data.split_first() else {
+        return;
+    };
+    // The Length covers the rest of the data exactly.
+    if text.len() != usize::from(len) {
+        return;
+    }
+    let Ok(text) = core::str::from_utf8(text) else {
+        return;
+    };
+    buf.push_field(length_fd, FieldValue::U8(len), offset..offset + 1);
+    if !text.is_empty() {
+        buf.push_field(
+            text_fd,
+            FieldValue::Str(text),
+            offset + 1..offset + 1 + text.len(),
+        );
     }
 }
 
 /// Parses NOTIFICATION message body and appends fields.
 ///
 /// RFC 4271, Section 4.5 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.5>
+///
+/// The raw `data` is always kept. Cease / Administrative Shutdown and
+/// Administrative Reset data is also decoded as a Shutdown Communication
+/// (RFC 9003, Section 2), and Cease / Hard Reset data as the encapsulated
+/// `hard_reset` Error Code, Subcode and Data (RFC 8538, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8538#section-3.1>).
 fn parse_notification<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -1198,14 +1507,279 @@ fn parse_notification<'pkt>(
 
     if data.len() > MIN_NOTIFICATION_SIZE {
         let data_bytes = &data[21..];
+        let data_offset = offset + 21;
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_DATA],
             FieldValue::Bytes(data_bytes),
-            offset + 21..offset + data.len(),
+            data_offset..offset + data.len(),
         );
+        match (error_code, error_subcode) {
+            (ERROR_CODE_CEASE, CEASE_ADMINISTRATIVE_SHUTDOWN | CEASE_ADMINISTRATIVE_RESET) => {
+                push_shutdown_communication(
+                    buf,
+                    &FIELD_DESCRIPTORS[FD_SHUTDOWN_COMMUNICATION_LENGTH],
+                    &FIELD_DESCRIPTORS[FD_SHUTDOWN_COMMUNICATION],
+                    data_bytes,
+                    data_offset,
+                );
+            }
+            // "the Hard Reset encapsulates another NOTIFICATION message in
+            // its data portion" (RFC 8538, Section 3.1 —
+            // https://www.rfc-editor.org/rfc/rfc8538#section-3.1).
+            (ERROR_CODE_CEASE, CEASE_HARD_RESET) if data_bytes.len() >= 2 => {
+                let obj_idx = buf.begin_container(
+                    &FIELD_DESCRIPTORS[FD_HARD_RESET],
+                    FieldValue::Object(0..0),
+                    data_offset..data_offset + data_bytes.len(),
+                );
+                let (code, subcode) = (data_bytes[0], data_bytes[1]);
+                buf.push_field(
+                    &HARD_RESET_FIELDS[0],
+                    FieldValue::U8(code),
+                    data_offset..data_offset + 1,
+                );
+                buf.push_field(
+                    &HARD_RESET_FIELDS[1],
+                    FieldValue::U8(subcode),
+                    data_offset + 1..data_offset + 2,
+                );
+                let inner = &data_bytes[2..];
+                if !inner.is_empty() {
+                    let inner_offset = data_offset + 2;
+                    buf.push_field(
+                        &HARD_RESET_FIELDS[2],
+                        FieldValue::Bytes(inner),
+                        inner_offset..inner_offset + inner.len(),
+                    );
+                    if code == ERROR_CODE_CEASE
+                        && matches!(
+                            subcode,
+                            CEASE_ADMINISTRATIVE_SHUTDOWN | CEASE_ADMINISTRATIVE_RESET
+                        )
+                    {
+                        push_shutdown_communication(
+                            buf,
+                            &HARD_RESET_FIELDS[3],
+                            &HARD_RESET_FIELDS[4],
+                            inner,
+                            inner_offset,
+                        );
+                    }
+                }
+                buf.end_container(obj_idx);
+            }
+            _ => {}
+        }
     }
 
     Ok(())
+}
+
+/// ORF Type "Address Prefix ORF" (RFC 5292, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5292#section-3>).
+const ORF_TYPE_ADDRESS_PREFIX: u8 = 64;
+/// ORF entry Action "REMOVE-ALL" (RFC 5291, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc5291#section-4>).
+const ORF_ACTION_REMOVE_ALL: u8 = 2;
+
+/// Returns a human-readable name for the ROUTE-REFRESH When-to-refresh field.
+///
+/// RFC 5291, Section 4 — <https://www.rfc-editor.org/rfc/rfc5291#section-4>
+fn when_to_refresh_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("IMMEDIATE"),
+        2 => Some("DEFER"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for an ORF entry Action.
+///
+/// RFC 5291, Section 4 — <https://www.rfc-editor.org/rfc/rfc5291#section-4>
+fn orf_action_name(v: u8) -> Option<&'static str> {
+    match v {
+        0 => Some("ADD"),
+        1 => Some("REMOVE"),
+        ORF_ACTION_REMOVE_ALL => Some("REMOVE-ALL"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for an ORF entry Match.
+///
+/// RFC 5291, Section 4 — <https://www.rfc-editor.org/rfc/rfc5291#section-4>
+fn orf_match_name(v: u8) -> Option<&'static str> {
+    match v {
+        0 => Some("PERMIT"),
+        1 => Some("DENY"),
+        _ => None,
+    }
+}
+
+/// Parses the ORFs following the fixed part of a ROUTE-REFRESH message:
+/// When-to-refresh, then one or more (ORF Type, Length of ORF entries, ORF
+/// entries).
+///
+/// RFC 5291, Section 4 — <https://www.rfc-editor.org/rfc/rfc5291#section-4>
+///
+/// Address Prefix ORF entries are decoded (RFC 5292, Section 3); the entries
+/// of other ORF types are kept as the ORF's `value`. Returns `false` (nothing
+/// left pushed) when the ORFs or Address Prefix ORF entries do not exactly
+/// fill their enclosing field.
+fn parse_route_refresh_orfs<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    body: &'pkt [u8],
+    offset: usize,
+    afi: u16,
+) -> bool {
+    // "a collection of one or more ORFs".
+    if body.len() < 4 {
+        return false;
+    }
+    let mark = buf.fields().len();
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_WHEN_TO_REFRESH],
+        FieldValue::U8(body[0]),
+        offset..offset + 1,
+    );
+    let array_idx = buf.begin_container(
+        &FIELD_DESCRIPTORS[FD_ORFS],
+        FieldValue::Array(0..0),
+        offset + 1..offset + body.len(),
+    );
+    let mut pos = 1;
+    while pos < body.len() {
+        let Some(len) = read_be_u16(body, pos + 1)
+            .ok()
+            .map(usize::from)
+            .filter(|len| pos + 3 + len <= body.len())
+        else {
+            buf.truncate_fields(mark);
+            return false;
+        };
+        let orf_type = body[pos];
+        let abs = offset + pos;
+        let entries = &body[pos + 3..pos + 3 + len];
+        let obj_idx = buf.begin_container(
+            &ORF_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + 3 + len,
+        );
+        buf.push_field(
+            &ORF_FIELDS[FD_ORF_TYPE],
+            FieldValue::U8(orf_type),
+            abs..abs + 1,
+        );
+        buf.push_field(
+            &ORF_FIELDS[FD_ORF_LENGTH],
+            FieldValue::U16(len as u16),
+            abs + 1..abs + 3,
+        );
+        if orf_type == ORF_TYPE_ADDRESS_PREFIX {
+            if !parse_address_prefix_orf_entries(buf, entries, abs + 3, afi) {
+                buf.truncate_fields(mark);
+                return false;
+            }
+        } else if !entries.is_empty() {
+            buf.push_field(
+                &ORF_FIELDS[FD_ORF_VALUE],
+                FieldValue::Bytes(entries),
+                abs + 3..abs + 3 + len,
+            );
+        }
+        buf.end_container(obj_idx);
+        pos += 3 + len;
+    }
+    buf.end_container(array_idx);
+    true
+}
+
+/// Parses Address Prefix ORF entries into `entries`. Returns `false` when
+/// they do not exactly fill `data` (the caller discards what was pushed).
+///
+/// RFC 5291, Section 4 — <https://www.rfc-editor.org/rfc/rfc5291#section-4>:
+/// the first octet carries Action (2 bits) and Match (1 bit); "When the
+/// Action component of an ORF entry specifies REMOVE-ALL, the entry consists
+/// of only the common part."
+/// RFC 5292, Section 3 — <https://www.rfc-editor.org/rfc/rfc5292#section-3>:
+/// Sequence (4), Minlen (1), Maxlen (1), Length (1), Prefix (variable).
+fn parse_address_prefix_orf_entries<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    afi: u16,
+) -> bool {
+    let array_idx = buf.begin_container(
+        &ORF_FIELDS[FD_ORF_ENTRIES],
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
+    // The Prefix is formatted as a CIDR string for IPv4 / IPv6, whose Length
+    // cannot exceed the address size (RFC 5292, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc5292#section-2).
+    let (prefix_fd, max_bits): (&'static FieldDescriptor, usize) = match afi {
+        AFI_IPV4 => (&PREFIX_ENTRY_IPV4_DESCRIPTOR, 32),
+        AFI_IPV6 => (&PREFIX_ENTRY_IPV6_DESCRIPTOR, 128),
+        _ => (&ORF_ENTRY_FIELDS[FD_ORFE_PREFIX_RAW], usize::from(u8::MAX)),
+    };
+    let mut pos = 0;
+    while pos < data.len() {
+        let common = data[pos];
+        let action = common >> 6;
+        let entry_len = if action == ORF_ACTION_REMOVE_ALL {
+            1
+        } else {
+            match data.get(pos + 7).map(|&bits| usize::from(bits)) {
+                Some(bits) if bits <= max_bits => 8 + bits.div_ceil(8),
+                _ => return false,
+            }
+        };
+        if pos + entry_len > data.len() {
+            return false;
+        }
+        let abs = offset + pos;
+        let e = &ORF_ENTRY_FIELDS;
+        let obj_idx = buf.begin_container(
+            &ORF_ENTRY_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + entry_len,
+        );
+        buf.push_field(&e[FD_ORFE_ACTION], FieldValue::U8(action), abs..abs + 1);
+        if action != ORF_ACTION_REMOVE_ALL {
+            // Match "is significant only when the value of the Action field
+            // is either ADD or REMOVE".
+            buf.push_field(
+                &e[FD_ORFE_MATCH],
+                FieldValue::U8((common >> 5) & 1),
+                abs..abs + 1,
+            );
+            buf.push_field(
+                &e[FD_ORFE_SEQUENCE],
+                FieldValue::U32(read_be_u32(data, pos + 1).unwrap_or_default()),
+                abs + 1..abs + 5,
+            );
+            buf.push_field(
+                &e[FD_ORFE_MINLEN],
+                FieldValue::U8(data[pos + 5]),
+                abs + 5..abs + 6,
+            );
+            buf.push_field(
+                &e[FD_ORFE_MAXLEN],
+                FieldValue::U8(data[pos + 6]),
+                abs + 6..abs + 7,
+            );
+            // Length (1) + Prefix: the `[len, octets...]` prefix encoding.
+            buf.push_field(
+                prefix_fd,
+                FieldValue::Bytes(&data[pos + 7..pos + entry_len]),
+                abs + 7..abs + entry_len,
+            );
+        }
+        buf.end_container(obj_idx);
+        pos += entry_len;
+    }
+    buf.end_container(array_idx);
+    true
 }
 
 /// Returns a human-readable name for ROUTE-REFRESH Message Subtypes.
@@ -1224,6 +1798,7 @@ fn route_refresh_subtype_name(v: u8) -> Option<&'static str> {
 ///
 /// RFC 2918 — <https://www.rfc-editor.org/rfc/rfc2918>
 /// RFC 7313 (Enhanced Route Refresh) — <https://www.rfc-editor.org/rfc/rfc7313>
+/// RFC 5291 (ORF) — <https://www.rfc-editor.org/rfc/rfc5291>
 fn parse_route_refresh<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -1257,6 +1832,22 @@ fn parse_route_refresh<'pkt>(
         FieldValue::U8(safi),
         offset + 22..offset + 23,
     );
+
+    // Octets after the fixed part: ORFs of a plain Route-Refresh (RFC 5291,
+    // Section 4 — https://www.rfc-editor.org/rfc/rfc5291#section-4), kept as
+    // `data` when they do not parse or for a BoRR / EoRR.
+    let body = &data[ROUTE_REFRESH_SIZE..];
+    if !body.is_empty() {
+        let body_offset = offset + ROUTE_REFRESH_SIZE;
+        let decoded = message_subtype == 0 && parse_route_refresh_orfs(buf, body, body_offset, afi);
+        if !decoded {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_DATA],
+                FieldValue::Bytes(body),
+                body_offset..body_offset + body.len(),
+            );
+        }
+    }
 
     Ok(())
 }
@@ -6060,6 +6651,8 @@ const FD_AS_PATHS_LIMIT: usize = 3;
 const FD_AS_FLAGS: usize = 4;
 const FD_AS_STALE_TIME: usize = 5;
 const FD_AS_NEXT_HOP_AFI: usize = 6;
+const FD_AS_LABEL_COUNT: usize = 7;
+const FD_AS_ORFS: usize = 8;
 
 /// Shared child field descriptors for the elements of every `afi_safis`
 /// array (ADD-PATH, PATHS-LIMIT, Graceful Restart, LLGR, Extended Next Hop
@@ -6094,7 +6687,101 @@ static AFI_SAFI_CHILDREN: &[FieldDescriptor] = &[
             FieldValue::U16(a) => afi_name(*a),
             _ => None,
         }),
+    // Multiple Labels Capability Count (RFC 8277, Section 2.1 —
+    // https://www.rfc-editor.org/rfc/rfc8277#section-2.1).
+    FieldDescriptor::new("label_count", "Count", FieldType::U8).optional(),
+    // Outbound Route Filtering Capability (RFC 5291, Section 5 —
+    // https://www.rfc-editor.org/rfc/rfc5291#section-5).
+    FieldDescriptor::new("orfs", "ORFs", FieldType::Array)
+        .optional()
+        .with_children(&ORF_CAP_FIELDS),
 ];
+
+/// Child field descriptors of one (ORF Type, Send/Receive) pair of the
+/// Outbound Route Filtering Capability.
+///
+/// RFC 5291, Section 5 — <https://www.rfc-editor.org/rfc/rfc5291#section-5>
+const ORF_CAP_FIELDS: [FieldDescriptor; 2] = [
+    ORF_TYPE_FIELD,
+    FieldDescriptor::new("send_receive", "Send/Receive", FieldType::U8).with_display_fn(|v, _| {
+        match v {
+            FieldValue::U8(sr) => orf_send_receive_name(*sr),
+            _ => None,
+        }
+    }),
+];
+
+/// Object descriptor for the ORF Capability `orfs` elements.
+static ORF_CAP_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("orf", "ORF", FieldType::Object).with_children(&ORF_CAP_FIELDS);
+
+/// ORF Type field, named from the IANA registry (RFC 5291, Sections 4-5 —
+/// <https://www.rfc-editor.org/rfc/rfc5291#section-4>).
+const ORF_TYPE_FIELD: FieldDescriptor = FieldDescriptor::new("orf_type", "ORF Type", FieldType::U8)
+    .with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => orf_type_name(*t),
+        _ => None,
+    });
+
+/// Field descriptor indices for [`ORF_FIELDS`].
+const FD_ORF_TYPE: usize = 0;
+const FD_ORF_LENGTH: usize = 1;
+const FD_ORF_ENTRIES: usize = 2;
+const FD_ORF_VALUE: usize = 3;
+
+/// Child field descriptors of one ORF of a ROUTE-REFRESH message.
+///
+/// RFC 5291, Section 4 — <https://www.rfc-editor.org/rfc/rfc5291#section-4>
+const ORF_FIELDS: [FieldDescriptor; 4] = [
+    ORF_TYPE_FIELD,
+    FieldDescriptor::new("length", "Length of ORF entries", FieldType::U16),
+    FieldDescriptor::new("entries", "ORF Entries", FieldType::Array)
+        .optional()
+        .with_children(&ORF_ENTRY_FIELDS),
+    // Entries of an ORF type that is not decoded.
+    FieldDescriptor::new("value", "ORF Entries (raw)", FieldType::Bytes).optional(),
+];
+
+/// Object descriptor for the ROUTE-REFRESH `orfs` elements.
+static ORF_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("orf", "ORF", FieldType::Object).with_children(&ORF_FIELDS);
+
+/// Field descriptor indices for [`ORF_ENTRY_FIELDS`].
+const FD_ORFE_ACTION: usize = 0;
+const FD_ORFE_MATCH: usize = 1;
+const FD_ORFE_SEQUENCE: usize = 2;
+const FD_ORFE_MINLEN: usize = 3;
+const FD_ORFE_MAXLEN: usize = 4;
+const FD_ORFE_PREFIX_RAW: usize = 5;
+
+/// Child field descriptors of an Address Prefix ORF entry.
+///
+/// `prefix` is `[Length, Prefix...]`, formatted as a CIDR string for IPv4 /
+/// IPv6 (the address-family specific `PREFIX_ENTRY_*` descriptors are pushed
+/// at run time).
+///
+/// RFC 5291, Section 4 — <https://www.rfc-editor.org/rfc/rfc5291#section-4>
+/// RFC 5292, Section 3 — <https://www.rfc-editor.org/rfc/rfc5292#section-3>
+const ORF_ENTRY_FIELDS: [FieldDescriptor; 6] = [
+    FieldDescriptor::new("action", "Action", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(a) => orf_action_name(*a),
+        _ => None,
+    }),
+    FieldDescriptor::new("match", "Match", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(m) => orf_match_name(*m),
+            _ => None,
+        }),
+    FieldDescriptor::new("sequence", "Sequence", FieldType::U32).optional(),
+    FieldDescriptor::new("minlen", "Minlen", FieldType::U8).optional(),
+    FieldDescriptor::new("maxlen", "Maxlen", FieldType::U8).optional(),
+    FieldDescriptor::new("prefix", "Prefix", FieldType::Bytes).optional(),
+];
+
+/// Object descriptor for Address Prefix ORF entries.
+static ORF_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("entry", "ORF Entry", FieldType::Object).with_children(&ORF_ENTRY_FIELDS);
 
 /// Object descriptor for `afi_safis` array elements shared across the
 /// capabilities listed on [`AFI_SAFI_CHILDREN`].
@@ -6119,6 +6806,8 @@ const FD_OPT_DOMAIN_NAME: usize = 11;
 // looked up by name (schema union member for non-capability optional
 // parameters — see NON_CAP_PARAM_CHILDREN), never pushed through
 // OPT_PARAM_CHILDREN at runtime.
+const FD_OPT_BGPSEC_VERSION: usize = 13;
+const FD_OPT_BGPSEC_DIRECTION: usize = 14;
 
 /// Child field descriptors for objects inside `optional_parameters`.
 ///
@@ -6172,6 +6861,15 @@ static OPT_PARAM_CHILDREN: &[FieldDescriptor] = &[
     // Non-capability optional parameter union member — see
     // NON_CAP_PARAM_CHILDREN.
     FieldDescriptor::new("param_type", "Parameter Type", FieldType::U8).optional(),
+    // BGPsec Capability (RFC 8205, Section 2.1 —
+    // https://www.rfc-editor.org/rfc/rfc8205#section-2.1); its AFI is `afi`.
+    FieldDescriptor::new("bgpsec_version", "BGPsec Version", FieldType::U8).optional(),
+    FieldDescriptor::new("bgpsec_direction", "BGPsec Direction", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(d) => bgpsec_direction_name(*d),
+            _ => None,
+        }),
 ];
 
 /// Field descriptor indices for [`PATH_ATTR_CHILDREN`].
@@ -6702,6 +7400,14 @@ const FD_WITHDRAWN_ROUTES: usize = 17;
 const FD_TOTAL_PATH_ATTRIBUTE_LENGTH: usize = 18;
 const FD_PATH_ATTRIBUTES: usize = 19;
 const FD_NLRI: usize = 20;
+// NOTIFICATION data (RFC 9003 — https://www.rfc-editor.org/rfc/rfc9003;
+// RFC 8538 — https://www.rfc-editor.org/rfc/rfc8538) and ROUTE-REFRESH ORFs
+// (RFC 5291 — https://www.rfc-editor.org/rfc/rfc5291)
+const FD_SHUTDOWN_COMMUNICATION_LENGTH: usize = 21;
+const FD_SHUTDOWN_COMMUNICATION: usize = 22;
+const FD_HARD_RESET: usize = 23;
+const FD_WHEN_TO_REFRESH: usize = 24;
+const FD_ORFS: usize = 25;
 
 /// Field descriptors for the BGP dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -6747,44 +7453,11 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional()
     .with_children(OPT_PARAM_CHILDREN),
     // NOTIFICATION fields (RFC 4271, Section 4.5)
-    FieldDescriptor {
-        name: "error_code",
-        display_name: "Error Code",
-        field_type: FieldType::U8,
-        optional: true,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(c) => error_code_name(*c),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    // RFC 4486 / RFC 8203 — Cease subcode names. The lookup is conditional on
-    // the sibling `error_code` being 6 (Cease); other error codes have their
-    // own subcode tables that are not currently decoded.
-    FieldDescriptor {
-        name: "error_subcode",
-        display_name: "Error Subcode",
-        field_type: FieldType::U8,
-        optional: true,
-        children: None,
-        display_fn: Some(|v, siblings| {
-            let FieldValue::U8(subcode) = v else {
-                return None;
-            };
-            let error_code = siblings
-                .iter()
-                .find(|f| f.name() == "error_code")
-                .and_then(|f| f.value.as_u8())?;
-            if error_code == 6 {
-                cease_subcode_name(*subcode)
-            } else {
-                None
-            }
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
+    ERROR_CODE_FIELD,
+    ERROR_SUBCODE_FIELD,
+    // NOTIFICATION Data; for ROUTE-REFRESH, KEEPALIVE and unknown message
+    // types, the octets that are not otherwise decoded.
+    DATA_FIELD,
     // Top-level `afi`/`safi`:
     // - ROUTE-REFRESH (RFC 2918, Section 3) — decoded directly from the
     //   message body.
@@ -6856,6 +7529,87 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("nlri", "NLRI", FieldType::Array)
         .optional()
         .with_children(NLRI_ENTRY_CHILDREN),
+    // NOTIFICATION Shutdown Communication (RFC 9003, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc9003#section-2).
+    SHUTDOWN_COMMUNICATION_LENGTH_FIELD,
+    SHUTDOWN_COMMUNICATION_FIELD,
+    // NOTIFICATION Hard Reset (RFC 8538, Section 3.1 —
+    // https://www.rfc-editor.org/rfc/rfc8538#section-3.1).
+    FieldDescriptor::new("hard_reset", "Hard Reset", FieldType::Object)
+        .optional()
+        .with_children(&HARD_RESET_FIELDS),
+    // ROUTE-REFRESH ORFs (RFC 5291, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc5291#section-4).
+    FieldDescriptor::new("when_to_refresh", "When-to-refresh", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(w) => when_to_refresh_name(*w),
+            _ => None,
+        }),
+    FieldDescriptor::new("orfs", "ORFs", FieldType::Array)
+        .optional()
+        .with_children(&ORF_FIELDS),
+];
+
+/// NOTIFICATION Error Code (RFC 4271, Section 4.5 —
+/// <https://www.rfc-editor.org/rfc/rfc4271#section-4.5>).
+const ERROR_CODE_FIELD: FieldDescriptor =
+    FieldDescriptor::new("error_code", "Error Code", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _siblings| match v {
+            FieldValue::U8(c) => error_code_name(*c),
+            _ => None,
+        });
+
+/// NOTIFICATION Error Subcode, named for the sibling `error_code` (IANA BGP
+/// Error Subcodes —
+/// <https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#bgp-parameters-5>).
+const ERROR_SUBCODE_FIELD: FieldDescriptor =
+    FieldDescriptor::new("error_subcode", "Error Subcode", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, siblings| {
+            let FieldValue::U8(subcode) = v else {
+                return None;
+            };
+            let error_code = siblings
+                .iter()
+                .find(|f| f.name() == "error_code")
+                .and_then(|f| f.value.as_u8())?;
+            error_subcode_name(error_code, *subcode)
+        });
+
+/// NOTIFICATION Data (RFC 4271, Section 4.5 —
+/// <https://www.rfc-editor.org/rfc/rfc4271#section-4.5>).
+const DATA_FIELD: FieldDescriptor =
+    FieldDescriptor::new("data", "Data", FieldType::Bytes).optional();
+
+/// Shutdown Communication Length (RFC 9003, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc9003#section-2>).
+const SHUTDOWN_COMMUNICATION_LENGTH_FIELD: FieldDescriptor = FieldDescriptor::new(
+    "shutdown_communication_length",
+    "Shutdown Communication Length",
+    FieldType::U8,
+)
+.optional();
+
+/// Shutdown Communication text (RFC 9003, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc9003#section-2>).
+const SHUTDOWN_COMMUNICATION_FIELD: FieldDescriptor = FieldDescriptor::new(
+    "shutdown_communication",
+    "Shutdown Communication",
+    FieldType::Str,
+)
+.optional();
+
+/// Child field descriptors of the `hard_reset` object: the encapsulated
+/// Error Code, Subcode and Data (RFC 8538, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8538#section-3.1>).
+const HARD_RESET_FIELDS: [FieldDescriptor; 5] = [
+    ERROR_CODE_FIELD,
+    ERROR_SUBCODE_FIELD,
+    DATA_FIELD,
+    SHUTDOWN_COMMUNICATION_LENGTH_FIELD,
+    SHUTDOWN_COMMUNICATION_FIELD,
 ];
 
 /// Parses a single BGP message from the start of `data` and appends one layer.
@@ -6924,7 +7678,20 @@ fn dissect_one_message<'pkt>(
         MSG_UPDATE => parse_update(buf, msg_data, offset)?,
         MSG_NOTIFICATION => parse_notification(buf, msg_data, offset)?,
         MSG_ROUTE_REFRESH => parse_route_refresh(buf, msg_data, offset)?,
-        _ => {}
+        // KEEPALIVE is only the header (RFC 4271, Section 4.4 —
+        // https://www.rfc-editor.org/rfc/rfc4271#section-4.4), and an
+        // unrecognized Type is a "Bad Message Type" error (RFC 4271,
+        // Section 6.1 — https://www.rfc-editor.org/rfc/rfc4271#section-6.1):
+        // any octets after the header are kept as `data`.
+        _ => {
+            if msg_len > HEADER_SIZE {
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_DATA],
+                    FieldValue::Bytes(&msg_data[HEADER_SIZE..]),
+                    offset + HEADER_SIZE..offset + msg_len,
+                );
+            }
+        }
     }
 
     buf.end_layer();
@@ -7072,9 +7839,39 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc8092",
     ),
     SpecReference::new(
-        "RFC 8203",
-        "BGP Administrative Shutdown Communication",
-        "https://www.rfc-editor.org/rfc/rfc8203",
+        "RFC 9003",
+        "Extended BGP Administrative Shutdown Communication",
+        "https://www.rfc-editor.org/rfc/rfc9003",
+    ),
+    SpecReference::new(
+        "RFC 8538",
+        "Notification Message Support for BGP Graceful Restart",
+        "https://www.rfc-editor.org/rfc/rfc8538",
+    ),
+    SpecReference::new(
+        "RFC 9384",
+        "A BGP Cease NOTIFICATION Subcode for Bidirectional Forwarding Detection (BFD)",
+        "https://www.rfc-editor.org/rfc/rfc9384",
+    ),
+    SpecReference::new(
+        "RFC 6608",
+        "Subcodes for BGP Finite State Machine Error",
+        "https://www.rfc-editor.org/rfc/rfc6608",
+    ),
+    SpecReference::new(
+        "RFC 5291",
+        "Outbound Route Filtering Capability for BGP-4",
+        "https://www.rfc-editor.org/rfc/rfc5291",
+    ),
+    SpecReference::new(
+        "RFC 5292",
+        "Address-Prefix-Based Outbound Route Filter for BGP-4",
+        "https://www.rfc-editor.org/rfc/rfc5292",
+    ),
+    SpecReference::new(
+        "RFC 8205",
+        "BGPsec Protocol Specification",
+        "https://www.rfc-editor.org/rfc/rfc8205",
     ),
     SpecReference::new(
         "RFC 8277",
@@ -7555,12 +8352,12 @@ mod tests {
             Some("Administrative Shutdown")
         );
 
-        // RFC 8203, Section 4 — Cease subcode 9 = "Hard Reset".
+        // RFC 8538, Section 3 — Cease subcode 9 = "Hard Reset".
         let mut raw = vec![0xFF; 16];
         raw.extend_from_slice(&21u16.to_be_bytes());
         raw.push(3); // Type = NOTIFICATION
         raw.push(6); // Cease
-        raw.push(9); // Hard Reset (RFC 8203)
+        raw.push(9); // Hard Reset (RFC 8538)
 
         let mut buf = DissectBuffer::new();
         BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
@@ -7571,7 +8368,10 @@ mod tests {
         );
 
         // For non-Cease error codes, error_subcode_name must NOT decode as a
-        // Cease subcode (the lookup table is error-code specific).
+        // Cease subcode (the lookup table is error-code specific): Message
+        // Header Error subcode 2 is "Bad Message Length" (RFC 4271,
+        // Section 6.1 — https://www.rfc-editor.org/rfc/rfc4271#section-6.1),
+        // not "Administrative Shutdown".
         let mut raw = vec![0xFF; 16];
         raw.extend_from_slice(&21u16.to_be_bytes());
         raw.push(3); // Type = NOTIFICATION
@@ -7581,7 +8381,10 @@ mod tests {
         let mut buf = DissectBuffer::new();
         BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
         let layer = &buf.layers()[0];
-        assert_eq!(buf.resolve_display_name(layer, "error_subcode_name"), None);
+        assert_eq!(
+            buf.resolve_display_name(layer, "error_subcode_name"),
+            Some("Bad Message Length")
+        );
     }
 
     #[test]
@@ -12962,5 +13765,519 @@ mod tests {
             .filter(|&(t, s)| ext_community_sub_type_name(t, s).is_some())
             .count();
         assert_eq!(pairs, 65);
+    }
+
+    // ---------------------------------------------------------------------
+    // OPEN capabilities 3 / 7 / 8, NOTIFICATION data, ROUTE-REFRESH ORF
+    // entries and message types without a body definition.
+    // ---------------------------------------------------------------------
+
+    /// Helper: the direct element object ranges of the named Array in `range`.
+    fn array_entry_ranges(
+        buf: &DissectBuffer<'_>,
+        range: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Vec<core::ops::Range<u32>> {
+        let FieldValue::Array(ref arr) = nested_field_by_name(buf, range, name).value else {
+            panic!("expected Array for {name}");
+        };
+        nlri_entry_ranges(buf, arr)
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_orf() {
+        // RFC 5291, Section 5: AFI 1 / SAFI 1 with two ORF types (Address
+        // Prefix ORF, receive; CP-ORF, both), then AFI 2 / SAFI 1 with none.
+        let caps = cap_tlv(3, &[0, 1, 0, 1, 2, 64, 1, 65, 3, 0, 2, 0, 1, 0]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "code_name"),
+            Some("Outbound Route Filtering Capability")
+        );
+        let entries = array_entry_ranges(&buf, &range, "afi_safis");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "afi"),
+            FieldValue::U16(1)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "safi"),
+            FieldValue::U16(1)
+        );
+        let orfs = array_entry_ranges(&buf, &entries[0], "orfs");
+        assert_eq!(orfs.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &orfs[0], "orf_type"),
+            FieldValue::U8(64)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&orfs[0], "orf_type_name"),
+            Some("Address Prefix ORF")
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&orfs[0], "send_receive_name"),
+            Some("receive")
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&orfs[1], "send_receive_name"),
+            Some("both")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[1], "afi"),
+            FieldValue::U16(2)
+        );
+        assert!(array_entry_ranges(&buf, &entries[1], "orfs").is_empty());
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_orf_malformed_is_raw() {
+        // A Number of ORFs that overruns the value leaves it undecoded.
+        let caps = cap_tlv(3, &[0, 1, 0, 1, 2, 64, 1]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+        assert!(nested_field_by_name_opt(&buf, &range, "afi_safis").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &range, "value"),
+            FieldValue::Bytes(&[0, 1, 0, 1, 2, 64, 1])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_multiple_labels() {
+        // RFC 8277, Section 2.1: <AFI, SAFI, Count> triples.
+        let caps = cap_tlv(8, &[0, 1, 4, 2, 0, 2, 128, 255]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+        let entries = array_entry_ranges(&buf, &range, "afi_safis");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "safi"),
+            FieldValue::U16(4)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "label_count"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[1], "afi"),
+            FieldValue::U16(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[1], "label_count"),
+            FieldValue::U8(255)
+        );
+
+        // Not a multiple of 4 octets: undecoded.
+        let caps = cap_tlv(8, &[0, 1, 4]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+        assert!(nested_field_by_name_opt(&buf, &range, "afi_safis").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_open_capability_bgpsec() {
+        // RFC 8205, Section 2.1: Version 0, Dir 1 (send), AFI 2.
+        let caps = cap_tlv(7, &[0x08, 0, 2]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &range, "bgpsec_version"),
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &range, "bgpsec_direction"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&range, "bgpsec_direction_name"),
+            Some("send")
+        );
+        assert_eq!(*nested_field_value(&buf, &range, "afi"), FieldValue::U16(2));
+
+        // "The capability length for this capability MUST be set to 3."
+        let caps = cap_tlv(7, &[0x08, 0]);
+        let data = build_open_with_caps(&caps);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+        assert!(nested_field_by_name_opt(&buf, &range, "bgpsec_version").is_none());
+    }
+
+    /// Helper: a NOTIFICATION message with the given code, subcode and data.
+    fn build_notification(code: u8, subcode: u8, data: &[u8]) -> Vec<u8> {
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&((21 + data.len()) as u16).to_be_bytes());
+        raw.push(3);
+        raw.push(code);
+        raw.push(subcode);
+        raw.extend_from_slice(data);
+        raw
+    }
+
+    #[test]
+    fn parse_bgp_notification_shutdown_communication() {
+        // RFC 9003, Section 2: Cease / Administrative Shutdown (2) and
+        // Administrative Reset (4) with a length-prefixed UTF-8 string.
+        let text = "maintenance – back in 2h";
+        for subcode in [2u8, 4] {
+            let mut body = vec![text.len() as u8];
+            body.extend_from_slice(text.as_bytes());
+            let raw = build_notification(6, subcode, &body);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert_eq!(
+                buf.field_by_name(layer, "shutdown_communication_length")
+                    .unwrap()
+                    .value,
+                FieldValue::U8(text.len() as u8)
+            );
+            assert_eq!(
+                buf.field_by_name(layer, "shutdown_communication")
+                    .unwrap()
+                    .value,
+                FieldValue::Str(text)
+            );
+            // The raw data stays available.
+            assert_eq!(
+                buf.field_by_name(layer, "data").unwrap().value,
+                FieldValue::Bytes(&body)
+            );
+        }
+
+        // "When the length value is zero, no Shutdown Communication field
+        // follows."
+        let raw = build_notification(6, 2, &[0]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "shutdown_communication_length")
+                .unwrap()
+                .value,
+            FieldValue::U8(0)
+        );
+        assert!(buf.field_by_name(layer, "shutdown_communication").is_none());
+
+        // "A receiving BGP speaker MUST NOT interpret invalid UTF-8
+        // sequences", and a Length that does not cover exactly the rest of
+        // the data is not decoded.
+        for body in [&[2u8, 0xff, 0xfe][..], &[5, b'a'][..], &[1, b'a', 1, 2][..]] {
+            let raw = build_notification(6, 2, body);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert!(buf.field_by_name(layer, "shutdown_communication").is_none());
+            assert!(
+                buf.field_by_name(layer, "shutdown_communication_length")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bgp_notification_hard_reset() {
+        // RFC 8538, Section 3.1: the Hard Reset data encapsulates an Error
+        // Code, Subcode and Data — here Cease / Administrative Reset with a
+        // Shutdown Communication.
+        let raw = build_notification(6, 9, &[6, 4, 3, b'b', b'y', b'e']);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "error_subcode_name"),
+            Some("Hard Reset")
+        );
+        let FieldValue::Object(ref hr) = buf.field_by_name(layer, "hard_reset").unwrap().value
+        else {
+            panic!("expected Object for hard_reset");
+        };
+        assert_eq!(
+            *nested_field_value(&buf, hr, "error_code"),
+            FieldValue::U8(6)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(hr, "error_code_name"),
+            Some("Cease")
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(hr, "error_subcode_name"),
+            Some("Administrative Reset")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, hr, "shutdown_communication"),
+            FieldValue::Str("bye")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, hr, "data"),
+            FieldValue::Bytes(&[3, b'b', b'y', b'e'])
+        );
+
+        // An encapsulated error without data, and a truncated Hard Reset
+        // (fewer than the Error Code and Subcode octets).
+        let raw = build_notification(6, 9, &[4, 0]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let FieldValue::Object(ref hr) = buf.field_by_name(layer, "hard_reset").unwrap().value
+        else {
+            panic!("expected Object for hard_reset");
+        };
+        assert_eq!(
+            buf.resolve_nested_display_name(hr, "error_code_name"),
+            Some("Hold Timer Expired")
+        );
+        assert!(nested_field_by_name_opt(&buf, hr, "data").is_none());
+
+        let raw = build_notification(6, 9, &[4]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "hard_reset").is_none());
+    }
+
+    #[test]
+    fn notification_subcode_names() {
+        // IANA BGP Error Subcodes (RFC 4271, Section 6; RFC 5492; RFC 9234;
+        // RFC 6608; RFC 4486; RFC 8538; RFC 9384; RFC 7313).
+        for (code, sub, name) in [
+            (1u8, 1u8, "Connection Not Synchronized"),
+            (1, 3, "Bad Message Type"),
+            (2, 2, "Bad Peer AS"),
+            (2, 7, "Unsupported Capability"),
+            (2, 11, "Role Mismatch"),
+            (3, 11, "Malformed AS_PATH"),
+            (5, 3, "Receive Unexpected Message in Established State"),
+            (6, 9, "Hard Reset"),
+            (6, 10, "BFD Down"),
+            (7, 1, "Invalid Message Length"),
+        ] {
+            assert_eq!(error_subcode_name(code, sub), Some(name), "{code}/{sub}");
+        }
+        assert_eq!(error_subcode_name(1, 0), Some("Unspecific"));
+        assert_eq!(error_subcode_name(4, 0), None);
+        assert_eq!(error_subcode_name(6, 11), None);
+        assert_eq!(error_code_name(9), Some("Loss of LSDB Synchronization"));
+
+        // Through the display_fn, with the sibling `error_code`.
+        let raw = build_notification(2, 7, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "error_subcode_name"),
+            Some("Unsupported Capability")
+        );
+    }
+
+    /// Helper: a ROUTE-REFRESH message for (AFI, subtype, SAFI) with `body`
+    /// after the fixed part.
+    fn build_route_refresh(afi: u16, subtype: u8, safi: u8, body: &[u8]) -> Vec<u8> {
+        let mut raw = vec![0xFF; 16];
+        raw.extend_from_slice(&((23 + body.len()) as u16).to_be_bytes());
+        raw.push(5);
+        raw.extend_from_slice(&afi.to_be_bytes());
+        raw.push(subtype);
+        raw.push(safi);
+        raw.extend_from_slice(body);
+        raw
+    }
+
+    #[test]
+    fn parse_bgp_route_refresh_address_prefix_orf() {
+        // RFC 5291, Section 4 and RFC 5292, Section 3: IMMEDIATE, one
+        // Address Prefix ORF (type 64) with an ADD/PERMIT entry for
+        // 10.0.0.0/8 le 24 and a REMOVE-ALL entry.
+        let mut entries = vec![0x00];
+        entries.extend_from_slice(&10u32.to_be_bytes()); // Sequence
+        entries.extend_from_slice(&[9, 24, 8, 10]); // Minlen, Maxlen, Length, Prefix
+        entries.push(0x80); // REMOVE-ALL
+        let mut body = vec![1, 64];
+        body.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+        body.extend_from_slice(&entries);
+        let raw = build_route_refresh(1, 0, 1, &body);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "when_to_refresh").unwrap().value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "when_to_refresh_name"),
+            Some("IMMEDIATE")
+        );
+        let FieldValue::Array(ref orfs) = buf.field_by_name(layer, "orfs").unwrap().value else {
+            panic!("expected Array for orfs");
+        };
+        let orfs = nlri_entry_ranges(&buf, orfs);
+        assert_eq!(orfs.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &orfs[0], "orf_type"),
+            FieldValue::U8(64)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &orfs[0], "length"),
+            FieldValue::U16(entries.len() as u16)
+        );
+        let es = array_entry_ranges(&buf, &orfs[0], "entries");
+        assert_eq!(es.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &es[0], "action"),
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&es[0], "action_name"),
+            Some("ADD")
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&es[0], "match_name"),
+            Some("PERMIT")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &es[0], "sequence"),
+            FieldValue::U32(10)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &es[0], "minlen"),
+            FieldValue::U8(9)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &es[0], "maxlen"),
+            FieldValue::U8(24)
+        );
+        let prefix = nested_field_by_name(&buf, &es[0], "prefix");
+        assert_eq!(prefix.value, FieldValue::Bytes(&[8, 10]));
+        assert_eq!(
+            call_format_fn(prefix.descriptor.format_fn.unwrap(), &prefix.value),
+            "\"10.0.0.0/8\""
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&es[1], "action_name"),
+            Some("REMOVE-ALL")
+        );
+        assert!(nested_field_by_name_opt(&buf, &es[1], "sequence").is_none());
+        // Match "is significant only when the value of the Action field is
+        // either ADD or REMOVE".
+        assert!(nested_field_by_name_opt(&buf, &es[1], "match").is_none());
+        assert!(buf.field_by_name(layer, "data").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_route_refresh_orf_other_types() {
+        // IPv6 Address Prefix ORF entry, and an ORF type whose entries are
+        // not decoded (CP-ORF, 65): each entry is kept as `value`.
+        let mut v6 = vec![0x20];
+        v6.extend_from_slice(&1u32.to_be_bytes());
+        v6.extend_from_slice(&[0, 0, 32, 0x20, 0x01, 0x0d, 0xb8]);
+        let mut body = vec![2, 64];
+        body.extend_from_slice(&(v6.len() as u16).to_be_bytes());
+        body.extend_from_slice(&v6);
+        body.extend_from_slice(&[65, 0, 3, 0xaa, 0xbb, 0xcc]);
+        let raw = build_route_refresh(2, 0, 1, &body);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "when_to_refresh_name"),
+            Some("DEFER")
+        );
+        let FieldValue::Array(ref orfs) = buf.field_by_name(layer, "orfs").unwrap().value else {
+            panic!("expected Array for orfs");
+        };
+        let orfs = nlri_entry_ranges(&buf, orfs);
+        assert_eq!(orfs.len(), 2);
+        let es = array_entry_ranges(&buf, &orfs[0], "entries");
+        assert_eq!(
+            buf.resolve_nested_display_name(&es[0], "match_name"),
+            Some("DENY")
+        );
+        let prefix = nested_field_by_name(&buf, &es[0], "prefix");
+        assert_eq!(
+            call_format_fn(prefix.descriptor.format_fn.unwrap(), &prefix.value),
+            "\"2001:db8::/32\""
+        );
+        assert!(nested_field_by_name_opt(&buf, &orfs[1], "entries").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &orfs[1], "value"),
+            FieldValue::Bytes(&[0xaa, 0xbb, 0xcc])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_route_refresh_malformed_orf_is_raw() {
+        // An ORF whose length overruns the message, an Address Prefix ORF
+        // entry that overruns its ORF, and a BoRR (RFC 7313) with trailing
+        // octets keep the bytes after the fixed part as `data`.
+        // An IPv4 prefix Length above 32 is malformed too.
+        let cases: [(u8, &[u8]); 4] = [
+            (0, &[1, 64, 0, 9, 0]),
+            (0, &[1, 64, 0, 3, 0x00, 0, 0]),
+            (0, &[1, 64, 0, 13, 0, 0, 0, 0, 1, 0, 0, 33, 10, 0, 0, 0, 0]),
+            (1, &[1, 2, 3]),
+        ];
+        for (subtype, body) in cases {
+            let raw = build_route_refresh(1, subtype, 1, body);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert!(buf.field_by_name(layer, "orfs").is_none());
+            assert!(buf.field_by_name(layer, "when_to_refresh").is_none());
+            assert_eq!(
+                buf.field_by_name(layer, "data").unwrap().value,
+                FieldValue::Bytes(body)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bgp_unknown_message_type_keeps_body() {
+        // RFC 4271, Section 6.1: an unrecognized Type is a "Bad Message
+        // Type" error; the body is still exposed as `data`. A KEEPALIVE
+        // longer than its header (Section 4.4) keeps the extra octets too.
+        for msg_type in [9u8, 4] {
+            let mut raw = vec![0xFF; 16];
+            raw.extend_from_slice(&22u16.to_be_bytes());
+            raw.push(msg_type);
+            raw.extend_from_slice(&[1, 2, 3]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert_eq!(
+                buf.field_by_name(layer, "data").unwrap().value,
+                FieldValue::Bytes(&[1, 2, 3])
+            );
+        }
+        // A bare KEEPALIVE has no `data`.
+        let data = build_keepalive();
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "data").is_none());
+    }
+
+    #[test]
+    fn open_notification_refresh_name_tables() {
+        assert_eq!(orf_type_name(64), Some("Address Prefix ORF"));
+        assert_eq!(orf_type_name(65), Some("CP-ORF"));
+        assert_eq!(orf_type_name(0), None);
+        assert_eq!(orf_send_receive_name(2), Some("send"));
+        assert_eq!(orf_send_receive_name(0), None);
+        assert_eq!(orf_action_name(1), Some("REMOVE"));
+        assert_eq!(orf_action_name(3), None);
+        assert_eq!(when_to_refresh_name(0), None);
+        assert_eq!(bgpsec_direction_name(0), Some("receive"));
+        assert_eq!(bgpsec_direction_name(2), None);
     }
 }

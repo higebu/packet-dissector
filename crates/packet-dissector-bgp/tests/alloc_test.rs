@@ -155,3 +155,36 @@ fn zero_alloc_dissect_bgp_update_structured_path_attributes() {
         "BGP structured path attribute dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_route_refresh_orf_and_notification() {
+    // ROUTE-REFRESH with an Address Prefix ORF (RFC 5291, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc5291#section-4; RFC 5292, Section 3 —
+    // https://www.rfc-editor.org/rfc/rfc5292#section-3), followed by a Cease /
+    // Hard Reset NOTIFICATION carrying a Shutdown Communication (RFC 8538,
+    // Section 3.1 — https://www.rfc-editor.org/rfc/rfc8538#section-3.1;
+    // RFC 9003, Section 2 — https://www.rfc-editor.org/rfc/rfc9003#section-2).
+    let orf = [1u8, 64, 0, 10, 0x00, 0, 0, 0, 10, 9, 24, 8, 10, 0x80];
+    let mut raw = vec![0xFF; 16];
+    raw.extend_from_slice(&((23 + orf.len()) as u16).to_be_bytes());
+    raw.push(5); // Type = ROUTE-REFRESH
+    raw.extend_from_slice(&[0, 1, 0, 1]); // AFI 1, Subtype 0, SAFI 1
+    raw.extend_from_slice(&orf);
+    let notification_data = [6u8, 4, 3, b'b', b'y', b'e'];
+    raw.extend_from_slice(&[0xFF; 16]);
+    raw.extend_from_slice(&((21 + notification_data.len()) as u16).to_be_bytes());
+    raw.extend_from_slice(&[3, 6, 9]); // NOTIFICATION, Cease, Hard Reset
+    raw.extend_from_slice(&notification_data);
+
+    let mut buf = DissectBuffer::new();
+    BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP ROUTE-REFRESH / NOTIFICATION dissect allocated {allocs} times"
+    );
+}
