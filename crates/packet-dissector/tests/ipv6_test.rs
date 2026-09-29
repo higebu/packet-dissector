@@ -47,6 +47,8 @@
 //! | 6553 §3     | RPL Option (0x63)              | parse_ipv6_option_rpl                   |
 //! | 9008 §11.1  | RPL Option (0x23)              | parse_ipv6_option_rpl                   |
 //! | 7731 §6.1   | MPL Option                     | parse_ipv6_option_mpl                   |
+//! | 7731 §6.1   | MPL seed-id sizes (S=0,2,3)    | parse_ipv6_option_mpl_seed_id_sizes     |
+//! | IANA        | Option names                   | parse_ipv6_option_names                 |
 //! | 9486 §3     | IOAM                           | parse_ipv6_option_ioam                  |
 //! | 8250 §3.2.1 | PDM                            | parse_ipv6_option_pdm                   |
 //! | 4782 §3.2   | Quick-Start                    | parse_ipv6_option_quick_start           |
@@ -59,6 +61,7 @@
 //! | 6275 §6.4   | Type 2 with bad length is raw  | parse_ipv6_routing                      |
 //! | 6554 §3     | Type 3 RPL Source Route        | parse_ipv6_routing_type3                |
 //! | 6554 §3     | Type 3 inconsistent sizes raw  | parse_ipv6_routing_type3_inconsistent   |
+//! | IANA        | Routing Type names             | parse_ipv6_routing_type_names           |
 //! | —           | Truncated header               | parse_ipv6_truncated                    |
 //! | —           | Offset handling                | parse_ipv6_with_offset                  |
 //! | —           | Dissector metadata             | ipv6_dissector_metadata                 |
@@ -105,6 +108,8 @@
 //! | 6.2.6       | Nonce Indices                  | parse_ipv6_mobility_options             |
 //! | 6.2.7       | Binding Authorization Data     | parse_ipv6_mobility_options             |
 //! | 6.2.1       | Unknown / malformed option     | parse_ipv6_mobility_options_malformed   |
+//! | 6.2.1       | Option without Length octet    | parse_ipv6_mobility_option_missing_length |
+//! | 6.1.2-6.1.9 | MH Type and option names       | parse_ipv6_mobility_names               |
 //! | —           | MH dissector metadata          | mobility_dissector_metadata             |
 
 use packet_dissector::dissector::{DispatchHint, Dissector};
@@ -1601,4 +1606,183 @@ fn parse_ipv6_mobility_options_malformed() {
         Some(&FieldValue::Bytes(&[0, 0, 0]))
     );
     assert_eq!(child(opts[1].1, "refresh_interval"), None);
+}
+
+fn option_display_names(buf: &DissectBuffer<'_>) -> Vec<Option<&'static str>> {
+    buf.fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name() == "option")
+        .map(|(i, f)| {
+            let FieldValue::Object(range) = &f.value else {
+                panic!("option must be an object");
+            };
+            let by_container = buf.resolve_container_display_name(i as u32);
+            assert_eq!(
+                by_container,
+                buf.resolve_nested_display_name(range, "type_name")
+            );
+            by_container
+        })
+        .collect()
+}
+
+#[test]
+fn parse_ipv6_option_mpl_seed_id_sizes() {
+    // RFC 7731, Section 6.1 — S selects a seed-id of 0, 2, 8 or 16 octets.
+    let buf = hbh_options(&[0x3a, 0x00, 0x6D, 0x02, 0x00, 0x07, 0x01, 0x00]);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    assert_eq!(child(opts[0].1, "mpl_seed_id"), None);
+    assert_eq!(child(opts[0].1, "mpl_sequence"), Some(&FieldValue::U8(7)));
+
+    let mut data = vec![0x3a, 0x01, 0x6D, 0x0A, 0x80, 0x07];
+    data.extend_from_slice(&[0xAB; 8]);
+    data.extend_from_slice(&[0x01, 0x00]);
+    let buf = hbh_options(&data);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    assert_eq!(
+        child(opts[0].1, "mpl_seed_id"),
+        Some(&FieldValue::Bytes(&[0xAB; 8]))
+    );
+
+    let mut data = vec![0x3a, 0x02, 0x6D, 0x12, 0xC0, 0x07];
+    data.extend_from_slice(&[0xCD; 16]);
+    data.extend_from_slice(&[0x01, 0x00]);
+    let buf = hbh_options(&data);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    assert_eq!(
+        child(opts[0].1, "mpl_seed_id"),
+        Some(&FieldValue::Bytes(&[0xCD; 16]))
+    );
+
+    // S=3 but only 2 octets of seed-id: kept raw.
+    let buf = hbh_options(&[0x3a, 0x00, 0x6D, 0x04, 0xC0, 0x07, 0x01, 0x02]);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    assert_eq!(child(opts[0].1, "mpl_seed_id"), None);
+    assert_eq!(
+        child(opts[0].1, "value"),
+        Some(&FieldValue::Bytes(&[0xC0, 0x07, 0x01, 0x02]))
+    );
+}
+
+#[test]
+fn parse_ipv6_option_names() {
+    // IANA "Destination Options and Hop-by-Hop Options" registry names.
+    let data = [
+        0x3a, 0x03, // NH, Hdr Ext Len 3 (32 octets)
+        0x00, // Pad1
+        0x01, 0x00, // PadN
+        0x04, 0x00, // Tunnel Encapsulation Limit (bad length)
+        0x07, 0x00, // CALIPSO (bad length)
+        0x0F, 0x00, // PDM (bad length)
+        0x11, 0x00, // IOAM (dest)
+        0x31, 0x00, // IOAM (HBH)
+        0x23, 0x00, // RPL Option
+        0x63, 0x00, // RPL Option (deprecated)
+        0x26, 0x00, // Quick-Start
+        0x6D, 0x00, // MPL Option
+        0xC2, 0x00, // Jumbo Payload
+        0xC9, 0x00, // Home Address
+        0x1E, 0x00, // unknown
+        0x01, 0x01, 0x00, // PadN
+    ];
+    let buf = hbh_options(&data);
+    assert_eq!(
+        option_display_names(&buf),
+        vec![
+            Some("Pad1"),
+            Some("PadN"),
+            Some("Tunnel Encapsulation Limit"),
+            Some("CALIPSO"),
+            Some("Performance and Diagnostic Metrics"),
+            Some("IOAM"),
+            Some("IOAM"),
+            Some("RPL Option"),
+            Some("RPL Option (deprecated)"),
+            Some("Quick-Start"),
+            Some("MPL Option"),
+            Some("Jumbo Payload"),
+            Some("Home Address"),
+            None,
+            Some("PadN"),
+        ]
+    );
+}
+
+#[test]
+fn parse_ipv6_routing_type_names() {
+    // IANA "Routing Types" registry.
+    for (t, name) in [
+        (0u8, Some("Source Route (deprecated)")),
+        (2, Some("Type 2 Routing Header")),
+        (3, Some("RPL Source Route Header")),
+        (4, Some("Segment Routing Header")),
+        (5, None),
+    ] {
+        let data = [59, 0, t, 0, 0, 0, 0, 0];
+        let mut buf = DissectBuffer::new();
+        GenericRoutingDissector
+            .dissect(&data, &mut buf, 40)
+            .unwrap();
+        let layer = buf.layer_by_name("IPv6 Routing").unwrap();
+        assert_eq!(buf.resolve_display_name(layer, "routing_type_name"), name);
+    }
+}
+
+#[test]
+fn parse_ipv6_mobility_option_missing_length() {
+    // A non-Pad1 mobility option in the last octet has no Option Length.
+    let data = [59, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02];
+    let mut data = data.to_vec();
+    data[1] = 1;
+    let buf = dissect_mh(&data);
+    let opts = option_objects(&buf, "IPv6 Mobility", "mobility_options");
+    let last = opts.last().unwrap();
+    assert_eq!(last.0, 55..56);
+    assert_eq!(child(last.1, "length"), None);
+    assert_eq!(child(last.1, "malformed"), Some(&FieldValue::Bytes(&[])));
+}
+
+#[test]
+fn parse_ipv6_mobility_names() {
+    // RFC 6275, Sections 6.1.2-6.1.9 (MH Types) and 6.2.2-6.2.7 (options).
+    for (t, name) in [
+        (0u8, Some("Binding Refresh Request")),
+        (1, Some("Home Test Init")),
+        (2, Some("Care-of Test Init")),
+        (3, Some("Home Test")),
+        (4, Some("Care-of Test")),
+        (5, Some("Binding Update")),
+        (6, Some("Binding Acknowledgement")),
+        (7, Some("Binding Error")),
+        (8, None),
+    ] {
+        let data = [59, 0, t, 0, 0, 0, 0, 0];
+        let buf = dissect_mh(&data);
+        let layer = buf.layer_by_name("IPv6 Mobility").unwrap();
+        assert_eq!(buf.resolve_display_name(layer, "mh_type_name"), name);
+    }
+
+    let coa = [0u8; 16];
+    let mut data = vec![59, 5, 0, 0, 0, 0, 0, 0]; // BRR, Header Len 5 (48 octets)
+    data.extend_from_slice(&[0x00, 0x01, 0x00, 0x02, 0x02, 0x00, 0x00]);
+    data.extend_from_slice(&[0x03, 0x10]);
+    data.extend_from_slice(&coa);
+    data.extend_from_slice(&[0x04, 0x04, 0, 1, 0, 2, 0x05, 0x01, 0xAA]);
+    data.extend_from_slice(&[0x2A, 0x00, 0x01, 0x02, 0, 0]);
+    assert_eq!(data.len(), 48);
+    let buf = dissect_mh(&data);
+    assert_eq!(
+        option_display_names(&buf),
+        vec![
+            Some("Pad1"),
+            Some("PadN"),
+            Some("Binding Refresh Advice"),
+            Some("Alternate Care-of Address"),
+            Some("Nonce Indices"),
+            Some("Binding Authorization Data"),
+            None,
+            Some("PadN"),
+        ]
+    );
 }

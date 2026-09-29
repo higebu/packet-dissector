@@ -41,6 +41,8 @@
 //! | 4782 §3.1      | Quick-Start Rate Request        | parse_ipv4_option_quick_start_request |
 //! | 4782 §3.1      | Quick-Start Report of Approved Rate | parse_ipv4_option_quick_start_report |
 //! | 791 §3.1       | Unknown option keeps raw value  | parse_ipv4_option_unknown           |
+//! | 791 §3.1       | Timestamp with undefined flag   | parse_ipv4_option_timestamp_undefined_flag |
+//! | IANA registry  | Option names                    | parse_ipv4_option_names             |
 //! | 791 §3.1       | Option length past header       | parse_ipv4_option_length_past_end   |
 //! | 791 §3.1       | Option length < 2               | parse_ipv4_option_length_too_small  |
 //! | 791 §3.1       | Length octet missing            | parse_ipv4_option_missing_length    |
@@ -864,4 +866,62 @@ fn parse_ipv4_option_missing_length() {
     assert_eq!(child(opt, "type"), Some(&FieldValue::U8(0x94)));
     assert_eq!(child(opt, "length"), None);
     assert_eq!(child(opt, "malformed"), Some(&FieldValue::Bytes(&[])));
+}
+
+#[test]
+fn parse_ipv4_option_timestamp_undefined_flag() {
+    // RFC 791, Section 3.1 defines flags 0, 1 and 3 only; other flags keep
+    // the timestamp area raw.
+    let pkt = build_ipv4_with_options(&[0x44, 0x08, 0x05, 0x02, 1, 2, 3, 4]);
+    let (buf, options) = dissect_options(&pkt);
+    let opts = option_objects(&buf, &options);
+    let (_, opt) = &opts[0];
+    assert_eq!(child(opt, "flag"), Some(&FieldValue::U8(2)));
+    assert_eq!(child(opt, "entries"), None);
+    assert_eq!(child(opt, "value"), Some(&FieldValue::Bytes(&[1, 2, 3, 4])));
+}
+
+#[test]
+fn parse_ipv4_option_names() {
+    // Option names from the IANA "IP Option Numbers" registry, resolved
+    // both on the option object and on its `type` field.
+    let cases: &[(&[u8], &str)] = &[
+        (&[0x00], "End of Option List"),
+        (&[0x01], "No Operation"),
+        (&[0x07, 0x03, 0x04], "Record Route"),
+        (&[0x19, 0x02], "Quick-Start"),
+        (&[0x44, 0x04, 0x05, 0x00], "Internet Timestamp"),
+        (&[0x82, 0x03, 0x01], "Basic Security"),
+        (&[0x83, 0x03, 0x04], "Loose Source and Record Route"),
+        (&[0x88, 0x04, 0x00, 0x01], "Stream Identifier"),
+        (&[0x89, 0x03, 0x04], "Strict Source and Record Route"),
+        (&[0x94, 0x04, 0x00, 0x00], "Router Alert"),
+    ];
+    for &(bytes, name) in cases {
+        let pkt = build_ipv4_with_options(bytes);
+        let mut buf = DissectBuffer::new();
+        Ipv4Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let idx = buf
+            .fields()
+            .iter()
+            .position(|f| f.name() == "option")
+            .unwrap() as u32;
+        assert_eq!(buf.resolve_container_display_name(idx), Some(name));
+        let FieldValue::Object(range) = &buf.fields()[idx as usize].value else {
+            panic!("option must be an object");
+        };
+        assert_eq!(
+            buf.resolve_nested_display_name(range, "type_name"),
+            Some(name)
+        );
+    }
+    let pkt = build_ipv4_with_options(&[0x9E, 0x02]);
+    let mut buf = DissectBuffer::new();
+    Ipv4Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+    let idx = buf
+        .fields()
+        .iter()
+        .position(|f| f.name() == "option")
+        .unwrap() as u32;
+    assert_eq!(buf.resolve_container_display_name(idx), None);
 }
