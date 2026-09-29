@@ -162,7 +162,8 @@ impl TcpReassemblyService {
         self.delivered.get(key).map(|&(seq, _)| seq)
     }
 
-    /// Record that the stream of `key` starts at `seq` (after a SYN).
+    /// Set the delivery position of `key` to `seq`, inserting the entry
+    /// (and evicting the oldest ones) when the direction is new.
     fn set_delivered(&mut self, key: StreamKey, seq: u32) {
         if let Some(entry) = self.delivered.get_mut(&key) {
             entry.0 = seq;
@@ -338,9 +339,12 @@ impl DissectorRegistry {
         offset: usize,
     ) -> Result<(), PacketError> {
         if ctx.is_syn() {
+            // Everything known about the direction belongs to an earlier
+            // connection. The emptiness checks skip hashing the key in the
+            // common case (`HashMap::remove` hashes before looking up).
             let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
-            if !service.streams.is_empty() {
-                service.remove_stream(&ctx.stream_key);
+            if !service.streams.is_empty() || !service.delivered.is_empty() {
+                service.forget(&ctx.stream_key);
             }
         }
 
@@ -567,13 +571,9 @@ impl DissectorRegistry {
             // and start the stream. Bytes already delivered, or any bytes
             // when the delivery position is unknown (the capture started
             // mid-connection), are treated as a retransmission and dropped.
-            let start = match (service.delivered_seq(&key), ctx.stream_start) {
-                // A delivery position outside [stream start, base] belongs to
-                // an earlier connection on the same 4-tuple.
-                (Some(d), Some(s)) if d.wrapping_sub(s) > base_seq.wrapping_sub(s) => Some(s),
-                (d, s) => d.or(s),
-            };
-            let undelivered = start
+            let undelivered = service
+                .delivered_seq(&key)
+                .or(ctx.stream_start)
                 .map(|d| base_seq.wrapping_sub(d) as usize)
                 .filter(|&n| n <= MAX_STREAM_WINDOW)
                 .unwrap_or(0);

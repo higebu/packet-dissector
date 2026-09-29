@@ -16,6 +16,8 @@
 //! | RFC 9293 3.10        | Reordered earlier data after a delivered message         | reordered_earlier_segment_is_inserted_after_delivered_message |
 //! | RFC 9293 3.10        | Earlier data with unknown delivery position is dropped   | earlier_segment_with_unknown_delivery_position_is_dropped |
 //! | RFC 9293 3.10        | Reordering after a SYN that reuses a 4-tuple             | reordered_segment_after_reused_tuple_syn                |
+//! | RFC 9293 3.5         | SYN forgets the old connection's delivery position (ahead) | syn_forgets_stale_delivery_position_ahead             |
+//! | RFC 9293 3.5         | SYN forgets the old connection's delivery position (near)  | syn_forgets_stale_delivery_position_near              |
 //! | RFC 9293 3.10        | Retransmitted delivered data is not inserted             | retransmission_of_delivered_data_is_not_inserted        |
 //! | —                    | Stream eviction is reported on the TCP layer             | eviction_is_reported_on_tcp_layer                       |
 //! | RFC 9293 3.10        | Overlapping retransmission contributes only new bytes    | overlapping_retransmission_is_trimmed                   |
@@ -690,4 +692,69 @@ fn stalled_body_dispatch_terminates() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let lp = buf.layers().iter().filter(|l| l.name == "LP").count();
     assert_eq!(lp, 2);
+}
+
+/// A delivery position left by an earlier connection on the same 4-tuple
+/// must not survive the new connection's SYN: a coalesced retransmission of
+/// already-dissected data would otherwise be inserted and dissected twice.
+#[test]
+fn syn_forgets_stale_delivery_position_ahead() {
+    let reg = DissectorRegistry::default();
+    let (a, b) = options_split();
+
+    // Earlier connection delivers far ahead in sequence space.
+    let pkt = c2s(5060, 900_000, PSH_ACK, SIP_OPTIONS);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let isn = 100u32;
+    let pkt = c2s(5060, isn, SYN, &[]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    // First message of the new connection is delivered on the fast path.
+    let pkt = c2s(5060, isn + 1, PSH_ACK, SIP_OPTIONS);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+
+    // The second message's tail arrives first ...
+    let second = isn + 1 + SIP_OPTIONS.len() as u32;
+    let pkt = c2s(5060, second + a.len() as u32, PSH_ACK, b);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    // ... then a retransmission of the first message coalesced with the
+    // second message's head. Only the second message is new.
+    let mut coalesced = SIP_OPTIONS.to_vec();
+    coalesced.extend_from_slice(a);
+    let pkt = c2s(5060, isn + 1, PSH_ACK, &coalesced);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+/// Same, with the stale position just after the new stream start: the
+/// reordered first segment must be inserted whole.
+#[test]
+fn syn_forgets_stale_delivery_position_near() {
+    let reg = DissectorRegistry::default();
+    let (a, b) = options_split();
+    let isn = 100u32;
+
+    // Earlier connection delivered up to isn + 11.
+    let old = SIP_OPTIONS;
+    let old_seq = isn + 11 - old.len() as u32;
+    let pkt = c2s(5060, old_seq, PSH_ACK, old);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let pkt = c2s(5060, isn, SYN, &[]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let pkt = c2s(5060, isn + 1 + a.len() as u32, PSH_ACK, b);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let pkt = c2s(5060, isn + 1, PSH_ACK, a);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
 }
