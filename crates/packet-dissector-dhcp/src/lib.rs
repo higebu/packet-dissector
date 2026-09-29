@@ -1674,15 +1674,8 @@ impl CodeSet {
     }
 }
 
-/// Maximum number of option instances recorded for RFC 3396 concatenation
-/// (<https://www.rfc-editor.org/rfc/rfc3396#section-7>).
-///
-/// A message with more instances is decoded without concatenation. The
-/// fixed-size table keeps dissection of ordinary messages allocation-free.
-const MAX_OPTION_INSTANCES: usize = 256;
-
 /// One option instance in the aggregate option buffer.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct OptionInstance {
     code: u8,
     /// Offset of the code octet within the DHCP message.
@@ -1691,95 +1684,105 @@ struct OptionInstance {
     len: u8,
 }
 
-/// The option instances of a message, in aggregate option buffer order.
+/// Call `f(code, pos, len)` for every option in `area[start..]`, stopping at
+/// the End option or at the first truncated option (reported later by
+/// [`parse_options`]). Returns the Option Overload value, if seen.
+fn scan_area(area: &[u8], start: usize, f: &mut impl FnMut(u8, usize, u8)) -> Option<u8> {
+    let mut overload = None;
+    let mut cursor = start;
+    while let Some(&code) = area.get(cursor) {
+        match code {
+            // RFC 2132, Sections 3.1 and 3.2 — Pad and End.
+            // <https://www.rfc-editor.org/rfc/rfc2132#section-3.1>
+            0 => {
+                cursor += 1;
+                continue;
+            }
+            255 => break,
+            _ => {}
+        }
+        let Some(&len) = area.get(cursor + 1) else {
+            break;
+        };
+        if cursor + 2 + len as usize > area.len() {
+            break;
+        }
+        if code == OPTION_OVERLOAD && len == 1 {
+            overload = Some(area[cursor + 2]);
+        }
+        f(code, cursor, len);
+        cursor += 2 + len as usize;
+    }
+    overload
+}
+
+/// Call `f(code, pos, len)` for every option in the aggregate option buffer,
+/// in its order.
 ///
 /// RFC 3396, Section 5 — <https://www.rfc-editor.org/rfc/rfc3396#section-5>:
 /// "The aggregate option buffer is made up of the optional parameters field,
-/// the file field, and the sname field, in that order."
+/// the file field, and the sname field, in that order." The `file` and
+/// `sname` fields are part of it only when option 52 says so (RFC 2132,
+/// Section 9.3 — <https://www.rfc-editor.org/rfc/rfc2132#section-9.3>).
+fn scan_aggregate(data: &[u8], mut f: impl FnMut(u8, usize, u8)) {
+    let overload = scan_area(data, MIN_MSG_SIZE, &mut f);
+    if matches!(overload, Some(1 | 3)) {
+        scan_area(&data[..OPTIONS_FIXED_END], FILE_OFFSET, &mut f);
+    }
+    if matches!(overload, Some(2 | 3)) {
+        scan_area(&data[..FILE_OFFSET], SNAME_OFFSET, &mut f);
+    }
+}
+
+/// Codes that occur more than once in the aggregate option buffer, which
+/// RFC 3396, Section 7 — <https://www.rfc-editor.org/rfc/rfc3396#section-7> —
+/// requires to be concatenated: "When a decoding agent is scanning an
+/// incoming DHCP packet's option buffer and finds two or more options with
+/// the same option code, it MUST consider them to be split portions of an
+/// option".
+///
+/// Option Overload (52) is excluded: it selects which fields form the
+/// aggregate option buffer, so it is taken from its first instance. Only two
+/// small bit sets are used, so ordinary messages pay a single extra pass.
+fn split_codes(data: &[u8]) -> CodeSet {
+    let mut seen = CodeSet::default();
+    let mut split = CodeSet::default();
+    scan_aggregate(data, |code, _, _| {
+        if code == OPTION_OVERLOAD {
+            return;
+        }
+        if seen.contains(code) {
+            split.insert(code);
+        }
+        seen.insert(code);
+    });
+    split
+}
+
+/// The instances of the split codes, in aggregate option buffer order.
+///
+/// Built only when a message has split options.
 struct OptionInstances {
-    items: [OptionInstance; MAX_OPTION_INSTANCES],
-    count: usize,
-    overflow: bool,
+    items: Vec<OptionInstance>,
 }
 
 impl OptionInstances {
-    fn new() -> Self {
-        Self {
-            items: [OptionInstance::default(); MAX_OPTION_INSTANCES],
-            count: 0,
-            overflow: false,
-        }
+    fn collect(data: &[u8], split: &CodeSet) -> Self {
+        let mut items = Vec::new();
+        scan_aggregate(data, |code, pos, len| {
+            if split.contains(code) {
+                items.push(OptionInstance {
+                    code,
+                    pos: pos as u32,
+                    len,
+                });
+            }
+        });
+        Self { items }
     }
 
     fn as_slice(&self) -> &[OptionInstance] {
-        &self.items[..self.count]
-    }
-
-    /// Record the instances in `area[start..]`, stopping at the End option
-    /// or at the first truncated option (reported later by
-    /// [`parse_options`]). Returns the Option Overload value, if seen.
-    fn scan(&mut self, area: &[u8], start: usize) -> Option<u8> {
-        let mut overload = None;
-        let mut cursor = start;
-        while let Some(&code) = area.get(cursor) {
-            match code {
-                // RFC 2132, Sections 3.1 and 3.2 — Pad and End.
-                // <https://www.rfc-editor.org/rfc/rfc2132#section-3.1>
-                0 => {
-                    cursor += 1;
-                    continue;
-                }
-                255 => break,
-                _ => {}
-            }
-            let Some(&len) = area.get(cursor + 1) else {
-                break;
-            };
-            if cursor + 2 + len as usize > area.len() {
-                break;
-            }
-            if code == OPTION_OVERLOAD && len == 1 {
-                overload = Some(area[cursor + 2]);
-            }
-            if self.count == MAX_OPTION_INSTANCES {
-                self.overflow = true;
-                break;
-            }
-            self.items[self.count] = OptionInstance {
-                code,
-                pos: cursor as u32,
-                len,
-            };
-            self.count += 1;
-            cursor += 2 + len as usize;
-        }
-        overload
-    }
-
-    /// Codes that occur more than once, which RFC 3396, Section 7 —
-    /// <https://www.rfc-editor.org/rfc/rfc3396#section-7> — requires to be
-    /// concatenated: "When a decoding agent is scanning an incoming DHCP
-    /// packet's option buffer and finds two or more options with the same
-    /// option code, it MUST consider them to be split portions of an option".
-    ///
-    /// Option Overload (52) is excluded: it selects which fields form the
-    /// aggregate option buffer, so it is taken from its first instance.
-    fn split_codes(&self) -> CodeSet {
-        let mut seen = CodeSet::default();
-        let mut split = CodeSet::default();
-        if self.overflow {
-            return split;
-        }
-        for inst in self.as_slice() {
-            if inst.code == OPTION_OVERLOAD {
-                continue;
-            }
-            if seen.contains(inst.code) {
-                split.insert(inst.code);
-            }
-            seen.insert(inst.code);
-        }
-        split
+        &self.items
     }
 }
 
@@ -1805,12 +1808,12 @@ fn push_split_options<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
-    instances: &OptionInstances,
     split: &CodeSet,
 ) {
     if split.is_empty() {
         return;
     }
+    let instances = &OptionInstances::collect(data, split);
     let mut done = CodeSet::default();
     // Scratch space reused for every split code.
     let mut value: Vec<u8> = Vec::new();
@@ -2846,19 +2849,10 @@ impl Dissector for DhcpDissector {
             );
             total_consumed = data.len();
         } else if data.len() > options_start {
-            // RFC 3396, Section 5 — the aggregate option buffer is the
-            // options field, then `file`, then `sname`. Record every option
-            // instance first so that split options can be concatenated.
-            // <https://www.rfc-editor.org/rfc/rfc3396#section-5>
-            let mut instances = OptionInstances::new();
-            let scanned_overload = instances.scan(data, options_start);
-            if matches!(scanned_overload, Some(1 | 3)) {
-                instances.scan(&data[..OPTIONS_FIXED_END], FILE_OFFSET);
-            }
-            if matches!(scanned_overload, Some(2 | 3)) {
-                instances.scan(&data[..FILE_OFFSET], SNAME_OFFSET);
-            }
-            let split = instances.split_codes();
+            // RFC 3396, Section 7 — find the codes that occur more than once
+            // in the aggregate option buffer before decoding any option.
+            // <https://www.rfc-editor.org/rfc/rfc3396#section-7>
+            let split = split_codes(data);
 
             let (opt_consumed, overload) = parse_options(buf, data, offset, options_start, &split)?;
             total_consumed = options_start + opt_consumed;
@@ -2883,7 +2877,7 @@ impl Dissector for DhcpDissector {
                         parse_options(buf, &data[..FILE_OFFSET], offset, SNAME_OFFSET, &split)?;
                 }
             }
-            push_split_options(buf, data, offset, &instances, &split);
+            push_split_options(buf, data, offset, &split);
         }
 
         // RFC 2131, Section 2 — sname: optional server host name, null-terminated string.
@@ -3064,7 +3058,7 @@ mod tests {
     // | 4, 7        | Single instances unchanged          | rfc3396_single_instances_are_unchanged      |
     // | 4           | Value longer than 255 octets        | rfc3396_split_value_over_255_octets         |
     // | 7           | Unknown split option                | rfc3396_split_unknown_option_keeps_concatenated_data |
-    // | —           | Instance table overflow             | rfc3396_too_many_instances_are_decoded_one_by_one |
+    // | 7           | Hundreds of portions                | rfc3396_many_instances_are_concatenated |
     // | 7           | Repeated fixed-length option        | rfc3396_repeated_fixed_length_option_is_decoded_per_portion |
     // | 7           | Numeric values straddling portions  | rfc3396_split_numeric_values_are_reassembled |
     // | 7           | FQDN straddling portions (scratch)  | rfc3396_split_client_fqdn_formats_scratch_name |
@@ -6220,17 +6214,25 @@ mod tests {
     }
 
     #[test]
-    fn rfc3396_too_many_instances_are_decoded_one_by_one() {
-        // More instances than MAX_OPTION_INSTANCES: no concatenation.
+    fn rfc3396_many_instances_are_concatenated() {
+        // 300 portions of one option: all are concatenated.
         let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
-        for _ in 0..=MAX_OPTION_INSTANCES {
+        for _ in 0..300 {
             push_option(&mut pkt, 12, b"h");
         }
         pkt.push(255);
         let mut buf = DissectBuffer::new();
         DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        assert!(top_fields(&buf, "split_option").is_empty());
-        assert_eq!(top_fields(&buf, "hostname").len(), MAX_OPTION_INSTANCES + 1);
+        let split = top_fields(&buf, "split_option");
+        assert_eq!(split.len(), 1);
+        let frags = direct_children_of(&buf, direct_children_of(&buf, split[0])[1]);
+        assert_eq!(frags.len(), 300);
+        let host = top_fields(&buf, "hostname");
+        assert_eq!(host.len(), 1);
+        let FieldValue::Scratch(ref r) = host[0].value else {
+            panic!("expected scratch");
+        };
+        assert_eq!(r.end - r.start, 300);
     }
 
     #[test]
