@@ -74,6 +74,13 @@ Route Types 1-7 of [RFC 6514](https://www.rfc-editor.org/rfc/rfc6514#section-4),
 malformed routes keep a `value`. SAFI 129 entries carry `rd` and `prefix`
 ([RFC 6514, Section 10](https://www.rfc-editor.org/rfc/rfc6514#section-10)).
 
+VPLS (AFI 25 / SAFI 65) entries carry `nlri_length` and `rd`, then `ve_id`,
+`ve_block_offset`, `ve_block_size` and `label_base` for a 17-octet VPLS NLRI
+([RFC 4761](https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2)) or
+`pe_address` for a 12-octet BGP-AD NLRI
+([RFC 6074](https://www.rfc-editor.org/rfc/rfc6074#section-3.2.2.1)); other
+lengths keep a `value`.
+
 Every `nlri` / `withdrawn_routes` array — top level and inside
 `MP_REACH_NLRI` / `MP_UNREACH_NLRI` — declares the same entry `children`: the
 union of the plain prefix fields and the
