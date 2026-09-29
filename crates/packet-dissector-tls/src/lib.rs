@@ -1,8 +1,9 @@
 //! TLS (Transport Layer Security) record layer dissector.
 //!
 //! Parses the TLS record layer header (5 bytes) and the plaintext messages
-//! it carries: every handshake message in a Handshake record (with
-//! ClientHello / ServerHello bodies decoded) and the Alert message.
+//! it carries: every handshake message in a Handshake record (see
+//! `handshake.rs` for the decoded bodies and `extensions.rs` for the decoded
+//! extensions), the Alert message, and the Heartbeat message.
 //!
 //! The dissector is stateless, so it cannot know whether record protection
 //! is already active. It classifies a record by its structure instead:
@@ -18,7 +19,7 @@
 //!   messages are not reassembled across records.
 //!
 //! The layer label (`TLSv1.x`) is not taken from the record version, which
-//! TLS 1.3 fixes at 0x0303 (RFC 9846, Section 5.1). It comes from the
+//! TLS 1.3 fixes at 0x0303 (RFC 9846, Section 5.1 (<https://www.rfc-editor.org/rfc/rfc9846#section-5.1>)). It comes from the
 //! ServerHello `supported_versions` extension or `legacy_version`, or from the
 //! ClientHello `legacy_version` when the client does not offer
 //! `supported_versions`.
@@ -34,16 +35,60 @@
 //! - RFC 7905 (ChaCha20-Poly1305 Cipher Suites): <https://www.rfc-editor.org/rfc/rfc7905>
 //! - RFC 8449 (Record Size Limit): <https://www.rfc-editor.org/rfc/rfc8449>
 //! - RFC 8879 (TLS Certificate Compression): <https://www.rfc-editor.org/rfc/rfc8879>
+//! - RFC 4346 (TLS 1.1, CertificateRequest without signature algorithms): <https://www.rfc-editor.org/rfc/rfc4346>
+//! - RFC 5077 (TLS 1.2 NewSessionTicket; obsoleted by RFC 9846): <https://www.rfc-editor.org/rfc/rfc5077>
+//! - RFC 8422 (ECC for TLS 1.2 and earlier; obsoleted by RFC 9846): <https://www.rfc-editor.org/rfc/rfc8422>
+//! - RFC 8701 (GREASE): <https://www.rfc-editor.org/rfc/rfc8701>
+//! - RFC 9000 (QUIC transport parameter encoding): <https://www.rfc-editor.org/rfc/rfc9000>
+//! - RFC 9001 (quic_transport_parameters extension): <https://www.rfc-editor.org/rfc/rfc9001>
+//! - RFC 9180 (HPKE identifiers): <https://www.rfc-editor.org/rfc/rfc9180>
+//! - RFC 9345 (Delegated Credentials): <https://www.rfc-editor.org/rfc/rfc9345>
+//! - RFC 9849 (TLS Encrypted Client Hello): <https://www.rfc-editor.org/rfc/rfc9849>
+//! - IANA TLS Parameters: <https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml>
 
 #![deny(missing_docs)]
+
+/// An optional field descriptor whose value is shown through a name lookup
+/// function, e.g. `named_field!("group", "Group", U16, named_group_name)`.
+macro_rules! named_field {
+    ($name:expr, $display:expr, $ty:ident, $lookup:path) => {
+        FieldDescriptor {
+            name: $name,
+            display_name: $display,
+            field_type: FieldType::$ty,
+            optional: true,
+            children: None,
+            display_fn: Some(|v, _siblings| match v {
+                FieldValue::$ty(x) => Some($lookup(*x)),
+                _ => None,
+            }),
+            format_fn: None,
+        }
+    };
+}
+
+mod extensions;
+mod handshake;
+mod names;
+mod reader;
+
+use handshake::{HANDSHAKE_CHILD_FIELDS, dissect_handshake_record};
+#[cfg(test)]
+use handshake::{
+    HANDSHAKE_TYPE_CLIENT_HELLO, HANDSHAKE_TYPE_SERVER_HELLO, HELLO_RETRY_REQUEST_RANDOM,
+    RANDOM_SIZE,
+};
+use names::heartbeat_message_type_name;
+#[cfg(test)]
+use names::{cipher_suite_name, extension_type_name};
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u16, read_be_u24};
+use packet_dissector_core::util::read_be_u16;
 
 /// TLS record layer header size (always 5 bytes).
 ///
@@ -142,6 +187,9 @@ fn version_name(version: u16) -> &'static str {
 ///
 /// RFC 9846, Section 4.3.1 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.3.1>
 fn supported_version_name(version: u16) -> &'static str {
+    if names::is_grease_u16(version) {
+        return "GREASE";
+    }
     match version {
         0x0300 => "SSL 3.0",
         0x0301 => "TLS 1.0",
@@ -187,7 +235,7 @@ fn record_version_label(version: u16) -> Option<&'static str> {
 /// RFC 9846, Section 4 — <https://www.rfc-editor.org/rfc/rfc9846#section-4>
 fn handshake_type_name(ht: u8) -> &'static str {
     match ht {
-        // RFC 5246, Section 7.4
+        // RFC 5246, Section 7.4 (https://www.rfc-editor.org/rfc/rfc5246#section-7.4)
         0 => "Hello Request",
         1 => "Client Hello",
         2 => "Server Hello",
@@ -206,9 +254,9 @@ fn handshake_type_name(ht: u8) -> &'static str {
         22 => "Certificate Status",
         // RFC 4680, Section 2 — https://www.rfc-editor.org/rfc/rfc4680#section-2
         23 => "Supplemental Data",
-        // RFC 9846, Section 4.7.3
+        // RFC 9846, Section 4.7.3 (https://www.rfc-editor.org/rfc/rfc9846#section-4.7.3)
         24 => "Key Update",
-        // RFC 8879, Section 5
+        // RFC 8879, Section 5 (https://www.rfc-editor.org/rfc/rfc8879#section-5)
         25 => "Compressed Certificate",
         254 => "Message Hash",
         _ => "Unknown",
@@ -244,7 +292,7 @@ fn alert_level_name(level: u8) -> &'static str {
 /// <https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-6>
 fn alert_description_name(desc: u8) -> &'static str {
     match desc {
-        // RFC 5246
+        // RFC 5246 (https://www.rfc-editor.org/rfc/rfc5246)
         0 => "close_notify",
         10 => "unexpected_message",
         20 => "bad_record_mac",
@@ -270,11 +318,11 @@ fn alert_description_name(desc: u8) -> &'static str {
         86 => "inappropriate_fallback",
         90 => "user_canceled",
         100 => "no_renegotiation",
-        // RFC 7301
+        // RFC 7301 (https://www.rfc-editor.org/rfc/rfc7301)
         120 => "no_application_protocol",
-        // RFC 7507
+        // RFC 7507 (https://www.rfc-editor.org/rfc/rfc7507)
         // 86 already covered above (inappropriate_fallback)
-        // RFC 9846, Section 6
+        // RFC 9846, Section 6 (https://www.rfc-editor.org/rfc/rfc9846#section-6)
         109 => "missing_extension",
         110 => "unsupported_extension",
         111 => "certificate_unobtainable",
@@ -287,126 +335,6 @@ fn alert_description_name(desc: u8) -> &'static str {
     }
 }
 
-/// Returns a human-readable name for a TLS `ExtensionType` value.
-///
-/// Based on the TLS 1.3 ExtensionType enum (RFC 9846, Section 4.3 —
-/// <https://www.rfc-editor.org/rfc/rfc9846#section-4.3>) and the IANA TLS
-/// ExtensionType Values registry:
-/// <https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml>
-fn extension_type_name(ext_type: u16) -> &'static str {
-    match ext_type {
-        0 => "server_name",
-        1 => "max_fragment_length",
-        5 => "status_request",
-        10 => "supported_groups",
-        11 => "ec_point_formats",
-        13 => "signature_algorithms",
-        14 => "use_srtp",
-        15 => "heartbeat",
-        16 => "application_layer_protocol_negotiation",
-        18 => "signed_certificate_timestamp",
-        // RFC 9846, Section 4.3 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3
-        // (originally RFC 7250 — https://www.rfc-editor.org/rfc/rfc7250)
-        19 => "client_certificate_type",
-        20 => "server_certificate_type",
-        21 => "padding",
-        // RFC 7366, Section 2 — https://www.rfc-editor.org/rfc/rfc7366#section-2
-        22 => "encrypt_then_mac",
-        23 => "extended_master_secret",
-        // RFC 8879, Section 7.1 — https://www.rfc-editor.org/rfc/rfc8879#section-7.1
-        27 => "compress_certificate",
-        // RFC 8449, Section 5 — https://www.rfc-editor.org/rfc/rfc8449#section-5
-        28 => "record_size_limit",
-        35 => "session_ticket",
-        41 => "pre_shared_key",
-        42 => "early_data",
-        43 => "supported_versions",
-        44 => "cookie",
-        45 => "psk_key_exchange_modes",
-        47 => "certificate_authorities",
-        // RFC 9846, Section 4.3.5 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.5
-        48 => "oid_filters",
-        49 => "post_handshake_auth",
-        50 => "signature_algorithms_cert",
-        51 => "key_share",
-        0xff01 => "renegotiation_info",
-        _ => "unknown",
-    }
-}
-
-/// Returns a human-readable name for a TLS `CipherSuite` value.
-///
-/// Covers the most commonly used cipher suites in modern TLS deployments.
-/// Based on the IANA TLS Cipher Suites registry:
-/// <https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-4>
-fn cipher_suite_name(cs: u16) -> Option<&'static str> {
-    match cs {
-        // TLS 1.3 cipher suites — RFC 9846, Appendix B.4
-        0x1301 => Some("TLS_AES_128_GCM_SHA256"),
-        0x1302 => Some("TLS_AES_256_GCM_SHA384"),
-        0x1303 => Some("TLS_CHACHA20_POLY1305_SHA256"),
-        0x1304 => Some("TLS_AES_128_CCM_SHA256"),
-        0x1305 => Some("TLS_AES_128_CCM_8_SHA256"),
-        // ECDHE+ECDSA — RFC 5289
-        0xc02b => Some("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
-        0xc02c => Some("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"),
-        0xc023 => Some("TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256"),
-        0xc024 => Some("TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384"),
-        // ECDHE+RSA — RFC 5289
-        0xc02f => Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
-        0xc030 => Some("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"),
-        0xc027 => Some("TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"),
-        0xc028 => Some("TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384"),
-        // DHE+RSA — RFC 5288
-        0x009e => Some("TLS_DHE_RSA_WITH_AES_128_GCM_SHA256"),
-        0x009f => Some("TLS_DHE_RSA_WITH_AES_256_GCM_SHA384"),
-        // RSA — RFC 5288 / RFC 5246
-        0x009c => Some("TLS_RSA_WITH_AES_128_GCM_SHA256"),
-        0x009d => Some("TLS_RSA_WITH_AES_256_GCM_SHA384"),
-        0x002f => Some("TLS_RSA_WITH_AES_128_CBC_SHA"),
-        0x0035 => Some("TLS_RSA_WITH_AES_256_CBC_SHA"),
-        0x003c => Some("TLS_RSA_WITH_AES_128_CBC_SHA256"),
-        0x003d => Some("TLS_RSA_WITH_AES_256_CBC_SHA256"),
-        // CHACHA20-POLY1305 — RFC 7905
-        0xcca8 => Some("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"),
-        0xcca9 => Some("TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"),
-        0xccaa => Some("TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256"),
-        _ => None,
-    }
-}
-
-/// Minimum ClientHello / ServerHello body size:
-/// legacy_version(2) + random(32) + legacy_session_id length(1).
-///
-/// RFC 9846, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.2>
-/// RFC 9846, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.3>
-const HELLO_MIN_BODY: usize = 2 + 32 + 1;
-
-/// Size of the TLS `Random` field (32 bytes).
-///
-/// RFC 9846, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.2>
-const RANDOM_SIZE: usize = 32;
-
-/// ServerHello.random value that marks a HelloRetryRequest
-/// (SHA-256 of "HelloRetryRequest").
-///
-/// RFC 9846, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.3>
-const HELLO_RETRY_REQUEST_RANDOM: [u8; RANDOM_SIZE] = [
-    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
-    0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
-];
-
-/// Handshake type for ClientHello.
-const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
-
-/// Handshake type for ServerHello (and HelloRetryRequest).
-const HANDSHAKE_TYPE_SERVER_HELLO: u8 = 2;
-
-/// ExtensionType `supported_versions(43)`.
-///
-/// RFC 9846, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.3>
-const EXT_SUPPORTED_VERSIONS: u16 = 43;
-
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_CONTENT_TYPE: usize = 0;
 const FD_VERSION: usize = 1;
@@ -416,184 +344,22 @@ const FD_OPAQUE_HANDSHAKE: usize = 4;
 const FD_ALERT_LEVEL: usize = 5;
 const FD_ALERT_DESCRIPTION: usize = 6;
 const FD_ENCRYPTED_ALERT: usize = 7;
+const FD_HEARTBEAT_TYPE: usize = 8;
+const FD_PAYLOAD_LENGTH: usize = 9;
+const FD_PAYLOAD: usize = 10;
+const FD_PADDING: usize = 11;
+const FD_PAYLOAD_LENGTH_EXCEEDS_RECORD: usize = 12;
+const FD_ENCRYPTED_HEARTBEAT: usize = 13;
 
-/// Field descriptor indices for [`HANDSHAKE_CHILD_FIELDS`].
-const HFD_TYPE: usize = 0;
-const HFD_LENGTH: usize = 1;
-const HFD_FRAGMENT_LENGTH: usize = 2;
-const HFD_VERSION: usize = 3;
-const HFD_RANDOM: usize = 4;
-const HFD_HELLO_RETRY_REQUEST: usize = 5;
-const HFD_SESSION_ID: usize = 6;
-const HFD_CIPHER_SUITES: usize = 7;
-const HFD_CIPHER_SUITE: usize = 8;
-const HFD_COMPRESSION_METHODS: usize = 9;
-const HFD_COMPRESSION_METHOD: usize = 10;
-const HFD_EXTENSIONS: usize = 11;
-
-/// Field descriptor indices for [`EXTENSION_CHILD_FIELDS`].
-const EFD_TYPE: usize = 0;
-const EFD_LENGTH: usize = 1;
-const EFD_DATA: usize = 2;
-const EFD_SERVER_NAME: usize = 3;
-const EFD_VERSIONS: usize = 4;
-const EFD_VERSION: usize = 5;
-const EFD_SELECTED_VERSION: usize = 6;
-
-/// Container descriptor for an extension Object.
+/// HeartbeatMessage header size: type(1) + payload_length(2).
 ///
-/// The outer label resolves to the extension name (e.g. `server_name`) by
-/// looking up the inner `type` field, avoiding collision with the inner
-/// "Extension Type" label.
-static FD_EXTENSION: FieldDescriptor = FieldDescriptor {
-    name: "extension",
-    display_name: "Extension",
-    field_type: FieldType::Object,
-    optional: false,
-    children: None,
-    display_fn: Some(|v, children| match v {
-        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
-            ("type", FieldValue::U16(t)) => Some(extension_type_name(*t)),
-            _ => None,
-        }),
-        _ => None,
-    }),
-    format_fn: None,
-};
+/// RFC 6520, Section 4 — <https://www.rfc-editor.org/rfc/rfc6520#section-4>
+const HEARTBEAT_HEADER_SIZE: usize = 3;
 
-/// Descriptor for a version value inside `supported_versions`.
-const fn supported_version_descriptor(
-    name: &'static str,
-    display_name: &'static str,
-) -> FieldDescriptor {
-    FieldDescriptor {
-        name,
-        display_name,
-        field_type: FieldType::U16,
-        optional: true,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U16(ver) => Some(supported_version_name(*ver)),
-            _ => None,
-        }),
-        format_fn: None,
-    }
-}
-
-/// Child field descriptors for extension objects within the `extensions` array.
+/// Minimum HeartbeatMessage padding: "The padding_length MUST be at least 16."
 ///
-/// RFC 9846, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.3>
-static EXTENSION_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor {
-        name: "type",
-        display_name: "Extension Type",
-        field_type: FieldType::U16,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U16(t) => Some(extension_type_name(*t)),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("length", "Extension Length", FieldType::U16),
-    FieldDescriptor::new("data", "Extension Data", FieldType::Bytes).optional(),
-    FieldDescriptor::new("server_name", "Server Name", FieldType::Bytes)
-        .optional()
-        .with_format_fn(format_utf8_lossy),
-    // RFC 9846, Section 4.3.1 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.1
-    FieldDescriptor::new("versions", "Supported Versions", FieldType::Array).optional(),
-    supported_version_descriptor("version", "Supported Version"),
-    supported_version_descriptor("selected_version", "Selected Version"),
-];
-
-/// Container descriptor for a handshake message Object.
-///
-/// The label resolves to the handshake type name, or "Hello Retry Request"
-/// for a ServerHello carrying the HelloRetryRequest random
-/// (RFC 9846, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.3>).
-static FD_HANDSHAKE: FieldDescriptor = FieldDescriptor {
-    name: "handshake",
-    display_name: "Handshake Message",
-    field_type: FieldType::Object,
-    optional: false,
-    children: None,
-    display_fn: Some(|v, children| {
-        if !matches!(v, FieldValue::Object(_)) {
-            return None;
-        }
-        if children.iter().any(|f| f.name() == "hello_retry_request") {
-            return Some("Hello Retry Request");
-        }
-        children.iter().find_map(|f| match (f.name(), &f.value) {
-            ("type", FieldValue::U8(t)) => Some(handshake_type_name(*t)),
-            _ => None,
-        })
-    }),
-    format_fn: None,
-};
-
-/// Child field descriptors for handshake message objects within the
-/// `handshake_messages` array.
-///
-/// RFC 9846, Section 4 — <https://www.rfc-editor.org/rfc/rfc9846#section-4>
-static HANDSHAKE_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor {
-        name: "type",
-        display_name: "Handshake Type",
-        field_type: FieldType::U8,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(ht) => Some(handshake_type_name(*ht)),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("length", "Handshake Length", FieldType::U32),
-    // Present only when the message continues in a following record: the
-    // number of body bytes carried by this record.
-    FieldDescriptor::new("fragment_length", "Fragment Length", FieldType::U32).optional(),
-    // --- ClientHello / ServerHello fields ---
-    FieldDescriptor {
-        name: "version",
-        display_name: "Legacy Version",
-        field_type: FieldType::U16,
-        optional: true,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U16(ver) => Some(version_name(*ver)),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("random", "Random", FieldType::Bytes).optional(),
-    FieldDescriptor::new("hello_retry_request", "Hello Retry Request", FieldType::U8).optional(),
-    FieldDescriptor::new("session_id", "Session ID", FieldType::Bytes).optional(),
-    FieldDescriptor::new("cipher_suites", "Cipher Suites", FieldType::Array).optional(),
-    FieldDescriptor {
-        name: "cipher_suite",
-        display_name: "Cipher Suite",
-        field_type: FieldType::U16,
-        optional: true,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U16(cs) => cipher_suite_name(*cs),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new(
-        "compression_methods",
-        "Compression Methods",
-        FieldType::Bytes,
-    )
-    .optional(),
-    FieldDescriptor::new("compression_method", "Compression Method", FieldType::U8).optional(),
-    FieldDescriptor::new("extensions", "Extensions", FieldType::Array)
-        .optional()
-        .with_children(EXTENSION_CHILD_FIELDS),
-];
+/// RFC 6520, Section 4 — <https://www.rfc-editor.org/rfc/rfc6520#section-4>
+const HEARTBEAT_MIN_PADDING: usize = 16;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor {
@@ -657,536 +423,116 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         format_fn: None,
     },
     FieldDescriptor::new("encrypted_alert", "Encrypted Alert", FieldType::Bytes).optional(),
+    // --- Heartbeat records (content_type == 24) ---
+    // RFC 6520, Section 4 — https://www.rfc-editor.org/rfc/rfc6520#section-4
+    named_field!(
+        "heartbeat_type",
+        "Heartbeat Message Type",
+        U8,
+        heartbeat_message_type_name
+    ),
+    FieldDescriptor::new("payload_length", "Payload Length", FieldType::U16).optional(),
+    FieldDescriptor::new("payload", "Payload", FieldType::Bytes).optional(),
+    FieldDescriptor::new("padding", "Padding", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "payload_length_exceeds_record",
+        "Payload Length Exceeds Record",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "encrypted_heartbeat",
+        "Encrypted Heartbeat",
+        FieldType::Bytes,
+    )
+    .optional(),
 ];
 
-/// What a ClientHello / ServerHello says about the protocol version.
-#[derive(Clone, Copy)]
-struct HelloVersion {
-    /// `legacy_version` from the message body.
-    legacy_version: u16,
-    /// The `supported_versions` extension, if any.
-    supported_versions: SupportedVersions,
-}
-
-/// State of the `supported_versions` extension in a Hello message.
-///
-/// RFC 9846, Section 4.3.1 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.3.1>
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SupportedVersions {
-    /// The extension is not present.
-    Absent,
-    /// The extension is present without selecting a single version (a
-    /// ClientHello list, or a malformed ServerHello value), or the message is
-    /// too malformed to tell whether it is present.
-    Undetermined,
-    /// A ServerHello / HelloRetryRequest `selected_version`.
-    Selected(u16),
-}
-
-impl HelloVersion {
-    /// Layer label implied by this Hello message.
-    ///
-    /// RFC 9846, Section 4.3.1 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.3.1>:
-    /// "If this extension is present, clients MUST ignore the
-    /// ServerHello.legacy_version value and MUST use only the
-    /// "supported_versions" extension to determine the selected version."
-    /// A ClientHello that carries the extension offers a list, so no single
-    /// version applies to it.
-    fn label(self) -> Option<&'static str> {
-        match self.supported_versions {
-            SupportedVersions::Absent => version_short_name(self.legacy_version),
-            SupportedVersions::Undetermined => None,
-            SupportedVersions::Selected(v) => version_short_name(v),
-        }
-    }
-}
-
-/// Decode the `supported_versions` extension body.
+/// Dissect the payload of a Heartbeat record.
 ///
 /// ```text
-/// RFC 9846, Section 4.3.1 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.1
+/// RFC 6520, Section 4 — https://www.rfc-editor.org/rfc/rfc6520#section-4
 ///
 /// struct {
-///     select (Handshake.msg_type) {
-///         case client_hello:
-///              ProtocolVersion versions<2..254>;
-///
-///         case server_hello: /* and HelloRetryRequest */
-///              ProtocolVersion selected_version;
-///     };
-/// } SupportedVersions;
+///    HeartbeatMessageType type;
+///    uint16 payload_length;
+///    opaque payload[HeartbeatMessage.payload_length];
+///    opaque padding[padding_length];
+/// } HeartbeatMessage;
 /// ```
-fn parse_supported_versions<'pkt>(
-    data: &'pkt [u8],
-    offset: usize,
-    handshake_type: u8,
-    buf: &mut DissectBuffer<'pkt>,
-) -> SupportedVersions {
-    if handshake_type == HANDSHAKE_TYPE_SERVER_HELLO {
-        if data.len() == 2 {
-            let v = read_be_u16(data, 0).unwrap_or_default();
-            buf.push_field(
-                &EXTENSION_CHILD_FIELDS[EFD_SELECTED_VERSION],
-                FieldValue::U16(v),
-                offset..offset + 2,
-            );
-            return SupportedVersions::Selected(v);
-        }
-        return SupportedVersions::Undetermined;
-    }
-
-    let Some((&list_len, list)) = data.split_first() else {
-        return SupportedVersions::Undetermined;
-    };
-    let list_len = list_len as usize;
-    if list_len != list.len() || list_len < 2 || list_len % 2 != 0 {
-        return SupportedVersions::Undetermined;
-    }
-    let arr = buf.begin_container(
-        &EXTENSION_CHILD_FIELDS[EFD_VERSIONS],
-        FieldValue::Array(0..0),
-        offset + 1..offset + 1 + list_len,
-    );
-    for (i, v) in list.chunks_exact(2).enumerate() {
-        let start = offset + 1 + i * 2;
-        buf.push_field(
-            &EXTENSION_CHILD_FIELDS[EFD_VERSION],
-            FieldValue::U16(u16::from_be_bytes([v[0], v[1]])),
-            start..start + 2,
-        );
-    }
-    buf.end_container(arr);
-    SupportedVersions::Undetermined
-}
-
-/// Parse the TLS extensions list into a [`DissectBuffer`].
 ///
-/// Each extension is a 2-byte type, 2-byte length, and variable-length data.
-/// Returns what the `supported_versions` extension says, if present.
+/// "The padding_length MUST be at least 16." and "If the payload_length of
+/// a received HeartbeatMessage is too large, the received HeartbeatMessage
+/// MUST be discarded silently."
 ///
-/// RFC 9846, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.3>
-fn parse_extensions<'pkt>(
-    data: &'pkt [u8],
-    offset: usize,
-    handshake_type: u8,
-    buf: &mut DissectBuffer<'pkt>,
-) -> SupportedVersions {
-    let mut supported_versions = SupportedVersions::Absent;
-    let mut pos = 0;
-    while pos < data.len() {
-        let (Ok(ext_type), Ok(ext_len)) = (read_be_u16(data, pos), read_be_u16(data, pos + 2))
-        else {
-            break;
-        };
-        let ext_len = ext_len as usize;
-        if pos + 4 + ext_len > data.len() {
-            break;
-        }
-        let ext_data = &data[pos + 4..pos + 4 + ext_len];
-        let ext_data_offset = offset + pos + 4;
-
-        let obj_idx = buf.begin_container(
-            &FD_EXTENSION,
-            FieldValue::Object(0..0),
-            offset + pos..offset + pos + 4 + ext_len,
-        );
-
-        buf.push_field(
-            &EXTENSION_CHILD_FIELDS[EFD_TYPE],
-            FieldValue::U16(ext_type),
-            offset + pos..offset + pos + 2,
-        );
-        buf.push_field(
-            &EXTENSION_CHILD_FIELDS[EFD_LENGTH],
-            FieldValue::U16(ext_len as u16),
-            offset + pos + 2..offset + pos + 4,
-        );
-        buf.push_field(
-            &EXTENSION_CHILD_FIELDS[EFD_DATA],
-            FieldValue::Bytes(ext_data),
-            ext_data_offset..ext_data_offset + ext_len,
-        );
-
-        // RFC 6066, Section 3 — https://www.rfc-editor.org/rfc/rfc6066#section-3
-        if ext_type == 0 && ext_len >= 5 {
-            let name_list_len = read_be_u16(ext_data, 0).unwrap_or_default() as usize;
-            if name_list_len + 2 <= ext_len && name_list_len >= 3 {
-                let name_type = ext_data[2];
-                if name_type == 0 {
-                    let name_len = read_be_u16(ext_data, 3).unwrap_or_default() as usize;
-                    if 5 + name_len <= ext_len {
-                        let name_bytes = &ext_data[5..5 + name_len];
-                        buf.push_field(
-                            &EXTENSION_CHILD_FIELDS[EFD_SERVER_NAME],
-                            FieldValue::Bytes(name_bytes),
-                            ext_data_offset + 5..ext_data_offset + 5 + name_len,
-                        );
-                    }
-                }
-            }
-        }
-
-        if ext_type == EXT_SUPPORTED_VERSIONS && supported_versions == SupportedVersions::Absent {
-            supported_versions =
-                parse_supported_versions(ext_data, ext_data_offset, handshake_type, buf);
-        }
-
-        buf.end_container(obj_idx);
-        pos += 4 + ext_len;
-    }
-    if pos != data.len() && supported_versions == SupportedVersions::Absent {
-        // A malformed extension may hide supported_versions.
-        return SupportedVersions::Undetermined;
-    }
-    supported_versions
-}
-
-/// Parse the trailing `extensions` vector of a Hello message body starting
-/// at `pos`, if it is present and fits.
-///
-/// A body that ends right before the vector has no extensions (TLS 1.2 and
-/// earlier, RFC 5246, Section 7.4.1.2 —
-/// <https://www.rfc-editor.org/rfc/rfc5246#section-7.4.1.2>).
-fn parse_hello_extensions<'pkt>(
-    body: &'pkt [u8],
-    pos: usize,
-    offset: usize,
-    handshake_type: u8,
-    buf: &mut DissectBuffer<'pkt>,
-) -> SupportedVersions {
-    if pos == body.len() {
-        return SupportedVersions::Absent;
-    }
-    let Ok(ext_len) = read_be_u16(body, pos) else {
-        return SupportedVersions::Undetermined;
-    };
-    let ext_len = ext_len as usize;
-    let start = pos + 2;
-    let Some(ext_data) = body.get(start..start + ext_len) else {
-        return SupportedVersions::Undetermined;
-    };
-    let ext_array_idx = buf.begin_container(
-        &HANDSHAKE_CHILD_FIELDS[HFD_EXTENSIONS],
-        FieldValue::Array(0..0),
-        offset + start..offset + start + ext_len,
-    );
-    let supported_versions = parse_extensions(ext_data, offset + start, handshake_type, buf);
-    buf.end_container(ext_array_idx);
-    supported_versions
-}
-
-/// Push `legacy_version`, `random` and `legacy_session_id` shared by
-/// ClientHello and ServerHello.
-///
-/// Returns `None` (pushing nothing) when the body is shorter than
-/// [`HELLO_MIN_BODY`]. Otherwise returns the version information, with
-/// `supported_versions` still undetermined, and the position after the
-/// session ID, or `None` if the session ID does not fit.
-fn parse_hello_prefix<'pkt>(
-    body: &'pkt [u8],
-    offset: usize,
-    handshake_type: u8,
-    buf: &mut DissectBuffer<'pkt>,
-) -> Option<(HelloVersion, Option<usize>)> {
-    if body.len() < HELLO_MIN_BODY {
-        return None;
-    }
-    let mut pos = 0;
-    let version = read_be_u16(body, pos).ok()?;
-    let hello = HelloVersion {
-        legacy_version: version,
-        supported_versions: SupportedVersions::Undetermined,
-    };
-    buf.push_field(
-        &HANDSHAKE_CHILD_FIELDS[HFD_VERSION],
-        FieldValue::U16(version),
-        offset + pos..offset + pos + 2,
-    );
-    pos += 2;
-
-    let random = &body[pos..pos + RANDOM_SIZE];
-    buf.push_field(
-        &HANDSHAKE_CHILD_FIELDS[HFD_RANDOM],
-        FieldValue::Bytes(random),
-        offset + pos..offset + pos + RANDOM_SIZE,
-    );
-    // RFC 9846, Section 4.2.3 — https://www.rfc-editor.org/rfc/rfc9846#section-4.2.3
-    // "Upon receiving a message with type server_hello, implementations MUST
-    // first examine the Random value and, if it matches this value, process
-    // it as described in Section 4.2.4."
-    if handshake_type == HANDSHAKE_TYPE_SERVER_HELLO && random == HELLO_RETRY_REQUEST_RANDOM {
-        buf.push_field(
-            &HANDSHAKE_CHILD_FIELDS[HFD_HELLO_RETRY_REQUEST],
-            FieldValue::U8(1),
-            offset + pos..offset + pos + RANDOM_SIZE,
-        );
-    }
-    pos += RANDOM_SIZE;
-
-    let session_id_len = body[pos] as usize;
-    pos += 1;
-    let Some(session_id) = body.get(pos..pos + session_id_len) else {
-        return Some((hello, None));
-    };
-    buf.push_field(
-        &HANDSHAKE_CHILD_FIELDS[HFD_SESSION_ID],
-        FieldValue::Bytes(session_id),
-        offset + pos..offset + pos + session_id_len,
-    );
-    Some((hello, Some(pos + session_id_len)))
-}
-
-/// Parse a ClientHello handshake body and append fields.
-///
-/// RFC 5246, Section 7.4.1.2 — <https://www.rfc-editor.org/rfc/rfc5246#section-7.4.1.2>
-/// RFC 9846, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.2>
-fn parse_client_hello<'pkt>(
-    body: &'pkt [u8],
-    offset: usize,
-    buf: &mut DissectBuffer<'pkt>,
-) -> Option<HelloVersion> {
-    let (mut hello, pos) = parse_hello_prefix(body, offset, HANDSHAKE_TYPE_CLIENT_HELLO, buf)?;
-    let Some(mut pos) = pos else {
-        return Some(hello);
-    };
-
-    // cipher_suites: 2-byte length prefix + list of u16
-    let Ok(cs_len) = read_be_u16(body, pos) else {
-        return Some(hello);
-    };
-    let cs_len = cs_len as usize;
-    pos += 2;
-    if pos + cs_len > body.len() || cs_len % 2 != 0 {
-        return Some(hello);
-    }
-    let cs_array_idx = buf.begin_container(
-        &HANDSHAKE_CHILD_FIELDS[HFD_CIPHER_SUITES],
-        FieldValue::Array(0..0),
-        offset + pos..offset + pos + cs_len,
-    );
-    for i in (0..cs_len).step_by(2) {
-        let suite = read_be_u16(body, pos + i).unwrap_or_default();
-        buf.push_field(
-            &HANDSHAKE_CHILD_FIELDS[HFD_CIPHER_SUITE],
-            FieldValue::U16(suite),
-            offset + pos + i..offset + pos + i + 2,
-        );
-    }
-    buf.end_container(cs_array_idx);
-    pos += cs_len;
-
-    let Some(&comp_len) = body.get(pos) else {
-        return Some(hello);
-    };
-    let comp_len = comp_len as usize;
-    pos += 1;
-    let Some(comp) = body.get(pos..pos + comp_len) else {
-        return Some(hello);
-    };
-    buf.push_field(
-        &HANDSHAKE_CHILD_FIELDS[HFD_COMPRESSION_METHODS],
-        FieldValue::Bytes(comp),
-        offset + pos..offset + pos + comp_len,
-    );
-    pos += comp_len;
-
-    hello.supported_versions =
-        parse_hello_extensions(body, pos, offset, HANDSHAKE_TYPE_CLIENT_HELLO, buf);
-    Some(hello)
-}
-
-/// Parse a ServerHello (or HelloRetryRequest) handshake body and append fields.
-///
-/// RFC 5246, Section 7.4.1.3 — <https://www.rfc-editor.org/rfc/rfc5246#section-7.4.1.3>
-/// RFC 9846, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.3>
-fn parse_server_hello<'pkt>(
-    body: &'pkt [u8],
-    offset: usize,
-    buf: &mut DissectBuffer<'pkt>,
-) -> Option<HelloVersion> {
-    let (mut hello, pos) = parse_hello_prefix(body, offset, HANDSHAKE_TYPE_SERVER_HELLO, buf)?;
-    let Some(mut pos) = pos else {
-        return Some(hello);
-    };
-
-    let Ok(cs) = read_be_u16(body, pos) else {
-        return Some(hello);
-    };
-    buf.push_field(
-        &HANDSHAKE_CHILD_FIELDS[HFD_CIPHER_SUITE],
-        FieldValue::U16(cs),
-        offset + pos..offset + pos + 2,
-    );
-    pos += 2;
-
-    let Some(&comp) = body.get(pos) else {
-        return Some(hello);
-    };
-    buf.push_field(
-        &HANDSHAKE_CHILD_FIELDS[HFD_COMPRESSION_METHOD],
-        FieldValue::U8(comp),
-        offset + pos..offset + pos + 1,
-    );
-    pos += 1;
-
-    hello.supported_versions =
-        parse_hello_extensions(body, pos, offset, HANDSHAKE_TYPE_SERVER_HELLO, buf);
-    Some(hello)
-}
-
-/// Whether a Handshake record payload is a sequence of plaintext handshake
-/// messages.
-///
-/// RFC 9846, Section 5.1 — <https://www.rfc-editor.org/rfc/rfc9846#section-5.1>:
-/// "Handshake messages MAY be coalesced into a single TLSPlaintext record
-/// or fragmented across several records". The payload qualifies when it
-/// starts with a complete header and every header has a known type. The
-/// last message may extend past the end of the record (up to
-/// [`MAX_FRAGMENTED_HANDSHAKE_LENGTH`]), or the record may end inside the
-/// last header. Anything else is either ciphertext (TLS 1.2 after
-/// ChangeCipherSpec, RFC 5246, Section 6.2.3 —
-/// <https://www.rfc-editor.org/rfc/rfc5246#section-6.2.3>) or the
-/// continuation of a message started in an earlier record.
-fn is_plaintext_handshake(payload: &[u8]) -> bool {
-    if payload.len() < HANDSHAKE_HEADER_SIZE {
-        return false;
-    }
-    let mut pos = 0;
-    while pos < payload.len() {
-        if !is_wire_handshake_type(payload[pos]) {
-            return false;
-        }
-        let Ok(msg_len) = read_be_u24(payload, pos + 1) else {
-            // The record ends inside this header.
-            return true;
-        };
-        let msg_len = msg_len as usize;
-        pos += HANDSHAKE_HEADER_SIZE;
-        if msg_len > payload.len() - pos && msg_len > MAX_FRAGMENTED_HANDSHAKE_LENGTH {
-            return false;
-        }
-        pos += msg_len;
-    }
-    true
-}
-
-/// Dissect the payload of a Handshake record. Returns the layer label.
-///
-/// The label comes from the first ClientHello / ServerHello. A record of
-/// other plaintext handshake messages uses the record version (see
-/// [`record_version_label`]). Opaque data gets no version: it may continue a
-/// TLS 1.3 initial ClientHello, whose record version may be 0x0301.
-///
-/// ```text
-/// RFC 9846, Section 4 — https://www.rfc-editor.org/rfc/rfc9846#section-4
-///
-/// struct {
-///     HandshakeType msg_type;    /* handshake type */
-///     uint24 length;             /* remaining bytes in message */
-///     select (Handshake.msg_type) { ... };
-/// } Handshake;
-/// ```
-fn dissect_handshake_record<'pkt>(
+/// Heartbeats sent after ChangeCipherSpec are protected, so a record is
+/// decoded only when it has a known message type and either is well formed
+/// (payload plus at least 16 bytes of padding) or is shorter than the
+/// smallest well-formed message (3 + 16 bytes), which ciphertext never is.
+/// The latter is the Heartbleed pattern; if its `payload_length` does not
+/// fit, it is flagged with `payload_length_exceeds_record` and the bytes
+/// that are present are reported as `payload`. Anything else is reported as
+/// `encrypted_heartbeat`.
+fn dissect_heartbeat_record<'pkt>(
     payload: &'pkt [u8],
     offset: usize,
-    record_version: u16,
     buf: &mut DissectBuffer<'pkt>,
-) -> Option<&'static str> {
-    if payload.is_empty() {
-        // RFC 9846, Section 5.1: "Implementations MUST NOT send zero-length
-        // fragments of Handshake types".
-        return None;
-    }
-    if !is_plaintext_handshake(payload) {
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_OPAQUE_HANDSHAKE],
-            FieldValue::Bytes(payload),
-            offset..offset + payload.len(),
-        );
-        return None;
-    }
-
-    let mut hello: Option<HelloVersion> = None;
-    let mut saw_hello = false;
-    let arr_idx = buf.begin_container(
-        &FIELD_DESCRIPTORS[FD_HANDSHAKE_MESSAGES],
-        FieldValue::Array(0..0),
-        offset..offset + payload.len(),
-    );
-    let mut pos = 0;
-    while pos + HANDSHAKE_HEADER_SIZE <= payload.len() {
-        let ht = payload[pos];
-        saw_hello |= matches!(
-            ht,
-            HANDSHAKE_TYPE_CLIENT_HELLO | HANDSHAKE_TYPE_SERVER_HELLO
-        );
-        let msg_len = read_be_u24(payload, pos + 1).unwrap_or_default();
-        let body_start = pos + HANDSHAKE_HEADER_SIZE;
-        let available = payload.len() - body_start;
-        let fragmented = msg_len as usize > available;
-        let body_len = if fragmented {
-            available
-        } else {
-            msg_len as usize
-        };
-        let body_end = body_start + body_len;
-        let body = &payload[body_start..body_end];
-        let body_offset = offset + body_start;
-
-        let obj_idx = buf.begin_container(
-            &FD_HANDSHAKE,
-            FieldValue::Object(0..0),
-            offset + pos..offset + body_end,
-        );
-        buf.push_field(
-            &HANDSHAKE_CHILD_FIELDS[HFD_TYPE],
-            FieldValue::U8(ht),
-            offset + pos..offset + pos + 1,
-        );
-        buf.push_field(
-            &HANDSHAKE_CHILD_FIELDS[HFD_LENGTH],
-            FieldValue::U32(msg_len),
-            offset + pos + 1..offset + body_start,
-        );
-        if fragmented {
-            // The rest of the message is in the following record(s); a
-            // partial body is not decoded.
-            buf.push_field(
-                &HANDSHAKE_CHILD_FIELDS[HFD_FRAGMENT_LENGTH],
-                FieldValue::U32(body_len as u32),
-                body_offset..offset + body_end,
-            );
-        } else {
-            let parsed = match ht {
-                HANDSHAKE_TYPE_CLIENT_HELLO => parse_client_hello(body, body_offset, buf),
-                HANDSHAKE_TYPE_SERVER_HELLO => parse_server_hello(body, body_offset, buf),
-                _ => None,
-            };
-            if hello.is_none() {
-                hello = parsed;
-            }
+) {
+    let plaintext = match payload {
+        [1 | 2, hi, lo, rest @ ..] => {
+            let payload_length = usize::from(u16::from_be_bytes([*hi, *lo]));
+            rest.len() >= payload_length + HEARTBEAT_MIN_PADDING
+                || payload.len() < HEARTBEAT_HEADER_SIZE + HEARTBEAT_MIN_PADDING
         }
-        buf.end_container(obj_idx);
-        pos = body_end;
+        _ => false,
+    };
+    if !plaintext {
+        if !payload.is_empty() {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_ENCRYPTED_HEARTBEAT],
+                FieldValue::Bytes(payload),
+                offset..offset + payload.len(),
+            );
+        }
+        return;
     }
-    buf.end_container(arr_idx);
-
-    if pos < payload.len() {
-        // The record ends inside a handshake header; the message continues
-        // in the next record.
+    let payload_length = u16::from_be_bytes([payload[1], payload[2]]);
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_HEARTBEAT_TYPE],
+        FieldValue::U8(payload[0]),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_PAYLOAD_LENGTH],
+        FieldValue::U16(payload_length),
+        offset + 1..offset + HEARTBEAT_HEADER_SIZE,
+    );
+    let payload_end = HEARTBEAT_HEADER_SIZE + payload_length as usize;
+    if payload_end > payload.len() {
         buf.push_field(
-            &FIELD_DESCRIPTORS[FD_OPAQUE_HANDSHAKE],
-            FieldValue::Bytes(&payload[pos..]),
-            offset + pos..offset + payload.len(),
+            &FIELD_DESCRIPTORS[FD_PAYLOAD_LENGTH_EXCEEDS_RECORD],
+            FieldValue::U8(1),
+            offset + 1..offset + HEARTBEAT_HEADER_SIZE,
         );
+        if payload.len() > HEARTBEAT_HEADER_SIZE {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_PAYLOAD],
+                FieldValue::Bytes(&payload[HEARTBEAT_HEADER_SIZE..]),
+                offset + HEARTBEAT_HEADER_SIZE..offset + payload.len(),
+            );
+        }
+        return;
     }
-
-    match hello {
-        Some(hello) => hello.label(),
-        // A fragmented or malformed Hello may come from TLS 1.3.
-        None if saw_hello => None,
-        None => record_version_label(record_version),
-    }
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_PAYLOAD],
+        FieldValue::Bytes(&payload[HEARTBEAT_HEADER_SIZE..payload_end]),
+        offset + HEARTBEAT_HEADER_SIZE..offset + payload_end,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_PADDING],
+        FieldValue::Bytes(&payload[payload_end..]),
+        offset + payload_end..offset + payload.len(),
+    );
 }
 
 /// Dissect the payload of an Alert record.
@@ -1284,6 +630,51 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 8879",
         "TLS Certificate Compression",
         "https://www.rfc-editor.org/rfc/rfc8879",
+    ),
+    SpecReference::new(
+        "RFC 4346",
+        "The Transport Layer Security (TLS) Protocol Version 1.1",
+        "https://www.rfc-editor.org/rfc/rfc4346",
+    ),
+    SpecReference::new(
+        "RFC 5077",
+        "Transport Layer Security (TLS) Session Resumption without Server-Side State",
+        "https://www.rfc-editor.org/rfc/rfc5077",
+    ),
+    SpecReference::new(
+        "RFC 8422",
+        "Elliptic Curve Cryptography (ECC) Cipher Suites for Transport Layer Security (TLS) Versions 1.2 and Earlier",
+        "https://www.rfc-editor.org/rfc/rfc8422",
+    ),
+    SpecReference::new(
+        "RFC 8701",
+        "Applying Generate Random Extensions And Sustain Extensibility (GREASE) to TLS Extensibility",
+        "https://www.rfc-editor.org/rfc/rfc8701",
+    ),
+    SpecReference::new(
+        "RFC 9000",
+        "QUIC: A UDP-Based Multiplexed and Secure Transport",
+        "https://www.rfc-editor.org/rfc/rfc9000",
+    ),
+    SpecReference::new(
+        "RFC 9001",
+        "Using TLS to Secure QUIC",
+        "https://www.rfc-editor.org/rfc/rfc9001",
+    ),
+    SpecReference::new(
+        "RFC 9180",
+        "Hybrid Public Key Encryption",
+        "https://www.rfc-editor.org/rfc/rfc9180",
+    ),
+    SpecReference::new(
+        "RFC 9345",
+        "Delegated Credentials for TLS and DTLS",
+        "https://www.rfc-editor.org/rfc/rfc9345",
+    ),
+    SpecReference::new(
+        "RFC 9849",
+        "TLS Encrypted Client Hello",
+        "https://www.rfc-editor.org/rfc/rfc9849",
     ),
 ];
 
@@ -1395,6 +786,10 @@ impl Dissector for TlsDissector {
                 dissect_alert_record(payload, payload_offset, buf);
                 record_version_label(version)
             }
+            CONTENT_TYPE_HEARTBEAT => {
+                dissect_heartbeat_record(payload, payload_offset, buf);
+                record_version_label(version)
+            }
             _ => record_version_label(version),
         };
         if let Some(layer) = buf.last_layer_mut() {
@@ -1458,6 +853,39 @@ mod tests {
     //! | 8449 §5       | record_size_limit (28)              | parse_tls_extension_type_names                |
     //! | 8879 §5       | Compressed Certificate              | parse_tls_handshake_type_names                |
     //! | 8879 §7.1     | compress_certificate                | parse_tls_extension_type_names                |
+    //! | 7301 §3.1     | ALPN protocol_name_list             | parse_alpn_extension                          |
+    //! | 9846 §4.3.7   | supported_groups                    | parse_supported_groups_extension              |
+    //! | 9846 §4.3.3   | signature_algorithms(_cert)         | parse_signature_algorithms_extensions         |
+    //! | 9846 §4.3.8   | key_share (CH / SH / HRR)           | parse_key_share_extension_forms               |
+    //! | 9846 §4.3.9   | psk_key_exchange_modes              | parse_psk_extensions                          |
+    //! | 9846 §4.3.11  | pre_shared_key (CH / SH)            | parse_psk_extensions                          |
+    //! | 8422 §5.1.2   | ec_point_formats                    | parse_ec_point_formats_extension              |
+    //! | 6066 §8       | status_request                      | parse_status_request_extension                |
+    //! | 8449 §4       | record_size_limit                   | parse_record_size_limit_extension             |
+    //! | 8879 §3       | compress_certificate algorithms     | parse_compress_certificate_extension          |
+    //! | 9001 §8.2     | quic_transport_parameters           | parse_quic_transport_parameters_extension     |
+    //! | 9849 §5       | encrypted_client_hello              | parse_encrypted_client_hello_extension        |
+    //! | 8701 §2       | GREASE values                       | parse_extension_names_and_grease              |
+    //! | 9345 §4.1     | delegated_credential name           | parse_extension_names_and_grease              |
+    //! | 5246 §7.4.2   | Certificate (TLS 1.2)               | parse_certificate_tls12                       |
+    //! | 9846 §4.5.1   | Certificate (TLS 1.3)               | parse_certificate_tls13                       |
+    //! | 9846 §4.5.1   | Certificate malformed               | parse_certificate_malformed                   |
+    //! | 8422 §5.4     | ServerKeyExchange (ECDHE)           | parse_server_key_exchange_ecdhe               |
+    //! | 5246 §7.4.3   | ServerKeyExchange (DHE)             | parse_server_key_exchange_dhe                 |
+    //! | 5246 §7.4.4   | CertificateRequest (TLS 1.2)        | parse_certificate_request_forms               |
+    //! | 9846 §4.4.2   | CertificateRequest (TLS 1.3)        | parse_certificate_request_forms               |
+    //! | 5077 §3.3     | NewSessionTicket (TLS 1.2)          | parse_new_session_ticket_forms                |
+    //! | 9846 §4.7.1   | NewSessionTicket (TLS 1.3)          | parse_new_session_ticket_forms                |
+    //! | 9846 §4.4.1   | EncryptedExtensions                 | parse_encrypted_extensions                    |
+    //! | 9846 §4.7.3   | KeyUpdate                           | parse_key_update                              |
+    //! | 8879 §4       | CompressedCertificate               | parse_compressed_certificate                  |
+    //! | 6066 §8       | CertificateStatus                   | parse_certificate_status                      |
+    //! | 6520 §4       | HeartbeatMessage                    | parse_heartbeat_messages                      |
+    //! | 6520 §4       | Protected heartbeat not Heartbleed  | parse_heartbeat_encrypted_with_known_first_byte |
+    //! | 5246 §7.4.3   | SKE form needs a filling signature  | parse_server_key_exchange_ambiguous_forms     |
+    //! | 9846 §4.3     | Malformed extension bodies stay raw | parse_malformed_extension_bodies_stay_raw     |
+    //! | 9846 §3.4     | Vector minimum lengths              | parse_handshake_bodies_minimum_lengths        |
+    //! | IANA          | Cipher suite names                  | parse_tls_cipher_suite_names                  |
 
     use super::*;
     use core::ops::Range;
@@ -1762,7 +1190,7 @@ mod tests {
     #[test]
     fn parse_tls_handshake_trailing_partial_header() {
         // ServerHello followed by the first 2 bytes of a Certificate header:
-        // a message may be split at any byte (RFC 9846, Section 5.1), so the
+        // a message may be split at any byte (RFC 9846, Section 5.1 (https://www.rfc-editor.org/rfc/rfc9846#section-5.1)), so the
         // complete ServerHello is decoded and the rest is reported as
         // continued handshake data.
         let body = build_server_hello_body(0x0303, &[], 0xc02f, 0x00, None);
@@ -1847,8 +1275,9 @@ mod tests {
 
     #[test]
     fn parse_tls_empty_handshake_record() {
-        // Zero-length Handshake fragments are forbidden (RFC 9846, Section
-        // 5.1); nothing beyond the record header is reported.
+        // Zero-length Handshake fragments are forbidden; nothing beyond the
+        // record header is reported.
+        // RFC 9846, Section 5.1 — https://www.rfc-editor.org/rfc/rfc9846#section-5.1
         let data = build_tls_record(CONTENT_TYPE_HANDSHAKE, 0x0303, &[]);
 
         let mut buf = DissectBuffer::new();
@@ -2219,7 +1648,7 @@ mod tests {
     #[test]
     fn parse_tls10_record_label() {
         // Only an initial ClientHello from a TLS 1.3 client may use a record
-        // version other than 0x0303 (RFC 9846, Section 5.1), so a non-handshake
+        // version other than 0x0303 (RFC 9846, Section 5.1 (https://www.rfc-editor.org/rfc/rfc9846#section-5.1)), so a non-handshake
         // record with 0x0300..=0x0302 identifies the negotiated version.
         for (ver, label) in [
             (0x0300u16, Some("SSL 3.0")),
@@ -2844,7 +2273,16 @@ mod tests {
             (0xc02f, Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")),
             (0xc02b, Some("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256")),
             (0xcca8, Some("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256")),
-            (0x0000, None),
+            // Full IANA registry
+            (0x0000, Some("TLS_NULL_WITH_NULL_NULL")),
+            (0xc013, Some("TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA")),
+            (0xc014, Some("TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA")),
+            (0xc009, Some("TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA")),
+            (0xc00a, Some("TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA")),
+            (0x00ff, Some("TLS_EMPTY_RENEGOTIATION_INFO_SCSV")),
+            (0x5600, Some("TLS_FALLBACK_SCSV")),
+            // RFC 8701 (https://www.rfc-editor.org/rfc/rfc8701) GREASE
+            (0xcaca, Some("GREASE")),
             (0xffff, None),
         ] {
             assert_eq!(
@@ -2924,6 +2362,977 @@ mod tests {
             buf.resolve_container_display_name(idx as u32),
             Some("server_name")
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Extension and handshake body decoders
+    // ---------------------------------------------------------------------
+
+    /// Direct children of a container whose children range is `range`.
+    fn direct<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>, range: &Range<u32>) -> Vec<&'a Field<'pkt>> {
+        let mut out = Vec::new();
+        let mut i = range.start;
+        while i < range.end {
+            let f = &buf.fields()[i as usize];
+            out.push(f);
+            i = match f.value.as_container_range() {
+                Some(r) => r.end,
+                None => i + 1,
+            };
+        }
+        out
+    }
+
+    /// Values of the direct children of the array field `name` in object `obj`.
+    fn array_values<'pkt>(
+        buf: &DissectBuffer<'pkt>,
+        obj: &Range<u32>,
+        name: &str,
+    ) -> Vec<FieldValue<'pkt>> {
+        let arr = child(buf, obj, name).unwrap_or_else(|| panic!("{name} missing"));
+        direct(buf, arr.value.as_container_range().unwrap())
+            .into_iter()
+            .map(|f| f.value.clone())
+            .collect()
+    }
+
+    /// Display name of a field through its descriptor's `display_fn`.
+    fn shown(f: &Field<'_>) -> Option<&'static str> {
+        f.descriptor.display_fn.and_then(|d| d(&f.value, &[]))
+    }
+
+    /// Element range (`index..end`) of an Object field.
+    fn object_of(buf: &DissectBuffer<'_>, f: &Field<'_>) -> Range<u32> {
+        let idx = buf
+            .fields()
+            .iter()
+            .position(|x| core::ptr::eq(x, f))
+            .unwrap() as u32;
+        idx..f.value.as_container_range().unwrap().end
+    }
+
+    /// Dissect a record and return the buffer.
+    fn dissect(data: &[u8]) -> DissectBuffer<'_> {
+        let mut buf = DissectBuffer::new();
+        TlsDissector.dissect(data, &mut buf, 0).unwrap();
+        buf
+    }
+
+    /// A ClientHello record carrying exactly `exts`.
+    fn client_hello_with(exts: &[u8]) -> Vec<u8> {
+        wrap_client_hello(&build_client_hello_body(
+            0x0303,
+            &[],
+            &[0x1301],
+            &[0x00],
+            Some(exts),
+        ))
+    }
+
+    /// A ServerHello record carrying exactly `exts`.
+    fn server_hello_with(exts: &[u8]) -> Vec<u8> {
+        wrap_server_hello(&build_server_hello_body(
+            0x0303,
+            &[],
+            0x1301,
+            0x00,
+            Some(exts),
+        ))
+    }
+
+    /// First extension object of the first handshake message.
+    fn first_extension(buf: &DissectBuffer<'_>) -> Range<u32> {
+        extension_objects(buf, &first_handshake(buf))
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    /// Length-prefixed vector with a `n`-byte big-endian length.
+    fn vec_n(n: usize, body: &[u8]) -> Vec<u8> {
+        let len = (body.len() as u32).to_be_bytes();
+        let mut v = len[4 - n..].to_vec();
+        v.extend_from_slice(body);
+        v
+    }
+
+    #[test]
+    fn parse_alpn_extension() {
+        // RFC 7301, Section 3.1 — https://www.rfc-editor.org/rfc/rfc7301#section-3.1
+        let alpn = build_extension(
+            16,
+            &[
+                0x00, 0x0c, 0x02, b'h', b'2', 0x08, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1',
+            ],
+        );
+        let data = client_hello_with(&alpn);
+        let buf = dissect(&data);
+        let ext = first_extension(&buf);
+        assert_eq!(
+            array_values(&buf, &ext, "protocol_names"),
+            vec![FieldValue::Bytes(b"h2"), FieldValue::Bytes(b"http/1.1")]
+        );
+        // The reproduction in the issue: a single "h2".
+        let alpn = build_extension(16, &[0x00, 0x03, 0x02, b'h', b'2']);
+        let data = client_hello_with(&alpn);
+        let buf = dissect(&data);
+        let ext = first_extension(&buf);
+        let names = child(&buf, &ext, "protocol_names").unwrap();
+        let first = direct(&buf, names.value.as_container_range().unwrap())[0];
+        assert_eq!(first.value, FieldValue::Bytes(b"h2"));
+        assert_eq!(first.range, 5 + 4 + 43 + 4 + 3..5 + 4 + 43 + 4 + 5);
+        // A malformed list is left as raw data only.
+        let bad = build_extension(16, &[0x00, 0x04, 0x05, b'h', b'2', b'x']);
+        let data = client_hello_with(&bad);
+        let buf = dissect(&data);
+        let ext = first_extension(&buf);
+        assert!(child(&buf, &ext, "protocol_names").is_none());
+        assert!(child(&buf, &ext, "data").is_some());
+    }
+
+    #[test]
+    fn parse_supported_groups_extension() {
+        // RFC 9846, Section 4.3.7 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.7
+        let ext = build_extension(
+            10,
+            &[0x00, 0x08, 0x3a, 0x3a, 0x11, 0xec, 0x00, 0x1d, 0x00, 0x17],
+        );
+        let data = client_hello_with(&ext);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let groups = child(&buf, &obj, "named_groups").unwrap();
+        let items = direct(&buf, groups.value.as_container_range().unwrap());
+        let names: Vec<_> = items.iter().map(|f| shown(f)).collect();
+        assert_eq!(
+            names,
+            vec![
+                Some("GREASE"),
+                Some("X25519MLKEM768"),
+                Some("x25519"),
+                Some("secp256r1")
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_signature_algorithms_extensions() {
+        // RFC 9846, Section 4.3.3 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.3
+        for ext_type in [13u16, 50] {
+            let ext = build_extension(ext_type, &[0x00, 0x04, 0x08, 0x04, 0x04, 0x03]);
+            let data = client_hello_with(&ext);
+            let buf = dissect(&data);
+            let obj = first_extension(&buf);
+            let arr = child(&buf, &obj, "signature_schemes").unwrap();
+            let items = direct(&buf, arr.value.as_container_range().unwrap());
+            assert_eq!(items[0].value, FieldValue::U16(0x0804));
+            assert_eq!(shown(items[0]), Some("rsa_pss_rsae_sha256"));
+            assert_eq!(shown(items[1]), Some("ecdsa_secp256r1_sha256"));
+        }
+    }
+
+    #[test]
+    fn parse_key_share_extension_forms() {
+        // RFC 9846, Section 4.3.8 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.8
+        let mut shares = Vec::new();
+        shares.extend_from_slice(&[0x00, 0x1d, 0x00, 0x04, 1, 2, 3, 4]);
+        shares.extend_from_slice(&[0x00, 0x17, 0x00, 0x02, 5, 6]);
+        let ext = build_extension(51, &vec_n(2, &shares));
+        let data = client_hello_with(&ext);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let arr = child(&buf, &obj, "client_shares").unwrap();
+        let entries = direct(&buf, arr.value.as_container_range().unwrap());
+        assert_eq!(entries.len(), 2);
+        let e0 = object_of(&buf, entries[0]);
+        assert_eq!(
+            child(&buf, &e0, "group").unwrap().value,
+            FieldValue::U16(0x1d)
+        );
+        assert_eq!(shown(child(&buf, &e0, "group").unwrap()), Some("x25519"));
+        assert_eq!(
+            child(&buf, &e0, "key_exchange").unwrap().value,
+            FieldValue::Bytes(&[1, 2, 3, 4])
+        );
+        assert_eq!(buf.resolve_container_display_name(e0.start), Some("x25519"));
+        let e1 = object_of(&buf, entries[1]);
+        assert_eq!(
+            child(&buf, &e1, "key_exchange").unwrap().value,
+            FieldValue::Bytes(&[5, 6])
+        );
+
+        // ServerHello: a single KeyShareEntry.
+        let ext = build_extension(51, &[0x00, 0x1d, 0x00, 0x02, 9, 9]);
+        let data = server_hello_with(&ext);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let share = child(&buf, &obj, "server_share").unwrap();
+        let share = object_of(&buf, share);
+        assert_eq!(
+            child(&buf, &share, "group").unwrap().value,
+            FieldValue::U16(0x1d)
+        );
+        assert_eq!(
+            child(&buf, &share, "key_exchange").unwrap().value,
+            FieldValue::Bytes(&[9, 9])
+        );
+
+        // HelloRetryRequest: selected_group only.
+        let ext = build_extension(51, &[0x11, 0xec]);
+        let body = build_server_hello_body_with_random(
+            0x0303,
+            &HELLO_RETRY_REQUEST_RANDOM,
+            &[],
+            0x1301,
+            0,
+            Some(&ext),
+        );
+        let data = wrap_server_hello(&body);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let sel = child(&buf, &obj, "selected_group").unwrap();
+        assert_eq!(sel.value, FieldValue::U16(0x11ec));
+        assert_eq!(shown(sel), Some("X25519MLKEM768"));
+        assert!(child(&buf, &obj, "server_share").is_none());
+    }
+
+    #[test]
+    fn parse_psk_extensions() {
+        // RFC 9846, Section 4.3.9 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.9
+        let modes = build_extension(45, &[0x02, 0x01, 0x0b]);
+        // RFC 9846, Section 4.3.11 — https://www.rfc-editor.org/rfc/rfc9846#section-4.3.11
+        let mut identities = vec_n(2, b"ticket");
+        identities.extend_from_slice(&0x0102_0304u32.to_be_bytes());
+        let mut psk = vec_n(2, &identities);
+        psk.extend_from_slice(&vec_n(2, &vec_n(1, &[0xbb; 32])));
+        let psk = build_extension(41, &psk);
+        let mut exts = modes;
+        exts.extend_from_slice(&psk);
+        let data = client_hello_with(&exts);
+        let buf = dissect(&data);
+        let objs = extension_objects(&buf, &first_handshake(&buf));
+
+        let modes = child(&buf, &objs[0], "ke_modes").unwrap();
+        let items = direct(&buf, modes.value.as_container_range().unwrap());
+        assert_eq!(shown(items[0]), Some("psk_dhe_ke"));
+        assert_eq!(shown(items[1]), Some("GREASE"));
+
+        let ids = child(&buf, &objs[1], "identities").unwrap();
+        let ids = direct(&buf, ids.value.as_container_range().unwrap());
+        assert_eq!(ids.len(), 1);
+        let id0 = object_of(&buf, ids[0]);
+        assert_eq!(
+            child(&buf, &id0, "identity").unwrap().value,
+            FieldValue::Bytes(b"ticket")
+        );
+        assert_eq!(
+            child(&buf, &id0, "obfuscated_ticket_age").unwrap().value,
+            FieldValue::U32(0x0102_0304)
+        );
+        assert_eq!(
+            array_values(&buf, &objs[1], "binders"),
+            vec![FieldValue::Bytes(&[0xbb; 32])]
+        );
+
+        // ServerHello: selected_identity.
+        let ext = build_extension(41, &[0x00, 0x00]);
+        let data = server_hello_with(&ext);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        assert_eq!(
+            child(&buf, &obj, "selected_identity").unwrap().value,
+            FieldValue::U16(0)
+        );
+    }
+
+    #[test]
+    fn parse_ec_point_formats_extension() {
+        // RFC 8422, Section 5.1.2 — https://www.rfc-editor.org/rfc/rfc8422#section-5.1.2
+        let ext = build_extension(11, &[0x02, 0x00, 0x01]);
+        let data = client_hello_with(&ext);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let arr = child(&buf, &obj, "ec_point_formats").unwrap();
+        let items = direct(&buf, arr.value.as_container_range().unwrap());
+        assert_eq!(shown(items[0]), Some("uncompressed"));
+        assert_eq!(shown(items[1]), Some("ansiX962_compressed_prime"));
+    }
+
+    #[test]
+    fn parse_status_request_extension() {
+        // RFC 6066, Section 8 — https://www.rfc-editor.org/rfc/rfc6066#section-8
+        let mut req = vec![0x01];
+        req.extend_from_slice(&vec_n(2, &vec_n(2, &[0xaa, 0xbb])));
+        req.extend_from_slice(&vec_n(2, &[0xcc]));
+        let ext = build_extension(5, &req);
+        let data = client_hello_with(&ext);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let st = child(&buf, &obj, "status_type").unwrap();
+        assert_eq!(st.value, FieldValue::U8(1));
+        assert_eq!(shown(st), Some("ocsp"));
+        assert_eq!(
+            array_values(&buf, &obj, "responder_id_list"),
+            vec![FieldValue::Bytes(&[0xaa, 0xbb])]
+        );
+        assert_eq!(
+            child(&buf, &obj, "request_extensions").unwrap().value,
+            FieldValue::Bytes(&[0xcc])
+        );
+
+        // An empty status_request in a TLS 1.2 ServerHello stays empty.
+        let data = server_hello_with(&build_extension(5, &[]));
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        assert!(child(&buf, &obj, "status_type").is_none());
+    }
+
+    #[test]
+    fn parse_record_size_limit_extension() {
+        // RFC 8449, Section 4 — https://www.rfc-editor.org/rfc/rfc8449#section-4
+        let data = client_hello_with(&build_extension(28, &[0x40, 0x01]));
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        assert_eq!(
+            child(&buf, &obj, "record_size_limit").unwrap().value,
+            FieldValue::U16(0x4001)
+        );
+    }
+
+    #[test]
+    fn parse_compress_certificate_extension() {
+        // RFC 8879, Section 3 — https://www.rfc-editor.org/rfc/rfc8879#section-3
+        let data = client_hello_with(&build_extension(27, &[0x04, 0x00, 0x02, 0x00, 0x03]));
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let arr = child(&buf, &obj, "algorithms").unwrap();
+        let items = direct(&buf, arr.value.as_container_range().unwrap());
+        assert_eq!(shown(items[0]), Some("brotli"));
+        assert_eq!(shown(items[1]), Some("zstd"));
+    }
+
+    #[test]
+    fn parse_quic_transport_parameters_extension() {
+        // RFC 9001, Section 8.2 — https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+        // RFC 9000, Section 18 — https://www.rfc-editor.org/rfc/rfc9000#section-18
+        let params = [
+            0x01, 0x02, 0x67, 0x10, // max_idle_timeout = 10000 (2-byte varint)
+            0x0f, 0x00, // initial_source_connection_id, empty
+            0x40, 0x3a, 0x01, 0xff, // reserved id 58 (2-byte varint), 1-byte value
+        ];
+        let data = client_hello_with(&build_extension(57, &params));
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        let arr = child(&buf, &obj, "transport_parameters").unwrap();
+        let items = direct(&buf, arr.value.as_container_range().unwrap());
+        assert_eq!(items.len(), 3);
+        let p0 = object_of(&buf, items[0]);
+        let id = child(&buf, &p0, "id").unwrap();
+        assert_eq!(id.value, FieldValue::U64(1));
+        assert_eq!(shown(id), Some("max_idle_timeout"));
+        assert_eq!(
+            child(&buf, &p0, "value").unwrap().value,
+            FieldValue::Bytes(&[0x67, 0x10])
+        );
+        assert_eq!(
+            buf.resolve_container_display_name(p0.start),
+            Some("max_idle_timeout")
+        );
+        let p2 = object_of(&buf, items[2]);
+        assert_eq!(child(&buf, &p2, "id").unwrap().value, FieldValue::U64(58));
+        assert_eq!(shown(child(&buf, &p2, "id").unwrap()), Some("reserved"));
+
+        // A parameter whose length overruns the extension is not decoded.
+        let data = client_hello_with(&build_extension(57, &[0x01, 0x05, 0x00]));
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        assert!(child(&buf, &obj, "transport_parameters").is_none());
+    }
+
+    #[test]
+    fn parse_encrypted_client_hello_extension() {
+        // RFC 9849, Section 5 — https://www.rfc-editor.org/rfc/rfc9849#section-5
+        let mut outer = vec![0x00, 0x00, 0x01, 0x00, 0x01, 0x42];
+        outer.extend_from_slice(&vec_n(2, &[0x11; 32]));
+        outer.extend_from_slice(&vec_n(2, &[0x22; 8]));
+        let data = client_hello_with(&build_extension(0xfe0d, &outer));
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        assert_eq!(
+            buf.resolve_container_display_name(obj.start),
+            Some("encrypted_client_hello")
+        );
+        let t = child(&buf, &obj, "ech_type").unwrap();
+        assert_eq!(shown(t), Some("outer"));
+        let kdf = child(&buf, &obj, "kdf_id").unwrap();
+        assert_eq!(shown(kdf), Some("HKDF-SHA256"));
+        let aead = child(&buf, &obj, "aead_id").unwrap();
+        assert_eq!(shown(aead), Some("AES-128-GCM"));
+        assert_eq!(
+            child(&buf, &obj, "config_id").unwrap().value,
+            FieldValue::U8(0x42)
+        );
+        assert_eq!(
+            child(&buf, &obj, "enc").unwrap().value,
+            FieldValue::Bytes(&[0x11; 32])
+        );
+        assert_eq!(
+            child(&buf, &obj, "payload").unwrap().value,
+            FieldValue::Bytes(&[0x22; 8])
+        );
+
+        // Inner variant: type only.
+        let data = client_hello_with(&build_extension(0xfe0d, &[0x01]));
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        assert_eq!(shown(child(&buf, &obj, "ech_type").unwrap()), Some("inner"));
+        assert!(child(&buf, &obj, "config_id").is_none());
+
+        // HelloRetryRequest: 8-byte confirmation.
+        let body = build_server_hello_body_with_random(
+            0x0303,
+            &HELLO_RETRY_REQUEST_RANDOM,
+            &[],
+            0x1301,
+            0,
+            Some(&build_extension(0xfe0d, &[0x33; 8])),
+        );
+        let data = wrap_server_hello(&body);
+        let buf = dissect(&data);
+        let obj = first_extension(&buf);
+        assert_eq!(
+            child(&buf, &obj, "confirmation").unwrap().value,
+            FieldValue::Bytes(&[0x33; 8])
+        );
+    }
+
+    #[test]
+    fn parse_extension_names_and_grease() {
+        // RFC 8701, Section 2 — https://www.rfc-editor.org/rfc/rfc8701#section-2
+        for (ext_type, expected) in [
+            (17u16, "status_request_v2"),
+            (23, "extended_main_secret"),
+            (34, "delegated_credential"),
+            (57, "quic_transport_parameters"),
+            (0xfe0d, "encrypted_client_hello"),
+            (0x0a0a, "GREASE"),
+            (0xfafa, "GREASE"),
+            (0x0a1a, "unknown"),
+        ] {
+            assert_eq!(extension_type_name(ext_type), expected, "{ext_type:#06x}");
+        }
+        assert_eq!(cipher_suite_name(0x2a2a), Some("GREASE"));
+        assert_eq!(names::named_group_name(0xdada), "GREASE");
+        assert_eq!(names::signature_scheme_name(0x1a1a), "GREASE");
+        assert_eq!(supported_version_name(0x7a7a), "GREASE");
+        // A GREASE extension in a ClientHello is labelled as such.
+        let data = client_hello_with(&build_extension(0x3a3a, &[]));
+        let buf = dissect(&data);
+        assert_eq!(
+            buf.resolve_container_display_name(first_extension(&buf).start),
+            Some("GREASE")
+        );
+    }
+
+    /// A handshake record carrying one message of type `ht` with `body`.
+    fn handshake_record(ht: u8, body: &[u8]) -> Vec<u8> {
+        build_tls_record(CONTENT_TYPE_HANDSHAKE, 0x0303, &build_handshake(ht, body))
+    }
+
+    #[test]
+    fn parse_certificate_tls12() {
+        // RFC 5246, Section 7.4.2 — https://www.rfc-editor.org/rfc/rfc5246#section-7.4.2
+        let mut list = vec_n(3, &[0x30, 0x01, 0xaa]);
+        list.extend_from_slice(&vec_n(3, &[0x30, 0x02, 0xbb, 0xcc]));
+        let data = handshake_record(11, &vec_n(3, &list));
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(
+            array_values(&buf, &obj, "certificates"),
+            vec![
+                FieldValue::Bytes(&[0x30, 0x01, 0xaa]),
+                FieldValue::Bytes(&[0x30, 0x02, 0xbb, 0xcc])
+            ]
+        );
+        let certs = child(&buf, &obj, "certificates").unwrap();
+        let first = direct(&buf, certs.value.as_container_range().unwrap())[0];
+        assert_eq!(first.range, 5 + 4 + 3 + 3..5 + 4 + 3 + 3 + 3);
+        assert!(child(&buf, &obj, "certificate_request_context").is_none());
+    }
+
+    #[test]
+    fn parse_certificate_tls13() {
+        // RFC 9846, Section 4.5.1 — https://www.rfc-editor.org/rfc/rfc9846#section-4.5.1
+        let mut status = vec![0x01];
+        status.extend_from_slice(&vec_n(3, &[0x0d; 3]));
+        let mut entry = vec_n(3, &[0x30, 0x01, 0xaa]);
+        entry.extend_from_slice(&vec_n(2, &build_extension(5, &status)));
+        let mut body = vec_n(1, &[]);
+        body.extend_from_slice(&vec_n(3, &entry));
+        let data = handshake_record(11, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(
+            child(&buf, &obj, "certificate_request_context")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&[])
+        );
+        let entries = child(&buf, &obj, "certificate_entries").unwrap();
+        let entries = direct(&buf, entries.value.as_container_range().unwrap());
+        assert_eq!(entries.len(), 1);
+        let e0 = object_of(&buf, entries[0]);
+        assert_eq!(
+            child(&buf, &e0, "cert_data").unwrap().value,
+            FieldValue::Bytes(&[0x30, 0x01, 0xaa])
+        );
+        let exts = extension_objects(&buf, &e0);
+        assert_eq!(
+            child(&buf, &exts[0], "ocsp_response").unwrap().value,
+            FieldValue::Bytes(&[0x0d; 3])
+        );
+    }
+
+    #[test]
+    fn parse_certificate_malformed() {
+        // A list length that matches neither form leaves only type/length.
+        let data = handshake_record(11, &[0x00, 0x00, 0x09, 0x01]);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert!(child(&buf, &obj, "certificates").is_none());
+        assert!(child(&buf, &obj, "certificate_entries").is_none());
+    }
+
+    #[test]
+    fn parse_server_key_exchange_ecdhe() {
+        // RFC 8422, Section 5.4 — https://www.rfc-editor.org/rfc/rfc8422#section-5.4
+        let mut body = vec![0x03, 0x00, 0x1d];
+        body.extend_from_slice(&vec_n(1, &[0x44; 32]));
+        body.extend_from_slice(&[0x08, 0x04]);
+        body.extend_from_slice(&vec_n(2, &[0x55; 16]));
+        let data = handshake_record(12, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        let ct = child(&buf, &obj, "curve_type").unwrap();
+        assert_eq!(shown(ct), Some("named_curve"));
+        let nc = child(&buf, &obj, "named_curve").unwrap();
+        assert_eq!(shown(nc), Some("x25519"));
+        assert_eq!(
+            child(&buf, &obj, "public_key").unwrap().value,
+            FieldValue::Bytes(&[0x44; 32])
+        );
+        let alg = child(&buf, &obj, "signature_algorithm").unwrap();
+        assert_eq!(shown(alg), Some("rsa_pss_rsae_sha256"));
+        assert_eq!(
+            child(&buf, &obj, "signature").unwrap().value,
+            FieldValue::Bytes(&[0x55; 16])
+        );
+
+        // TLS 1.0 / 1.1: no SignatureAndHashAlgorithm before the signature.
+        let mut body = vec![0x03, 0x00, 0x17];
+        body.extend_from_slice(&vec_n(1, &[0x04; 5]));
+        body.extend_from_slice(&vec_n(2, &[0x55; 6]));
+        let data = handshake_record(12, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert!(child(&buf, &obj, "signature_algorithm").is_none());
+        assert_eq!(
+            child(&buf, &obj, "signature").unwrap().value,
+            FieldValue::Bytes(&[0x55; 6])
+        );
+    }
+
+    #[test]
+    fn parse_server_key_exchange_dhe() {
+        // RFC 5246, Section 7.4.3 — https://www.rfc-editor.org/rfc/rfc5246#section-7.4.3
+        let mut body = vec_n(2, &[0xff; 4]);
+        body.extend_from_slice(&vec_n(2, &[0x02]));
+        body.extend_from_slice(&vec_n(2, &[0x77; 4]));
+        body.extend_from_slice(&[0x04, 0x01]);
+        body.extend_from_slice(&vec_n(2, &[0x55; 8]));
+        let data = handshake_record(12, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(
+            child(&buf, &obj, "dh_p").unwrap().value,
+            FieldValue::Bytes(&[0xff; 4])
+        );
+        assert_eq!(
+            child(&buf, &obj, "dh_g").unwrap().value,
+            FieldValue::Bytes(&[0x02])
+        );
+        assert_eq!(
+            child(&buf, &obj, "dh_ys").unwrap().value,
+            FieldValue::Bytes(&[0x77; 4])
+        );
+        assert_eq!(
+            shown(child(&buf, &obj, "signature_algorithm").unwrap()),
+            Some("rsa_pkcs1_sha256")
+        );
+        assert!(child(&buf, &obj, "curve_type").is_none());
+
+        // Parameters that do not fit are left undecoded.
+        let data = handshake_record(12, &[0x00, 0x09, 0x01]);
+        let buf = dissect(&data);
+        assert!(child(&buf, &first_handshake(&buf), "dh_p").is_none());
+    }
+
+    #[test]
+    fn parse_certificate_request_forms() {
+        // RFC 5246, Section 7.4.4 — https://www.rfc-editor.org/rfc/rfc5246#section-7.4.4
+        let mut body = vec_n(1, &[0x01, 0x40]);
+        body.extend_from_slice(&vec_n(2, &[0x04, 0x03]));
+        body.extend_from_slice(&vec_n(2, &vec_n(2, &[0x30, 0x00])));
+        let data = handshake_record(13, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        let types = child(&buf, &obj, "certificate_types").unwrap();
+        let types = direct(&buf, types.value.as_container_range().unwrap());
+        assert_eq!(shown(types[0]), Some("rsa_sign"));
+        assert_eq!(shown(types[1]), Some("ecdsa_sign"));
+        assert_eq!(
+            array_values(&buf, &obj, "supported_signature_algorithms"),
+            vec![FieldValue::U16(0x0403)]
+        );
+        assert_eq!(
+            array_values(&buf, &obj, "certificate_authorities"),
+            vec![FieldValue::Bytes(&[0x30, 0x00])]
+        );
+
+        // RFC 9846, Section 4.4.2 — https://www.rfc-editor.org/rfc/rfc9846#section-4.4.2
+        let mut body = vec_n(1, &[0x07]);
+        body.extend_from_slice(&vec_n(2, &build_extension(13, &[0x00, 0x02, 0x08, 0x07])));
+        let data = handshake_record(13, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(
+            child(&buf, &obj, "certificate_request_context")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&[0x07])
+        );
+        let exts = extension_objects(&buf, &obj);
+        let schemes = child(&buf, &exts[0], "signature_schemes").unwrap();
+        let schemes = direct(&buf, schemes.value.as_container_range().unwrap());
+        assert_eq!(shown(schemes[0]), Some("ed25519"));
+    }
+
+    #[test]
+    fn parse_new_session_ticket_forms() {
+        // RFC 5077, Section 3.3 — https://www.rfc-editor.org/rfc/rfc5077#section-3.3
+        let mut body = 7200u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&vec_n(2, &[0x99; 10]));
+        let data = handshake_record(4, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(
+            child(&buf, &obj, "ticket_lifetime").unwrap().value,
+            FieldValue::U32(7200)
+        );
+        assert_eq!(
+            child(&buf, &obj, "ticket").unwrap().value,
+            FieldValue::Bytes(&[0x99; 10])
+        );
+        assert!(child(&buf, &obj, "ticket_age_add").is_none());
+
+        // RFC 9846, Section 4.7.1 — https://www.rfc-editor.org/rfc/rfc9846#section-4.7.1
+        let mut body = 7200u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&0xdead_beefu32.to_be_bytes());
+        body.extend_from_slice(&vec_n(1, &[0x00]));
+        body.extend_from_slice(&vec_n(2, &[0x99; 10]));
+        body.extend_from_slice(&vec_n(2, &build_extension(42, &[0x00, 0x00, 0x40, 0x00])));
+        let data = handshake_record(4, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(
+            child(&buf, &obj, "ticket_age_add").unwrap().value,
+            FieldValue::U32(0xdead_beef)
+        );
+        assert_eq!(
+            child(&buf, &obj, "ticket_nonce").unwrap().value,
+            FieldValue::Bytes(&[0x00])
+        );
+        let exts = extension_objects(&buf, &obj);
+        assert_eq!(
+            child(&buf, &exts[0], "max_early_data_size").unwrap().value,
+            FieldValue::U32(0x4000)
+        );
+    }
+
+    #[test]
+    fn parse_encrypted_extensions() {
+        // RFC 9846, Section 4.4.1 — https://www.rfc-editor.org/rfc/rfc9846#section-4.4.1
+        let alpn = build_extension(16, &[0x00, 0x03, 0x02, b'h', b'3']);
+        let data = handshake_record(8, &vec_n(2, &alpn));
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        let exts = extension_objects(&buf, &obj);
+        assert_eq!(
+            array_values(&buf, &exts[0], "protocol_names"),
+            vec![FieldValue::Bytes(b"h3")]
+        );
+    }
+
+    #[test]
+    fn parse_key_update() {
+        // RFC 9846, Section 4.7.3 — https://www.rfc-editor.org/rfc/rfc9846#section-4.7.3
+        let data = handshake_record(24, &[0x01]);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        let ru = child(&buf, &obj, "request_update").unwrap();
+        assert_eq!(ru.value, FieldValue::U8(1));
+        assert_eq!(shown(ru), Some("update_requested"));
+    }
+
+    #[test]
+    fn parse_compressed_certificate() {
+        // RFC 8879, Section 4 — https://www.rfc-editor.org/rfc/rfc8879#section-4
+        let mut body = vec![0x00, 0x01, 0x00, 0x10, 0x00];
+        body.extend_from_slice(&vec_n(3, &[0x78; 6]));
+        let data = handshake_record(25, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(shown(child(&buf, &obj, "algorithm").unwrap()), Some("zlib"));
+        assert_eq!(
+            child(&buf, &obj, "uncompressed_length").unwrap().value,
+            FieldValue::U32(0x1000)
+        );
+        assert_eq!(
+            child(&buf, &obj, "compressed_certificate_message")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&[0x78; 6])
+        );
+    }
+
+    #[test]
+    fn parse_certificate_status() {
+        // RFC 6066, Section 8 — https://www.rfc-editor.org/rfc/rfc6066#section-8
+        let mut body = vec![0x01];
+        body.extend_from_slice(&vec_n(3, &[0x30, 0x03]));
+        let data = handshake_record(22, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert_eq!(
+            shown(child(&buf, &obj, "status_type").unwrap()),
+            Some("ocsp")
+        );
+        assert_eq!(
+            child(&buf, &obj, "ocsp_response").unwrap().value,
+            FieldValue::Bytes(&[0x30, 0x03])
+        );
+    }
+
+    #[test]
+    fn parse_heartbeat_messages() {
+        // RFC 6520, Section 4 — https://www.rfc-editor.org/rfc/rfc6520#section-4
+        let mut msg = vec![0x01, 0x00, 0x03, b'a', b'b', b'c'];
+        msg.extend_from_slice(&[0x00; 16]);
+        let data = build_tls_record(CONTENT_TYPE_HEARTBEAT, 0x0303, &msg);
+        let buf = dissect(&data);
+        let layer = buf.layer_by_name("TLS").unwrap();
+        let t = buf.field_by_name(layer, "heartbeat_type").unwrap();
+        assert_eq!(t.value, FieldValue::U8(1));
+        assert_eq!(
+            buf.resolve_display_name(layer, "heartbeat_type_name"),
+            Some("heartbeat_request")
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "payload_length").unwrap().value,
+            FieldValue::U16(3)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "payload").unwrap().value,
+            FieldValue::Bytes(b"abc")
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "padding").unwrap().value,
+            FieldValue::Bytes(&[0x00; 16])
+        );
+        assert!(
+            buf.field_by_name(layer, "payload_length_exceeds_record")
+                .is_none()
+        );
+
+        // Heartbleed-style request: payload_length larger than the record.
+        let data = build_tls_record(CONTENT_TYPE_HEARTBEAT, 0x0302, &[0x01, 0x40, 0x00]);
+        let buf = dissect(&data);
+        let layer = buf.layer_by_name("TLS").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "payload_length").unwrap().value,
+            FieldValue::U16(0x4000)
+        );
+        assert!(buf.field_by_name(layer, "payload").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "payload_length_exceeds_record")
+                .unwrap()
+                .value,
+            FieldValue::U8(1)
+        );
+
+        // A protected heartbeat (unknown type byte) is reported raw.
+        let data = build_tls_record(CONTENT_TYPE_HEARTBEAT, 0x0303, &[0xab; 24]);
+        let buf = dissect(&data);
+        let layer = buf.layer_by_name("TLS").unwrap();
+        assert!(buf.field_by_name(layer, "heartbeat_type").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "encrypted_heartbeat")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&[0xab; 24])
+        );
+    }
+
+    #[test]
+    fn parse_server_key_exchange_ambiguous_forms() {
+        // ffdhe6144 DHE parameters start with dh_p length 0x0300, which also
+        // reads as curve_type named_curve(3); the ECDHE form only applies when
+        // the signature fills the rest of the body.
+        let mut body = vec_n(2, &[0xff; 0x300]);
+        body.extend_from_slice(&vec_n(2, &[0x02]));
+        body.extend_from_slice(&vec_n(2, &[0x77; 8]));
+        body.extend_from_slice(&[0x08, 0x04]);
+        body.extend_from_slice(&vec_n(2, &[0x55; 8]));
+        let data = handshake_record(12, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert!(child(&buf, &obj, "curve_type").is_none());
+        assert_eq!(
+            child(&buf, &obj, "dh_p").unwrap().value,
+            FieldValue::Bytes(&[0xff; 0x300])
+        );
+
+        // TLS 1.0 RSA_EXPORT parameters (modulus, exponent) followed by a
+        // signature are not DHE: three vectors with nothing after them.
+        let mut body = vec_n(2, &[0xc1; 8]);
+        body.extend_from_slice(&vec_n(2, &[0x01, 0x00, 0x01]));
+        body.extend_from_slice(&vec_n(2, &[0x55; 8]));
+        let data = handshake_record(12, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert!(child(&buf, &obj, "dh_p").is_none());
+        assert!(child(&buf, &obj, "signature").is_none());
+    }
+
+    #[test]
+    fn parse_heartbeat_encrypted_with_known_first_byte() {
+        // A protected heartbeat whose first ciphertext byte is 0x01 is not a
+        // Heartbleed request: it is too long to be a malformed plaintext
+        // message and its payload_length does not fit.
+        let mut msg = vec![0x01, 0x9a, 0x3c];
+        msg.extend_from_slice(&[0x5e; 37]);
+        let data = build_tls_record(CONTENT_TYPE_HEARTBEAT, 0x0303, &msg);
+        let buf = dissect(&data);
+        let layer = buf.layer_by_name("TLS").unwrap();
+        assert!(buf.field_by_name(layer, "heartbeat_type").is_none());
+        assert!(
+            buf.field_by_name(layer, "payload_length_exceeds_record")
+                .is_none()
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "encrypted_heartbeat")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&msg)
+        );
+
+        // A short Heartbleed request with trailing bytes keeps them visible.
+        let mut msg = vec![0x01, 0x40, 0x00];
+        msg.extend_from_slice(&[0x61; 10]);
+        let data = build_tls_record(CONTENT_TYPE_HEARTBEAT, 0x0302, &msg);
+        let buf = dissect(&data);
+        let layer = buf.layer_by_name("TLS").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "payload").unwrap().value,
+            FieldValue::Bytes(&[0x61; 10])
+        );
+        assert!(
+            buf.field_by_name(layer, "payload_length_exceeds_record")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn parse_malformed_extension_bodies_stay_raw() {
+        for (ext_type, data) in [
+            // quic_transport_parameters: truncated varint.
+            (57u16, vec![0x40]),
+            // quic_transport_parameters: second parameter overruns.
+            (57, vec![0x01, 0x00, 0x02, 0x05, 0x00]),
+            // status_request: OCSP request missing request_extensions.
+            (5, vec![0x01, 0x00, 0x00]),
+            // status_request: unknown status type.
+            (5, vec![0x07, 0x00]),
+            // encrypted_client_hello: truncated outer.
+            (0xfe0d, vec![0x00, 0x00, 0x01]),
+            // encrypted_client_hello: inner with trailing bytes.
+            (0xfe0d, vec![0x01, 0x00]),
+            // key_share: empty key_exchange.
+            (51, vec_n(2, &[0x00, 0x1d, 0x00, 0x00])),
+            // pre_shared_key: binder shorter than 32 bytes.
+            (41, {
+                let mut id = vec_n(2, b"t");
+                id.extend_from_slice(&[0, 0, 0, 0]);
+                let mut v = vec_n(2, &id);
+                v.extend_from_slice(&vec_n(2, &vec_n(1, &[0xbb; 8])));
+                v
+            }),
+            // pre_shared_key: no identities.
+            (41, {
+                let mut v = vec_n(2, &[]);
+                v.extend_from_slice(&vec_n(2, &vec_n(1, &[0xbb; 32])));
+                v
+            }),
+        ] {
+            let data = client_hello_with(&build_extension(ext_type, &data));
+            let buf = dissect(&data);
+            let obj = first_extension(&buf);
+            let names: Vec<&str> = children(&buf, &obj).iter().map(|f| f.name()).collect();
+            assert_eq!(
+                names,
+                vec!["type", "length", "data"],
+                "extension {ext_type:#06x} with malformed body"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_handshake_bodies_minimum_lengths() {
+        // TLS 1.3 NewSessionTicket with an empty ticket (ticket<1..2^16-1>).
+        let mut body = 7200u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0, 0, 0, 1]);
+        body.extend_from_slice(&vec_n(1, &[]));
+        body.extend_from_slice(&vec_n(2, &[]));
+        body.extend_from_slice(&vec_n(2, &[]));
+        let data = handshake_record(4, &body);
+        let buf = dissect(&data);
+        assert!(child(&buf, &first_handshake(&buf), "ticket").is_none());
+
+        // TLS 1.2 CertificateRequest with an empty signature algorithm list
+        // (supported_signature_algorithms<2..2^16-2>) and no CAs.
+        let mut body = vec_n(1, &[0x01]);
+        body.extend_from_slice(&vec_n(2, &[]));
+        body.extend_from_slice(&vec_n(2, &[]));
+        let data = handshake_record(13, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        assert!(child(&buf, &obj, "supported_signature_algorithms").is_none());
+
+        // TLS 1.3 Certificate entry with empty cert_data (cert_data<1..2^24-1>).
+        let mut entry = vec_n(3, &[]);
+        entry.extend_from_slice(&vec_n(2, &[]));
+        let mut body = vec_n(1, &[]);
+        body.extend_from_slice(&vec_n(3, &entry));
+        let data = handshake_record(11, &body);
+        let buf = dissect(&data);
+        assert!(child(&buf, &first_handshake(&buf), "certificate_entries").is_none());
+
+        // CertificateStatus with trailing bytes is not decoded.
+        let mut body = vec![0x01];
+        body.extend_from_slice(&vec_n(3, &[0x30]));
+        body.push(0xff);
+        let data = handshake_record(22, &body);
+        let buf = dissect(&data);
+        assert!(child(&buf, &first_handshake(&buf), "status_type").is_none());
     }
 
     #[test]
