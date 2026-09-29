@@ -2349,6 +2349,11 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("stun", || {
                 Box::new(packet_dissector_stun::StunDissector)
             });
+            // Stream framing for decode-as on other TCP ports (RFC 8656,
+            // Section 12.5 — https://www.rfc-editor.org/rfc/rfc8656#section-12.5).
+            reg.register_dissector_factory("stun.tcp", || {
+                Box::new(packet_dissector_stun::StunTcpDissector)
+            });
         }
 
         reg
@@ -3545,7 +3550,16 @@ mod tests {
         assert!(reg.create_dissector_by_name("quic").is_some());
 
         #[cfg(feature = "stun")]
-        assert!(reg.create_dissector_by_name("stun").is_some());
+        {
+            assert!(reg.create_dissector_by_name("stun").is_some());
+            let tcp = reg.create_dissector_by_name("stun.tcp").unwrap();
+            // Stream framing: an unpadded ChannelData message is incomplete.
+            let mut buf = packet_dissector_core::packet::DissectBuffer::new();
+            assert!(matches!(
+                tcp.dissect(&[0x40, 0x00, 0x00, 0x01, 0xAA], &mut buf, 0),
+                Err(PacketError::Truncated { expected: 8, .. })
+            ));
+        }
 
         // Non-existent factory
         assert!(reg.create_dissector_by_name("nonexistent").is_none());
