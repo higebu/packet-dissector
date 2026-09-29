@@ -77,6 +77,7 @@
 //! | Ethernet → IPv4 → TCP → TLS 1.3 CH extensions      | ethernet_ipv4_tcp_tls13_client_hello_extensions      |
 //! | Ethernet → IPv4 → TCP (443) → non-TLS rejected     | ethernet_ipv4_tcp_non_tls_on_port_443                |
 //! | Ethernet → IPv4 → UDP → STUN Binding Request       | integration_ethernet_ipv4_udp_stun_binding_request   |
+//! | Ethernet → IPv4 → UDP → STUN XOR-MAPPED-ADDRESS    | integration_ethernet_ipv4_udp_stun_xor_mapped_address |
 //! | Ethernet → IPv4 → UDP → TURN ChannelData           | integration_ethernet_ipv4_udp_turn_channeldata       |
 //! | Ethernet → IPv4 → TCP → TURN ChannelData ×2        | integration_ethernet_ipv4_tcp_turn_channeldata_pipelined |
 //! | Ethernet → IPv4 → UDP → classic STUN (RFC 3489)    | integration_ethernet_ipv4_udp_classic_stun           |
@@ -8152,6 +8153,33 @@ fn integration_ethernet_ipv4_udp_stun_binding_request() {
         buf.field_by_name(stun, "magic_cookie").unwrap().value,
         FieldValue::U32(0x2112_A442)
     );
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_stun_xor_mapped_address() {
+    // RFC 5769, Section 2.2 — Binding response with XOR-MAPPED-ADDRESS
+    // 192.0.2.1:32853. https://www.rfc-editor.org/rfc/rfc5769#section-2.2
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 3478, 50000);
+    pkt.extend_from_slice(&[
+        0x01, 0x01, 0x00, 0x0c, 0x21, 0x12, 0xa4, 0x42, 0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6,
+        0x86, 0xfa, 0x87, 0xdf, 0xae, 0x00, 0x20, 0x00, 0x08, 0x00, 0x01, 0xa1, 0x47, 0xe1, 0x12,
+        0xa6, 0x43,
+    ]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let stun = buf.layer_by_name("STUN").unwrap();
+    let fields = buf.layer_fields(stun);
+    let find = |name: &str| fields.iter().find(|f| f.name() == name).unwrap();
+    assert_eq!(find("port").value, FieldValue::U16(32853));
+    assert_eq!(find("address").value, FieldValue::Ipv4Addr([192, 0, 2, 1]));
 }
 
 #[test]
