@@ -2173,9 +2173,15 @@ impl Default for DissectorRegistry {
         // SIP runs over UDP and TCP on port 5060 (RFC 3261)
         #[cfg(feature = "sip")]
         {
+            // RFC 3261, Section 18.3 — body framing differs between UDP and
+            // stream transports, so UDP gets the datagram variant.
+            // https://www.rfc-editor.org/rfc/rfc3261#section-18.3
             #[cfg(feature = "udp")]
             assert_builtin(
-                reg.register_by_udp_port(5060, Box::new(packet_dissector_sip::SipDissector)),
+                reg.register_by_udp_port(
+                    5060,
+                    Box::new(packet_dissector_sip::SipDatagramDissector),
+                ),
             );
 
             #[cfg(feature = "tcp")]
@@ -2184,6 +2190,9 @@ impl Default for DissectorRegistry {
             );
 
             reg.register_dissector_factory("sip", || Box::new(packet_dissector_sip::SipDissector));
+            reg.register_dissector_factory("sip.udp", || {
+                Box::new(packet_dissector_sip::SipDatagramDissector)
+            });
         }
 
         // SDP is carried as a message body, dispatched by MIME content type
@@ -2515,6 +2524,8 @@ mod tests {
         assert!(reg.create_dissector_by_name("bgp").is_some());
         #[cfg(feature = "sip")]
         assert!(reg.create_dissector_by_name("sip").is_some());
+        #[cfg(feature = "sip")]
+        assert!(reg.create_dissector_by_name("sip.udp").is_some());
     }
 
     #[test]
