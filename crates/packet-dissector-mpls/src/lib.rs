@@ -1683,6 +1683,52 @@ mod tests {
         assert_eq!(ach_channel_type_name(0x0003), None);
     }
 
+    /// Every assigned code point in the IANA G-ACh Types registry has a name.
+    /// <https://www.iana.org/assignments/g-ach-parameters/g-ach-parameters.xhtml>
+    #[test]
+    fn ach_channel_type_names_cover_registry() {
+        let assigned = [0x0000u16, 0x0001, 0x0002]
+            .into_iter()
+            .chain(0x0007..=0x0015)
+            .chain(0x0021..=0x002A)
+            .chain(0x0057..=0x0059)
+            .chain(0x7FF8..=0x7FFF)
+            .chain([0x8902]);
+        for ct in assigned {
+            assert!(ach_channel_type_name(ct).is_some(), "0x{ct:04X}");
+        }
+        for ct in [0x0003u16, 0x0006, 0x0016, 0x0020, 0x002B, 0x0056, 0x005A] {
+            assert_eq!(ach_channel_type_name(ct), None, "0x{ct:04X}");
+        }
+    }
+
+    #[test]
+    fn display_fns_ignore_unexpected_value_types() {
+        let label = ENTRY_CHILDREN[FD_ENTRY_LABEL].display_fn.unwrap();
+        assert_eq!(label(&FieldValue::U8(0), &[]), None);
+        let channel_type = ACH_FIELD_DESCRIPTORS[FD_ACH_CHANNEL_TYPE]
+            .display_fn
+            .unwrap();
+        assert_eq!(channel_type(&FieldValue::U8(0), &[]), None);
+    }
+
+    /// Only up to two VLAN tags (802.1ad S-tag, 802.1Q C-tag) are skipped
+    /// before the EtherType check.
+    #[test]
+    fn looks_like_ethernet_rejects_three_vlan_tags() {
+        let mut frame = vec![0x02; 12];
+        frame.extend_from_slice(&[0x88, 0xA8, 0x00, 0x0A, 0x81, 0x00, 0x00, 0x14]);
+        frame.extend_from_slice(&[0x81, 0x00, 0x00, 0x1E, 0x08, 0x00]);
+        assert!(!looks_like_ethernet(&frame));
+        assert!(looks_like_ethernet(
+            &frame[..12]
+                .iter()
+                .chain(&frame[16..])
+                .copied()
+                .collect::<Vec<_>>()
+        ));
+    }
+
     #[test]
     fn references_and_layer_are_populated() {
         fn check(dissector: &dyn Dissector, layer: ProtocolLayer) {
