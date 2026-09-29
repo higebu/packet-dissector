@@ -241,7 +241,7 @@ fn registration_request_suci_imsi() {
     assert_eq!(u8_of(&ksi, "nas_key_set_identifier"), 7);
     assert_eq!(
         display(&ksi, "nas_key_set_identifier"),
-        Some("no key is available")
+        Some("no key is available (UE to network); reserved (network to UE)")
     );
 
     let id = ie(&buf, &top, "5GS mobile identity");
@@ -645,6 +645,13 @@ fn identity_request() {
     let t = ie(&buf, &top, "Identity type");
     assert_eq!(u8_of(&t, "type_of_identity"), 1);
     assert_eq!(display(&t, "type_of_identity"), Some("SUCI"));
+
+    // Table 9.11.3.3.1 has no "No identity": value 0 is unused.
+    let buf = dissect(&[0x7e, 0x00, 0x5b, 0x00]);
+    let top = top_level(&buf);
+    let t = ie(&buf, &top, "Identity type");
+    assert_eq!(u8_of(&t, "type_of_identity"), 0);
+    assert_eq!(display(&t, "type_of_identity"), None);
 }
 
 /// UL NAS transport carrying a 5GSM PDU session establishment request —

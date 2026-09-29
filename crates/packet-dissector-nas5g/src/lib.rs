@@ -86,7 +86,7 @@ const SHT_INTEGRITY_PROTECTED_AND_CIPHERED_NEW_CONTEXT: u8 = 4;
 
 // ── Field descriptors for 5GMM plain messages ──────────────────────────
 
-static FD_EPD: FieldDescriptor = FieldDescriptor {
+pub(crate) static FD_EPD: FieldDescriptor = FieldDescriptor {
     name: "extended_protocol_discriminator",
     display_name: "Extended Protocol Discriminator",
     field_type: FieldType::U8,
@@ -150,16 +150,16 @@ static FD_RAW_NAS: FieldDescriptor =
 
 // ── Field descriptors for 5GSM messages ────────────────────────────────
 
-static FD_PDU_SESSION_ID: FieldDescriptor =
+pub(crate) static FD_PDU_SESSION_ID: FieldDescriptor =
     FieldDescriptor::new("pdu_session_id", "PDU Session ID", FieldType::U8);
 
-static FD_PTI: FieldDescriptor = FieldDescriptor::new(
+pub(crate) static FD_PTI: FieldDescriptor = FieldDescriptor::new(
     "procedure_transaction_identity",
     "Procedure Transaction Identity",
     FieldType::U8,
 );
 
-static FD_SM_MESSAGE_TYPE: FieldDescriptor = FieldDescriptor {
+pub(crate) static FD_SM_MESSAGE_TYPE: FieldDescriptor = FieldDescriptor {
     name: "message_type",
     display_name: "Message Type",
     field_type: FieldType::U8,

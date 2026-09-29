@@ -261,10 +261,9 @@ fn common_cause_name(cause: u8) -> Option<&'static str> {
     })
 }
 
-/// Type of identity name.
+/// Type of identity name of a 5GS mobile identity.
 ///
-/// 3GPP TS 24.501, Section 9.11.3.4, Table 9.11.3.4.1 and Section
-/// 9.11.3.3, Table 9.11.3.3.1.
+/// 3GPP TS 24.501, Section 9.11.3.4, Table 9.11.3.4.1.
 fn type_of_identity_name(t: u8) -> Option<&'static str> {
     Some(match t {
         0 => "No identity",
@@ -277,6 +276,18 @@ fn type_of_identity_name(t: u8) -> Option<&'static str> {
         7 => "EUI-64",
         _ => return None,
     })
+}
+
+/// Type of identity name of a 5GS identity type IE.
+///
+/// 3GPP TS 24.501, Section 9.11.3.3, Table 9.11.3.3.1. Unlike Table
+/// 9.11.3.4.1, value 0 is not "No identity": "All other values are unused
+/// and shall be interpreted as \"SUCI\", if received by the UE."
+fn identity_type_name(t: u8) -> Option<&'static str> {
+    match t {
+        0 => None,
+        _ => type_of_identity_name(t),
+    }
 }
 
 /// SUPI format name.
@@ -354,7 +365,7 @@ fn tsc_name(t: u8) -> Option<&'static str> {
 /// 3GPP TS 24.501, Section 9.11.3.32, Table 9.11.3.32.1: value "111" is
 /// "no key is available (UE to network); reserved (network to UE)".
 fn ksi_name(k: u8) -> Option<&'static str> {
-    (k == 7).then_some("no key is available")
+    (k == 7).then_some("no key is available (UE to network); reserved (network to UE)")
 }
 
 /// Type of list name of a partial tracking area identity list.
@@ -783,6 +794,14 @@ plain!(
 plain!(FD_MAC_ADDRESS, "mac_address", "MAC Address", MacAddr);
 plain!(FD_EUI64, "eui_64", "EUI-64", Bytes);
 
+// 5GS identity type (9.11.3.3).
+named_u8!(
+    FD_IDENTITY_TYPE,
+    "type_of_identity",
+    "Type of Identity",
+    identity_type_name
+);
+
 // NAS key set identifier (9.11.3.32).
 named_u8!(FD_TSC, "tsc", "Type of Security Context", tsc_name);
 named_u8!(
@@ -920,18 +939,10 @@ named_u8!(
 /// (`information_elements` → `n1_sm_message` → `information_elements`)
 /// does not form an initializer cycle.
 static N1_SM_CHILDREN: [FieldDescriptor; 7] = [
-    FieldDescriptor::new(
-        "extended_protocol_discriminator",
-        "Extended Protocol Discriminator",
-        FieldType::U8,
-    ),
-    FieldDescriptor::new("pdu_session_id", "PDU Session ID", FieldType::U8),
-    FieldDescriptor::new(
-        "procedure_transaction_identity",
-        "Procedure Transaction Identity",
-        FieldType::U8,
-    ),
-    FieldDescriptor::new("message_type", "Message Type", FieldType::U8),
+    crate::FD_EPD,
+    crate::FD_PDU_SESSION_ID,
+    crate::FD_PTI,
+    crate::FD_SM_MESSAGE_TYPE,
     FD_INFORMATION_ELEMENTS,
     FD_UNDECODED_OCTETS,
     FD_MISSING_MANDATORY_IE,
@@ -1628,7 +1639,7 @@ fn push_half_value(
         // TS 24.501, 9.11.3.47: value in bits 1 to 3.
         Value::RequestType => u8_field(buf, &FD_REQUEST_TYPE, nibble & 0x07),
         // TS 24.501, 9.11.3.3: type of identity in bits 1 to 3.
-        Value::IdentityType => u8_field(buf, &FD_TYPE_OF_IDENTITY, nibble & 0x07),
+        Value::IdentityType => u8_field(buf, &FD_IDENTITY_TYPE, nibble & 0x07),
         // TS 24.501, 9.11.3.20: switch off in bit 4, re-registration
         // required in bit 3, access type in bits 1 and 2.
         Value::DeregistrationType => {
@@ -1997,8 +2008,7 @@ fn push_tai<'pkt>(
     tac: &[u8],
     tac_at: usize,
 ) {
-    let start = plmn_at.min(tac_at);
-    let idx = buf.begin_container(&FD_TAI, FieldValue::Object(0..0), start..tac_at + 3);
+    let idx = buf.begin_container(&FD_TAI, FieldValue::Object(0..0), plmn_at..tac_at + 3);
     push_plmn(buf, plmn, plmn_at);
     buf.push_field(&FD_TAC, FieldValue::U32(be_u24(tac)), tac_at..tac_at + 3);
     buf.end_container(idx);
@@ -2306,27 +2316,22 @@ fn push_qos_rule_body<'pkt>(
 
     // "QoS rule precedence (octet m+1)" and "Segregation / QFI (octet
     // m+2)"; "Octet m+2 shall not be included without octet m+1."
-    match data.len() - pos {
-        0 => {}
-        1 => {
-            buf.push_field(
-                &FD_QOS_RULE_PRECEDENCE,
-                FieldValue::U8(data[pos]),
-                offset + pos..offset + pos + 1,
-            );
-        }
-        2 => {
-            buf.push_field(
-                &FD_QOS_RULE_PRECEDENCE,
-                FieldValue::U8(data[pos]),
-                offset + pos..offset + pos + 1,
-            );
-            let o = data[pos + 1];
-            let r = offset + pos + 1..offset + pos + 2;
-            buf.push_field(&FD_SEGREGATION, FieldValue::U8((o >> 6) & 1), r.clone());
-            buf.push_field(&FD_QFI, FieldValue::U8(o & 0x3f), r);
-        }
-        _ => return false,
+    let tail = data.len() - pos;
+    if tail > 2 {
+        return false;
+    }
+    if tail >= 1 {
+        buf.push_field(
+            &FD_QOS_RULE_PRECEDENCE,
+            FieldValue::U8(data[pos]),
+            offset + pos..offset + pos + 1,
+        );
+    }
+    if tail == 2 {
+        let o = data[pos + 1];
+        let r = offset + pos + 1..offset + pos + 2;
+        buf.push_field(&FD_SEGREGATION, FieldValue::U8((o >> 6) & 1), r.clone());
+        buf.push_field(&FD_QFI, FieldValue::U8(o & 0x3f), r);
     }
     true
 }
@@ -2706,6 +2711,20 @@ mod tests {
                 (7, "EUI-64"),
             ],
         );
+        // TS 24.501, Table 9.11.3.3.1: "All other values are unused and
+        // shall be interpreted as \"SUCI\", if received by the UE."
+        assert_table(
+            identity_type_name,
+            &[
+                (1, "SUCI"),
+                (2, "5G-GUTI"),
+                (3, "IMEI"),
+                (4, "5G-S-TMSI"),
+                (5, "IMEISV"),
+                (6, "MAC address"),
+                (7, "EUI-64"),
+            ],
+        );
         for (v, n) in [
             (0, "IMSI"),
             (1, "Network specific identifier"),
@@ -2750,7 +2769,10 @@ mod tests {
         assert_eq!(tsc_name(0), Some("native security context"));
         assert_eq!(tsc_name(1), Some("mapped security context"));
         assert_eq!(ksi_name(0), None);
-        assert_eq!(ksi_name(7), Some("no key is available"));
+        assert_eq!(
+            ksi_name(7),
+            Some("no key is available (UE to network); reserved (network to UE)")
+        );
         assert_eq!(
             type_of_list_name(0),
             Some("list of TACs belonging to one PLMN or SNPN, with non-consecutive TAC values")
@@ -3123,6 +3145,32 @@ mod tests {
         assert_raw(
             Value::QosFlowDescriptions,
             &[0x01, 0x20, 0x41, 0x01, 0x02, 0x09],
+        );
+    }
+
+    #[test]
+    fn n1_sm_schema_uses_pushed_header_descriptors() {
+        // The schema must describe the descriptors push_5gsm actually
+        // pushes, including their display functions.
+        let names: Vec<_> = N1_SM_CHILDREN[..4].iter().map(|d| d.name).collect();
+        assert_eq!(
+            names,
+            [
+                "extended_protocol_discriminator",
+                "pdu_session_id",
+                "procedure_transaction_identity",
+                "message_type",
+            ]
+        );
+        let epd = N1_SM_CHILDREN[0].display_fn.unwrap();
+        assert_eq!(
+            epd(&FieldValue::U8(0x2e), &[]),
+            Some("5GS session management")
+        );
+        let mt = N1_SM_CHILDREN[3].display_fn.unwrap();
+        assert_eq!(
+            mt(&FieldValue::U8(0xc1), &[]),
+            Some("PDU session establishment request")
         );
     }
 
