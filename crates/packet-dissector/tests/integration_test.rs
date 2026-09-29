@@ -79,6 +79,7 @@
 //! | Ethernet → MPLS (GAL) → ACH → BFD                    | integration_ethernet_mpls_gal_ach_bfd                |
 //! | Ethernet → MPLS → PW-ACH → IPv4 → UDP                | integration_ethernet_mpls_pw_ach_ipv4                |
 //! | Ethernet → MPLS → PW-CW → Ethernet → IPv4 → UDP      | integration_ethernet_mpls_pw_control_word_ethernet   |
+//! | Ethernet → MPLS → Ethernet PW without CW (DA 00:..)  | integration_ethernet_mpls_pw_without_control_word_does_not_fail |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
 //! | Ethernet → IPv4 → UDP → NTP (Control, mode 6)        | integration_ethernet_ipv4_udp_ntp_control_request    |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
@@ -4328,6 +4329,33 @@ fn integration_ethernet_mpls_pw_ach_ipv4() {
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "MPLS", "ACH", "IPv4", "UDP"]);
     assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → MPLS → Ethernet PW *without* a control word whose destination
+/// MAC starts with nibble 0. The first nibble cannot tell this apart from a
+/// control word (RFC 4928 §3 — <https://www.rfc-editor.org/rfc/rfc4928#section-3>),
+/// but the Length bits the MAC lands on are reserved for an Ethernet PW
+/// (RFC 4448 §4.6 — <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>), so
+/// they must not cut the payload short and fail the whole packet.
+#[test]
+fn integration_ethernet_mpls_pw_without_control_word_does_not_fail() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, 16, 0, 1, 64);
+    // Tagged inner Ethernet: DA 00:1b:21:3a:4b:5c, VLAN 100, IPv4
+    pkt.extend_from_slice(&[0x00, 0x1B, 0x21, 0x3A, 0x4B, 0x5C]);
+    pkt.extend_from_slice(&[0x66; 6]);
+    pkt.extend_from_slice(&[0x81, 0x00, 0x00, 0x64, 0x08, 0x00]);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[1].name, "MPLS");
 }
 
 /// Ethernet → MPLS → PW control word → Ethernet → IPv4 → UDP (RFC 4385 §3 —

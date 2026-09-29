@@ -365,6 +365,9 @@ fn is_known_inner_ethertype(ethertype: u16) -> bool {
             | 0x8864 // PPPoE Session
             | 0x8809 // Slow Protocols (LACP)
             | 0x88CC // LLDP
+            | 0x88E7 // IEEE 802.1ah PBB (I-tag)
+            | 0x88F7 // PTP (IEEE 1588)
+            | 0x8902 // CFM / Y.1731 OAM (IEEE 802.1Q)
     )
 }
 
@@ -517,8 +520,9 @@ impl Dissector for AchDissector {
 /// `|0 0 0 0|Flags|FRG|Length|Sequence Number|`. The PW type, and hence the
 /// payload type, is signalled out of band, so the payload is only
 /// dispatched as Ethernet (RFC 4448) when it starts with a plausible
-/// Ethernet header; the guess is recorded in `payload_heuristic`. A
-/// non-zero Length bounds the payload.
+/// Ethernet header; the guess is recorded in `payload_heuristic`. Length is
+/// reported but not applied, since the Ethernet PW control word reserves it
+/// (RFC 4448, Section 4.6).
 ///
 /// - RFC 4385, Section 3: <https://www.rfc-editor.org/rfc/rfc4385#section-3>
 /// - RFC 4448, Section 4.6: <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>
@@ -587,17 +591,13 @@ impl Dissector for PwControlWordDissector {
         let length = ((word >> 16) & 0x3F) as u8;
         let sequence_number = (word & 0xFFFF) as u16;
 
-        // RFC 4385, Section 3 — "If the MPLS payload is less than 64 bytes,
-        // the length field MUST be set to the length of the PW payload plus
-        // the length of the PWMCW. Otherwise it MUST be set to zero." A value
-        // below the control word size cannot be valid and is not used.
-        // https://www.rfc-editor.org/rfc/rfc4385#section-3
-        let payload_len = (length as usize).checked_sub(CONTROL_WORD_SIZE);
+        // The only payload this dissector dispatches is Ethernet, whose
+        // control word reserves bits 4-15: "They MUST be set to 0 when
+        // transmitting, and MUST be ignored upon receipt." (RFC 4448,
+        // Section 4.6). The RFC 4385 Length field is therefore reported but
+        // never used to bound the payload.
+        // https://www.rfc-editor.org/rfc/rfc4448#section-4.6
         let payload = &data[CONTROL_WORD_SIZE..];
-        let payload = match payload_len {
-            Some(len) => &payload[..len.min(payload.len())],
-            None => payload,
-        };
 
         buf.begin_layer(
             self.short_name(),
@@ -643,12 +643,16 @@ impl Dissector for PwControlWordDissector {
         };
         buf.end_layer();
 
-        let result = DissectResult::new(CONTROL_WORD_SIZE, next);
-        Ok(match payload_len {
-            Some(len) => result.with_payload_len(len),
-            None => result,
-        })
+        Ok(DissectResult::new(CONTROL_WORD_SIZE, next))
     }
+}
+
+/// Extend the result of a dissector run on the bytes after the label stack
+/// (`stack_len` bytes) so that it counts the label stack too, keeping every
+/// other field of the nested result.
+fn nested(stack_len: usize, mut result: DissectResult) -> Result<DissectResult, PacketError> {
+    result.bytes_consumed += stack_len;
+    Ok(result)
 }
 
 /// MPLS dissector.
@@ -707,9 +711,11 @@ impl Dissector for MplsDissector {
             offset..offset,
         );
 
-        // The previous entry's label when it was a special-purpose label
-        // (not an entropy or extended special-purpose label). After the
-        // loop it describes the bottom entry.
+        // The previous entry's label, or `None` when that entry was an
+        // entropy label or an extended special-purpose label (whose value is
+        // not a special-purpose label). After the loop it describes the
+        // bottom entry: `None` means the bottom label must not be read as a
+        // special-purpose label.
         let mut previous_label = None;
 
         // RFC 3032, Section 2.1 — parse label stack entries until Bottom of Stack (S=1).
@@ -820,11 +826,11 @@ impl Dissector for MplsDissector {
         // extended special-purpose label carries an arbitrary value, not a
         // special-purpose label.
         // https://www.rfc-editor.org/rfc/rfc3032#section-2.1
-        let bottom_is_special = previous_label.is_some();
+        let bottom_may_be_special = previous_label.is_some();
         let payload = &data[pos..];
         let first_nibble = payload.first().map(|b| b >> 4);
         let has_word = payload.len() >= 4;
-        let next = match (bottom_is_special, bottom_label) {
+        let next = match (bottom_may_be_special, bottom_label) {
             // RFC 3032, Section 2.1 (updated by RFC 4182): Label 0 → IPv4.
             (true, LABEL_IPV4_EXPLICIT_NULL) => DispatchHint::ByEtherType(0x0800),
             // RFC 3032, Section 2.1 (updated by RFC 4182): Label 2 → IPv6.
@@ -836,8 +842,7 @@ impl Dissector for MplsDissector {
             // https://www.rfc-editor.org/rfc/rfc5586#section-4
             (true, LABEL_GAL) => {
                 if has_word && first_nibble == Some(NIBBLE_ACH) {
-                    let ach = AchDissector.dissect(payload, buf, offset + pos)?;
-                    return Ok(DissectResult::new(pos + ach.bytes_consumed, ach.next));
+                    return nested(pos, AchDissector.dissect(payload, buf, offset + pos)?);
                 }
                 DispatchHint::End
             }
@@ -852,18 +857,15 @@ impl Dissector for MplsDissector {
                 // Reserved octet, which "MUST be sent as 0", must be zero too.
                 // https://www.rfc-editor.org/rfc/rfc4385#section-5
                 Some(NIBBLE_ACH) if has_word && payload[1] == 0 => {
-                    let ach = AchDissector.dissect(payload, buf, offset + pos)?;
-                    return Ok(DissectResult::new(pos + ach.bytes_consumed, ach.next));
+                    return nested(pos, AchDissector.dissect(payload, buf, offset + pos)?);
                 }
                 // RFC 4385, Section 3 — PW MPLS Control Word.
                 // https://www.rfc-editor.org/rfc/rfc4385#section-3
                 Some(NIBBLE_CONTROL_WORD) if has_word => {
-                    let cw = PwControlWordDissector.dissect(payload, buf, offset + pos)?;
-                    let result = DissectResult::new(pos + cw.bytes_consumed, cw.next);
-                    return Ok(match cw.payload_len {
-                        Some(len) => result.with_payload_len(len),
-                        None => result,
-                    });
+                    return nested(
+                        pos,
+                        PwControlWordDissector.dissect(payload, buf, offset + pos)?,
+                    );
                 }
                 _ => DispatchHint::End,
             },
@@ -890,7 +892,7 @@ mod tests {
     // | 4385 §5     | PW-ACH (first nibble 1)            | parse_mpls_pw_ach_ipv4              |
     // | 4385 §5     | ACH version, reserved              | parse_mpls_ach_unknown_version      |
     // | 4385 §3     | PW control word + Ethernet guess   | parse_mpls_pw_control_word_ethernet |
-    // | 4385 §3     | CW Flags/FRG/Length bound payload  | parse_mpls_pw_control_word_length_and_flags |
+    // | 4385 §3     | CW Flags/FRG/Length fields         | parse_mpls_pw_control_word_length_and_flags |
     // | 4385 §3     | CW Length 1-3 ignored              | parse_mpls_pw_control_word_invalid_length_ignored |
     // | 4385 §3     | CW with unknown payload            | parse_mpls_pw_control_word_unknown_payload |
     // | 4385 §3     | Truncated CW                       | parse_mpls_pw_control_word_truncated |
@@ -902,7 +904,8 @@ mod tests {
     // | 4928 §3     | Unknown first nibble → End         | parse_mpls_payload_unknown_nibble   |
     // | 6790 §3     | Bottom EL/ESPL is not reserved     | parse_mpls_bottom_entropy_label_is_not_reserved |
     // | 4385 §5     | PW-ACH needs zero Reserved w/o GAL | parse_mpls_pw_ach_requires_zero_reserved_without_gal |
-    // | 4385 §3     | Heuristic bounded by CW Length     | parse_mpls_pw_control_word_heuristic_respects_length |
+    // | 4448 §4.6   | CW Length ignored for Ethernet     | parse_mpls_pw_control_word_length_not_applied_to_ethernet |
+    // | 4448 §4.6   | CFM / PBB / PTP Ethernet payloads  | parse_mpls_pw_control_word_more_ethertypes |
     // | 4448 §4.6   | QinQ / PPPoE Ethernet PW payload   | parse_mpls_pw_control_word_qinq_and_pppoe |
     // | 5586 / 4385 | Standalone ACH / CW dissectors     | standalone_ach_and_control_word_dissectors |
     // | 4928 §3     | First nibble heuristic IPv4        | parse_mpls_payload_heuristic        |
@@ -1207,6 +1210,9 @@ mod tests {
     /// RFC 5586, Section 4 — GAL at the bottom of the stack: an ACH follows
     /// (RFC 5586, Section 2.1). The example is VCCV BFD, channel type 0x0007
     /// (RFC 5885, Section 3.2).
+    /// <https://www.rfc-editor.org/rfc/rfc5586#section-4>
+    /// <https://www.rfc-editor.org/rfc/rfc5586#section-2.1>
+    /// <https://www.rfc-editor.org/rfc/rfc5885#section-3.2>
     #[test]
     fn parse_mpls_gal_ach_bfd() {
         let mut raw = mpls_entry(LABEL_GAL, 0, 1, 1).to_vec();
@@ -1241,6 +1247,8 @@ mod tests {
     /// RFC 4385, Section 5 — without GAL, a first nibble of 0001 is a PW
     /// Associated Channel Header. Channel type 0x0021 carries IPv4
     /// (RFC 4385, Section 6).
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-5>
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-6>
     #[test]
     fn parse_mpls_pw_ach_ipv4() {
         let mut raw = mpls_entry(1000, 0, 1, 64).to_vec();
@@ -1259,6 +1267,7 @@ mod tests {
     /// RFC 4385, Section 5 — "This specification defines version 0." An ACH
     /// with another version is reported but not dispatched. Reserved bits
     /// are "ignored on reception".
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-5>
     #[test]
     fn parse_mpls_ach_unknown_version() {
         let mut raw = mpls_entry(LABEL_GAL, 0, 1, 1).to_vec();
@@ -1272,6 +1281,7 @@ mod tests {
 
     /// RFC 5586, Section 2.1 — the ACH first nibble is 0001. A GAL followed by
     /// anything else, or by fewer than 4 bytes, has no decodable ACH.
+    /// <https://www.rfc-editor.org/rfc/rfc5586#section-2.1>
     #[test]
     fn parse_mpls_gal_without_valid_ach() {
         let mut raw = mpls_entry(LABEL_GAL, 0, 1, 1).to_vec();
@@ -1293,6 +1303,8 @@ mod tests {
     /// Flags (4), FRG (2), Length (6), Sequence Number (16). The payload of an
     /// Ethernet PW (RFC 4448, Section 4.6) is recognised by a plausible
     /// Ethernet header, and the guess is visible in `payload_heuristic`.
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-3>
+    /// <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>
     #[test]
     fn parse_mpls_pw_control_word_ethernet() {
         let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
@@ -1328,9 +1340,13 @@ mod tests {
         );
     }
 
-    /// RFC 4385, Section 3 — the non-zero Length (PW payload plus control
-    /// word) bounds the payload, so Ethernet padding is not decoded. Flags
-    /// and FRG are decoded from bits 4-7 and 8-9.
+    /// RFC 4385, Section 3 — Flags, FRG and Length are decoded from bits
+    /// 4-7, 8-9 and 10-15
+    /// (<https://www.rfc-editor.org/rfc/rfc4385#section-3>). For an Ethernet
+    /// payload those bits are reserved and "MUST be ignored upon receipt"
+    /// (RFC 4448, Section 4.6 —
+    /// <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>), so Length does
+    /// not bound the payload.
     #[test]
     fn parse_mpls_pw_control_word_length_and_flags() {
         let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
@@ -1342,7 +1358,7 @@ mod tests {
         raw.extend_from_slice(&[0x00; 6]); // padding
         let (buf, result) = dissect(&raw).expect("dissect failed");
         assert_eq!(result.next, DispatchHint::ByEtherType(0x6558));
-        assert_eq!(result.payload_len, Some(18));
+        assert_eq!(result.payload_len, None);
         assert_eq!(*layer_field(&buf, "PW-CW", "flags"), FieldValue::U8(0x0A));
         assert_eq!(*layer_field(&buf, "PW-CW", "frg"), FieldValue::U8(0x02));
         assert_eq!(*layer_field(&buf, "PW-CW", "length"), FieldValue::U8(22));
@@ -1394,6 +1410,7 @@ mod tests {
 
     /// RFC 4385, Section 3 — a Length of 1-3 cannot include the 4-byte
     /// control word, so it does not bound the payload.
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-3>
     #[test]
     fn parse_mpls_pw_control_word_invalid_length_ignored() {
         let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
@@ -1407,6 +1424,8 @@ mod tests {
 
     /// RFC 7274, Section 3 and the IANA Special-Purpose MPLS Label Values
     /// registry — label names.
+    /// <https://www.rfc-editor.org/rfc/rfc7274#section-3>
+    /// <https://www.iana.org/assignments/mpls-label-values/mpls-label-values.xhtml>
     #[test]
     fn special_purpose_label_names() {
         assert_eq!(
@@ -1446,6 +1465,7 @@ mod tests {
 
     /// RFC 6790, Section 3 — the label after an Entropy Label Indicator is an
     /// entropy label. Its value is not a special-purpose label.
+    /// <https://www.rfc-editor.org/rfc/rfc6790#section-3>
     #[test]
     fn parse_mpls_entropy_label_after_eli() {
         let mut raw = mpls_entry(100, 0, 0, 64).to_vec();
@@ -1477,6 +1497,7 @@ mod tests {
 
     /// RFC 7274, Section 3.1 — the label after the Extension Label is an
     /// extended special-purpose label, not a special-purpose one.
+    /// <https://www.rfc-editor.org/rfc/rfc7274#section-3.1>
     #[test]
     fn parse_mpls_extended_special_purpose_label_after_xl() {
         let mut raw = mpls_entry(LABEL_XL, 0, 0, 64).to_vec();
@@ -1511,6 +1532,8 @@ mod tests {
     /// A bottom-of-stack entropy label (RFC 6790, Section 3) or extended
     /// special-purpose label (RFC 7274, Section 3.1) is not a reserved label,
     /// even when its value is 0, 2 or 13.
+    /// <https://www.rfc-editor.org/rfc/rfc6790#section-3>
+    /// <https://www.rfc-editor.org/rfc/rfc7274#section-3.1>
     #[test]
     fn parse_mpls_bottom_entropy_label_is_not_reserved() {
         let mut raw = mpls_entry(LABEL_ELI, 0, 0, 0).to_vec();
@@ -1531,6 +1554,7 @@ mod tests {
     /// first nibble alone identifies a PW-ACH, so a non-zero reserved octet
     /// is taken as a sign that the payload is something else (for example an
     /// Ethernet PW without a control word) and is not decoded as an ACH.
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-5>
     #[test]
     fn parse_mpls_pw_ach_requires_zero_reserved_without_gal() {
         let mut raw = mpls_entry(1000, 0, 1, 64).to_vec();
@@ -1541,24 +1565,43 @@ mod tests {
         assert!(buf.layer_by_name("ACH").is_none());
     }
 
-    /// RFC 4385, Section 3 — when Length bounds the payload, the Ethernet
-    /// heuristic only looks at the payload, not at the padding after it.
+    /// RFC 4448, Section 4.6 — the Length bits are reserved in the Ethernet
+    /// PW control word and "MUST be ignored upon receipt"
+    /// (<https://www.rfc-editor.org/rfc/rfc4448#section-4.6>). A first-nibble-0
+    /// word that is really the start of a destination MAC (an Ethernet PW
+    /// without a control word, which the first nibble cannot tell apart —
+    /// RFC 4928, Section 3, <https://www.rfc-editor.org/rfc/rfc4928#section-3>)
+    /// must not cut the payload short and fail the whole dissection.
     #[test]
-    fn parse_mpls_pw_control_word_heuristic_respects_length() {
+    fn parse_mpls_pw_control_word_length_not_applied_to_ethernet() {
         let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
-        raw.extend_from_slice(&[0x00, 0x0A, 0x00, 0x01]); // Length 10: 6-byte payload
-        raw.extend_from_slice(&[0x00; 6]); // payload
-        raw.extend_from_slice(&[0x00; 6]); // padding
-        raw.extend_from_slice(&[0x08, 0x00]); // padding that looks like an EtherType
-        let (buf, result) = dissect(&raw).expect("dissect failed");
-        assert_eq!(result.next, DispatchHint::End);
-        assert_eq!(result.payload_len, Some(6));
-        let cw = buf.layer_by_name("PW-CW").unwrap();
-        assert!(buf.field_by_name(cw, "payload_heuristic").is_none());
+        // Tagged Ethernet frame without a control word: DA 00:1b:21:3a:4b:5c
+        raw.extend_from_slice(&[0x00, 0x1B, 0x21, 0x3A, 0x4B, 0x5C]);
+        raw.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        raw.extend_from_slice(&[0x81, 0x00, 0x00, 0x64, 0x08, 0x00]);
+        raw.extend_from_slice(&[0x45; 28]);
+        let (_, result) = dissect(&raw).expect("dissect failed");
+        assert_eq!(result.next, DispatchHint::ByEtherType(0x6558));
+        assert_eq!(result.payload_len, None);
+    }
+
+    /// Ethernet PWs also carry CFM / Y.1731 (0x8902), PBB (0x88E7) and PTP
+    /// (0x88F7) frames.
+    #[test]
+    fn parse_mpls_pw_control_word_more_ethertypes() {
+        for ethertype in [[0x89, 0x02], [0x88, 0xE7], [0x88, 0xF7]] {
+            let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
+            raw.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+            raw.extend_from_slice(&[0x02; 12]);
+            raw.extend_from_slice(&ethertype);
+            let (_, result) = dissect(&raw).expect("dissect failed");
+            assert_eq!(result.next, DispatchHint::ByEtherType(0x6558));
+        }
     }
 
     /// RFC 4448, Section 4.6 — an Ethernet PW commonly carries QinQ frames
     /// (802.1ad S-tag, then 802.1Q C-tag) and PPPoE.
+    /// <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>
     #[test]
     fn parse_mpls_pw_control_word_qinq_and_pppoe() {
         let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
