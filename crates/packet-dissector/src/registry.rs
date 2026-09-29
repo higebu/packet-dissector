@@ -26,7 +26,11 @@ fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
 /// and `payload_len` is [`DissectResult::payload_len`]. The result never
 /// exceeds `end`, so a captured buffer shorter than the declared length
 /// (snaplen truncation) keeps its actual end.
-fn bound_payload_end(end: usize, payload_start: usize, payload_len: Option<usize>) -> usize {
+pub(crate) fn bound_payload_end(
+    end: usize,
+    payload_start: usize,
+    payload_len: Option<usize>,
+) -> usize {
     match payload_len {
         Some(len) => end.min(payload_start.saturating_add(len)),
         None => end,
@@ -54,6 +58,7 @@ pub struct DissectorRegistry {
     by_udp_port: HashMap<u16, Box<dyn Dissector>>,
     /// SCTP port table — mirrors Wireshark's `sctp.port` dissector table.
     by_sctp_port: HashMap<u16, Box<dyn Dissector>>,
+    by_sctp_ppid: HashMap<u32, Box<dyn Dissector>>,
     /// IPv6 Routing Header type table — mirrors Wireshark's `ipv6.routing.type` dissector table.
     by_ipv6_routing_type: HashMap<u8, Box<dyn Dissector>>,
     /// Content-type table — dispatches message bodies by MIME type.
@@ -85,6 +90,7 @@ impl DissectorRegistry {
             by_tcp_port: HashMap::new(),
             by_udp_port: HashMap::new(),
             by_sctp_port: HashMap::new(),
+            by_sctp_ppid: HashMap::new(),
             by_content_type: HashMap::new(),
             by_ipv6_routing_type: HashMap::new(),
             ipv6_routing_fallback: None,
@@ -285,6 +291,44 @@ impl DissectorRegistry {
         dissector: Box<dyn Dissector>,
     ) -> Option<Box<dyn Dissector>> {
         self.by_sctp_port.insert(port, dissector)
+    }
+
+    /// Register a dissector for a given SCTP Payload Protocol Identifier.
+    ///
+    /// Used for [`DispatchHint::BySctpPpid`], before the SCTP ports are
+    /// tried. PPID 0 means "unspecified" (RFC 9260, Section 3.3.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>) and is never
+    /// looked up, so a dissector registered for it is not used. Returns an
+    /// error if a dissector is already registered for this PPID. Use
+    /// [`register_by_sctp_ppid_or_replace`](Self::register_by_sctp_ppid_or_replace)
+    /// to intentionally override an existing registration.
+    pub fn register_by_sctp_ppid(
+        &mut self,
+        ppid: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        if let Some(existing) = self.by_sctp_ppid.get(&ppid) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "sctp_ppid",
+                key: ppid as u64,
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        self.by_sctp_ppid.insert(ppid, dissector);
+        Ok(())
+    }
+
+    /// Register a dissector for a given SCTP Payload Protocol Identifier,
+    /// replacing any existing one.
+    ///
+    /// Returns the previously registered dissector, if any.
+    pub fn register_by_sctp_ppid_or_replace(
+        &mut self,
+        ppid: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        self.by_sctp_ppid.insert(ppid, dissector)
     }
 
     /// Register a dissector for a given IPv6 Routing Header type.
@@ -517,6 +561,11 @@ impl DissectorRegistry {
         self.by_sctp_port.get(&port).map(|d| d.as_ref())
     }
 
+    /// Look up a dissector by SCTP Payload Protocol Identifier.
+    pub fn get_by_sctp_ppid(&self, ppid: u32) -> Option<&dyn Dissector> {
+        self.by_sctp_ppid.get(&ppid).map(|d| d.as_ref())
+    }
+
     /// Look up a dissector by IPv6 Routing Header type.
     ///
     /// Returns the type-specific dissector if one is registered, otherwise
@@ -603,7 +652,8 @@ impl DissectorRegistry {
     /// stops as soon as a port-based dispatch hint
     /// ([`ByTcpPort`](DispatchHint::ByTcpPort) /
     /// [`ByUdpPort`](DispatchHint::ByUdpPort) /
-    /// [`BySctpPort`](DispatchHint::BySctpPort)) is produced. The protocol
+    /// [`BySctpPort`](DispatchHint::BySctpPort) /
+    /// [`BySctpPpid`](DispatchHint::BySctpPpid)) is produced. The protocol
     /// that would handle the next layer is resolved from the dispatch tables
     /// and reported as [`DissectSummary::next_protocol`] so callers can still
     /// display it (e.g., in a packet-list protocol column).
@@ -647,8 +697,8 @@ impl DissectorRegistry {
     ) -> Result<DissectSummary, PacketError> {
         let entry = self.entry_dissector()?;
         let mut summary = DissectSummary::new();
-        self.dissect_from_entry(entry, data, buf, &mut |_, hint| {
-            self.summary_stop(hint, &mut summary)
+        self.dissect_from_entry(entry, data, buf, &mut |buf, hint| {
+            self.summary_stop(buf, hint, &mut summary)
         })?;
         Ok(summary)
     }
@@ -664,20 +714,37 @@ impl DissectorRegistry {
     ) -> Result<DissectSummary, PacketError> {
         let entry = self.entry_dissector_for_link_type(link_type)?;
         let mut summary = DissectSummary::new();
-        self.dissect_from_entry(entry, data, buf, &mut |_, hint| {
-            self.summary_stop(hint, &mut summary)
+        self.dissect_from_entry(entry, data, buf, &mut |buf, hint| {
+            self.summary_stop(buf, hint, &mut summary)
         })?;
         Ok(summary)
     }
 
     /// Summary stop predicate: stop at the first port-based dispatch hint
     /// and record the next protocol's short name.
-    fn summary_stop(&self, hint: &DispatchHint, summary: &mut DissectSummary) -> bool {
+    ///
+    /// When the hint itself resolves to no dissector, the payloads the
+    /// transport layer recorded in `buf` (e.g. bundled SCTP DATA chunks) are
+    /// tried in order, so a later user message can name the protocol.
+    fn summary_stop(
+        &self,
+        buf: &DissectBuffer<'_>,
+        hint: &DispatchHint,
+        summary: &mut DissectSummary,
+    ) -> bool {
         match hint {
             DispatchHint::ByTcpPort(..)
             | DispatchHint::ByUdpPort(..)
-            | DispatchHint::BySctpPort(..) => {
-                summary.next_protocol = self.lookup_dissector(hint).map(|d| d.short_name());
+            | DispatchHint::BySctpPort(..)
+            | DispatchHint::BySctpPpid { .. } => {
+                summary.next_protocol = self
+                    .lookup_dissector(hint)
+                    .or_else(|| {
+                        buf.embedded_payloads()
+                            .iter()
+                            .find_map(|p| self.lookup_dissector(&p.next))
+                    })
+                    .map(|d| d.short_name());
                 true
             }
             _ => false,
@@ -833,7 +900,7 @@ impl DissectorRegistry {
     ///
     /// Port-based hints try the lower port first, then the higher port,
     /// mirroring Wireshark's dual-port dispatch strategy.
-    fn lookup_dissector(&self, hint: &DispatchHint) -> Option<&dyn Dissector> {
+    pub(crate) fn lookup_dissector(&self, hint: &DispatchHint) -> Option<&dyn Dissector> {
         match hint {
             DispatchHint::End => None,
             DispatchHint::ByEtherType(et) => self.get_by_ethertype(*et),
@@ -852,6 +919,22 @@ impl DissectorRegistry {
                 let (low, high) = ((*src).min(*dst), (*src).max(*dst));
                 self.get_by_sctp_port(low)
                     .or_else(|| self.get_by_sctp_port(high))
+            }
+            DispatchHint::BySctpPpid {
+                ppid,
+                src_port,
+                dst_port,
+            } => {
+                // RFC 9260, Section 3.3.1 — PPID 0 means no application
+                // identifier is specified —
+                // https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1
+                let by_ppid = match *ppid {
+                    0 => None,
+                    ppid => self.get_by_sctp_ppid(ppid),
+                };
+                by_ppid.or_else(|| {
+                    self.lookup_dissector(&DispatchHint::BySctpPort(*src_port, *dst_port))
+                })
             }
             DispatchHint::ByContentType(ct) => self.get_by_content_type(ct),
             DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
@@ -1035,39 +1118,14 @@ impl DissectorRegistry {
                         let remaining = end.saturating_sub(offset);
                         let payload_end = offset + ctx.payload_len.min(remaining);
                         let payload = &data[offset..payload_end];
-                        let upper_result = if payload.len() < ctx.payload_len {
-                            // The capture holds fewer bytes than the segment
-                            // occupies in sequence space (snaplen truncation).
-                            // Buffering them would leave a gap before the
-                            // next segment and stall the stream, so dissect
-                            // the captured bytes directly without reassembly.
-                            if payload.is_empty() {
-                                break;
-                            }
-                            Some(upper.dissect(payload, buf, offset)?)
-                        } else {
-                            self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)?
-                        };
-                        match upper_result {
-                            Some(upper_result) => {
-                                // Fast path succeeded — propagate the upper
-                                // dissector's result so chaining can continue.
-                                // Advance by bytes_consumed (not payload_end)
-                                // so partial consumption is handled correctly.
-                                let consumed = upper_result.bytes_consumed.min(payload.len());
-                                offset += consumed;
-                                end = bound_payload_end(end, offset, upper_result.payload_len);
-                                next = upper_result.next;
-                                continue;
-                            }
-                            None => {
-                                // Reassembly in progress or complete via
-                                // buffered path — terminate the chain since
-                                // offset coordinates are no longer consistent
-                                // with the current packet.
-                                break;
-                            }
-                        }
+                        // The capture may hold fewer bytes than the segment
+                        // occupies in sequence space (snaplen truncation).
+                        let captured_all = payload.len() >= ctx.payload_len;
+                        // The middleware dissects every message in the
+                        // segment (and their bodies) itself, so the chain
+                        // ends here.
+                        self.handle_tcp_segment(ctx, payload, captured_all, upper, buf, offset)?;
+                        break;
                     }
                     break;
                 }
@@ -1299,6 +1357,9 @@ impl DissectorRegistry {
         for d in self.by_sctp_port.values() {
             push(d.as_ref());
         }
+        for d in self.by_sctp_ppid.values() {
+            push(d.as_ref());
+        }
         for d in self.by_ipv6_routing_type.values() {
             push(d.as_ref());
         }
@@ -1324,6 +1385,16 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+        // The Slow Protocols dispatcher delegates by subtype; expose the
+        // schemas of the layers it produces.
+        #[cfg(feature = "lacp")]
+        {
+            push(&packet_dissector_lacp::LacpDissector);
+            push(&packet_dissector_lacp::MarkerDissector);
+            push(&packet_dissector_lacp::OamDissector);
+            push(&packet_dissector_lacp::OsspDissector);
+            push(&packet_dissector_lacp::EsmcDissector);
+        }
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
@@ -1391,6 +1462,7 @@ impl DissectorRegistry {
             DissectorTable::TcpPort(p) => self.register_by_tcp_port(p, dissector),
             DissectorTable::UdpPort(p) => self.register_by_udp_port(p, dissector),
             DissectorTable::SctpPort(p) => self.register_by_sctp_port(p, dissector),
+            DissectorTable::SctpPpid(ppid) => self.register_by_sctp_ppid(ppid, dissector),
             DissectorTable::ContentType(ct) => self.register_by_content_type(ct, dissector),
             DissectorTable::Ipv6RoutingType(rt) => {
                 self.register_by_ipv6_routing_type(rt, dissector)
@@ -1424,6 +1496,9 @@ impl DissectorRegistry {
             DissectorTable::TcpPort(p) => self.register_by_tcp_port_or_replace(p, dissector),
             DissectorTable::UdpPort(p) => self.register_by_udp_port_or_replace(p, dissector),
             DissectorTable::SctpPort(p) => self.register_by_sctp_port_or_replace(p, dissector),
+            DissectorTable::SctpPpid(ppid) => {
+                self.register_by_sctp_ppid_or_replace(ppid, dissector)
+            }
             DissectorTable::ContentType(ct) => {
                 self.register_by_content_type_or_replace(ct, dissector)
             }
@@ -1985,11 +2060,13 @@ impl Default for DissectorRegistry {
             reg.register_by_ethertype(0x0806, Box::new(packet_dissector_arp::ArpDissector)),
         );
 
-        // EtherType 0x8809 — IEEE 802.3 Slow Protocols (LACP is subtype 0x01)
+        // EtherType 0x8809 — IEEE 802.3 Slow Protocols; the dispatcher selects
+        // LACP, Marker, OAM or OSSP/ESMC by subtype (IEEE 802.3 Annex 57A)
         #[cfg(feature = "lacp")]
-        assert_builtin(
-            reg.register_by_ethertype(0x8809, Box::new(packet_dissector_lacp::LacpDissector)),
-        );
+        assert_builtin(reg.register_by_ethertype(
+            0x8809,
+            Box::new(packet_dissector_lacp::SlowProtocolsDissector),
+        ));
 
         // LLDP uses EtherType 0x88CC (IEEE 802.1AB)
         #[cfg(feature = "lldp")]
@@ -2329,6 +2406,17 @@ impl Default for DissectorRegistry {
                 3868,
                 Box::new(packet_dissector_diameter::DiameterDissector),
             ));
+            // IANA "SCTP Payload Protocol Identifiers": 46 = Diameter in a
+            // SCTP DATA chunk —
+            // https://www.iana.org/assignments/sctp-parameters/
+            // RFC 6733, Section 2.1.1 — https://www.rfc-editor.org/rfc/rfc6733#section-2.1.1
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_ppid(
+                    46,
+                    Box::new(packet_dissector_diameter::DiameterDissector),
+                ),
+            );
             reg.register_dissector_factory("diameter", || {
                 Box::new(packet_dissector_diameter::DiameterDissector)
             });
@@ -2340,6 +2428,13 @@ impl Default for DissectorRegistry {
             #[cfg(feature = "sctp")]
             assert_builtin(
                 reg.register_by_sctp_port(38412, Box::new(packet_dissector_ngap::NgapDissector)),
+            );
+            // IANA "SCTP Payload Protocol Identifiers": 60 = NGAP
+            // (3GPP TS 38.413) —
+            // https://www.iana.org/assignments/sctp-parameters/
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_ppid(60, Box::new(packet_dissector_ngap::NgapDissector)),
             );
             reg.register_dissector_factory("ngap", || {
                 Box::new(packet_dissector_ngap::NgapDissector)
@@ -3191,6 +3286,89 @@ mod tests {
     }
 
     #[test]
+    fn register_by_sctp_ppid_rejects_duplicate_and_replaces() {
+        let mut reg = DissectorRegistry::new();
+        assert!(reg.get_by_sctp_ppid(46).is_none());
+        reg.register_by_sctp_ppid(46, Box::new(StubDissector("diameter")))
+            .unwrap();
+        let err = reg
+            .register_by_sctp_ppid(46, Box::new(StubDissector("diameter-dup")))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RegistrationError::DuplicateDispatchKey {
+                table: "sctp_ppid",
+                key: 46,
+                existing: "diameter",
+                new: "diameter-dup",
+            }
+        );
+        let previous = reg
+            .register_by_sctp_ppid_or_replace(46, Box::new(StubDissector("diameter-new")))
+            .unwrap();
+        assert_eq!(previous.short_name(), "diameter");
+        assert_eq!(
+            reg.get_by_sctp_ppid(46).unwrap().short_name(),
+            "diameter-new"
+        );
+
+        // Through the generic DissectorTable API.
+        reg.register_dissector(
+            DissectorTable::SctpPpid(60),
+            Box::new(StubDissector("ngap")),
+        )
+        .unwrap();
+        assert!(
+            reg.register_dissector_or_replace(
+                DissectorTable::SctpPpid(60),
+                Box::new(StubDissector("ngap-new"))
+            )
+            .is_some()
+        );
+        assert_eq!(reg.get_by_sctp_ppid(60).unwrap().short_name(), "ngap-new");
+        assert!(
+            reg.all_field_schemas()
+                .iter()
+                .any(|s| s.short_name == "ngap-new")
+        );
+    }
+
+    #[test]
+    fn sctp_ppid_hint_prefers_ppid_then_ports() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_sctp_ppid(46, Box::new(StubDissector("by-ppid")))
+            .unwrap();
+        reg.register_by_sctp_ppid(0, Box::new(StubDissector("ppid-zero")))
+            .unwrap();
+        reg.register_by_sctp_port(3868, Box::new(StubDissector("by-port")))
+            .unwrap();
+        let hint = |ppid, src_port, dst_port| DispatchHint::BySctpPpid {
+            ppid,
+            src_port,
+            dst_port,
+        };
+
+        // PPID wins over the port.
+        let d = reg.lookup_dissector(&hint(46, 49152, 3868)).unwrap();
+        assert_eq!(d.short_name(), "by-ppid");
+        // Unknown PPID falls back to the lower, then the higher port.
+        let d = reg.lookup_dissector(&hint(9999, 49152, 3868)).unwrap();
+        assert_eq!(d.short_name(), "by-port");
+        let d = reg.lookup_dissector(&hint(9999, 3868, 1)).unwrap();
+        assert_eq!(d.short_name(), "by-port");
+        // PPID 0 ("unspecified") never uses the PPID table.
+        let d = reg.lookup_dissector(&hint(0, 49152, 3868)).unwrap();
+        assert_eq!(d.short_name(), "by-port");
+        assert!(reg.lookup_dissector(&hint(0, 1, 2)).is_none());
+
+        // The summary stops at a PPID hint and names the next protocol.
+        let mut summary = DissectSummary::new();
+        let buf = DissectBuffer::new();
+        assert!(reg.summary_stop(&buf, &hint(46, 1, 2), &mut summary));
+        assert_eq!(summary.next_protocol, Some("by-ppid"));
+    }
+
+    #[test]
     fn register_by_sctp_port_or_replace_returns_previous() {
         let mut reg = DissectorRegistry::new();
         assert!(
@@ -3890,6 +4068,12 @@ mod tests {
 
         #[cfg(all(feature = "ngap", feature = "sctp"))]
         assert!(reg.get_by_sctp_port(38412).is_some());
+
+        // IANA "SCTP Payload Protocol Identifiers": 46 Diameter, 60 NGAP.
+        #[cfg(all(feature = "diameter", feature = "sctp"))]
+        assert_eq!(reg.get_by_sctp_ppid(46).unwrap().short_name(), "Diameter");
+        #[cfg(all(feature = "ngap", feature = "sctp"))]
+        assert_eq!(reg.get_by_sctp_ppid(60).unwrap().short_name(), "NGAP");
 
         #[cfg(all(any(feature = "l2tp", feature = "l2tpv3"), feature = "udp"))]
         assert!(reg.get_by_udp_port(1701).is_some());
