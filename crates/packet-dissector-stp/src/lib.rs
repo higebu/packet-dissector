@@ -56,28 +56,20 @@ const FD_MAX_AGE: usize = 18;
 const FD_HELLO_TIME: usize = 19;
 const FD_FORWARD_DELAY: usize = 20;
 const FD_VERSION1_LENGTH: usize = 21;
-const FD_ROOT_PRIORITY_COMPONENT: usize = 22;
-const FD_ROOT_SYSTEM_ID_EXTENSION: usize = 23;
-const FD_BRIDGE_PRIORITY_COMPONENT: usize = 24;
-const FD_BRIDGE_SYSTEM_ID_EXTENSION: usize = 25;
-const FD_PORT_PRIORITY: usize = 26;
-const FD_PORT_NUMBER: usize = 27;
-const FD_CIST_REGIONAL_ROOT_PRIORITY: usize = 28;
-const FD_CIST_REGIONAL_ROOT_MAC: usize = 29;
-const FD_VERSION3_LENGTH: usize = 30;
-const FD_MST_CONFIG_FORMAT_SELECTOR: usize = 31;
-const FD_MST_CONFIG_NAME: usize = 32;
-const FD_MST_CONFIG_REVISION: usize = 33;
-const FD_MST_CONFIG_DIGEST: usize = 34;
-const FD_CIST_INTERNAL_ROOT_PATH_COST: usize = 35;
-const FD_CIST_BRIDGE_PRIORITY: usize = 36;
-const FD_CIST_BRIDGE_PRIORITY_COMPONENT: usize = 37;
-const FD_CIST_BRIDGE_SYSTEM_ID_EXTENSION: usize = 38;
-const FD_CIST_BRIDGE_MAC: usize = 39;
-const FD_CIST_REMAINING_HOPS: usize = 40;
-const FD_MSTIS: usize = 41;
-const FD_VERSION4_LENGTH: usize = 42;
-const FD_UNPARSED: usize = 43;
+const FD_CIST_REGIONAL_ROOT_PRIORITY: usize = 22;
+const FD_CIST_REGIONAL_ROOT_MAC: usize = 23;
+const FD_VERSION3_LENGTH: usize = 24;
+const FD_MST_CONFIG_FORMAT_SELECTOR: usize = 25;
+const FD_MST_CONFIG_NAME: usize = 26;
+const FD_MST_CONFIG_REVISION: usize = 27;
+const FD_MST_CONFIG_DIGEST: usize = 28;
+const FD_CIST_INTERNAL_ROOT_PATH_COST: usize = 29;
+const FD_CIST_BRIDGE_PRIORITY: usize = 30;
+const FD_CIST_BRIDGE_MAC: usize = 31;
+const FD_CIST_REMAINING_HOPS: usize = 32;
+const FD_MSTIS: usize = 33;
+const FD_VERSION4_LENGTH: usize = 34;
+const FD_UNPARSED: usize = 35;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("protocol_id", "Protocol Identifier", FieldType::U16),
@@ -118,32 +110,6 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("hello_time", "Hello Time", FieldType::U16).optional(),
     FieldDescriptor::new("forward_delay", "Forward Delay", FieldType::U16).optional(),
     FieldDescriptor::new("version1_length", "Version 1 Length", FieldType::U8).optional(),
-    FieldDescriptor::new(
-        "root_priority_component",
-        "Root Bridge Priority (priority component)",
-        FieldType::U16,
-    )
-    .optional(),
-    FieldDescriptor::new(
-        "root_system_id_extension",
-        "Root Bridge System ID Extension",
-        FieldType::U16,
-    )
-    .optional(),
-    FieldDescriptor::new(
-        "bridge_priority_component",
-        "Bridge Priority (priority component)",
-        FieldType::U16,
-    )
-    .optional(),
-    FieldDescriptor::new(
-        "bridge_system_id_extension",
-        "Bridge System ID Extension",
-        FieldType::U16,
-    )
-    .optional(),
-    FieldDescriptor::new("port_priority", "Port Priority", FieldType::U8).optional(),
-    FieldDescriptor::new("port_number", "Port Number", FieldType::U16).optional(),
     FieldDescriptor::new(
         "cist_regional_root_priority",
         "CIST Regional Root Priority",
@@ -191,18 +157,6 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new(
         "cist_bridge_priority",
         "CIST Bridge Priority",
-        FieldType::U16,
-    )
-    .optional(),
-    FieldDescriptor::new(
-        "cist_bridge_priority_component",
-        "CIST Bridge Priority (priority component)",
-        FieldType::U16,
-    )
-    .optional(),
-    FieldDescriptor::new(
-        "cist_bridge_system_id_extension",
-        "CIST Bridge System ID Extension",
         FieldType::U16,
     )
     .optional(),
@@ -749,13 +703,6 @@ impl StpDissector {
             FieldValue::U16(root_priority),
             offset + 5..offset + 7,
         );
-        push_id_split(
-            buf,
-            FD_ROOT_PRIORITY_COMPONENT,
-            FD_ROOT_SYSTEM_ID_EXTENSION,
-            root_priority,
-            offset + 5,
-        );
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_ROOT_MAC],
             FieldValue::MacAddr(root_mac),
@@ -778,13 +725,6 @@ impl StpDissector {
             FieldValue::U16(bridge_priority),
             offset + 17..offset + 19,
         );
-        push_id_split(
-            buf,
-            FD_BRIDGE_PRIORITY_COMPONENT,
-            FD_BRIDGE_SYSTEM_ID_EXTENSION,
-            bridge_priority,
-            offset + 17,
-        );
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_BRIDGE_MAC],
             FieldValue::MacAddr(bridge_mac),
@@ -806,22 +746,11 @@ impl StpDissector {
             );
         }
 
-        // Port Identifier (2 octets at offset 25). IEEE 802.1Q-2022,
-        // Section 14.2.7: 4-bit priority component, 12-bit Port Number.
+        // Port Identifier (2 octets at offset 25).
         let port_id = read_be_u16(data, 25).unwrap_or_default();
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_PORT_ID],
             FieldValue::U16(port_id),
-            offset + 25..offset + 27,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_PORT_PRIORITY],
-            FieldValue::U8((port_id >> 8) as u8 & 0xF0),
-            offset + 25..offset + 27,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_PORT_NUMBER],
-            FieldValue::U16(port_id & 0x0FFF),
             offset + 25..offset + 27,
         );
 
@@ -858,29 +787,6 @@ impl StpDissector {
             offset + 33..offset + 35,
         );
     }
-}
-
-/// Push the priority component and system ID extension of the 16-bit
-/// priority part of a Bridge Identifier starting at `start`.
-///
-/// IEEE 802.1Q-2022, Section 14.2.5.
-fn push_id_split(
-    buf: &mut DissectBuffer<'_>,
-    fd_component: usize,
-    fd_extension: usize,
-    id_priority: u16,
-    start: usize,
-) {
-    buf.push_field(
-        &FIELD_DESCRIPTORS[fd_component],
-        FieldValue::U16(priority_component(id_priority)),
-        start..start + 2,
-    );
-    buf.push_field(
-        &FIELD_DESCRIPTORS[fd_extension],
-        FieldValue::U16(system_id_extension(id_priority)),
-        start..start + 2,
-    );
 }
 
 /// Push the MST BPDU fields that follow Version 1 Length.
@@ -937,13 +843,6 @@ fn push_mst_fields<'pkt>(
         &FIELD_DESCRIPTORS[FD_CIST_BRIDGE_PRIORITY],
         FieldValue::U16(cist_bridge_priority),
         at(CIST_BRIDGE_ID_OFFSET, 2),
-    );
-    push_id_split(
-        buf,
-        FD_CIST_BRIDGE_PRIORITY_COMPONENT,
-        FD_CIST_BRIDGE_SYSTEM_ID_EXTENSION,
-        cist_bridge_priority,
-        offset + CIST_BRIDGE_ID_OFFSET,
     );
     let mac = &data[CIST_BRIDGE_ID_OFFSET + 2..CIST_BRIDGE_ID_OFFSET + 8];
     buf.push_field(

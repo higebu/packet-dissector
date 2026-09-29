@@ -11,8 +11,7 @@
 //! | IEEE 802.1D-2004 §9.3.1   | Flags: TC and TCA bits                   | parse_stp_flags_tc_tca        |
 //! | IEEE 802.1w-2004 §9.3.3   | RSTP flags: all bits                     | parse_rstp_flags_all          |
 //! | IEEE 802.1D-2004 §9.2.5   | Bridge ID: priority + MAC                | parse_stp_bridge_id           |
-//! | IEEE 802.1Q §14.2.5       | Bridge ID priority / system ID extension | parse_stp_bridge_id_split     |
-//! | IEEE 802.1Q §14.2.7       | Port ID priority / port number           | parse_stp_bridge_id_split     |
+//! | IEEE 802.1Q §14.2.5       | Bridge ID kept as the raw 16-bit value   | parse_stp_bridge_id_split     |
 //! | IEEE 802.1Q §14.2.9       | Port Role names (Unknown vs Master)      | parse_port_role_names         |
 //! | IEEE 802.1Q §14.4 a)–u)   | MST BPDU without MSTI messages           | parse_mst_bpdu_no_msti        |
 //! | IEEE 802.1Q §14.4 j)      | Octets 18–25 = CIST Regional Root in MST | parse_mst_bpdu_no_msti        |
@@ -678,7 +677,8 @@ fn parse_spt_bpdu_version4() {
 
 #[test]
 fn parse_stp_bridge_id_split() {
-    // Priority 32768 + VLAN 100 (PVST+ / MSTP system ID extension), port 0x8001.
+    // Priority 32768 + VLAN 100 (PVST+ / MSTP system ID extension): the
+    // 16-bit priority part is reported as-is; no split fields are emitted.
     let data = build_config_bpdu(
         0x8064,
         [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
@@ -692,34 +692,12 @@ fn parse_stp_bridge_id_split() {
     StpDissector.dissect(&data, &mut buf, 0).unwrap();
     assert_eq!(field(&buf, "root_priority"), Some(&FieldValue::U16(0x8064)));
     assert_eq!(
-        field(&buf, "root_priority_component"),
-        Some(&FieldValue::U16(32768))
+        field(&buf, "bridge_priority"),
+        Some(&FieldValue::U16(0x7065))
     );
-    assert_eq!(
-        field(&buf, "root_system_id_extension"),
-        Some(&FieldValue::U16(100))
-    );
-    assert_eq!(
-        field(&buf, "bridge_priority_component"),
-        Some(&FieldValue::U16(28672))
-    );
-    assert_eq!(
-        field(&buf, "bridge_system_id_extension"),
-        Some(&FieldValue::U16(101))
-    );
-    assert_eq!(field(&buf, "port_priority"), Some(&FieldValue::U8(128)));
-    assert_eq!(field(&buf, "port_number"), Some(&FieldValue::U16(1)));
-    let layer = buf.layer_by_name("STP").unwrap();
-    assert_eq!(
-        buf.field_by_name(layer, "root_system_id_extension")
-            .unwrap()
-            .range,
-        5..7
-    );
-    assert_eq!(
-        buf.field_by_name(layer, "port_number").unwrap().range,
-        25..27
-    );
+    assert_eq!(field(&buf, "port_id"), Some(&FieldValue::U16(0x8001)));
+    assert!(field(&buf, "root_system_id_extension").is_none());
+    assert!(field(&buf, "port_number").is_none());
 }
 
 #[test]
