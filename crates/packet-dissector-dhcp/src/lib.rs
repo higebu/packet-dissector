@@ -1253,29 +1253,30 @@ fn push_radius_attributes<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8],
         start..start + data.len(),
     );
     let mut i = 0;
-    while i + 2 <= data.len() {
-        let attr_len = data[i + 1] as usize;
-        if attr_len < 2 || i + attr_len > data.len() {
-            break;
-        }
+    // Each attribute is Type, Length (covering the whole attribute), Value.
+    while let Some(attr) = data
+        .get(i + 1)
+        .and_then(|&len| data.get(i..i + len as usize))
+        .filter(|attr| attr.len() >= 2)
+    {
         let base = start + i;
         let obj_idx = buf.begin_container(
             &FD_RADIUS_ATTRIBUTE,
             FieldValue::Object(0..0),
-            base..base + attr_len,
+            base..base + attr.len(),
         );
         buf.push_field(
             &RADIUS_ATTRIBUTE_CHILDREN[CFD_RADIUS_TYPE],
-            FieldValue::U8(data[i]),
+            FieldValue::U8(attr[0]),
             base..base + 1,
         );
         buf.push_field(
             &RADIUS_ATTRIBUTE_CHILDREN[CFD_RADIUS_VALUE],
-            FieldValue::Bytes(&data[i + 2..i + attr_len]),
-            base + 2..base + attr_len,
+            FieldValue::Bytes(&attr[2..]),
+            base + 2..base + attr.len(),
         );
         buf.end_container(obj_idx);
-        i += attr_len;
+        i += attr.len();
     }
     buf.end_container(arr_idx);
 }
@@ -1316,17 +1317,17 @@ fn push_vendor_entries<'pkt>(
 ) {
     let arr_idx = buf.begin_container(fd, FieldValue::Array(0..0), range);
     let mut i = 0;
-    while i + 5 <= data.len() {
-        let data_len = data[i + 4] as usize;
-        if i + 5 + data_len > data.len() {
-            break;
-        }
-        let enterprise = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+    // Each entry is enterprise-number (4), data-len (1), data.
+    while let Some(entry) = data
+        .get(i + 4)
+        .and_then(|&len| data.get(i..i + 5 + len as usize))
+    {
+        let enterprise = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]);
         let base = start + i;
         let obj_idx = buf.begin_container(
             &FD_VENDOR_ENTRY,
             FieldValue::Object(0..0),
-            base..base + 5 + data_len,
+            base..base + entry.len(),
         );
         buf.push_field(
             &VENDOR_ENTRY_CHILDREN[CFD_VENDOR_ENTERPRISE_NUMBER],
@@ -1335,11 +1336,11 @@ fn push_vendor_entries<'pkt>(
         );
         buf.push_field(
             &VENDOR_ENTRY_CHILDREN[CFD_VENDOR_DATA],
-            FieldValue::Bytes(&data[i + 5..i + 5 + data_len]),
-            base + 5..base + 5 + data_len,
+            FieldValue::Bytes(&entry[5..]),
+            base + 5..base + entry.len(),
         );
         buf.end_container(obj_idx);
-        i += 5 + data_len;
+        i += entry.len();
     }
     buf.end_container(arr_idx);
 }
@@ -1377,17 +1378,18 @@ fn push_user_class<'pkt>(
     let fd = &FIELD_DESCRIPTORS[FD_USER_CLASS];
     let arr_idx = buf.begin_container(fd, FieldValue::Array(0..0), range);
     let mut i = 0;
-    while i < data.len() {
-        let uc_len = data[i] as usize;
-        if uc_len == 0 || i + 1 + uc_len > data.len() {
-            break;
-        }
+    // Each instance is UC_Len_i (1, non-zero), then that many octets.
+    while let Some(class) = data
+        .get(i)
+        .and_then(|&len| data.get(i + 1..i + 1 + len as usize))
+        .filter(|class| !class.is_empty())
+    {
         buf.push_field(
             fd,
-            FieldValue::Bytes(&data[i + 1..i + 1 + uc_len]),
-            start + i + 1..start + i + 1 + uc_len,
+            FieldValue::Bytes(class),
+            start + i + 1..start + i + 1 + class.len(),
         );
-        i += 1 + uc_len;
+        i += 1 + class.len();
     }
     buf.end_container(arr_idx);
 }
@@ -5012,14 +5014,35 @@ mod tests {
     #[test]
     fn parse_relay_sub_option_radius_attributes_malformed_raw() {
         // Attribute length 9 overruns the 4-octet sub-option; length 1 is
-        // below the RFC 2865 minimum of 2.
-        for sub in [&[7u8, 4, 1, 9, b'a', b'b'][..], &[7, 2, 1, 1]] {
+        // below the RFC 2865 minimum of 2; a lone octet after a complete
+        // attribute cannot hold a Type and Length.
+        for sub in [
+            &[7u8, 4, 1, 9, b'a', b'b'][..],
+            &[7, 2, 1, 1],
+            &[7, 4, 1, 3, b'a', 9],
+        ] {
             let pkt = discover_with_options(&[(82, sub)]);
             let mut buf = DissectBuffer::new();
             DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
             let fields = relay_sub_option_children(&buf);
             assert!(!fields.iter().any(|f| f.name() == "radius_attributes"));
             assert_eq!(child(&fields, "data").value, FieldValue::Bytes(&sub[2..]));
+        }
+    }
+
+    /// Empty RADIUS Attributes (7) and Vendor-Specific (9) sub-options have
+    /// no entries to decode.
+    #[test]
+    fn parse_relay_sub_option_empty_lists_not_decoded() {
+        for (sub, name) in [
+            (&[7u8, 0][..], "radius_attributes"),
+            (&[9, 0], "vendor_specific"),
+        ] {
+            let pkt = discover_with_options(&[(82, sub)]);
+            let mut buf = DissectBuffer::new();
+            DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            let fields = relay_sub_option_children(&buf);
+            assert!(!fields.iter().any(|f| f.name() == name), "{name}");
         }
     }
 
@@ -5442,12 +5465,8 @@ mod tests {
             if f.descriptor.field_type == FieldType::Array && !f.value.is_array() {
                 continue;
             }
-            assert_eq!(
-                f.value.field_type(),
-                f.descriptor.field_type,
-                "field {}",
-                f.name()
-            );
+            let name = f.name();
+            assert_eq!(f.value.field_type(), f.descriptor.field_type, "{name}");
         }
         assert!(buf.field_by_name(layer, "unknown_option").is_none());
         let subs = direct_children(&buf, top_field(&buf, "relay_agent_info"));
