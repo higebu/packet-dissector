@@ -927,6 +927,8 @@ version = "0.5.0"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-dns",
+ "packet-dissector-icmp",
+ "packet-dissector-icmpv6",
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-mdns",
