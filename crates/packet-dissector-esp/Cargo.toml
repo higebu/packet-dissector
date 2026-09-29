@@ -15,14 +15,22 @@ packet-dissector-core = { workspace = true }
 aes = { workspace = true, optional = true }
 cbc = { workspace = true, optional = true }
 aes-gcm = { workspace = true, optional = true }
+ccm = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true, optional = true }
+ctr = { workspace = true, optional = true }
+des = { workspace = true, optional = true }
 
 [features]
-decrypt = ["aes", "cbc", "aes-gcm"]
+decrypt = ["aes", "cbc", "aes-gcm", "ccm", "chacha20poly1305", "ctr", "des"]
 
 [dev-dependencies]
 aes = { workspace = true }
 aes-gcm = { workspace = true }
 cbc = { workspace = true }
+ccm = { workspace = true }
+chacha20poly1305 = { workspace = true }
+ctr = { workspace = true }
+des = { workspace = true }
 criterion = { workspace = true }
 packet-dissector-test-alloc = { workspace = true }
 
