@@ -1349,6 +1349,8 @@ mod tests {
     // | RFC 8260 2.1| I-DATA fields, PPID/FSN by B bit, dispatch     | parse_i_data_chunk                    |
     // | RFC 8260 2.1| I-DATA fragments not dispatched                | i_data_fragments_not_dispatched       |
     // | 3.2, 3.2.1  | Bytes after decoded fields shown as undecoded  | undecoded_trailing_bytes_shown        |
+    // | IANA        | Number of named values per registry            | registry_name_counts                  |
+    // | 3.2.1, 3.3.10 | Parameter / cause names in display labels    | parameter_and_cause_display_names     |
     // | ---         | No chunks => no `chunks` array field           | common_header_only_no_chunks_field    |
     // | ---         | Offset handling in byte ranges                 | dissect_with_offset                   |
     // | ---         | Field descriptors                              | field_descriptors_list                |
@@ -2549,6 +2551,73 @@ mod tests {
                 let arr = c.iter().find(|f| f.name() == decoded_field).unwrap();
                 assert_eq!(arr.range.end, start, "type {ctype}: array ends at last TLV");
             }
+        }
+    }
+
+    #[test]
+    fn registry_name_counts() {
+        // Every permanent assignment in the IANA "SCTP Parameters" registries
+        // (last updated 2026-08-13) has a name; temporary registrations and
+        // reserved values do not.
+        let chunk_types = (0..=u8::MAX).filter_map(sctp_chunk_type_name).count();
+        assert_eq!(chunk_types, 23);
+        let parameter_types = (0..=u16::MAX).filter_map(sctp_parameter_type_name).count();
+        assert_eq!(parameter_types, 28);
+        let cause_codes = (0..=u16::MAX).filter_map(sctp_cause_code_name).count();
+        assert_eq!(cause_codes, 19);
+        let ppids = (0..=5000u32).filter_map(sctp_ppid_name).count();
+        assert_eq!(ppids, 73);
+    }
+
+    #[test]
+    fn parameter_and_cause_display_names() {
+        let mut body = init_fixed(1, 2, 3, 4, 5);
+        param(&mut body, 5, &[192, 0, 2, 1]);
+        let mut data = build_common_header(5000, 3868, 0, 0);
+        push_chunk(&mut data, 1, 0, &body);
+        let mut cause_body = Vec::new();
+        cause(&mut cause_body, 12, b"bye");
+        push_chunk(&mut data, 6, 0, &cause_body);
+        let mut buf = DissectBuffer::new();
+        SctpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let label = |name: &str| {
+            let (idx, _) = buf
+                .fields()
+                .iter()
+                .enumerate()
+                .find(|(_, f)| f.name() == name)
+                .unwrap();
+            buf.resolve_container_display_name(idx as u32)
+        };
+        assert_eq!(label("parameter"), Some("IPv4 Address"));
+        assert_eq!(label("error_cause"), Some("User-Initiated Abort"));
+
+        let scalar = |name: &str, value: FieldValue<'static>| {
+            let f = buf.fields().iter().find(|f| f.name() == name).unwrap();
+            f.descriptor.display_fn.unwrap()(&value, &[])
+        };
+        assert_eq!(
+            scalar("code", FieldValue::U16(12)),
+            Some("User-Initiated Abort")
+        );
+        assert_eq!(scalar("code", FieldValue::U8(12)), None);
+        let ppid_display = CHUNK_CHILD_FIELDS[CFD_PPID].display_fn.unwrap();
+        assert_eq!(ppid_display(&FieldValue::U8(46), &[]), None);
+        let param_type = buf
+            .fields()
+            .iter()
+            .find(|f| f.name() == "type" && f.value == FieldValue::U16(5))
+            .unwrap();
+        let display = param_type.descriptor.display_fn.unwrap();
+        assert_eq!(display(&FieldValue::U16(5), &[]), Some("IPv4 Address"));
+        assert_eq!(display(&FieldValue::U8(5), &[]), None);
+
+        // Containers without a type/code child have no label.
+        for fd in [&FD_PARAMETER, &FD_ERROR_CAUSE] {
+            let display = fd.display_fn.unwrap();
+            assert_eq!(display(&FieldValue::Object(0..0), &[]), None);
+            assert_eq!(display(&FieldValue::U8(0), &[]), None);
         }
     }
 
