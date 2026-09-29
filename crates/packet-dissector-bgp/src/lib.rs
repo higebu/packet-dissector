@@ -12095,4 +12095,31 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn path_attribute_name_tables_have_unique_non_empty_names() {
+        // Walk every code point of each table: each name is non-empty and
+        // unique within its table, and the tables hold the expected number
+        // of registered values (IANA registries cited on each function).
+        fn check<T: Copy>(
+            values: impl Iterator<Item = T>,
+            f: fn(T) -> Option<&'static str>,
+        ) -> usize {
+            let names: Vec<&str> = values.filter_map(f).collect();
+            for (i, n) in names.iter().enumerate() {
+                assert!(!n.is_empty());
+                assert!(!names[i + 1..].contains(n), "duplicate name {n}");
+            }
+            names.len()
+        }
+        assert_eq!(check(0..=u8::MAX, path_attr_type_name), 31);
+        assert_eq!(check(0..=u8::MAX, pmsi_tunnel_type_name), 14);
+        assert_eq!(check(0..=u16::MAX, tunnel_type_name), 13);
+        assert_eq!(check(0..=u8::MAX, tunnel_sub_tlv_name), 19);
+        assert_eq!(check(0..=u16::MAX, bgp_ls_tlv_name), 109);
+        assert_eq!(check(0..=u8::MAX, aigp_tlv_type_name), 1);
+        assert_eq!(check(0..=u8::MAX, sfp_tlv_type_name), 5);
+        assert_eq!(check(0..=u8::MAX, bfd_mode_name), 1);
+        assert_eq!(check(0..=u8::MAX, bfd_optional_tlv_type_name), 1);
+    }
 }
