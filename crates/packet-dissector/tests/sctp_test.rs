@@ -12,10 +12,10 @@
 //! | 3.2         | Chunk padding to 4-byte boundary     | parse_sctp_chunk_padding              |
 //! | 3.2         | Chunk Length < 4 invalid              | parse_sctp_invalid_chunk_length       |
 //! | 3.2         | Chunk truncated                      | parse_sctp_truncated_chunk            |
-//! | 3.3.1       | DATA chunk embedded payload           | sctp_data_chunk_embedded_payload      |
+//! | 3.3.1       | DATA chunk user data recorded         | sctp_data_chunk_embedded_payload      |
 //! | 3.3.1       | DATA chunk with preceding chunks      | sctp_data_chunk_with_preceding_chunks |
 //! | —           | Header only (no chunks)              | parse_sctp_header_only                |
-//! | —           | No DATA chunk → no embedded payload  | sctp_no_data_chunk_no_payload         |
+//! | —           | No DATA chunk → no recorded payload  | sctp_no_data_chunk_no_payload         |
 //! | —           | Truncated common header              | parse_sctp_truncated                  |
 //! | —           | Offset handling                      | parse_sctp_with_offset                |
 //! | —           | Dissector metadata                   | sctp_dissector_metadata               |
@@ -371,10 +371,12 @@ fn sctp_data_chunk_embedded_payload() {
     let mut buf = DissectBuffer::new();
     let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
 
-    // embedded_payload should point to the user data within the DATA chunk.
-    // SCTP header = 12, DATA chunk header = 16, so user data starts at 28.
-    assert!(result.embedded_payload.is_some());
-    let range = result.embedded_payload.unwrap();
+    // The recorded payload should point to the user data within the DATA
+    // chunk. SCTP header = 12, DATA chunk header = 16, so user data starts
+    // at 28.
+    assert!(result.embedded_payload.is_none());
+    assert_eq!(buf.embedded_payloads().len(), 1);
+    let range = buf.embedded_payloads()[0].range.clone();
     assert_eq!(range.start, 28);
     assert_eq!(range.end, 28 + user_data.len());
     // Verify the bytes at that range match user data
@@ -392,6 +394,7 @@ fn sctp_no_data_chunk_no_payload() {
     let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
 
     assert!(result.embedded_payload.is_none());
+    assert!(buf.embedded_payloads().is_empty());
 }
 
 #[test]
@@ -409,8 +412,9 @@ fn sctp_data_chunk_with_preceding_chunks() {
     let mut buf = DissectBuffer::new();
     let result = SctpDissector.dissect(&data, &mut buf, 0).unwrap();
 
-    assert!(result.embedded_payload.is_some());
-    let range = result.embedded_payload.unwrap();
+    assert!(result.embedded_payload.is_none());
+    assert_eq!(buf.embedded_payloads().len(), 1);
+    let range = buf.embedded_payloads()[0].range.clone();
     // DATA chunk starts at data_chunk_start, user data at +16
     assert_eq!(range.start, data_chunk_start + 16);
     assert_eq!(range.end, data_chunk_start + 16 + user_data.len());

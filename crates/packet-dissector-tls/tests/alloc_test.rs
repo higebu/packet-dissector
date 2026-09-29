@@ -98,3 +98,55 @@ fn zero_alloc_dissect_tls_server_hello() {
         "TLS server_hello dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_tls_coalesced_server_flight() {
+    // TLS 1.3 ServerHello (supported_versions) + Certificate + ServerHelloDone
+    // in one record.
+    let mut raw = vec![0x16, 0x03, 0x03, 0x00, 0x3d];
+    raw.extend_from_slice(&[0x02, 0x00, 0x00, 0x2e, 0x03, 0x03]); // ServerHello
+    raw.extend_from_slice(&[0x22; 32]); // random
+    raw.extend_from_slice(&[0x00, 0x13, 0x01, 0x00]); // session_id, suite, comp
+    raw.extend_from_slice(&[0x00, 0x06, 0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]); // supported_versions
+    raw.extend_from_slice(&[0x0b, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00]); // Certificate
+    raw.extend_from_slice(&[0x0e, 0x00, 0x00, 0x00]); // ServerHelloDone
+    assert_eq!(raw.len(), 5 + 0x3d);
+
+    let mut buf = DissectBuffer::new();
+    TlsDissector.dissect(&raw, &mut buf, 0).unwrap();
+    assert_eq!(buf.layers()[0].display_name, Some("TLSv1.3"));
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        TlsDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "TLS coalesced handshake dissect allocated {allocs} times"
+    );
+}
+
+#[test]
+fn zero_alloc_dissect_tls_encrypted_records() {
+    // Encrypted alert and encrypted handshake (TLS 1.2, after ChangeCipherSpec).
+    let mut alert = vec![0x15, 0x03, 0x03, 0x00, 0x1a];
+    alert.extend_from_slice(&[0xab; 26]);
+    let mut finished = vec![0x16, 0x03, 0x03, 0x00, 0x28];
+    finished.extend_from_slice(&[0xab; 40]);
+
+    let mut buf = DissectBuffer::new();
+    TlsDissector.dissect(&alert, &mut buf, 0).unwrap();
+    buf.clear();
+    TlsDissector.dissect(&finished, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        TlsDissector.dissect(&alert, &mut buf, 0).unwrap();
+        buf.clear();
+        TlsDissector.dissect(&finished, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "TLS encrypted record dissect allocated {allocs} times"
+    );
+}

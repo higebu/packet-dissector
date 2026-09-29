@@ -11,6 +11,14 @@
 //! - RFC 4486 (Cease NOTIFICATION subcodes): <https://www.rfc-editor.org/rfc/rfc4486>
 //! - RFC 4659 (BGP-MPLS IP VPN Extension for IPv6 VPN): <https://www.rfc-editor.org/rfc/rfc4659>
 //! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
+//! - RFC 6368 (Internal BGP as PE-CE Protocol / ATTR_SET): <https://www.rfc-editor.org/rfc/rfc6368>
+//! - RFC 6514 (BGP Encodings for Multicast in MPLS/BGP IP VPNs / PMSI Tunnel): <https://www.rfc-editor.org/rfc/rfc6514>
+//! - RFC 7311 (Accumulated IGP Metric Attribute): <https://www.rfc-editor.org/rfc/rfc7311>
+//! - RFC 8205 (BGPsec Protocol Specification): <https://www.rfc-editor.org/rfc/rfc8205>
+//! - RFC 8365 (Network Virtualization Overlay Solution Using EVPN): <https://www.rfc-editor.org/rfc/rfc8365>
+//! - RFC 9015 (BGP Control Plane for the Network Service Header / SFP attribute): <https://www.rfc-editor.org/rfc/rfc9015>
+//! - RFC 9026 (Multicast VPN Fast Upstream Failover / BFD Discriminator): <https://www.rfc-editor.org/rfc/rfc9026>
+//! - RFC 9552 (BGP-LS): <https://www.rfc-editor.org/rfc/rfc9552>
 //! - RFC 4760 (Multiprotocol Extensions): <https://www.rfc-editor.org/rfc/rfc4760>
 //! - RFC 5492 (Capabilities Advertisement with BGP-4): <https://www.rfc-editor.org/rfc/rfc5492>
 //! - RFC 5065 (AS Confederations): <https://www.rfc-editor.org/rfc/rfc5065>
@@ -26,10 +34,13 @@
 //! - RFC 8950 (Extended Next Hop Encoding Capability): <https://www.rfc-editor.org/rfc/rfc8950>
 //! - RFC 9012 (Tunnel Encapsulation / Color): <https://www.rfc-editor.org/rfc/rfc9012>
 //! - RFC 9072 (Extended Optional Parameters Length): <https://www.rfc-editor.org/rfc/rfc9072>
-//! - RFC 9234 (BGP Role Capability): <https://www.rfc-editor.org/rfc/rfc9234>
+//! - RFC 9234 (BGP Role Capability / OTC attribute): <https://www.rfc-editor.org/rfc/rfc9234>
 //! - RFC 9252 (SRv6 BGP Services): <https://www.rfc-editor.org/rfc/rfc9252>
 //! - RFC 9494 (Long-Lived Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc9494>
 //! - IANA Capability Codes: <https://www.iana.org/assignments/capability-codes/capability-codes.xhtml>
+//! - IANA BGP Parameters: <https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml>
+//! - IANA BGP Tunnel Encapsulation: <https://www.iana.org/assignments/bgp-tunnel-encapsulation/bgp-tunnel-encapsulation.xhtml>
+//! - IANA BGP-LS Parameters: <https://www.iana.org/assignments/bgp-ls-parameters/bgp-ls-parameters.xhtml>
 //! - draft-abraitis-idr-addpath-paths-limit-04 (PATHS-LIMIT Capability): <https://datatracker.ietf.org/doc/draft-abraitis-idr-addpath-paths-limit/>
 //! - draft-ietf-bess-mup-safi-01 (MUP SAFI): <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
 //! - draft-walton-bgp-hostname-capability-02 (FQDN Capability): <https://datatracker.ietf.org/doc/draft-walton-bgp-hostname-capability/>
@@ -133,6 +144,36 @@
 //! |-------------|-------------|------|
 //! | 8 | ORIGINATOR_ID | `parse_bgp_update_originator_id` |
 //! | 8 | CLUSTER_LIST | `parse_bgp_update_cluster_list` |
+//!
+//! # Path Attribute Value Coverage (RFC 9234 / RFC 7311 / RFC 6514 / RFC 8365 / RFC 9012 / RFC 9552 / RFC 8205 / RFC 6368 / RFC 9015 / RFC 9026)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 9234 §5 | OTC (AS number) | `parse_bgp_update_otc` |
+//! | RFC 9234 §5 | OTC with a length other than 4 kept as raw bytes | `parse_bgp_update_otc_bad_length_is_raw` |
+//! | RFC 7311 §3 | AIGP TLV (u64 metric) and unknown TLV | `parse_bgp_update_aigp` |
+//! | RFC 7311 §3.2 | Malformed AIGP TLVs kept as raw bytes | `parse_bgp_update_aigp_malformed_is_raw` |
+//! | RFC 6514 §5 | PMSI Tunnel, Ingress Replication endpoint (IPv4 / IPv6) | `parse_bgp_update_pmsi_tunnel_ingress_replication`, `parse_bgp_update_pmsi_tunnel_ingress_replication_ipv6` |
+//! | RFC 6514 §5 | Other Tunnel Identifiers kept as bytes | `parse_bgp_update_pmsi_tunnel_other_type_keeps_identifier_bytes` |
+//! | RFC 6514 §5 | No tunnel information; truncated attribute kept raw | `parse_bgp_update_pmsi_tunnel_no_identifier_and_truncated` |
+//! | RFC 8365 §5.1.3 | PMSI MPLS Label field as a 24-bit VNI with VXLAN / NVGRE / VXLAN GPE | `parse_bgp_update_pmsi_tunnel_vni_with_vxlan_encapsulation` |
+//! | RFC 9012 §4.1 | Encapsulation Extended Community scan | `attr_context_scans_encapsulation_community` |
+//! | RFC 9012 §2, §3.1, §3.2, §3.3.2, §3.4.1, §3.4.2 | Tunnel TLVs and sub-TLVs (1- and 2-octet lengths) | `parse_bgp_update_tunnel_encapsulation` |
+//! | RFC 9012 §3.1, §3.4.2 | Egress Endpoint AF 0 / IPv6 / malformed, unrecognized Color | `parse_bgp_update_tunnel_encapsulation_sub_tlv_variants` |
+//! | RFC 9012 §13 | Overrunning TLVs / sub-TLVs kept as raw bytes | `parse_bgp_update_tunnel_encapsulation_malformed_is_raw` |
+//! | RFC 9552 §5.1, §5.3 | BGP-LS Attribute TLVs | `parse_bgp_update_bgp_ls_attribute` |
+//! | RFC 9552 §5.1 | Malformed BGP-LS Attribute kept as raw bytes | `parse_bgp_update_bgp_ls_attribute_malformed_is_raw` |
+//! | RFC 8205 §3.1, §3.2 | BGPsec_Path Secure_Path and Signature_Block | `parse_bgp_update_bgpsec_path` |
+//! | RFC 8205 §3 | Malformed BGPsec_Path kept as raw bytes | `parse_bgp_update_bgpsec_path_malformed_is_raw` |
+//! | RFC 6368 §5 | ATTR_SET Origin AS + nested attributes (4-octet AS_PATH) | `parse_bgp_update_attr_set` |
+//! | RFC 6368 §5 | ATTR_SET carrying MP_REACH_NLRI / MP_UNREACH_NLRI kept raw | `parse_bgp_update_attr_set_with_mp_reach_is_raw` |
+//! | RFC 6368 §5 | Nested ATTR_SET, 2-octet AS_PATH / AGGREGATOR inside ATTR_SET kept raw | `parse_bgp_update_attr_set_nested_attributes_constrained` |
+//! | RFC 6368 §5 | ATTR_SET shorter than 4 octets / bad nested attribute kept raw | `parse_bgp_update_attr_set_malformed_is_raw` |
+//! | RFC 9015 §3.2.1 | SFP attribute TLVs; overrunning TLV kept raw | `parse_bgp_update_sfp_attribute` |
+//! | RFC 9026 §3.1.6 | BFD Discriminator with Source IP Address TLV | `parse_bgp_update_bfd_discriminator` |
+//! | RFC 9026 §3.1.6 | Malformed BFD Discriminator kept as raw bytes | `parse_bgp_update_bfd_discriminator_malformed_is_raw` |
+//! | IANA BGP Parameters | Path attribute, PMSI, tunnel, BGP-LS, AIGP, SFP, BFD name tables | `path_attribute_value_name_tables` |
+//! | RFC 4271 §4.3 | Schema of the new `value` union members | `field_schema_exposes_new_path_attribute_value_children` |
 //!
 //! # RFC 4760 Coverage
 //!
@@ -259,7 +300,7 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{
-    read_be_u16, read_be_u24, read_be_u32, read_ipv4_addr, read_ipv6_addr,
+    read_be_u16, read_be_u24, read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr,
 };
 
 /// BGP message header size in bytes (RFC 4271, Section 4.1).
@@ -1413,14 +1454,386 @@ fn path_attr_type_name(v: u8) -> Option<&'static str> {
         18 => Some("AS4_AGGREGATOR"),
         22 => Some("PMSI_TUNNEL"),
         23 => Some("Tunnel Encapsulation"),
+        // RFC 5543 — https://www.rfc-editor.org/rfc/rfc5543
+        24 => Some("Traffic Engineering"),
+        // RFC 5701 — https://www.rfc-editor.org/rfc/rfc5701
+        25 => Some("IPv6 Address Specific Extended Community"),
         26 => Some("AIGP"),
+        // RFC 6514 — https://www.rfc-editor.org/rfc/rfc6514
+        27 => Some("PE Distinguisher Labels"),
         29 => Some("BGP-LS Attribute"),
         32 => Some("LARGE_COMMUNITY"),
         33 => Some("BGPsec_Path"),
         35 => Some("Only to Customer (OTC)"),
+        // RFC 10039 — https://www.rfc-editor.org/rfc/rfc10039
+        36 => Some("BGP Domain Path (D-PATH)"),
+        // RFC 9015 — https://www.rfc-editor.org/rfc/rfc9015
+        37 => Some("SFP attribute"),
+        // RFC 9026 — https://www.rfc-editor.org/rfc/rfc9026
+        38 => Some("BFD Discriminator"),
         40 => Some("BGP Prefix-SID"),
+        // RFC 9793 — https://www.rfc-editor.org/rfc/rfc9793
+        41 => Some("BIER"),
+        // RFC 6368 — https://www.rfc-editor.org/rfc/rfc6368
+        128 => Some("ATTR_SET"),
         _ => None,
     }
+}
+
+/// Returns a human-readable name for PMSI Tunnel Types.
+///
+/// RFC 6514, Section 5 — <https://www.rfc-editor.org/rfc/rfc6514#section-5>
+/// IANA P-Multicast Service Interface Tunnel (PMSI Tunnel) Tunnel Types —
+/// <https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#pmsi-tunnel-types>
+fn pmsi_tunnel_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        0x00 => Some("No tunnel information present"),
+        0x01 => Some("RSVP-TE P2MP LSP"),
+        0x02 => Some("mLDP P2MP LSP"),
+        0x03 => Some("PIM-SSM Tree"),
+        0x04 => Some("PIM-SM Tree"),
+        0x05 => Some("BIDIR-PIM Tree"),
+        0x06 => Some("Ingress Replication"),
+        0x07 => Some("mLDP MP2MP LSP"),
+        // RFC 7524 — https://www.rfc-editor.org/rfc/rfc7524
+        0x08 => Some("Transport Tunnel"),
+        // RFC 9574 — https://www.rfc-editor.org/rfc/rfc9574
+        0x0A => Some("Assisted Replication Tunnel"),
+        // RFC 8556 — https://www.rfc-editor.org/rfc/rfc8556
+        0x0B => Some("BIER"),
+        // RFC 10018 — https://www.rfc-editor.org/rfc/rfc10018
+        0x0C => Some("SR-MPLS P2MP Tree"),
+        0x0D => Some("SRv6 P2MP Tree"),
+        // RFC 8338 — https://www.rfc-editor.org/rfc/rfc8338
+        0xFF => Some("Wildcard Transport Tunnel Type"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for Tunnel Encapsulation Attribute Tunnel
+/// Types.
+///
+/// IANA BGP Tunnel Encapsulation Attribute Tunnel Types —
+/// <https://www.iana.org/assignments/bgp-tunnel-encapsulation/bgp-tunnel-encapsulation.xhtml#tunnel-types>
+fn tunnel_type_name(v: u16) -> Option<&'static str> {
+    match v {
+        1 => Some("L2TPv3 over IP"),
+        2 => Some("GRE"),
+        7 => Some("IP in IP"),
+        8 => Some("VXLAN Encapsulation"),
+        9 => Some("NVGRE Encapsulation"),
+        10 => Some("MPLS Encapsulation"),
+        11 => Some("MPLS in GRE Encapsulation"),
+        12 => Some("VXLAN GPE Encapsulation"),
+        13 => Some("MPLS in UDP Encapsulation"),
+        14 => Some("IPv6 Tunnel"),
+        15 => Some("SR Policy"),
+        16 => Some("Bare"),
+        19 => Some("Geneve Encapsulation"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for Tunnel Encapsulation Attribute Sub-TLV
+/// types.
+///
+/// IANA BGP Tunnel Encapsulation Attribute Sub-TLVs —
+/// <https://www.iana.org/assignments/bgp-tunnel-encapsulation/bgp-tunnel-encapsulation.xhtml#tunnel-sub-tlvs>
+fn tunnel_sub_tlv_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("Encapsulation"),
+        2 => Some("Protocol Type"),
+        4 => Some("Color"),
+        5 => Some("Load-Balancing Block"),
+        6 => Some("Tunnel Egress Endpoint"),
+        7 => Some("DS Field"),
+        8 => Some("UDP Destination Port"),
+        9 => Some("Embedded Label Handling"),
+        10 => Some("MPLS Label Stack"),
+        11 => Some("Prefix-SID"),
+        // RFC 9830 — https://www.rfc-editor.org/rfc/rfc9830
+        12 => Some("Preference"),
+        13 => Some("Binding SID"),
+        14 => Some("ENLP"),
+        15 => Some("Priority"),
+        // RFC 9015 — https://www.rfc-editor.org/rfc/rfc9015
+        16 => Some("SPI/SI Representation"),
+        // RFC 9830 — https://www.rfc-editor.org/rfc/rfc9830
+        20 => Some("SRv6 Binding SID"),
+        128 => Some("Segment List"),
+        129 => Some("SR Policy Candidate Path Name"),
+        130 => Some("SR Policy Name"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for BGP-LS Node / Link / Prefix Descriptor
+/// and Attribute TLV code points.
+///
+/// Only the code points assigned by RFCs are listed.
+///
+/// RFC 9552, Section 5 — <https://www.rfc-editor.org/rfc/rfc9552#section-5>
+/// IANA BGP-LS Node Descriptor, Link Descriptor, Prefix Descriptor, and
+/// Attribute TLVs —
+/// <https://www.iana.org/assignments/bgp-ls-parameters/bgp-ls-parameters.xhtml#node-descriptor-link-descriptor-prefix-descriptor-attribute-tlv>
+fn bgp_ls_tlv_name(v: u16) -> Option<&'static str> {
+    match v {
+        256 => Some("Local Node Descriptors"),
+        257 => Some("Remote Node Descriptors"),
+        258 => Some("Link Local/Remote Identifiers"),
+        259 => Some("IPv4 interface address"),
+        260 => Some("IPv4 neighbor address"),
+        261 => Some("IPv6 interface address"),
+        262 => Some("IPv6 neighbor address"),
+        263 => Some("Multi-Topology Identifier"),
+        264 => Some("OSPF Route Type"),
+        265 => Some("IP Reachability Information"),
+        266 => Some("Node MSD"),
+        267 => Some("Link MSD"),
+        512 => Some("Autonomous System"),
+        513 => Some("BGP-LS Identifier (deprecated)"),
+        514 => Some("OSPF Area-ID"),
+        515 => Some("IGP Router-ID"),
+        516 => Some("BGP Router-ID"),
+        517 => Some("BGP Confederation Member"),
+        518 => Some("SRv6 SID Information"),
+        554 => Some("SR Policy Candidate Path Descriptor"),
+        1024 => Some("Node Flag Bits"),
+        1025 => Some("Opaque Node Attribute"),
+        1026 => Some("Node Name"),
+        1027 => Some("IS-IS Area Identifier"),
+        1028 => Some("IPv4 Router-ID of Local Node"),
+        1029 => Some("IPv6 Router-ID of Local Node"),
+        1030 => Some("IPv4 Router-ID of Remote Node"),
+        1031 => Some("IPv6 Router-ID of Remote Node"),
+        1032 => Some("S-BFD Discriminators"),
+        1034 => Some("SR Capabilities"),
+        1035 => Some("SR Algorithm"),
+        1036 => Some("SR Local Block"),
+        1037 => Some("SRMS Preference"),
+        1038 => Some("SRv6 Capabilities"),
+        1039 => Some("Flexible Algorithm Definition"),
+        1040 => Some("Flexible Algorithm Exclude-Any Affinity"),
+        1041 => Some("Flexible Algorithm Include-Any Affinity"),
+        1042 => Some("Flexible Algorithm Include-All Affinity"),
+        1043 => Some("Flexible Algorithm Definition Flags"),
+        1044 => Some("Flexible Algorithm Prefix Metric"),
+        1045 => Some("Flexible Algorithm Exclude SRLG"),
+        1046 => Some("Flexible Algorithm Unsupported"),
+        1088 => Some("Administrative group (color)"),
+        1089 => Some("Maximum link bandwidth"),
+        1090 => Some("Max. reservable link bandwidth"),
+        1091 => Some("Unreserved bandwidth"),
+        1092 => Some("TE Default Metric"),
+        1093 => Some("Link Protection Type"),
+        1094 => Some("MPLS Protocol Mask"),
+        1095 => Some("IGP Metric"),
+        1096 => Some("Shared Risk Link Group"),
+        1097 => Some("Opaque Link Attribute"),
+        1098 => Some("Link Name"),
+        1099 => Some("Adjacency SID"),
+        1100 => Some("LAN Adjacency SID"),
+        1101 => Some("PeerNode SID"),
+        1102 => Some("PeerAdj SID"),
+        1103 => Some("PeerSet SID"),
+        1105 => Some("RTM Capability"),
+        1106 => Some("SRv6 End.X SID"),
+        1107 => Some("IS-IS SRv6 LAN End.X SID"),
+        1108 => Some("OSPFv3 SRv6 LAN End.X SID"),
+        1114 => Some("Unidirectional Link Delay"),
+        1115 => Some("Min/Max Unidirectional Link Delay"),
+        1116 => Some("Unidirectional Delay Variation"),
+        1117 => Some("Unidirectional Link Loss"),
+        1118 => Some("Unidirectional Residual Bandwidth"),
+        1119 => Some("Unidirectional Available Bandwidth"),
+        1120 => Some("Unidirectional Utilized Bandwidth"),
+        1121 => Some("Graceful-Link-Shutdown TLV"),
+        1122 => Some("Application-Specific Link Attributes"),
+        1152 => Some("IGP Flags"),
+        1153 => Some("IGP Route Tag"),
+        1154 => Some("IGP Extended Route Tag"),
+        1155 => Some("Prefix Metric"),
+        1156 => Some("OSPF Forwarding Address"),
+        1157 => Some("Opaque Prefix Attribute"),
+        1158 => Some("Prefix-SID"),
+        1159 => Some("Range"),
+        1161 => Some("SID/Label"),
+        1162 => Some("SRv6 Locator"),
+        1170 => Some("Prefix Attributes Flags"),
+        1171 => Some("Source Router Identifier"),
+        1172 => Some("L2 Bundle Member Attributes"),
+        1173 => Some("Extended Administrative Group"),
+        1174 => Some("Source OSPF Router-ID"),
+        1181 => Some("Sequence Number"),
+        1184 => Some("SPF Status"),
+        1185 => Some("Address Family Link Descriptor"),
+        1201 => Some("SR Binding SID"),
+        1202 => Some("SR Candidate Path State"),
+        1203 => Some("SR Candidate Path Name"),
+        1204 => Some("SR Candidate Path Constraints"),
+        1205 => Some("SR Segment List"),
+        1206 => Some("SR Segment"),
+        1207 => Some("SR Segment List Metric"),
+        1208 => Some("SR Affinity Constraint"),
+        1209 => Some("SR SRLG Constraint"),
+        1210 => Some("SR Bandwidth Constraint"),
+        1211 => Some("SR Disjoint Group Constraint"),
+        1212 => Some("SRv6 Binding SID"),
+        1213 => Some("SR Policy Name"),
+        1214 => Some("SR Bidirectional Group Constraint"),
+        1215 => Some("SR Metric Constraint"),
+        1216 => Some("SR Segment List Bandwidth"),
+        1217 => Some("SR Segment List Identifier"),
+        1250 => Some("SRv6 Endpoint Behavior"),
+        1251 => Some("SRv6 BGP PeerNode SID"),
+        1252 => Some("SRv6 SID Structure"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for AIGP attribute TLV types.
+///
+/// RFC 7311, Section 3 — <https://www.rfc-editor.org/rfc/rfc7311#section-3>
+fn aigp_tlv_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("AIGP"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for SFP attribute TLV types.
+///
+/// RFC 9015, Section 10.3 — <https://www.rfc-editor.org/rfc/rfc9015#section-10.3>
+fn sfp_tlv_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("Association TLV"),
+        2 => Some("Hop TLV"),
+        3 => Some("SFT TLV"),
+        4 => Some("MPLS Swapping/Stacking"),
+        5 => Some("SFP Traversal With MPLS"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for BFD Mode values of the BFD Discriminator
+/// attribute.
+///
+/// RFC 9026, Section 7.2 — <https://www.rfc-editor.org/rfc/rfc9026#section-7.2>
+fn bfd_mode_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("P2MP BFD Session"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for BFD Discriminator Optional TLV types.
+///
+/// RFC 9026, Section 7.3 — <https://www.rfc-editor.org/rfc/rfc9026#section-7.3>
+fn bfd_optional_tlv_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("Source IP Address"),
+        _ => None,
+    }
+}
+
+/// Context shared by the path attributes of one UPDATE (or of one ATTR_SET).
+#[derive(Clone, Copy)]
+struct AttrContext {
+    /// AS number size inferred from the other attributes (see
+    /// [`AttrContext::for_update`]), used for AS_PATH.
+    as_size_hint: Option<usize>,
+    /// Whether an Encapsulation Extended Community selects a tunnel type
+    /// whose MPLS Label fields carry a VNI (see [`carries_vni_encapsulation`]).
+    vni_label: bool,
+    /// Whether the attributes are nested in an ATTR_SET value (RFC 6368,
+    /// Section 5 — <https://www.rfc-editor.org/rfc/rfc6368#section-5>).
+    in_attr_set: bool,
+}
+
+impl AttrContext {
+    /// Context for the top-level Path Attributes field `attrs` of an UPDATE
+    /// (RFC 4271, Section 4.3 —
+    /// <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>), gathered in one
+    /// walk over the attribute headers.
+    ///
+    /// The AS number size of the AS_PATH is inferred from the other
+    /// attributes, or `None` when they give no evidence:
+    ///
+    /// - AS4_PATH / AS4_AGGREGATOR are only sent towards OLD BGP speakers:
+    ///   "When communicating with an OLD BGP speaker, a NEW BGP speaker MUST
+    ///   send the AS path information in the AS_PATH attribute encoded with
+    ///   two-octet AS numbers.  The NEW BGP speaker MUST also send the AS path
+    ///   information in the AS4_PATH attribute" (RFC 6793, Section 4.2.2 —
+    ///   <https://www.rfc-editor.org/rfc/rfc6793#section-4.2.2>), and they
+    ///   "MUST NOT be carried in an UPDATE message between NEW BGP speakers"
+    ///   (RFC 6793, Section 4.1 —
+    ///   <https://www.rfc-editor.org/rfc/rfc6793#section-4.1>). Their presence
+    ///   means 2-octet.
+    /// - AGGREGATOR uses the same AS number size as AS_PATH (RFC 6793,
+    ///   Section 4.1): a 6-octet value means 2-octet, an 8-octet value
+    ///   4-octet.
+    ///
+    /// [`AttrContext::vni_label`] is set by an Encapsulation Extended
+    /// Community for a VNI-carrying tunnel type (see
+    /// [`carries_vni_encapsulation`]).
+    fn for_update(attrs: &[u8]) -> Self {
+        let mut as4_seen = false;
+        let mut aggregator_hint = None;
+        let mut vni_label = false;
+        for (type_code, value) in path_attr_values(attrs) {
+            match (type_code, value.len()) {
+                // AS4_PATH / AS4_AGGREGATOR: the strongest evidence.
+                (17 | 18, _) => as4_seen = true,
+                // AGGREGATOR with a 2-octet or 4-octet AS number.
+                (7, 6) => aggregator_hint = Some(2),
+                (7, 8) => aggregator_hint = Some(4),
+                // EXTENDED COMMUNITIES (RFC 4360, Section 2 —
+                // https://www.rfc-editor.org/rfc/rfc4360#section-2).
+                (16, _) => vni_label |= carries_vni_encapsulation(value),
+                _ => {}
+            }
+        }
+        Self {
+            as_size_hint: if as4_seen { Some(2) } else { aggregator_hint },
+            vni_label,
+            in_attr_set: false,
+        }
+    }
+}
+
+/// Iterates over the `(type code, value)` of the path attributes in `attrs`,
+/// stopping at the first attribute whose header or value is truncated.
+///
+/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>:
+/// Attribute Flags, Attribute Type Code, and a one- or two-octet (Extended
+/// Length bit) Attribute Length.
+fn path_attr_values(attrs: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
+    let mut pos = 0;
+    core::iter::from_fn(move || {
+        let flags = *attrs.get(pos)?;
+        let shape = TlvShape::new(1, if flags & 0x10 != 0 { 2 } else { 1 });
+        let (type_code, value_len) = tlv_at(attrs, pos + 1, shape)?;
+        let start = pos + 1 + shape.header_len();
+        pos = start + value_len;
+        Some((type_code as u8, &attrs[start..pos]))
+    })
+}
+
+/// Returns `true` when the EXTENDED COMMUNITIES value `communities` carries
+/// an Encapsulation Extended Community for VXLAN (8), NVGRE (9) or VXLAN GPE
+/// (12).
+///
+/// With those encapsulations the MPLS Label field of the PMSI Tunnel
+/// attribute (and of the EVPN routes) carries a VNI: "the entire 24-bit field
+/// is used to encode the VNI value" (RFC 8365, Section 5.1.3 —
+/// <https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3>). The Encapsulation
+/// Extended Community is type 0x03, sub-type 0x0c, with the tunnel type in its
+/// last two octets (RFC 9012, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9012#section-4.1>).
+fn carries_vni_encapsulation(communities: &[u8]) -> bool {
+    communities
+        .chunks_exact(8)
+        .any(|c| c[..2] == [0x03, 0x0c] && matches!(u16::from_be_bytes([c[6], c[7]]), 8 | 9 | 12))
 }
 
 /// Parses a single path attribute and pushes it as an Object into the buffer.
@@ -1431,7 +1844,7 @@ fn parse_path_attribute<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     base_offset: usize,
-    as_size_hint: Option<usize>,
+    ctx: AttrContext,
 ) -> Option<(usize, Option<MpAfiSafi>)> {
     if data.len() < 3 {
         return None;
@@ -1480,7 +1893,7 @@ fn parse_path_attribute<'pkt>(
     );
 
     let val_offset = base_offset + header_len;
-    let mp_afi_safi = parse_attr_value(buf, type_code, value_data, val_offset, as_size_hint);
+    let mp_afi_safi = parse_attr_value(buf, type_code, value_data, val_offset, ctx);
 
     buf.end_container(obj_idx);
 
@@ -1963,7 +2376,7 @@ fn as_path_fits(data: &[u8], as_size: usize) -> bool {
 /// [`as_path_fits`]:
 ///
 /// 1. `hint`, derived from the other attributes of the same UPDATE by
-///    [`as_number_size_hint`], wins when the value fits it;
+///    [`AttrContext::for_update`], wins when the value fits it;
 /// 2. otherwise four-octet is tried first because RFC 6793 sessions are the
 ///    common case, so a value that is valid for both sizes is decoded with
 ///    four-octet AS numbers.
@@ -1975,46 +2388,6 @@ fn detect_as_path_as_size(data: &[u8], hint: Option<usize>) -> Option<usize> {
     hint.into_iter()
         .chain([4, 2])
         .find(|&size| as_path_fits(data, size))
-}
-
-/// Infers the AS number size of the AS_PATH of an UPDATE from its other path
-/// attributes, or `None` when they give no evidence.
-///
-/// - AS4_PATH / AS4_AGGREGATOR are only sent towards OLD BGP speakers: "When
-///   communicating with an OLD BGP speaker, a NEW BGP speaker MUST send the AS
-///   path information in the AS_PATH attribute encoded with two-octet AS
-///   numbers.  The NEW BGP speaker MUST also send the AS path information in
-///   the AS4_PATH attribute" (RFC 6793, Section 4.2.2), and they "MUST NOT be
-///   carried in an UPDATE message between NEW BGP speakers" (RFC 6793,
-///   Section 4.1). Their presence means 2-octet.
-/// - AGGREGATOR uses the same AS number size as AS_PATH (RFC 6793,
-///   Section 4.1): a 6-octet value means 2-octet, an 8-octet value 4-octet.
-///
-/// `attrs` is the Path Attributes field of the UPDATE (RFC 4271, Section 4.3).
-///
-/// RFC 6793, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc6793#section-4.1>
-/// RFC 6793, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc6793#section-4.2.2>
-/// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
-fn as_number_size_hint(attrs: &[u8]) -> Option<usize> {
-    let mut hint = None;
-    let mut pos = 0;
-    while let Some(&[flags, type_code]) = attrs.get(pos..pos + 2) {
-        let (attr_len, header_len) = if flags & 0x10 != 0 {
-            (read_be_u16(attrs, pos + 2).ok()? as usize, 4)
-        } else {
-            (*attrs.get(pos + 2)? as usize, 3)
-        };
-        match (type_code, attr_len) {
-            // AS4_PATH / AS4_AGGREGATOR: the strongest evidence.
-            (17 | 18, _) => return Some(2),
-            // AGGREGATOR with a 2-octet or 4-octet AS number.
-            (7, 6) => hint = Some(2),
-            (7, 8) => hint = Some(4),
-            _ => {}
-        }
-        pos += header_len + attr_len;
-    }
-    hint
 }
 
 /// Pushes an AS_PATH or AS4_PATH attribute value as the attribute `value`
@@ -2092,16 +2465,22 @@ fn parse_as_path<'pkt>(
 ///
 /// RFC 4271, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc4271#section-4.3>
 ///
-/// `as_size_hint` is the AS number size inferred from the other attributes of
-/// the UPDATE (see [`as_number_size_hint`]), used for AS_PATH.
+/// Inside an ATTR_SET ([`AttrContext::in_attr_set`]) a further ATTR_SET is
+/// not decoded (its value is kept as raw bytes), and AS_PATH / AGGREGATOR are
+/// decoded only with 4-octet AS numbers (RFC 6368, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc6368#section-5>). MP_REACH_NLRI /
+/// MP_UNREACH_NLRI never get here: they make the ATTR_SET malformed (see
+/// [`parse_attr_set`]).
 fn parse_attr_value<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     type_code: u8,
     data: &'pkt [u8],
     offset: usize,
-    as_size_hint: Option<usize>,
+    ctx: AttrContext,
 ) -> Option<MpAfiSafi> {
+    let as_size_hint = ctx.as_size_hint;
     match type_code {
+        128 if ctx.in_attr_set => push_raw_attr_value(buf, data, offset),
         // ORIGIN (RFC 4271, Section 5.1.1)
         1 if data.len() == 1 => {
             buf.push_field(
@@ -2117,6 +2496,8 @@ fn parse_attr_value<'pkt>(
             // No segments: nothing to infer the AS number size from.
             parse_as_path(buf, data, offset, 2);
         }
+        // Inside an ATTR_SET only 4-octet AS numbers are valid.
+        2 if ctx.in_attr_set && !as_path_fits(data, 4) => push_raw_attr_value(buf, data, offset),
         2 => match detect_as_path_as_size(data, as_size_hint) {
             Some(as_size) => {
                 parse_as_path(buf, data, offset, as_size);
@@ -2167,7 +2548,7 @@ fn parse_attr_value<'pkt>(
         6 => {}
         // AGGREGATOR (RFC 4271, Section 5.1.7) — 2-byte AS + 4-byte IP = 6 bytes
         // or 4-byte AS + 4-byte IP = 8 bytes (RFC 6793)
-        7 if data.len() == 6 || data.len() == 8 => {
+        7 if data.len() == 8 || (data.len() == 6 && !ctx.in_attr_set) => {
             buf.push_field(
                 &FD_AGGREGATOR_VALUE,
                 FieldValue::Bytes(data),
@@ -2280,18 +2661,974 @@ fn parse_attr_value<'pkt>(
         40 => {
             parse_prefix_sid(buf, data, offset);
         }
-        _ => {
-            // Unknown/unhandled attribute: store raw bytes
-            if !data.is_empty() {
+        // Only to Customer (OTC) (RFC 9234, Section 5 —
+        // https://www.rfc-editor.org/rfc/rfc9234#section-5): "Attribute Type
+        // Code 35 and a length of 4 octets. ... The attribute value is an AS
+        // number (ASN)".
+        35 if data.len() == 4 => {
+            buf.push_field(
+                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+                FieldValue::U32(read_be_u32(data, 0).unwrap_or_default()),
+                offset..offset + 4,
+            );
+        }
+        // Structured attributes whose decoder keeps the value raw when it
+        // does not parse exactly.
+        22 | 23 | 26 | 29 | 33 | 37 | 38 | 128 => {
+            let decoded = match type_code {
+                // PMSI_TUNNEL (RFC 6514, Section 5 —
+                // https://www.rfc-editor.org/rfc/rfc6514#section-5)
+                22 => parse_pmsi_tunnel(buf, data, offset, ctx.vni_label),
+                // Tunnel Encapsulation (RFC 9012, Section 2 —
+                // https://www.rfc-editor.org/rfc/rfc9012#section-2)
+                23 => parse_tunnel_encapsulation(buf, data, offset),
+                // AIGP (RFC 7311, Section 3 —
+                // https://www.rfc-editor.org/rfc/rfc7311#section-3)
+                26 => parse_aigp(buf, data, offset),
+                // BGP-LS Attribute (RFC 9552, Section 5.3 —
+                // https://www.rfc-editor.org/rfc/rfc9552#section-5.3)
+                29 => parse_bgp_ls_attribute(buf, data, offset),
+                // BGPsec_Path (RFC 8205, Section 3 —
+                // https://www.rfc-editor.org/rfc/rfc8205#section-3)
+                33 => parse_bgpsec_path(buf, data, offset),
+                // SFP attribute (RFC 9015, Section 3.2.1 —
+                // https://www.rfc-editor.org/rfc/rfc9015#section-3.2.1)
+                37 => parse_sfp_attribute(buf, data, offset),
+                // BFD Discriminator (RFC 9026, Section 3.1.6 —
+                // https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6)
+                38 => parse_bfd_discriminator(buf, data, offset),
+                // ATTR_SET (RFC 6368, Section 5 —
+                // https://www.rfc-editor.org/rfc/rfc6368#section-5)
+                128 => parse_attr_set(buf, data, offset),
+                _ => false,
+            };
+            if !decoded {
+                push_raw_attr_value(buf, data, offset);
+            }
+        }
+        // Unknown/unhandled attribute: store raw bytes
+        _ => push_raw_attr_value(buf, data, offset),
+    }
+    None
+}
+
+/// Layout of a Type-Length-Value header.
+#[derive(Clone, Copy)]
+struct TlvShape {
+    /// Size of the Type field (1 or 2 octets).
+    type_len: usize,
+    /// Size of the Length field (1 or 2 octets).
+    len_len: usize,
+    /// Whether the Length counts the Type and Length fields too (RFC 7311,
+    /// Section 3 — <https://www.rfc-editor.org/rfc/rfc7311#section-3>) rather
+    /// than only the Value.
+    len_includes_header: bool,
+}
+
+impl TlvShape {
+    /// A TLV whose Length counts only the Value.
+    const fn new(type_len: usize, len_len: usize) -> Self {
+        Self {
+            type_len,
+            len_len,
+            len_includes_header: false,
+        }
+    }
+
+    /// Size of the Type and Length fields.
+    const fn header_len(self) -> usize {
+        self.type_len + self.len_len
+    }
+}
+
+/// AIGP TLV: 1-octet Type, 2-octet Length including the Type and Length
+/// fields (RFC 7311, Section 3 — <https://www.rfc-editor.org/rfc/rfc7311#section-3>).
+const AIGP_TLV_SHAPE: TlvShape = TlvShape {
+    type_len: 1,
+    len_len: 2,
+    len_includes_header: true,
+};
+/// Tunnel TLV: 2-octet Tunnel Type, 2-octet Length (RFC 9012, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc9012#section-2>).
+const TUNNEL_TLV_SHAPE: TlvShape = TlvShape::new(2, 2);
+/// BGP-LS TLV: 2-octet Type, 2-octet Length (RFC 9552, Section 5.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9552#section-5.1>).
+const BGP_LS_TLV_SHAPE: TlvShape = TlvShape::new(2, 2);
+/// SFP attribute TLV: 1-octet Type, 2-octet Length (RFC 9015,
+/// Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc9015#section-3.2.1>).
+const SFP_TLV_SHAPE: TlvShape = TlvShape::new(1, 2);
+/// BFD Discriminator Optional TLV: 1-octet Type, 1-octet Length (RFC 9026,
+/// Section 3.1.6 — <https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6>).
+const BFD_TLV_SHAPE: TlvShape = TlvShape::new(1, 1);
+
+/// Returns `(type, value_len)` for the TLV of the given shape at `pos`, or
+/// `None` when its header or value does not fit in `data`.
+fn tlv_at(data: &[u8], pos: usize, shape: TlvShape) -> Option<(u16, usize)> {
+    let header_len = shape.header_len();
+    let header = data.get(pos..pos.checked_add(header_len)?)?;
+    let tlv_type = match shape.type_len {
+        1 => u16::from(header[0]),
+        _ => read_be_u16(header, 0).ok()?,
+    };
+    let length = match shape.len_len {
+        1 => usize::from(header[shape.type_len]),
+        _ => usize::from(read_be_u16(header, shape.type_len).ok()?),
+    };
+    let value_len = if shape.len_includes_header {
+        length.checked_sub(header_len)?
+    } else {
+        length
+    };
+    (pos + header_len + value_len <= data.len()).then_some((tlv_type, value_len))
+}
+
+/// Returns `value` as a [`FieldValue`] of the descriptor's type (U8 or U16).
+fn u8_or_u16(descriptor: &FieldDescriptor, value: u16) -> FieldValue<'static> {
+    match descriptor.field_type {
+        FieldType::U8 => FieldValue::U8(value as u8),
+        _ => FieldValue::U16(value),
+    }
+}
+
+/// One TLV opened by [`begin_tlv_object`].
+struct OpenTlv<'pkt> {
+    /// Placeholder index of the TLV Object, to pass to `end_container`.
+    idx: u32,
+    /// The Type field.
+    tlv_type: u16,
+    /// The Value field.
+    value: &'pkt [u8],
+    /// Absolute offset of the Value field.
+    value_offset: usize,
+    /// Offset of the next TLV, relative to the TLV sequence.
+    next: usize,
+}
+
+/// Opens the Object of the TLV of the given shape at `pos` of `data` (which
+/// starts at absolute `offset`) and pushes its Type (`fields[0]`) and Length
+/// (`fields[1]`), each as a U8 or a U16 following its descriptor.
+///
+/// Returns `None` (nothing pushed) when the TLV does not fit.
+fn begin_tlv_object<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    object: &'static FieldDescriptor,
+    fields: &'static [FieldDescriptor],
+    data: &'pkt [u8],
+    pos: usize,
+    offset: usize,
+    shape: TlvShape,
+) -> Option<OpenTlv<'pkt>> {
+    let (tlv_type, value_len) = tlv_at(data, pos, shape)?;
+    let header_len = shape.header_len();
+    let next = pos + header_len + value_len;
+    let abs = offset + pos;
+    let idx = buf.begin_container(object, FieldValue::Object(0..0), abs..offset + next);
+    buf.push_field(
+        &fields[0],
+        u8_or_u16(&fields[0], tlv_type),
+        abs..abs + shape.type_len,
+    );
+    let length = if shape.len_includes_header {
+        value_len + header_len
+    } else {
+        value_len
+    };
+    buf.push_field(
+        &fields[1],
+        u8_or_u16(&fields[1], length as u16),
+        abs + shape.type_len..abs + header_len,
+    );
+    Some(OpenTlv {
+        idx,
+        tlv_type,
+        value: &data[pos + header_len..next],
+        value_offset: abs + header_len,
+        next,
+    })
+}
+
+/// Pushes `value` with `descriptor` as Bytes (unless empty).
+fn push_bytes_nonempty<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    descriptor: &'static FieldDescriptor,
+    value: &'pkt [u8],
+    offset: usize,
+) {
+    if !value.is_empty() {
+        buf.push_field(
+            descriptor,
+            FieldValue::Bytes(value),
+            offset..offset + value.len(),
+        );
+    }
+}
+
+/// Pushes `data` as the raw `value` of a path attribute (unless empty).
+fn push_raw_attr_value<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    push_bytes_nonempty(buf, &PATH_ATTR_CHILDREN[FD_PA_VALUE], data, offset);
+}
+
+/// AIGP TLV type "AIGP" (RFC 7311, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc7311#section-3>).
+const AIGP_TLV_TYPE_AIGP: u16 = 1;
+
+/// Parses the AIGP attribute value (type code 26) as a sequence of TLVs.
+///
+/// RFC 7311, Section 3 — <https://www.rfc-editor.org/rfc/rfc7311#section-3>
+///
+/// The AIGP TLV (Type 1, Length 11) carries an 8-octet Accumulated IGP
+/// Metric; TLVs of other types keep their value as bytes. Returns `false`
+/// (nothing left pushed) when the TLVs do not exactly fill the attribute or
+/// an AIGP TLV does not have Length 11.
+fn parse_aigp<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let mark = buf.fields().len();
+    let array_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
+    let mut pos = 0;
+    while pos < data.len() {
+        let Some(tlv) = begin_tlv_object(
+            buf,
+            &AIGP_TLV_OBJECT_DESCRIPTOR,
+            AIGP_TLV_CHILDREN,
+            data,
+            pos,
+            offset,
+            AIGP_TLV_SHAPE,
+        ) else {
+            buf.truncate_fields(mark);
+            return false;
+        };
+        if tlv.tlv_type == AIGP_TLV_TYPE_AIGP {
+            // "The value field of the AIGP TLV is always 8 octets long, and
+            // its value is interpreted as an unsigned 64-bit integer."
+            let metric = match read_be_u64(tlv.value, 0) {
+                Ok(metric) if tlv.value.len() == 8 => metric,
+                _ => {
+                    buf.truncate_fields(mark);
+                    return false;
+                }
+            };
+            buf.push_field(
+                &AIGP_TLV_CHILDREN[FD_AIGP_METRIC],
+                FieldValue::U64(metric),
+                tlv.value_offset..tlv.value_offset + 8,
+            );
+        } else {
+            push_bytes_nonempty(
+                buf,
+                &AIGP_TLV_CHILDREN[FD_AIGP_VALUE],
+                tlv.value,
+                tlv.value_offset,
+            );
+        }
+        buf.end_container(tlv.idx);
+        pos = tlv.next;
+    }
+    buf.end_container(array_idx);
+    true
+}
+
+/// PMSI Tunnel Type "Ingress Replication" (RFC 6514, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc6514#section-5>).
+const PMSI_TUNNEL_INGRESS_REPLICATION: u8 = 6;
+/// Size of the PMSI Tunnel attribute fixed part: Flags (1), Tunnel Type (1)
+/// and MPLS Label (3) (RFC 6514, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc6514#section-5>).
+const PMSI_TUNNEL_FIXED_SIZE: usize = 5;
+
+/// Parses the PMSI_TUNNEL attribute value (type code 22).
+///
+/// RFC 6514, Section 5 — <https://www.rfc-editor.org/rfc/rfc6514#section-5>
+///
+/// Flags, Tunnel Type, MPLS Label and a Tunnel Identifier whose syntax depends
+/// on the Tunnel Type. The Ingress Replication identifier — "the unicast
+/// tunnel endpoint IP address" — is decoded as an address; the others stay
+/// bytes.
+///
+/// The MPLS Label field is exposed as `mpls_label` ("the high-order 20 bits
+/// contain the label value"), or as `vni` when `vni_label` is set: with a
+/// VXLAN / NVGRE / VXLAN-GPE encapsulation "the entire 24-bit field is used to
+/// encode the VNI value" (RFC 8365, Section 5.1.3 —
+/// <https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3>).
+///
+/// Returns `false` (nothing pushed) when the fixed part is truncated.
+fn parse_pmsi_tunnel<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    vni_label: bool,
+) -> bool {
+    if data.len() < PMSI_TUNNEL_FIXED_SIZE {
+        return false;
+    }
+    let obj_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_PMSI_FLAGS],
+        FieldValue::U8(data[0]),
+        offset..offset + 1,
+    );
+    let tunnel_type = data[1];
+    buf.push_field(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_TUNNEL_TYPE],
+        FieldValue::U8(tunnel_type),
+        offset + 1..offset + 2,
+    );
+    let label_field = read_be_u24(data, 2).unwrap_or_default();
+    let (label_fd, label) = if vni_label {
+        (FD_PAV_VNI, label_field)
+    } else {
+        (FD_PAV_MPLS_LABEL, label_field >> 4)
+    };
+    buf.push_field(
+        &PATH_ATTR_VALUE_BASE_FIELDS[label_fd],
+        FieldValue::U32(label),
+        offset + 2..offset + PMSI_TUNNEL_FIXED_SIZE,
+    );
+    let identifier = &data[PMSI_TUNNEL_FIXED_SIZE..];
+    let id_offset = offset + PMSI_TUNNEL_FIXED_SIZE;
+    if tunnel_type == PMSI_TUNNEL_INGRESS_REPLICATION
+        && (identifier.len() == 4 || identifier.len() == 16)
+    {
+        buf.push_field(
+            &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_TUNNEL_ENDPOINT],
+            format_address(identifier, identifier.len() == 16),
+            id_offset..id_offset + identifier.len(),
+        );
+    } else {
+        push_bytes_nonempty(
+            buf,
+            &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_TUNNEL_IDENTIFIER],
+            identifier,
+            id_offset,
+        );
+    }
+    buf.end_container(obj_idx);
+    true
+}
+
+/// Returns the shape of the Tunnel Encapsulation sub-TLV of type `sub_type`.
+///
+/// RFC 9012, Section 2 — <https://www.rfc-editor.org/rfc/rfc9012#section-2>:
+/// "The Sub-TLV Length field contains 1 octet if the Sub-TLV Type field
+/// contains a value in the range from 0-127. The Sub-TLV Length field contains
+/// two octets if the Sub-TLV Type field contains a value in the range from
+/// 128-255."
+fn tunnel_sub_tlv_shape(sub_type: u8) -> TlvShape {
+    TlvShape::new(1, if sub_type < 128 { 1 } else { 2 })
+}
+
+/// Parses the Tunnel Encapsulation attribute value (type code 23).
+///
+/// RFC 9012, Section 2 — <https://www.rfc-editor.org/rfc/rfc9012#section-2>
+///
+/// The value is a set of Tunnel TLVs, each carrying sub-TLVs, exposed as
+/// `tunnels`. Returns `false` (nothing left pushed) when the TLVs or sub-TLVs
+/// do not exactly fill their enclosing field.
+fn parse_tunnel_encapsulation<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let mark = buf.fields().len();
+    let obj_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    let array_idx = buf.begin_container(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_TUNNELS],
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
+    let mut pos = 0;
+    while pos < data.len() {
+        let Some(tlv) = begin_tlv_object(
+            buf,
+            &TUNNEL_TLV_OBJECT_DESCRIPTOR,
+            TUNNEL_TLV_CHILDREN,
+            data,
+            pos,
+            offset,
+            TUNNEL_TLV_SHAPE,
+        ) else {
+            buf.truncate_fields(mark);
+            return false;
+        };
+        let subs_idx = buf.begin_container(
+            &TUNNEL_TLV_CHILDREN[FD_TUN_SUB_TLVS],
+            FieldValue::Array(0..0),
+            tlv.value_offset..tlv.value_offset + tlv.value.len(),
+        );
+        if !parse_tunnel_sub_tlvs(buf, tlv.value, tlv.value_offset) {
+            buf.truncate_fields(mark);
+            return false;
+        }
+        buf.end_container(subs_idx);
+        buf.end_container(tlv.idx);
+        pos = tlv.next;
+    }
+    buf.end_container(array_idx);
+    buf.end_container(obj_idx);
+    true
+}
+
+/// Tunnel Encapsulation sub-TLV types decoded beyond raw bytes (RFC 9012,
+/// Sections 3.1, 3.3.2, 3.4.1 and 3.4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc9012#section-3>).
+const TUNNEL_SUB_TLV_PROTOCOL_TYPE: u8 = 2;
+const TUNNEL_SUB_TLV_COLOR: u8 = 4;
+const TUNNEL_SUB_TLV_EGRESS_ENDPOINT: u8 = 6;
+const TUNNEL_SUB_TLV_UDP_PORT: u8 = 8;
+
+/// Parses the sub-TLVs of one Tunnel TLV. Returns `false` when they do not
+/// exactly fill `data` (the caller discards what was pushed).
+///
+/// RFC 9012, Section 3 — <https://www.rfc-editor.org/rfc/rfc9012#section-3>
+fn parse_tunnel_sub_tlvs<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    let fields = TUNNEL_SUB_TLV_CHILDREN;
+    let mut pos = 0;
+    while pos < data.len() {
+        let sub_type = data[pos];
+        let Some(tlv) = begin_tlv_object(
+            buf,
+            &TUNNEL_SUB_TLV_OBJECT_DESCRIPTOR,
+            fields,
+            data,
+            pos,
+            offset,
+            tunnel_sub_tlv_shape(sub_type),
+        ) else {
+            return false;
+        };
+        let (value, vo) = (tlv.value, tlv.value_offset);
+        match (sub_type, read_be_u16(value, 4).ok(), value.len()) {
+            // Tunnel Egress Endpoint (RFC 9012, Section 3.1 —
+            // https://www.rfc-editor.org/rfc/rfc9012#section-3.1): Reserved
+            // (4), Address Family (2) and an Address of 0 (Address Family 0),
+            // 4 (IPv4) or 16 (IPv6) octets.
+            (TUNNEL_SUB_TLV_EGRESS_ENDPOINT, Some(afi @ (0 | AFI_IPV4 | AFI_IPV6)), len)
+                if len == 6 + address_len(afi) =>
+            {
                 buf.push_field(
-                    &PATH_ATTR_CHILDREN[FD_PA_VALUE],
-                    FieldValue::Bytes(data),
-                    offset..offset + data.len(),
+                    &fields[FD_TSUB_ADDRESS_FAMILY],
+                    FieldValue::U16(afi),
+                    vo + 4..vo + 6,
                 );
+                if len > 6 {
+                    buf.push_field(
+                        &fields[FD_TSUB_ADDRESS],
+                        format_address(&value[6..], afi == AFI_IPV6),
+                        vo + 6..vo + len,
+                    );
+                }
+            }
+            // Color (RFC 9012, Section 3.4.2 —
+            // https://www.rfc-editor.org/rfc/rfc9012#section-3.4.2): a Color
+            // Extended Community (Section 4.3). "If the Length field of a
+            // Color sub-TLV has a value other than 8, or the first two octets
+            // of its Value field are not 0x030b, the sub-TLV MUST be treated
+            // as if it were an unrecognized sub-TLV".
+            (TUNNEL_SUB_TLV_COLOR, _, 8) if value[..2] == [0x03, 0x0b] => {
+                buf.push_field(
+                    &fields[FD_TSUB_FLAGS],
+                    FieldValue::U16(read_be_u16(value, 2).unwrap_or_default()),
+                    vo + 2..vo + 4,
+                );
+                buf.push_field(
+                    &fields[FD_TSUB_COLOR],
+                    FieldValue::U32(read_be_u32(value, 4).unwrap_or_default()),
+                    vo + 4..vo + 8,
+                );
+            }
+            // UDP Destination Port (RFC 9012, Section 3.3.2 —
+            // https://www.rfc-editor.org/rfc/rfc9012#section-3.3.2).
+            (TUNNEL_SUB_TLV_UDP_PORT, _, 2) => buf.push_field(
+                &fields[FD_TSUB_UDP_PORT],
+                FieldValue::U16(read_be_u16(value, 0).unwrap_or_default()),
+                vo..vo + 2,
+            ),
+            // Protocol Type (RFC 9012, Section 3.4.1 —
+            // https://www.rfc-editor.org/rfc/rfc9012#section-3.4.1): an
+            // EtherType.
+            (TUNNEL_SUB_TLV_PROTOCOL_TYPE, _, 2) => buf.push_field(
+                &fields[FD_TSUB_PROTOCOL_TYPE],
+                FieldValue::U16(read_be_u16(value, 0).unwrap_or_default()),
+                vo..vo + 2,
+            ),
+            _ => push_bytes_nonempty(buf, &fields[FD_TSUB_VALUE], value, vo),
+        }
+        buf.end_container(tlv.idx);
+        pos = tlv.next;
+    }
+    true
+}
+
+/// Returns the address length for an IANA Address Family Number (IPv4: 4,
+/// IPv6: 16, anything else: 0).
+fn address_len(afi: u16) -> usize {
+    match afi {
+        AFI_IPV4 => 4,
+        AFI_IPV6 => 16,
+        _ => 0,
+    }
+}
+
+/// Pushes `data` as an Array of TLV objects whose `fields` are
+/// `[type, length, value]`. Returns `false` (nothing left pushed) when the
+/// TLVs do not exactly fill `data`.
+fn push_generic_tlvs<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    array: &'static FieldDescriptor,
+    object: &'static FieldDescriptor,
+    fields: &'static [FieldDescriptor],
+    data: &'pkt [u8],
+    offset: usize,
+    shape: TlvShape,
+) -> bool {
+    let mark = buf.fields().len();
+    let array_idx =
+        buf.begin_container(array, FieldValue::Array(0..0), offset..offset + data.len());
+    let mut pos = 0;
+    while pos < data.len() {
+        let Some(tlv) = begin_tlv_object(buf, object, fields, data, pos, offset, shape) else {
+            buf.truncate_fields(mark);
+            return false;
+        };
+        push_bytes_nonempty(buf, &fields[2], tlv.value, tlv.value_offset);
+        buf.end_container(tlv.idx);
+        pos = tlv.next;
+    }
+    buf.end_container(array_idx);
+    true
+}
+
+/// Parses the BGP-LS Attribute value (type code 29).
+///
+/// RFC 9552, Section 5.3 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.3>
+///
+/// A set of TLVs exposed as `tlvs`, whose values are kept as bytes. Returns
+/// `false` (nothing left pushed) when the TLVs do not exactly fill the
+/// attribute.
+fn parse_bgp_ls_attribute<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let mark = buf.fields().len();
+    let obj_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    if !push_generic_tlvs(
+        buf,
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_TLVS],
+        &BGP_LS_TLV_OBJECT_DESCRIPTOR,
+        BGP_LS_TLV_CHILDREN,
+        data,
+        offset,
+        BGP_LS_TLV_SHAPE,
+    ) {
+        buf.truncate_fields(mark);
+        return false;
+    }
+    buf.end_container(obj_idx);
+    true
+}
+
+/// Parses the SFP attribute value (type code 37) as a sequence of TLVs.
+///
+/// RFC 9015, Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc9015#section-3.2.1>
+///
+/// Returns `false` (nothing left pushed) when the TLVs do not exactly fill
+/// the attribute ("TLV length that suggests the TLV extends beyond the end of
+/// the SFP attribute" is an error).
+fn parse_sfp_attribute<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    !data.is_empty()
+        && push_generic_tlvs(
+            buf,
+            &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+            &SFP_TLV_OBJECT_DESCRIPTOR,
+            SFP_TLV_CHILDREN,
+            data,
+            offset,
+            SFP_TLV_SHAPE,
+        )
+}
+
+/// Size of a BGPsec Secure_Path Segment (RFC 8205, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8205#section-3.1>).
+const BGPSEC_SEGMENT_SIZE: usize = 6;
+/// Size of the Subject Key Identifier of a Signature Segment (RFC 8205,
+/// Section 3.2 — <https://www.rfc-editor.org/rfc/rfc8205#section-3.2>).
+const BGPSEC_SKI_SIZE: usize = 20;
+/// Signature_Block Length (2) and Algorithm Suite Identifier (1) (RFC 8205,
+/// Section 3.2 — <https://www.rfc-editor.org/rfc/rfc8205#section-3.2>).
+const BGPSEC_BLOCK_HEADER_SIZE: usize = 3;
+
+/// Parses the BGPsec_Path attribute value (type code 33).
+///
+/// RFC 8205, Section 3 — <https://www.rfc-editor.org/rfc/rfc8205#section-3>
+///
+/// A Secure_Path of one or more 6-octet segments followed by one or two
+/// Signature_Blocks. Returns `false` (nothing left pushed) when the value is
+/// not well formed: a Secure_Path Length other than 2 + 6n (n >= 1), a number
+/// of Signature_Blocks other than one or two, a Signature_Block without
+/// exactly n Signature Segments, or Signature_Blocks / Signature Segments that
+/// do not exactly fill their enclosing field.
+fn parse_bgpsec_path<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
+    let Ok(sp_len) = read_be_u16(data, 0).map(usize::from) else {
+        return false;
+    };
+    // "the Secure_Path Length is two greater than six times the number of
+    // Secure_Path Segments" (RFC 8205, Section 3.1 —
+    // https://www.rfc-editor.org/rfc/rfc8205#section-3.1).
+    if sp_len < 2 + BGPSEC_SEGMENT_SIZE
+        || (sp_len - 2) % BGPSEC_SEGMENT_SIZE != 0
+        || sp_len >= data.len()
+    {
+        return false;
+    }
+    let mark = buf.fields().len();
+    let obj_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_SECURE_PATH_LENGTH],
+        FieldValue::U16(sp_len as u16),
+        offset..offset + 2,
+    );
+    let sp_idx = buf.begin_container(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_SECURE_PATH],
+        FieldValue::Array(0..0),
+        offset + 2..offset + sp_len,
+    );
+    for pos in (2..sp_len).step_by(BGPSEC_SEGMENT_SIZE) {
+        let abs = offset + pos;
+        let seg_idx = buf.begin_container(
+            &BGPSEC_SEGMENT_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + BGPSEC_SEGMENT_SIZE,
+        );
+        buf.push_field(
+            &BGPSEC_SEGMENT_CHILDREN[FD_BSEG_PCOUNT],
+            FieldValue::U8(data[pos]),
+            abs..abs + 1,
+        );
+        buf.push_field(
+            &BGPSEC_SEGMENT_CHILDREN[FD_BSEG_FLAGS],
+            FieldValue::U8(data[pos + 1]),
+            abs + 1..abs + 2,
+        );
+        buf.push_field(
+            &BGPSEC_SEGMENT_CHILDREN[FD_BSEG_ASN],
+            FieldValue::U32(read_be_u32(data, pos + 2).unwrap_or_default()),
+            abs + 2..abs + BGPSEC_SEGMENT_SIZE,
+        );
+        buf.end_container(seg_idx);
+    }
+    buf.end_container(sp_idx);
+
+    let blocks_idx = buf.begin_container(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_SIGNATURE_BLOCKS],
+        FieldValue::Array(0..0),
+        offset + sp_len..offset + data.len(),
+    );
+    let segments = (sp_len - 2) / BGPSEC_SEGMENT_SIZE;
+    let mut pos = sp_len;
+    let mut blocks = 0;
+    while pos < data.len() {
+        blocks += 1;
+        match parse_bgpsec_signature_block(buf, data, pos, offset, segments) {
+            // "The BGPsec_PATH attribute will contain one or two
+            // Signature_Blocks" (RFC 8205, Section 3).
+            Some(end) if blocks <= 2 => pos = end,
+            _ => {
+                buf.truncate_fields(mark);
+                return false;
             }
         }
     }
-    None
+    buf.end_container(blocks_idx);
+    buf.end_container(obj_idx);
+    true
+}
+
+/// Parses the Signature_Block at `pos` of a BGPsec_Path value and returns the
+/// offset just past it, or `None` when it is not well formed (the caller
+/// discards what was pushed).
+///
+/// RFC 8205, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc8205#section-3.2>:
+/// "The Signature_Block Length in Figure 6 is the total number of octets in
+/// the Signature_Block (including the 2 octets used to express this length
+/// field)", and "A Signature_Block in Figure 6 has exactly one Signature
+/// Segment (see Figure 7) for each Secure_Path Segment" — `segments` of them.
+fn parse_bgpsec_signature_block<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    pos: usize,
+    offset: usize,
+    segments: usize,
+) -> Option<usize> {
+    let block_len = usize::from(read_be_u16(data, pos).ok()?);
+    let end = pos + block_len;
+    if block_len < BGPSEC_BLOCK_HEADER_SIZE || end > data.len() {
+        return None;
+    }
+    let abs = offset + pos;
+    let block_idx = buf.begin_container(
+        &BGPSEC_BLOCK_OBJECT_DESCRIPTOR,
+        FieldValue::Object(0..0),
+        abs..abs + block_len,
+    );
+    buf.push_field(
+        &BGPSEC_BLOCK_CHILDREN[FD_BBLK_LENGTH],
+        FieldValue::U16(block_len as u16),
+        abs..abs + 2,
+    );
+    buf.push_field(
+        &BGPSEC_BLOCK_CHILDREN[FD_BBLK_ALGORITHM_SUITE],
+        FieldValue::U8(data[pos + 2]),
+        abs + 2..abs + BGPSEC_BLOCK_HEADER_SIZE,
+    );
+    let segs_idx = buf.begin_container(
+        &BGPSEC_BLOCK_CHILDREN[FD_BBLK_SIGNATURE_SEGMENTS],
+        FieldValue::Array(0..0),
+        abs + BGPSEC_BLOCK_HEADER_SIZE..abs + block_len,
+    );
+    let mut spos = pos + BGPSEC_BLOCK_HEADER_SIZE;
+    let mut count = 0;
+    while spos < end {
+        count += 1;
+        // Signature Segment: SKI (20), Signature Length (2), Signature.
+        let sig_start = spos + BGPSEC_SKI_SIZE + 2;
+        let sig_len = usize::from(read_be_u16(&data[..end], spos + BGPSEC_SKI_SIZE).ok()?);
+        let seg_end = sig_start + sig_len;
+        if seg_end > end {
+            return None;
+        }
+        let sabs = offset + spos;
+        let seg_idx = buf.begin_container(
+            &BGPSEC_SIGNATURE_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            sabs..offset + seg_end,
+        );
+        buf.push_field(
+            &BGPSEC_SIGNATURE_CHILDREN[FD_BSIG_SKI],
+            FieldValue::Bytes(&data[spos..spos + BGPSEC_SKI_SIZE]),
+            sabs..sabs + BGPSEC_SKI_SIZE,
+        );
+        buf.push_field(
+            &BGPSEC_SIGNATURE_CHILDREN[FD_BSIG_SIGNATURE_LENGTH],
+            FieldValue::U16(sig_len as u16),
+            sabs + BGPSEC_SKI_SIZE..offset + sig_start,
+        );
+        push_bytes_nonempty(
+            buf,
+            &BGPSEC_SIGNATURE_CHILDREN[FD_BSIG_SIGNATURE],
+            &data[sig_start..seg_end],
+            offset + sig_start,
+        );
+        buf.end_container(seg_idx);
+        spos = seg_end;
+    }
+    if count != segments {
+        return None;
+    }
+    buf.end_container(segs_idx);
+    buf.end_container(block_idx);
+    Some(end)
+}
+
+/// ATTR_SET Origin AS size (RFC 6368, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc6368#section-5>).
+const ATTR_SET_ORIGIN_AS_SIZE: usize = 4;
+
+/// Parses the ATTR_SET attribute value (type code 128).
+///
+/// RFC 6368, Section 5 — <https://www.rfc-editor.org/rfc/rfc6368#section-5>
+///
+/// A 4-octet Origin AS followed by path attributes, parsed with
+/// [`AttrContext::in_attr_set`]. Returns `false` (nothing left pushed) when
+/// the ATTR_SET is malformed — "Its length is less than 4 octets", or "The
+/// original path attributes carried in the variable-length attribute data
+/// include the MP_REACH or MP_UNREACH attribute" — or when the nested
+/// attributes do not exactly fill it. A nested attribute whose own value is
+/// malformed keeps its raw bytes, like a top-level one, so that the other
+/// nested attributes stay decoded.
+///
+/// MP_REACH_NLRI / MP_UNREACH_NLRI are rejected before they are parsed:
+/// [`DissectBuffer::truncate_fields`] does not roll back the scratch buffer
+/// that the labeled NLRI decoder writes to.
+fn parse_attr_set<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
+    if data.len() < ATTR_SET_ORIGIN_AS_SIZE {
+        return false;
+    }
+    let attrs = &data[ATTR_SET_ORIGIN_AS_SIZE..];
+    let ctx = AttrContext {
+        // "The AS_PATH and AGGREGATOR attributes contained within an ATTR_SET
+        // attribute MUST be encoded using 4-octet AS numbers".
+        as_size_hint: Some(4),
+        in_attr_set: true,
+        ..AttrContext::for_update(attrs)
+    };
+    let mark = buf.fields().len();
+    let obj_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &PATH_ATTR_VALUE_CHILDREN[FD_PAV_ORIGIN_AS],
+        FieldValue::U32(read_be_u32(data, 0).unwrap_or_default()),
+        offset..offset + ATTR_SET_ORIGIN_AS_SIZE,
+    );
+    let array_idx = buf.begin_container(
+        &PATH_ATTR_VALUE_CHILDREN[FD_PAV_PATH_ATTRIBUTES],
+        FieldValue::Array(0..0),
+        offset + ATTR_SET_ORIGIN_AS_SIZE..offset + data.len(),
+    );
+    let mut pos = 0;
+    while pos < attrs.len() {
+        let forbidden = matches!(attrs.get(pos + 1), Some(14 | 15));
+        let parsed = if forbidden {
+            None
+        } else {
+            parse_path_attribute(
+                buf,
+                &attrs[pos..],
+                offset + ATTR_SET_ORIGIN_AS_SIZE + pos,
+                ctx,
+            )
+        };
+        match parsed {
+            Some((consumed, _)) => pos += consumed,
+            None => {
+                buf.truncate_fields(mark);
+                return false;
+            }
+        }
+    }
+    buf.end_container(array_idx);
+    buf.end_container(obj_idx);
+    true
+}
+
+/// Fixed part of the BFD Discriminator attribute: BFD Mode (1) and BFD
+/// Discriminator (4) (RFC 9026, Section 3.1.6 —
+/// <https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6>).
+const BFD_DISCRIMINATOR_FIXED_SIZE: usize = 5;
+/// "The BFD Discriminator attribute MUST be considered malformed if its length
+/// is smaller than 11 octets" (RFC 9026, Section 3.1.6 —
+/// <https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6>).
+const BFD_DISCRIMINATOR_MIN_SIZE: usize = 11;
+/// BFD Discriminator Optional TLV type "Source IP Address" (RFC 9026,
+/// Section 3.1.6 — <https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6>).
+const BFD_TLV_SOURCE_IP_ADDRESS: u16 = 1;
+
+/// Parses the BFD Discriminator attribute value (type code 38).
+///
+/// RFC 9026, Section 3.1.6 — <https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6>
+///
+/// BFD Mode, BFD Discriminator and Optional TLVs. Returns `false` (nothing
+/// left pushed) when the value is shorter than 11 octets or the Optional TLVs
+/// are "not well formed".
+fn parse_bfd_discriminator<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    if data.len() < BFD_DISCRIMINATOR_MIN_SIZE {
+        return false;
+    }
+    let mark = buf.fields().len();
+    let obj_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    buf.push_field(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_BFD_MODE],
+        FieldValue::U8(data[0]),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_BFD_DISCRIMINATOR],
+        FieldValue::U32(read_be_u32(data, 1).unwrap_or_default()),
+        offset + 1..offset + BFD_DISCRIMINATOR_FIXED_SIZE,
+    );
+    let tlvs = &data[BFD_DISCRIMINATOR_FIXED_SIZE..];
+    let tlvs_offset = offset + BFD_DISCRIMINATOR_FIXED_SIZE;
+    if !tlvs.is_empty() {
+        let array_idx = buf.begin_container(
+            &PATH_ATTR_VALUE_BASE_FIELDS[FD_PAV_OPTIONAL_TLVS],
+            FieldValue::Array(0..0),
+            tlvs_offset..tlvs_offset + tlvs.len(),
+        );
+        let mut pos = 0;
+        while pos < tlvs.len() {
+            let Some(tlv) = begin_tlv_object(
+                buf,
+                &BFD_TLV_OBJECT_DESCRIPTOR,
+                BFD_TLV_CHILDREN,
+                tlvs,
+                pos,
+                tlvs_offset,
+                BFD_TLV_SHAPE,
+            ) else {
+                buf.truncate_fields(mark);
+                return false;
+            };
+            let len = tlv.value.len();
+            // Source IP Address TLV: "The Length field is 4 for the IPv4
+            // address family and 16 for the IPv6 address family."
+            if tlv.tlv_type == BFD_TLV_SOURCE_IP_ADDRESS && (len == 4 || len == 16) {
+                buf.push_field(
+                    &BFD_TLV_CHILDREN[FD_BFDT_SOURCE_ADDRESS],
+                    format_address(tlv.value, len == 16),
+                    tlv.value_offset..tlv.value_offset + len,
+                );
+            } else {
+                push_bytes_nonempty(
+                    buf,
+                    &BFD_TLV_CHILDREN[FD_BFDT_VALUE],
+                    tlv.value,
+                    tlv.value_offset,
+                );
+            }
+            buf.end_container(tlv.idx);
+            pos = tlv.next;
+        }
+        buf.end_container(array_idx);
+    }
+    buf.end_container(obj_idx);
+    true
 }
 
 /// Returns a human-readable name for MUP route types.
@@ -3638,14 +4975,11 @@ fn parse_update<'pkt>(
         let before = buf.field_count();
         let mut pos = 0;
         let attr_data = &data[pa_start..pa_end];
-        let as_size_hint = as_number_size_hint(attr_data);
+        let ctx = AttrContext::for_update(attr_data);
         while pos < attr_data.len() {
-            if let Some((consumed, mp_afi_safi)) = parse_path_attribute(
-                buf,
-                &attr_data[pos..],
-                offset + pa_start + pos,
-                as_size_hint,
-            ) {
+            if let Some((consumed, mp_afi_safi)) =
+                parse_path_attribute(buf, &attr_data[pos..], offset + pa_start + pos, ctx)
+            {
                 if first_mp_afi_safi.is_none() {
                     first_mp_afi_safi = mp_afi_safi;
                 }
@@ -4357,46 +5691,119 @@ static FD_AS4_AGGREGATOR_VALUE: FieldDescriptor =
 
 /// Child field descriptors for objects inside `path_attributes`.
 static PATH_ATTR_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("flags", "Flags", FieldType::U8),
-    FieldDescriptor {
-        name: "type_code",
-        display_name: "Type Code",
-        field_type: FieldType::U8,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(t) => path_attr_type_name(*t),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("attr_length", "Attribute Length", FieldType::U16),
-    FieldDescriptor::new("value", "Value", FieldType::Any)
-        .optional()
-        .with_children(PATH_ATTR_VALUE_CHILDREN),
-    // AS_PATH only: the AS number size (2 or 4 octets) inferred from the
-    // structure of the value, since the RFC 6793 capability exchange is not
-    // visible to a stateless dissector (RFC 6793, Section 4.1 —
-    // https://www.rfc-editor.org/rfc/rfc6793#section-4.1).
-    FieldDescriptor::new("as_number_size", "AS Number Size", FieldType::U8).optional(),
+    PA_FLAGS_FIELD,
+    PA_TYPE_CODE_FIELD,
+    PA_ATTR_LENGTH_FIELD,
+    PA_VALUE_FIELD.with_children(&PATH_ATTR_VALUE_FIELDS),
+    PA_AS_NUMBER_SIZE_FIELD,
 ];
 
+/// Schema of the path attributes nested in an ATTR_SET value (RFC 6368,
+/// Section 5 — <https://www.rfc-editor.org/rfc/rfc6368#section-5>).
+///
+/// It mirrors [`PATH_ATTR_CHILDREN`], but its `value` union omits the
+/// ATTR_SET-only `origin_as` / `path_attributes` so that the schema does not
+/// recurse: a nested ATTR_SET is kept as raw bytes (see [`parse_attr_value`]).
+/// At run time the nested attributes are pushed with the same descriptors as
+/// the top-level ones, which have the same names and types.
+const ATTR_SET_PATH_ATTR_FIELDS: [FieldDescriptor; 5] = [
+    PA_FLAGS_FIELD,
+    PA_TYPE_CODE_FIELD,
+    PA_ATTR_LENGTH_FIELD,
+    PA_VALUE_FIELD.with_children(&PATH_ATTR_VALUE_BASE_FIELDS),
+    PA_AS_NUMBER_SIZE_FIELD,
+];
+
+/// Path attribute `flags` (RFC 4271, Section 4.3).
+const PA_FLAGS_FIELD: FieldDescriptor = FieldDescriptor::new("flags", "Flags", FieldType::U8);
+
+/// Path attribute `type_code` (RFC 4271, Section 4.3).
+const PA_TYPE_CODE_FIELD: FieldDescriptor =
+    FieldDescriptor::new("type_code", "Type Code", FieldType::U8).with_display_fn(
+        |v, _siblings| match v {
+            FieldValue::U8(t) => path_attr_type_name(*t),
+            _ => None,
+        },
+    );
+
+/// Path attribute `attr_length` (RFC 4271, Section 4.3).
+const PA_ATTR_LENGTH_FIELD: FieldDescriptor =
+    FieldDescriptor::new("attr_length", "Attribute Length", FieldType::U16);
+
+/// Path attribute `value`, before its union `children` are attached.
+const PA_VALUE_FIELD: FieldDescriptor =
+    FieldDescriptor::new("value", "Value", FieldType::Any).optional();
+
+/// AS_PATH only: the AS number size (2 or 4 octets) inferred from the
+/// structure of the value, since the RFC 6793 capability exchange is not
+/// visible to a stateless dissector (RFC 6793, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc6793#section-4.1>).
+const PA_AS_NUMBER_SIZE_FIELD: FieldDescriptor =
+    FieldDescriptor::new("as_number_size", "AS Number Size", FieldType::U8).optional();
+
+/// Concatenates two descriptor arrays in a `const` context.
+const fn concat_fields<const A: usize, const B: usize, const N: usize>(
+    a: [FieldDescriptor; A],
+    b: [FieldDescriptor; B],
+) -> [FieldDescriptor; N] {
+    assert!(A > 0 && A + B == N);
+    let mut out = [a[0]; N];
+    let mut i = 0;
+    while i < A {
+        out[i] = a[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < B {
+        out[A + j] = b[j];
+        j += 1;
+    }
+    out
+}
+
+/// Field descriptor indices for the entries of [`PATH_ATTR_VALUE_BASE_FIELDS`]
+/// that are pushed directly into a path attribute `value` object.
+const FD_PAV_PMSI_FLAGS: usize = 20;
+const FD_PAV_TUNNEL_TYPE: usize = 21;
+const FD_PAV_MPLS_LABEL: usize = 22;
+const FD_PAV_VNI: usize = 23;
+const FD_PAV_TUNNEL_ENDPOINT: usize = 24;
+const FD_PAV_TUNNEL_IDENTIFIER: usize = 25;
+const FD_PAV_TUNNELS: usize = 26;
+const FD_PAV_TLVS: usize = 27;
+const FD_PAV_SECURE_PATH_LENGTH: usize = 28;
+const FD_PAV_SECURE_PATH: usize = 29;
+const FD_PAV_SIGNATURE_BLOCKS: usize = 30;
+const FD_PAV_BFD_MODE: usize = 31;
+const FD_PAV_BFD_DISCRIMINATOR: usize = 32;
+const FD_PAV_OPTIONAL_TLVS: usize = 33;
+/// Field descriptor indices of the ATTR_SET entries of
+/// [`PATH_ATTR_VALUE_FIELDS`].
+const FD_PAV_ORIGIN_AS: usize = 34;
+const FD_PAV_PATH_ATTRIBUTES: usize = 35;
+
 /// Union of every field that can appear inside a structured path attribute
-/// `value`.
+/// `value`, except the ATTR_SET ones (see [`PATH_ATTR_VALUE_FIELDS`]).
 ///
 /// A path attribute `value` is [`FieldType::Any`]: its runtime shape is selected
 /// by the sibling `type_code`. It is an Object for MP_REACH_NLRI /
-/// MP_UNREACH_NLRI (RFC 4760), an Array of TLV objects for BGP Prefix-SID
-/// (RFC 8669 / RFC 9252), an Array of segment objects for AS_PATH / AS4_PATH
-/// (RFC 4271, Section 5.1.2), an Array of scalars for COMMUNITIES /
-/// CLUSTER_LIST / EXTENDED COMMUNITIES / LARGE_COMMUNITY, a scalar for ORIGIN /
-/// MULTI_EXIT_DISC / LOCAL_PREF, an IPv4 address for NEXT_HOP / ORIGINATOR_ID,
-/// and raw bytes for unknown attributes.
+/// MP_UNREACH_NLRI (RFC 4760), PMSI_TUNNEL (RFC 6514), Tunnel Encapsulation
+/// (RFC 9012), BGP-LS Attribute (RFC 9552), BGPsec_Path (RFC 8205), ATTR_SET
+/// (RFC 6368) and BFD Discriminator (RFC 9026); an Array of TLV objects for
+/// BGP Prefix-SID (RFC 8669 / RFC 9252), AIGP (RFC 7311) and the SFP
+/// attribute (RFC 9015); an Array of segment objects for AS_PATH / AS4_PATH
+/// (RFC 4271, Section 5.1.2); an Array of scalars for COMMUNITIES /
+/// CLUSTER_LIST / EXTENDED COMMUNITIES / LARGE_COMMUNITY; a scalar for ORIGIN /
+/// MULTI_EXIT_DISC / LOCAL_PREF / OTC (RFC 9234); an IPv4 address for
+/// NEXT_HOP / ORIGINATOR_ID; and raw bytes for unknown or malformed
+/// attributes.
 ///
 /// This list is the union of the sub-fields of every *object* shape, so that a
 /// schema walker can discover them. Every entry is optional because none of them
-/// is present for all `type_code` values.
-static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &[
+/// is present for all `type_code` values. Names are unique: where two shapes
+/// would clash on a name with a different type or children, one of them is
+/// wrapped (`tunnels`, `tlvs`) or prefixed (`pmsi_flags`).
+const PATH_ATTR_VALUE_BASE_FIELDS: [FieldDescriptor; 34] = [
     // MP_REACH_NLRI / MP_UNREACH_NLRI object fields (RFC 4760).
     MP_FIELDS[FD_MP_AFI].optional(),
     MP_FIELDS[FD_MP_SAFI].optional(),
@@ -4408,7 +5815,11 @@ static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &[
     MP_FIELDS[FD_MP_WITHDRAWN_ROUTES_RAW],
     MP_FIELDS[FD_MP_NEXT_HOP_RD],
     MP_FIELDS[FD_MP_NEXT_HOP_LINK_LOCAL_RD],
-    // BGP Prefix-SID TLV element fields (RFC 8669, RFC 9252).
+    // BGP Prefix-SID TLV element fields (RFC 8669, RFC 9252); the SFP
+    // attribute TLVs (RFC 9015, Section 3.2.1 —
+    // https://www.rfc-editor.org/rfc/rfc9015#section-3.2.1) and AIGP TLVs
+    // (RFC 7311, Section 3 — https://www.rfc-editor.org/rfc/rfc7311#section-3)
+    // share `type`, `length` and `value`.
     PREFIX_SID_TLV_FIELDS[FD_PSID_TYPE].optional(),
     PREFIX_SID_TLV_FIELDS[FD_PSID_LENGTH].optional(),
     PREFIX_SID_TLV_FIELDS[FD_PSID_FLAGS],
@@ -4419,7 +5830,307 @@ static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &[
     // AS_PATH / AS4_PATH segment fields (RFC 4271, Section 5.1.2; RFC 6793).
     AS_PATH_SEG_FIELDS[FD_APS_SEGMENT_TYPE].optional(),
     AS_PATH_SEG_FIELDS[FD_APS_AS_NUMBERS].optional(),
+    // AIGP TLV (RFC 7311, Section 3 —
+    // https://www.rfc-editor.org/rfc/rfc7311#section-3).
+    AIGP_TLV_FIELDS[FD_AIGP_METRIC],
+    // PMSI_TUNNEL (RFC 6514, Section 5 —
+    // https://www.rfc-editor.org/rfc/rfc6514#section-5).
+    FieldDescriptor::new("pmsi_flags", "PMSI Tunnel Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("tunnel_type", "Tunnel Type", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(t) => pmsi_tunnel_type_name(*t),
+            _ => None,
+        }),
+    FieldDescriptor::new("mpls_label", "MPLS Label", FieldType::U32).optional(),
+    // The MPLS Label field carries a 24-bit VNI with a VXLAN / NVGRE /
+    // VXLAN-GPE encapsulation (RFC 8365, Section 5.1.3 —
+    // https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3).
+    FieldDescriptor::new("vni", "VNI", FieldType::U32).optional(),
+    FieldDescriptor::new("tunnel_endpoint", "Tunnel Endpoint", FieldType::Any).optional(),
+    FieldDescriptor::new("tunnel_identifier", "Tunnel Identifier", FieldType::Bytes).optional(),
+    // Tunnel Encapsulation (RFC 9012, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-2).
+    FieldDescriptor::new("tunnels", "Tunnel TLVs", FieldType::Array)
+        .optional()
+        .with_children(&TUNNEL_TLV_FIELDS),
+    // BGP-LS Attribute (RFC 9552, Section 5.3 —
+    // https://www.rfc-editor.org/rfc/rfc9552#section-5.3).
+    FieldDescriptor::new("tlvs", "TLVs", FieldType::Array)
+        .optional()
+        .with_children(&BGP_LS_TLV_FIELDS),
+    // BGPsec_Path (RFC 8205, Section 3 —
+    // https://www.rfc-editor.org/rfc/rfc8205#section-3).
+    FieldDescriptor::new("secure_path_length", "Secure_Path Length", FieldType::U16).optional(),
+    FieldDescriptor::new("secure_path", "Secure_Path", FieldType::Array)
+        .optional()
+        .with_children(&BGPSEC_SEGMENT_FIELDS),
+    FieldDescriptor::new("signature_blocks", "Signature_Blocks", FieldType::Array)
+        .optional()
+        .with_children(&BGPSEC_BLOCK_FIELDS),
+    // BFD Discriminator (RFC 9026, Section 3.1.6 —
+    // https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6).
+    FieldDescriptor::new("bfd_mode", "BFD Mode", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(m) => bfd_mode_name(*m),
+            _ => None,
+        }),
+    FieldDescriptor::new("bfd_discriminator", "BFD Discriminator", FieldType::U32).optional(),
+    FieldDescriptor::new("optional_tlvs", "Optional TLVs", FieldType::Array)
+        .optional()
+        .with_children(&BFD_TLV_FIELDS),
 ];
+
+/// Union of every field that can appear inside a structured path attribute
+/// `value`: [`PATH_ATTR_VALUE_BASE_FIELDS`] plus the ATTR_SET fields (RFC 6368,
+/// Section 5 — <https://www.rfc-editor.org/rfc/rfc6368#section-5>).
+const PATH_ATTR_VALUE_FIELDS: [FieldDescriptor; 36] = concat_fields(
+    PATH_ATTR_VALUE_BASE_FIELDS,
+    [
+        FieldDescriptor::new("origin_as", "Origin AS", FieldType::U32).optional(),
+        FieldDescriptor::new("path_attributes", "Path Attributes", FieldType::Array)
+            .optional()
+            .with_children(&ATTR_SET_PATH_ATTR_FIELDS),
+    ],
+);
+
+/// Slice form of [`PATH_ATTR_VALUE_FIELDS`].
+static PATH_ATTR_VALUE_CHILDREN: &[FieldDescriptor] = &PATH_ATTR_VALUE_FIELDS;
+
+/// Field descriptor indices for [`AIGP_TLV_CHILDREN`].
+const FD_AIGP_METRIC: usize = 2;
+const FD_AIGP_VALUE: usize = 3;
+
+/// Child field descriptors of an AIGP TLV.
+///
+/// RFC 7311, Section 3 — <https://www.rfc-editor.org/rfc/rfc7311#section-3>
+const AIGP_TLV_FIELDS: [FieldDescriptor; 4] = [
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => aigp_tlv_type_name(*t),
+        _ => None,
+    }),
+    FieldDescriptor::new("length", "Length", FieldType::U16),
+    FieldDescriptor::new("metric", "Accumulated IGP Metric", FieldType::U64).optional(),
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+];
+
+/// Slice form of [`AIGP_TLV_FIELDS`].
+static AIGP_TLV_CHILDREN: &[FieldDescriptor] = &AIGP_TLV_FIELDS;
+
+/// Object descriptor for AIGP TLVs.
+static AIGP_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("tlv", "TLV", FieldType::Object).with_children(&AIGP_TLV_FIELDS);
+
+/// Field descriptor index for [`TUNNEL_TLV_CHILDREN`].
+const FD_TUN_SUB_TLVS: usize = 2;
+
+/// Child field descriptors of a Tunnel Encapsulation TLV.
+///
+/// RFC 9012, Section 2 — <https://www.rfc-editor.org/rfc/rfc9012#section-2>
+const TUNNEL_TLV_FIELDS: [FieldDescriptor; 3] = [
+    FieldDescriptor::new("tunnel_type", "Tunnel Type", FieldType::U16).with_display_fn(|v, _| {
+        match v {
+            FieldValue::U16(t) => tunnel_type_name(*t),
+            _ => None,
+        }
+    }),
+    FieldDescriptor::new("length", "Length", FieldType::U16),
+    FieldDescriptor::new("sub_tlvs", "Sub-TLVs", FieldType::Array)
+        .with_children(&TUNNEL_SUB_TLV_FIELDS),
+];
+
+/// Slice form of [`TUNNEL_TLV_FIELDS`].
+static TUNNEL_TLV_CHILDREN: &[FieldDescriptor] = &TUNNEL_TLV_FIELDS;
+
+/// Object descriptor for Tunnel Encapsulation TLVs.
+static TUNNEL_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("tunnel", "Tunnel TLV", FieldType::Object)
+        .with_children(&TUNNEL_TLV_FIELDS);
+
+/// Field descriptor indices for [`TUNNEL_SUB_TLV_CHILDREN`].
+const FD_TSUB_ADDRESS_FAMILY: usize = 2;
+const FD_TSUB_ADDRESS: usize = 3;
+const FD_TSUB_FLAGS: usize = 4;
+const FD_TSUB_COLOR: usize = 5;
+const FD_TSUB_UDP_PORT: usize = 6;
+const FD_TSUB_PROTOCOL_TYPE: usize = 7;
+const FD_TSUB_VALUE: usize = 8;
+
+/// Child field descriptors of a Tunnel Encapsulation sub-TLV.
+///
+/// The Sub-TLV Length is exposed as a U16 whether it is encoded in 1 or 2
+/// octets.
+///
+/// RFC 9012, Sections 2 and 3 — <https://www.rfc-editor.org/rfc/rfc9012#section-3>
+const TUNNEL_SUB_TLV_FIELDS: [FieldDescriptor; 9] = [
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => tunnel_sub_tlv_name(*t),
+        _ => None,
+    }),
+    FieldDescriptor::new("length", "Length", FieldType::U16),
+    // Tunnel Egress Endpoint (RFC 9012, Section 3.1 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-3.1).
+    FieldDescriptor::new("address_family", "Address Family", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(a) => afi_name(*a),
+            _ => None,
+        }),
+    FieldDescriptor::new("address", "Address", FieldType::Any).optional(),
+    // Color (RFC 9012, Sections 3.4.2 and 4.3 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-4.3).
+    FieldDescriptor::new("flags", "Flags", FieldType::U16).optional(),
+    FieldDescriptor::new("color", "Color Value", FieldType::U32).optional(),
+    // UDP Destination Port (RFC 9012, Section 3.3.2 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-3.3.2).
+    FieldDescriptor::new("udp_port", "UDP Destination Port", FieldType::U16).optional(),
+    // Protocol Type (RFC 9012, Section 3.4.1 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-3.4.1).
+    FieldDescriptor::new("protocol_type", "Protocol Type", FieldType::U16).optional(),
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+];
+
+/// Slice form of [`TUNNEL_SUB_TLV_FIELDS`].
+static TUNNEL_SUB_TLV_CHILDREN: &[FieldDescriptor] = &TUNNEL_SUB_TLV_FIELDS;
+
+/// Object descriptor for Tunnel Encapsulation sub-TLVs.
+static TUNNEL_SUB_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("sub_tlv", "Sub-TLV", FieldType::Object)
+        .with_children(&TUNNEL_SUB_TLV_FIELDS);
+
+/// Child field descriptors of a BGP-LS Attribute TLV.
+///
+/// RFC 9552, Section 5.1 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.1>
+const BGP_LS_TLV_FIELDS: [FieldDescriptor; 3] = [
+    FieldDescriptor::new("type", "Type", FieldType::U16).with_display_fn(|v, _| match v {
+        FieldValue::U16(t) => bgp_ls_tlv_name(*t),
+        _ => None,
+    }),
+    FieldDescriptor::new("length", "Length", FieldType::U16),
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+];
+
+/// Slice form of [`BGP_LS_TLV_FIELDS`].
+static BGP_LS_TLV_CHILDREN: &[FieldDescriptor] = &BGP_LS_TLV_FIELDS;
+
+/// Object descriptor for BGP-LS Attribute TLVs.
+static BGP_LS_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("tlv", "TLV", FieldType::Object).with_children(&BGP_LS_TLV_FIELDS);
+
+/// Child field descriptors of an SFP attribute TLV.
+///
+/// RFC 9015, Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc9015#section-3.2.1>
+const SFP_TLV_FIELDS: [FieldDescriptor; 3] = [
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => sfp_tlv_type_name(*t),
+        _ => None,
+    }),
+    FieldDescriptor::new("length", "Length", FieldType::U16),
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+];
+
+/// Slice form of [`SFP_TLV_FIELDS`].
+static SFP_TLV_CHILDREN: &[FieldDescriptor] = &SFP_TLV_FIELDS;
+
+/// Object descriptor for SFP attribute TLVs.
+static SFP_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("tlv", "TLV", FieldType::Object).with_children(&SFP_TLV_FIELDS);
+
+/// Field descriptor indices for [`BGPSEC_SEGMENT_CHILDREN`].
+const FD_BSEG_PCOUNT: usize = 0;
+const FD_BSEG_FLAGS: usize = 1;
+const FD_BSEG_ASN: usize = 2;
+
+/// Child field descriptors of a BGPsec Secure_Path Segment.
+///
+/// RFC 8205, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc8205#section-3.1>
+const BGPSEC_SEGMENT_FIELDS: [FieldDescriptor; 3] = [
+    FieldDescriptor::new("pcount", "pCount", FieldType::U8),
+    FieldDescriptor::new("flags", "Flags", FieldType::U8),
+    FieldDescriptor::new("asn", "AS Number", FieldType::U32),
+];
+
+/// Slice form of [`BGPSEC_SEGMENT_FIELDS`].
+static BGPSEC_SEGMENT_CHILDREN: &[FieldDescriptor] = &BGPSEC_SEGMENT_FIELDS;
+
+/// Object descriptor for BGPsec Secure_Path Segments.
+static BGPSEC_SEGMENT_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("segment", "Secure_Path Segment", FieldType::Object)
+        .with_children(&BGPSEC_SEGMENT_FIELDS);
+
+/// Field descriptor indices for [`BGPSEC_BLOCK_CHILDREN`].
+const FD_BBLK_LENGTH: usize = 0;
+const FD_BBLK_ALGORITHM_SUITE: usize = 1;
+const FD_BBLK_SIGNATURE_SEGMENTS: usize = 2;
+
+/// Child field descriptors of a BGPsec Signature_Block.
+///
+/// RFC 8205, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc8205#section-3.2>
+const BGPSEC_BLOCK_FIELDS: [FieldDescriptor; 3] = [
+    FieldDescriptor::new("length", "Signature_Block Length", FieldType::U16),
+    FieldDescriptor::new(
+        "algorithm_suite",
+        "Algorithm Suite Identifier",
+        FieldType::U8,
+    ),
+    FieldDescriptor::new("signature_segments", "Signature Segments", FieldType::Array)
+        .with_children(&BGPSEC_SIGNATURE_FIELDS),
+];
+
+/// Slice form of [`BGPSEC_BLOCK_FIELDS`].
+static BGPSEC_BLOCK_CHILDREN: &[FieldDescriptor] = &BGPSEC_BLOCK_FIELDS;
+
+/// Object descriptor for BGPsec Signature_Blocks.
+static BGPSEC_BLOCK_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("signature_block", "Signature_Block", FieldType::Object)
+        .with_children(&BGPSEC_BLOCK_FIELDS);
+
+/// Field descriptor indices for [`BGPSEC_SIGNATURE_CHILDREN`].
+const FD_BSIG_SKI: usize = 0;
+const FD_BSIG_SIGNATURE_LENGTH: usize = 1;
+const FD_BSIG_SIGNATURE: usize = 2;
+
+/// Child field descriptors of a BGPsec Signature Segment.
+///
+/// RFC 8205, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc8205#section-3.2>
+const BGPSEC_SIGNATURE_FIELDS: [FieldDescriptor; 3] = [
+    FieldDescriptor::new("ski", "Subject Key Identifier", FieldType::Bytes),
+    FieldDescriptor::new("signature_length", "Signature Length", FieldType::U16),
+    FieldDescriptor::new("signature", "Signature", FieldType::Bytes).optional(),
+];
+
+/// Slice form of [`BGPSEC_SIGNATURE_FIELDS`].
+static BGPSEC_SIGNATURE_CHILDREN: &[FieldDescriptor] = &BGPSEC_SIGNATURE_FIELDS;
+
+/// Object descriptor for BGPsec Signature Segments.
+static BGPSEC_SIGNATURE_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("signature_segment", "Signature Segment", FieldType::Object)
+        .with_children(&BGPSEC_SIGNATURE_FIELDS);
+
+/// Field descriptor indices for [`BFD_TLV_CHILDREN`].
+const FD_BFDT_SOURCE_ADDRESS: usize = 2;
+const FD_BFDT_VALUE: usize = 3;
+
+/// Child field descriptors of a BFD Discriminator Optional TLV.
+///
+/// RFC 9026, Section 3.1.6 — <https://www.rfc-editor.org/rfc/rfc9026#section-3.1.6>
+const BFD_TLV_FIELDS: [FieldDescriptor; 4] = [
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => bfd_optional_tlv_type_name(*t),
+        _ => None,
+    }),
+    FieldDescriptor::new("length", "Length", FieldType::U8),
+    FieldDescriptor::new("source_address", "Source IP Address", FieldType::Any).optional(),
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+];
+
+/// Slice form of [`BFD_TLV_FIELDS`].
+static BFD_TLV_CHILDREN: &[FieldDescriptor] = &BFD_TLV_FIELDS;
+
+/// Object descriptor for BFD Discriminator Optional TLVs.
+static BFD_TLV_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("tlv", "TLV", FieldType::Object).with_children(&BFD_TLV_FIELDS);
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_MARKER: usize = 0;
@@ -4813,6 +6524,46 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 9234",
         "Route Leak Prevention and Detection Using Roles in UPDATE and OPEN Messages",
         "https://www.rfc-editor.org/rfc/rfc9234",
+    ),
+    SpecReference::new(
+        "RFC 6368",
+        "Internal BGP as the Provider/Customer Edge Protocol for BGP/MPLS IP Virtual Private Networks (VPNs)",
+        "https://www.rfc-editor.org/rfc/rfc6368",
+    ),
+    SpecReference::new(
+        "RFC 6514",
+        "BGP Encodings and Procedures for Multicast in MPLS/BGP IP VPNs",
+        "https://www.rfc-editor.org/rfc/rfc6514",
+    ),
+    SpecReference::new(
+        "RFC 7311",
+        "The Accumulated IGP Metric Attribute for BGP",
+        "https://www.rfc-editor.org/rfc/rfc7311",
+    ),
+    SpecReference::new(
+        "RFC 8205",
+        "BGPsec Protocol Specification",
+        "https://www.rfc-editor.org/rfc/rfc8205",
+    ),
+    SpecReference::new(
+        "RFC 8365",
+        "A Network Virtualization Overlay Solution Using Ethernet VPN (EVPN)",
+        "https://www.rfc-editor.org/rfc/rfc8365",
+    ),
+    SpecReference::new(
+        "RFC 9015",
+        "BGP Control Plane for the Network Service Header in Service Function Chaining",
+        "https://www.rfc-editor.org/rfc/rfc9015",
+    ),
+    SpecReference::new(
+        "RFC 9026",
+        "Multicast VPN Fast Upstream Failover",
+        "https://www.rfc-editor.org/rfc/rfc9026",
+    ),
+    SpecReference::new(
+        "RFC 9552",
+        "Distribution of Link-State and Traffic Engineering Information Using BGP",
+        "https://www.rfc-editor.org/rfc/rfc9552",
     ),
     SpecReference::new(
         "RFC 9252",
@@ -9423,5 +11174,952 @@ mod tests {
             *nested_field_value(&buf, &mp, "withdrawn_routes_raw"),
             FieldValue::Bytes(&[40, 1, 2])
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Path attribute value decoding: OTC, AIGP, PMSI_TUNNEL, Tunnel
+    // Encapsulation, BGP-LS Attribute, BGPsec_Path, ATTR_SET, SFP and BFD
+    // Discriminator.
+    // ---------------------------------------------------------------------
+
+    /// Helper: the direct element objects of the first path attribute's Array
+    /// `value`.
+    fn first_attr_value_array_objs(buf: &DissectBuffer<'_>) -> Vec<core::ops::Range<u32>> {
+        let FieldValue::Array(ref arr) = *extract_pa_value(buf) else {
+            panic!("expected Array value, got {:?}", extract_pa_value(buf));
+        };
+        nlri_entry_ranges(buf, arr)
+    }
+
+    /// Helper: the direct element objects of the named Array field in `range`.
+    fn array_objs(
+        buf: &DissectBuffer<'_>,
+        range: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Vec<core::ops::Range<u32>> {
+        let FieldValue::Array(ref arr) = *nested_field_value(buf, range, name) else {
+            panic!("expected Array for {name}");
+        };
+        nlri_entry_ranges(buf, arr)
+    }
+
+    #[test]
+    fn parse_bgp_update_otc() {
+        // Example from the issue: flags 0xC0, type 35, length 4, AS 64500.
+        let data = build_update(&[0xc0, 0x23, 0x04, 0x00, 0x00, 0xfb, 0xf4], &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(*extract_pa_value(&buf), FieldValue::U32(64500));
+    }
+
+    #[test]
+    fn parse_bgp_update_otc_bad_length_is_raw() {
+        // RFC 9234, Section 5: "a length of 4 octets".
+        let data = build_update(&build_attr(0xc0, 35, &[0, 0xfb, 0xf4]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&[0, 0xfb, 0xf4]));
+    }
+
+    #[test]
+    fn parse_bgp_update_aigp() {
+        // RFC 7311, Section 3: AIGP TLV (Type 1, Length 11, 8-octet metric)
+        // followed by a TLV of an unknown type, which is kept as bytes.
+        let mut val = vec![1u8];
+        val.extend_from_slice(&11u16.to_be_bytes());
+        val.extend_from_slice(&1_000_000u64.to_be_bytes());
+        val.extend_from_slice(&[2, 0, 5, 0xaa, 0xbb]);
+        let data = build_update(&build_attr(0x80, 26, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let tlvs = first_attr_value_array_objs(&buf);
+        assert_eq!(tlvs.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "type"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "length"),
+            FieldValue::U16(11)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "metric"),
+            FieldValue::U64(1_000_000)
+        );
+        assert!(nested_field_by_name_opt(&buf, &tlvs[0], "value").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[1], "type"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[1], "value"),
+            FieldValue::Bytes(&[0xaa, 0xbb])
+        );
+        assert!(nested_field_by_name_opt(&buf, &tlvs[1], "metric").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_aigp_malformed_is_raw() {
+        // RFC 7311, Section 3: "the minimum length is 3". A TLV Length below
+        // 3, or one that overruns the attribute, keeps the value raw.
+        // An AIGP TLV must have Length 11 (RFC 7311, Section 3).
+        for val in [
+            &[1u8, 0, 2][..],
+            &[1, 0, 11, 0, 0, 0, 0][..],
+            &[1, 0, 7, 0, 0, 0, 5][..],
+        ] {
+            let data = build_update(&build_attr(0x80, 26, val), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(val));
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_pmsi_tunnel_ingress_replication() {
+        // RFC 6514, Section 5: Flags (L bit set), Tunnel Type 6 (Ingress
+        // Replication), MPLS Label 100 in the high-order 20 bits, and the
+        // unicast tunnel endpoint as Tunnel Identifier.
+        let val = [0x01, 6, 0x00, 0x06, 0x41, 192, 0, 2, 1];
+        let data = build_update(&build_attr(0xc0, 22, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "pmsi_flags"),
+            FieldValue::U8(1)
+        );
+        let tunnel_type = nested_field_by_name(&buf, &obj, "tunnel_type");
+        assert_eq!(tunnel_type.value, FieldValue::U8(6));
+        assert_eq!(
+            (tunnel_type.descriptor.display_fn.unwrap())(&tunnel_type.value, &[]),
+            Some("Ingress Replication")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "mpls_label"),
+            FieldValue::U32(100)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "tunnel_endpoint"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        assert!(nested_field_by_name_opt(&buf, &obj, "tunnel_identifier").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_pmsi_tunnel_ingress_replication_ipv6() {
+        let mut val = vec![0x00, 6, 0, 0, 0];
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let data = build_update(&build_attr(0xc0, 22, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "tunnel_endpoint"),
+            FieldValue::Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_pmsi_tunnel_other_type_keeps_identifier_bytes() {
+        // RFC 6514, Section 5: PIM-SM Tree (4), <Sender Address, P-Multicast
+        // Group>. Tunnel identifiers other than Ingress Replication stay bytes.
+        let val = [0x00, 4, 0, 0, 0, 192, 0, 2, 1, 239, 1, 1, 1];
+        let data = build_update(&build_attr(0xc0, 22, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "tunnel_type"),
+            FieldValue::U8(4)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "mpls_label"),
+            FieldValue::U32(0)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "tunnel_identifier"),
+            FieldValue::Bytes(&[192, 0, 2, 1, 239, 1, 1, 1])
+        );
+        assert!(nested_field_by_name_opt(&buf, &obj, "tunnel_endpoint").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_pmsi_tunnel_no_identifier_and_truncated() {
+        // Tunnel Type 0 "No tunnel information present": no identifier.
+        let data = build_update(&build_attr(0xc0, 22, &[0x01, 0, 0, 0, 0]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let obj = first_attr_value_obj_range(&buf);
+        assert!(nested_field_by_name_opt(&buf, &obj, "tunnel_identifier").is_none());
+        assert!(nested_field_by_name_opt(&buf, &obj, "tunnel_endpoint").is_none());
+
+        // Shorter than the 5-octet fixed part: raw.
+        let data = build_update(&build_attr(0xc0, 22, &[0x01, 6, 0, 0]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&[0x01, 6, 0, 0]));
+    }
+
+    /// Helper: a Tunnel Encapsulation sub-TLV (RFC 9012, Section 2), with a
+    /// 2-octet length for types 128-255.
+    fn build_tunnel_sub_tlv(sub_type: u8, value: &[u8]) -> Vec<u8> {
+        let mut raw = vec![sub_type];
+        if sub_type >= 128 {
+            raw.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        } else {
+            raw.push(value.len() as u8);
+        }
+        raw.extend_from_slice(value);
+        raw
+    }
+
+    #[test]
+    fn parse_bgp_update_tunnel_encapsulation() {
+        // RFC 9012, Section 2: one VXLAN (8) Tunnel TLV carrying the Tunnel
+        // Egress Endpoint (6), Color (4), UDP Destination Port (8), Protocol
+        // Type (2), Encapsulation (1) and a 2-octet-length sub-TLV (128).
+        let mut subs = Vec::new();
+        subs.extend(build_tunnel_sub_tlv(6, &[0, 0, 0, 0, 0, 1, 192, 0, 2, 1]));
+        subs.extend(build_tunnel_sub_tlv(4, &[0x03, 0x0b, 0, 0, 0, 0, 0, 100]));
+        subs.extend(build_tunnel_sub_tlv(8, &4789u16.to_be_bytes()));
+        subs.extend(build_tunnel_sub_tlv(2, &0x6558u16.to_be_bytes()));
+        subs.extend(build_tunnel_sub_tlv(1, &[0, 0, 0, 0, 0, 0, 0, 10]));
+        subs.extend(build_tunnel_sub_tlv(128, &[1, 2, 3]));
+        let mut val = 8u16.to_be_bytes().to_vec();
+        val.extend_from_slice(&(subs.len() as u16).to_be_bytes());
+        val.extend_from_slice(&subs);
+        let data = build_update(&build_attr(0xc0, 23, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        let tunnels = array_objs(&buf, &obj, "tunnels");
+        assert_eq!(tunnels.len(), 1);
+        let tunnel_type = nested_field_by_name(&buf, &tunnels[0], "tunnel_type");
+        assert_eq!(tunnel_type.value, FieldValue::U16(8));
+        assert_eq!(
+            (tunnel_type.descriptor.display_fn.unwrap())(&tunnel_type.value, &[]),
+            Some("VXLAN Encapsulation")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tunnels[0], "length"),
+            FieldValue::U16(subs.len() as u16)
+        );
+
+        let subs = array_objs(&buf, &tunnels[0], "sub_tlvs");
+        assert_eq!(subs.len(), 6);
+        // Tunnel Egress Endpoint (RFC 9012, Section 3.1).
+        let sub_type = nested_field_by_name(&buf, &subs[0], "type");
+        assert_eq!(sub_type.value, FieldValue::U8(6));
+        assert_eq!(
+            (sub_type.descriptor.display_fn.unwrap())(&sub_type.value, &[]),
+            Some("Tunnel Egress Endpoint")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &subs[0], "length"),
+            FieldValue::U16(10)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &subs[0], "address_family"),
+            FieldValue::U16(1)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &subs[0], "address"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        // Color (RFC 9012, Section 3.4.2).
+        assert_eq!(
+            *nested_field_value(&buf, &subs[1], "color"),
+            FieldValue::U32(100)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &subs[1], "flags"),
+            FieldValue::U16(0)
+        );
+        // UDP Destination Port (RFC 9012, Section 3.3.2).
+        assert_eq!(
+            *nested_field_value(&buf, &subs[2], "udp_port"),
+            FieldValue::U16(4789)
+        );
+        // Protocol Type (RFC 9012, Section 3.4.1).
+        assert_eq!(
+            *nested_field_value(&buf, &subs[3], "protocol_type"),
+            FieldValue::U16(0x6558)
+        );
+        // Encapsulation (RFC 9012, Section 3.2) and the 2-octet-length
+        // sub-TLV stay bytes.
+        assert_eq!(
+            *nested_field_value(&buf, &subs[4], "value"),
+            FieldValue::Bytes(&[0, 0, 0, 0, 0, 0, 0, 10])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &subs[5], "length"),
+            FieldValue::U16(3)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &subs[5], "value"),
+            FieldValue::Bytes(&[1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_tunnel_encapsulation_sub_tlv_variants() {
+        // RFC 9012, Section 3.1: Address Family 0 (next hop, no Address) and
+        // IPv6; a Color sub-TLV that does not start with 0x030b and a
+        // malformed endpoint are kept as bytes (Sections 3.4.2 and 13).
+        let mut subs = Vec::new();
+        subs.extend(build_tunnel_sub_tlv(6, &[0, 0, 0, 0, 0, 0]));
+        let mut v6 = vec![0, 0, 0, 0, 0, 2];
+        v6.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        subs.extend(build_tunnel_sub_tlv(6, &v6));
+        subs.extend(build_tunnel_sub_tlv(4, &[0x00, 0x02, 0, 0, 0, 0, 0, 100]));
+        subs.extend(build_tunnel_sub_tlv(6, &[0, 0, 0, 0, 0, 1, 192, 0]));
+        let mut val = 7u16.to_be_bytes().to_vec(); // IP in IP
+        val.extend_from_slice(&(subs.len() as u16).to_be_bytes());
+        val.extend_from_slice(&subs);
+        let data = build_update(&build_attr(0xc0, 23, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        let tunnels = array_objs(&buf, &obj, "tunnels");
+        let subs = array_objs(&buf, &tunnels[0], "sub_tlvs");
+        assert_eq!(
+            *nested_field_value(&buf, &subs[0], "address_family"),
+            FieldValue::U16(0)
+        );
+        assert!(nested_field_by_name_opt(&buf, &subs[0], "address").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &subs[1], "address"),
+            FieldValue::Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        );
+        assert!(nested_field_by_name_opt(&buf, &subs[2], "color").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &subs[2], "value"),
+            FieldValue::Bytes(&[0x00, 0x02, 0, 0, 0, 0, 0, 100])
+        );
+        assert!(nested_field_by_name_opt(&buf, &subs[3], "address").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &subs[3], "value"),
+            FieldValue::Bytes(&[0, 0, 0, 0, 0, 1, 192, 0])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_tunnel_encapsulation_malformed_is_raw() {
+        // A sub-TLV that overruns its Tunnel TLV, and a Tunnel TLV that
+        // overruns the attribute (RFC 9012, Section 13), keep the value raw.
+        let overrun_sub = [0, 8, 0, 3, 6, 10, 0];
+        let overrun_tlv = [0, 8, 0, 9, 8, 2, 0x12];
+        for val in [&overrun_sub[..], &overrun_tlv[..], &[0, 8, 0][..]] {
+            let data = build_update(&build_attr(0xc0, 23, val), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(val));
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_bgp_ls_attribute() {
+        // RFC 9552, Section 5.3: Node Name (1026) and IGP Metric (1095) TLVs,
+        // each a 2-octet Type, 2-octet Length and Value (Section 5.1).
+        let mut val = Vec::new();
+        val.extend_from_slice(&1026u16.to_be_bytes());
+        val.extend_from_slice(&2u16.to_be_bytes());
+        val.extend_from_slice(b"r1");
+        val.extend_from_slice(&1095u16.to_be_bytes());
+        val.extend_from_slice(&3u16.to_be_bytes());
+        val.extend_from_slice(&[0, 0, 10]);
+        let data = build_update(&build_attr(0x80, 29, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        let tlvs = array_objs(&buf, &obj, "tlvs");
+        assert_eq!(tlvs.len(), 2);
+        let tlv_type = nested_field_by_name(&buf, &tlvs[0], "type");
+        assert_eq!(tlv_type.value, FieldValue::U16(1026));
+        assert_eq!(
+            (tlv_type.descriptor.display_fn.unwrap())(&tlv_type.value, &[]),
+            Some("Node Name")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "length"),
+            FieldValue::U16(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "value"),
+            FieldValue::Bytes(b"r1")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[1], "value"),
+            FieldValue::Bytes(&[0, 0, 10])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_bgp_ls_attribute_malformed_is_raw() {
+        let val = [0x04, 0x02, 0x00, 0x05, b'r'];
+        let data = build_update(&build_attr(0x80, 29, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&val));
+    }
+
+    /// Helper: a BGPsec_Path value (RFC 8205, Section 3) with the given
+    /// Secure_Path Segments `(pCount, Flags, AS)` and one Signature_Block of
+    /// Algorithm Suite 1 whose Signature Segments carry `sig_len`-octet
+    /// signatures.
+    fn build_bgpsec_path(segments: &[(u8, u8, u32)], sig_len: usize) -> Vec<u8> {
+        let mut val = Vec::new();
+        val.extend_from_slice(&((2 + 6 * segments.len()) as u16).to_be_bytes());
+        for &(pcount, flags, asn) in segments {
+            val.push(pcount);
+            val.push(flags);
+            val.extend_from_slice(&asn.to_be_bytes());
+        }
+        let block_len = 2 + 1 + segments.len() * (20 + 2 + sig_len);
+        val.extend_from_slice(&(block_len as u16).to_be_bytes());
+        val.push(1); // Algorithm Suite Identifier
+        for i in 0..segments.len() {
+            val.extend_from_slice(&[i as u8 + 0xa0; 20]); // SKI
+            val.extend_from_slice(&(sig_len as u16).to_be_bytes());
+            val.extend(std::iter::repeat_n(0x5a, sig_len));
+        }
+        val
+    }
+
+    #[test]
+    fn parse_bgp_update_bgpsec_path() {
+        let val = build_bgpsec_path(&[(1, 0x00, 65001), (2, 0x80, 65002)], 4);
+        let data = build_update(&build_attr(0x90, 33, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "secure_path_length"),
+            FieldValue::U16(14)
+        );
+        let segs = array_objs(&buf, &obj, "secure_path");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &segs[1], "pcount"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &segs[1], "flags"),
+            FieldValue::U8(0x80)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &segs[1], "asn"),
+            FieldValue::U32(65002)
+        );
+
+        let blocks = array_objs(&buf, &obj, "signature_blocks");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &blocks[0], "length"),
+            FieldValue::U16(2 + 1 + 2 * 26)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &blocks[0], "algorithm_suite"),
+            FieldValue::U8(1)
+        );
+        let sigs = array_objs(&buf, &blocks[0], "signature_segments");
+        assert_eq!(sigs.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &sigs[1], "ski"),
+            FieldValue::Bytes(&[0xa1; 20])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &sigs[1], "signature_length"),
+            FieldValue::U16(4)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &sigs[1], "signature"),
+            FieldValue::Bytes(&[0x5a; 4])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_bgpsec_path_malformed_is_raw() {
+        // Secure_Path Length not 2 + 6n, a Signature_Block that overruns the
+        // attribute, and a truncated Signature Segment keep the value raw.
+        let mut bad_sp_len = build_bgpsec_path(&[(1, 0, 65001)], 4);
+        bad_sp_len[1] = 7;
+        let mut bad_block = build_bgpsec_path(&[(1, 0, 65001)], 4);
+        bad_block[9] += 1;
+        let mut bad_sig = build_bgpsec_path(&[(1, 0, 65001)], 4);
+        bad_sig[32] = 9;
+        // "A Signature_Block ... has exactly one Signature Segment ... for each
+        // Secure_Path Segment", and there are "one or two Signature_Blocks".
+        let mut empty_block = build_bgpsec_path(&[(1, 0, 65001)], 4);
+        empty_block.truncate(8);
+        empty_block.extend_from_slice(&[0, 3, 1]);
+        let one = build_bgpsec_path(&[(1, 0, 65001)], 4);
+        let mut three_blocks = one.clone();
+        for _ in 0..2 {
+            three_blocks.extend_from_slice(&one[8..]);
+        }
+        let mut two_blocks = one.clone();
+        two_blocks.extend_from_slice(&one[8..]);
+        let data = build_update(&build_attr(0x90, 33, &two_blocks), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let obj = first_attr_value_obj_range(&buf);
+        assert_eq!(array_objs(&buf, &obj, "signature_blocks").len(), 2);
+        for val in [
+            bad_sp_len,
+            bad_block,
+            bad_sig,
+            empty_block,
+            three_blocks,
+            vec![0],
+        ] {
+            let data = build_update(&build_attr(0x90, 33, &val), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&val));
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_attr_set() {
+        // RFC 6368, Section 5: Origin AS 65001, then ORIGIN, a 4-octet AS_PATH
+        // and LOCAL_PREF encoded as path attributes.
+        let mut val = 65001u32.to_be_bytes().to_vec();
+        val.extend(build_attr(0x40, 1, &[0]));
+        let mut as_path = vec![2, 1];
+        as_path.extend_from_slice(&65001u32.to_be_bytes());
+        val.extend(build_attr(0x40, 2, &as_path));
+        val.extend(build_attr(0x40, 5, &100u32.to_be_bytes()));
+        let data = build_update(&build_attr(0xc0, 128, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "origin_as"),
+            FieldValue::U32(65001)
+        );
+        let attrs = array_objs(&buf, &obj, "path_attributes");
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(
+            *nested_field_value(&buf, &attrs[0], "type_code"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &attrs[0], "value"),
+            FieldValue::U8(0)
+        );
+        // "The AS_PATH and AGGREGATOR attributes contained within an ATTR_SET
+        // attribute MUST be encoded using 4-octet AS numbers".
+        assert_eq!(
+            *nested_field_value(&buf, &attrs[1], "as_number_size"),
+            FieldValue::U8(4)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &attrs[2], "value"),
+            FieldValue::U32(100)
+        );
+        // The UPDATE carries no MP attribute: no top-level afi/safi.
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "afi").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_attr_set_with_mp_reach_is_raw() {
+        // RFC 6368, Section 5: "The ATTR_SET attribute SHALL be considered
+        // malformed if ... The original path attributes carried in the
+        // variable-length attribute data include the MP_REACH or MP_UNREACH
+        // attribute." The whole value is kept raw and does not set the
+        // top-level afi/safi.
+        let mp_reach = [
+            0u8, 2, 1, 16, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+        ];
+        for type_code in [14u8, 15] {
+            let mut val = 65001u32.to_be_bytes().to_vec();
+            val.extend(build_attr(0x40, 1, &[0]));
+            val.extend(build_attr(0x80, type_code, &mp_reach));
+            let data = build_update(&build_attr(0xc0, 128, &val), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&val));
+            let layer = &buf.layers()[0];
+            assert!(buf.field_by_name(layer, "afi").is_none());
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_attr_set_nested_attributes_constrained() {
+        // Inside an ATTR_SET a further ATTR_SET is kept raw, and "The AS_PATH
+        // and AGGREGATOR attributes contained within an ATTR_SET attribute MUST
+        // be encoded using 4-octet AS numbers" (RFC 6368, Section 5): a
+        // 2-octet AS_PATH or a 6-octet AGGREGATOR is kept raw.
+        let inner_set = [0u8, 0, 0xfd, 0xe9, 0x40, 1, 1, 0];
+        let as_path_2 = [2u8, 2, 0xfd, 0xe9, 0xfd, 0xea];
+        let aggregator_2 = [0xfd, 0xe9, 192, 0, 2, 1];
+        let aggregator_4 = [0, 0, 0xfd, 0xe9, 192, 0, 2, 1];
+        let mut val = 65001u32.to_be_bytes().to_vec();
+        val.extend(build_attr(0xc0, 128, &inner_set));
+        val.extend(build_attr(0x40, 2, &as_path_2));
+        val.extend(build_attr(0xc0, 7, &aggregator_2));
+        val.extend(build_attr(0xc0, 7, &aggregator_4));
+        let data = build_update(&build_attr(0xc0, 128, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        let attrs = array_objs(&buf, &obj, "path_attributes");
+        assert_eq!(attrs.len(), 4);
+        assert_eq!(
+            *nested_field_value(&buf, &attrs[0], "value"),
+            FieldValue::Bytes(&inner_set)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &attrs[1], "value"),
+            FieldValue::Bytes(&as_path_2)
+        );
+        assert!(nested_field_by_name_opt(&buf, &attrs[1], "as_number_size").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &attrs[2], "value"),
+            FieldValue::Bytes(&aggregator_2)
+        );
+        let aggregator = nested_field_by_name(&buf, &attrs[3], "value");
+        assert_eq!(aggregator.value, FieldValue::Bytes(&aggregator_4));
+        assert!(aggregator.descriptor.format_fn.is_some());
+        let raw = nested_field_by_name(&buf, &attrs[2], "value");
+        assert!(raw.descriptor.format_fn.is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_pmsi_tunnel_vni_with_vxlan_encapsulation() {
+        // RFC 8365, Section 5.1.3: with a VXLAN encapsulation (Encapsulation
+        // Extended Community, RFC 9012 Section 4.1, tunnel type 8) "the entire
+        // 24-bit field is used to encode the VNI value". Here VNI 10100
+        // (0x002774), which would read as label 631 under RFC 6514.
+        let pmsi = [0x00, 6, 0x00, 0x27, 0x74, 192, 0, 2, 1];
+        for (tunnel_type, expect_vni) in [(8u8, true), (9, true), (12, true), (10, false)] {
+            let mut attrs = build_attr(0xc0, 16, &[0x03, 0x0c, 0, 0, 0, 0, 0, tunnel_type]);
+            attrs.extend(build_attr(0xc0, 22, &pmsi));
+            let data = build_update(&attrs, &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+            let layer = &buf.layers()[0];
+            let FieldValue::Array(ref pa) =
+                buf.field_by_name(layer, "path_attributes").unwrap().value
+            else {
+                panic!("expected Array");
+            };
+            let pmsi_attr = &nlri_entry_ranges(&buf, pa)[1];
+            let FieldValue::Object(ref obj) = *nested_field_value(&buf, pmsi_attr, "value") else {
+                panic!("expected Object");
+            };
+            if expect_vni {
+                assert_eq!(
+                    *nested_field_value(&buf, obj, "vni"),
+                    FieldValue::U32(10100),
+                    "tunnel type {tunnel_type}"
+                );
+                assert!(nested_field_by_name_opt(&buf, obj, "mpls_label").is_none());
+            } else {
+                assert_eq!(
+                    *nested_field_value(&buf, obj, "mpls_label"),
+                    FieldValue::U32(631)
+                );
+                assert!(nested_field_by_name_opt(&buf, obj, "vni").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn attr_context_scans_encapsulation_community() {
+        let vni = |attrs: &[u8]| AttrContext::for_update(attrs).vni_label;
+        // Truncated attribute headers or values stop the scan without a match.
+        assert!(!vni(&[0xc0]));
+        assert!(!vni(&[0xc0, 16]));
+        assert!(!vni(&[0xd0, 16, 0]));
+        assert!(!vni(&[0xc0, 16, 8, 0x03, 0x0c]));
+        // A non-transitive (0x43) community is not the Encapsulation Extended
+        // Community; an extended-length attribute is walked.
+        assert!(!vni(&[0xc0, 16, 8, 0x43, 0x0c, 0, 0, 0, 0, 0, 8]));
+        assert!(vni(&[0xd0, 16, 0, 8, 0x03, 0x0c, 0, 0, 0, 0, 0, 8]));
+        // A later attribute is reached past an unrelated one.
+        assert!(vni(&[
+            0x40, 1, 1, 0, 0xc0, 16, 8, 0x03, 0x0c, 0, 0, 0, 0, 0, 9
+        ]));
+    }
+
+    #[test]
+    fn parse_bgp_update_attr_set_malformed_is_raw() {
+        // "Its length is less than 4 octets", and nested path attributes that
+        // do not parse, keep the value raw.
+        for val in [&[0u8, 0, 0xfd][..], &[0, 0, 0xfd, 0xe9, 0x40, 1, 5, 0][..]] {
+            let data = build_update(&build_attr(0xc0, 128, val), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(val));
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_sfp_attribute() {
+        // RFC 9015, Section 3.2.1: 1-octet Type, 2-octet Length (of the data
+        // following the Length field), Value.
+        let val = [1u8, 0, 2, 0xaa, 0xbb, 2, 0, 0];
+        let data = build_update(&build_attr(0xc0, 37, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let tlvs = first_attr_value_array_objs(&buf);
+        assert_eq!(tlvs.len(), 2);
+        let tlv_type = nested_field_by_name(&buf, &tlvs[0], "type");
+        assert_eq!(tlv_type.value, FieldValue::U8(1));
+        assert_eq!(
+            (tlv_type.descriptor.display_fn.unwrap())(&tlv_type.value, &[]),
+            Some("Association TLV")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "value"),
+            FieldValue::Bytes(&[0xaa, 0xbb])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[1], "length"),
+            FieldValue::U16(0)
+        );
+        assert!(nested_field_by_name_opt(&buf, &tlvs[1], "value").is_none());
+
+        // "TLV length that suggests the TLV extends beyond the end of the SFP
+        // attribute" is malformed: raw.
+        let bad = [2u8, 0, 3, 0];
+        let data = build_update(&build_attr(0xc0, 37, &bad), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&bad));
+    }
+
+    #[test]
+    fn parse_bgp_update_bfd_discriminator() {
+        // RFC 9026, Section 3.1.6: BFD Mode 1 (P2MP BFD Session), BFD
+        // Discriminator, and a Source IP Address TLV (Type 1, Length 4).
+        let val = [1u8, 0, 0, 0x12, 0x34, 1, 4, 192, 0, 2, 1, 250, 1, 0xee];
+        let data = build_update(&build_attr(0xc0, 38, &val), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let obj = first_attr_value_obj_range(&buf);
+        let mode = nested_field_by_name(&buf, &obj, "bfd_mode");
+        assert_eq!(mode.value, FieldValue::U8(1));
+        assert_eq!(
+            (mode.descriptor.display_fn.unwrap())(&mode.value, &[]),
+            Some("P2MP BFD Session")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &obj, "bfd_discriminator"),
+            FieldValue::U32(0x1234)
+        );
+        let tlvs = array_objs(&buf, &obj, "optional_tlvs");
+        assert_eq!(tlvs.len(), 2);
+        let tlv_type = nested_field_by_name(&buf, &tlvs[0], "type");
+        assert_eq!(
+            (tlv_type.descriptor.display_fn.unwrap())(&tlv_type.value, &[]),
+            Some("Source IP Address")
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "length"),
+            FieldValue::U8(4)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[0], "source_address"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &tlvs[1], "value"),
+            FieldValue::Bytes(&[0xee])
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_bfd_discriminator_malformed_is_raw() {
+        // Shorter than Mode + Discriminator, and Optional TLVs that are "not
+        // well formed", keep the value raw.
+        // "The BFD Discriminator attribute MUST be considered malformed if its
+        // length is smaller than 11 octets or if Optional TLVs are present but
+        // not well formed."
+        for val in [
+            &[1u8, 0, 0, 0][..],
+            &[1, 0, 0, 0, 1][..],
+            &[1, 0, 0, 0, 1, 1, 4, 192, 0][..],
+            &[1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1, 250, 5, 0][..],
+        ] {
+            let data = build_update(&build_attr(0xc0, 38, val), &[]);
+            let mut buf = DissectBuffer::new();
+            BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(val));
+        }
+    }
+
+    #[test]
+    fn path_attribute_value_name_tables() {
+        // IANA BGP Path Attributes.
+        for (v, expected) in [
+            (24u8, "Traffic Engineering"),
+            (25, "IPv6 Address Specific Extended Community"),
+            (27, "PE Distinguisher Labels"),
+            (36, "BGP Domain Path (D-PATH)"),
+            (37, "SFP attribute"),
+            (38, "BFD Discriminator"),
+            (41, "BIER"),
+            (128, "ATTR_SET"),
+        ] {
+            assert_eq!(path_attr_type_name(v), Some(expected), "type {v}");
+        }
+        assert_eq!(path_attr_type_name(0), None);
+
+        // IANA P-Multicast Service Interface Tunnel (PMSI Tunnel) Types.
+        assert_eq!(
+            pmsi_tunnel_type_name(0),
+            Some("No tunnel information present")
+        );
+        assert_eq!(pmsi_tunnel_type_name(0x0B), Some("BIER"));
+        assert_eq!(pmsi_tunnel_type_name(0x09), None);
+
+        // IANA BGP Tunnel Encapsulation Attribute Tunnel Types / Sub-TLVs.
+        assert_eq!(tunnel_type_name(2), Some("GRE"));
+        assert_eq!(tunnel_type_name(15), Some("SR Policy"));
+        assert_eq!(tunnel_type_name(0), None);
+        assert_eq!(tunnel_sub_tlv_name(1), Some("Encapsulation"));
+        assert_eq!(tunnel_sub_tlv_name(128), Some("Segment List"));
+        assert_eq!(tunnel_sub_tlv_name(0), None);
+
+        // IANA BGP-LS Node/Link/Prefix Descriptor and Attribute TLVs.
+        assert_eq!(bgp_ls_tlv_name(256), Some("Local Node Descriptors"));
+        assert_eq!(bgp_ls_tlv_name(1095), Some("IGP Metric"));
+        assert_eq!(bgp_ls_tlv_name(1157), Some("Opaque Prefix Attribute"));
+        assert_eq!(bgp_ls_tlv_name(0), None);
+
+        // IANA AIGP, SFP attribute TLV, BFD Mode and BFD Discriminator
+        // Optional TLV types.
+        assert_eq!(aigp_tlv_type_name(1), Some("AIGP"));
+        assert_eq!(aigp_tlv_type_name(2), None);
+        assert_eq!(sfp_tlv_type_name(5), Some("SFP Traversal With MPLS"));
+        assert_eq!(sfp_tlv_type_name(0), None);
+        assert_eq!(bfd_mode_name(0), None);
+        assert_eq!(bfd_optional_tlv_type_name(2), None);
+    }
+
+    #[test]
+    fn field_schema_exposes_new_path_attribute_value_children() {
+        fn find<'a>(descs: &'a [FieldDescriptor], name: &str) -> Option<&'a FieldDescriptor> {
+            descs.iter().find(|d| d.name == name)
+        }
+        let descs = BgpDissector.field_descriptors();
+        let pa = find(descs, "path_attributes").unwrap().children.unwrap();
+        let value_children = find(pa, "value").unwrap().children.unwrap();
+        for name in [
+            "metric",
+            "pmsi_flags",
+            "tunnel_type",
+            "mpls_label",
+            "vni",
+            "tunnel_endpoint",
+            "tunnel_identifier",
+            "tunnels",
+            "tlvs",
+            "secure_path_length",
+            "secure_path",
+            "signature_blocks",
+            "origin_as",
+            "path_attributes",
+            "bfd_mode",
+            "bfd_discriminator",
+            "optional_tlvs",
+        ] {
+            let child =
+                find(value_children, name).unwrap_or_else(|| panic!("{name} missing from union"));
+            assert!(child.optional, "{name} in a union must be optional");
+        }
+
+        // The union holds one descriptor per name.
+        for (i, d) in value_children.iter().enumerate() {
+            assert!(
+                !value_children[i + 1..].iter().any(|o| o.name == d.name),
+                "duplicate {} in the value union",
+                d.name
+            );
+        }
+
+        // ATTR_SET nests path attributes one level deep; their `value` union
+        // does not recurse into another `path_attributes`.
+        let nested = find(value_children, "path_attributes")
+            .unwrap()
+            .children
+            .unwrap();
+        for name in [
+            "flags",
+            "type_code",
+            "attr_length",
+            "value",
+            "as_number_size",
+        ] {
+            assert!(find(nested, name).is_some(), "{name} missing");
+        }
+        let nested_value = find(nested, "value").unwrap().children.unwrap();
+        assert!(find(nested_value, "tunnels").is_some());
+        assert!(find(nested_value, "path_attributes").is_none());
+        assert!(find(nested_value, "origin_as").is_none());
+
+        for (name, children) in [
+            ("tunnels", &["tunnel_type", "length", "sub_tlvs"][..]),
+            ("tlvs", &["type", "length", "value"][..]),
+            ("secure_path", &["pcount", "flags", "asn"][..]),
+            (
+                "signature_blocks",
+                &["length", "algorithm_suite", "signature_segments"][..],
+            ),
+            (
+                "optional_tlvs",
+                &["type", "length", "source_address", "value"][..],
+            ),
+        ] {
+            let d = find(value_children, name).unwrap().children.unwrap();
+            for c in children {
+                assert!(find(d, c).is_some(), "{c} missing from {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn path_attribute_name_tables_have_unique_non_empty_names() {
+        // Walk every code point of each table: each name is non-empty and
+        // unique within its table, and the tables hold the expected number
+        // of registered values (IANA registries cited on each function).
+        fn check<T: Copy>(
+            values: impl Iterator<Item = T>,
+            f: fn(T) -> Option<&'static str>,
+        ) -> usize {
+            let names: Vec<&str> = values.filter_map(f).collect();
+            for (i, n) in names.iter().enumerate() {
+                assert!(!n.is_empty());
+                assert!(!names[i + 1..].contains(n), "duplicate name {n}");
+            }
+            names.len()
+        }
+        assert_eq!(check(0..=u8::MAX, path_attr_type_name), 31);
+        assert_eq!(check(0..=u8::MAX, pmsi_tunnel_type_name), 14);
+        assert_eq!(check(0..=u16::MAX, tunnel_type_name), 13);
+        assert_eq!(check(0..=u8::MAX, tunnel_sub_tlv_name), 19);
+        assert_eq!(check(0..=u16::MAX, bgp_ls_tlv_name), 109);
+        assert_eq!(check(0..=u8::MAX, aigp_tlv_type_name), 1);
+        assert_eq!(check(0..=u8::MAX, sfp_tlv_type_name), 5);
+        assert_eq!(check(0..=u8::MAX, bfd_mode_name), 1);
+        assert_eq!(check(0..=u8::MAX, bfd_optional_tlv_type_name), 1);
     }
 }

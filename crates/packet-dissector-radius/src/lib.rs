@@ -6,6 +6,24 @@
 //! ## References
 //! - RFC 2865 (RADIUS base protocol): <https://www.rfc-editor.org/rfc/rfc2865>
 //! - RFC 2866 (RADIUS Accounting): <https://www.rfc-editor.org/rfc/rfc2866>
+//! - RFC 2867 (Tunnel Protocol Support accounting): <https://www.rfc-editor.org/rfc/rfc2867>
+//! - RFC 2868 (Tunnel Protocol Support attributes): <https://www.rfc-editor.org/rfc/rfc2868>
+//! - RFC 2869 (RADIUS Extensions): <https://www.rfc-editor.org/rfc/rfc2869>
+//! - RFC 3162 (RADIUS and IPv6): <https://www.rfc-editor.org/rfc/rfc3162>
+//! - RFC 3579 (RADIUS Support for EAP): <https://www.rfc-editor.org/rfc/rfc3579>
+//! - RFC 4372 (Chargeable User Identity): <https://www.rfc-editor.org/rfc/rfc4372>
+//! - RFC 4818 (Delegated-IPv6-Prefix): <https://www.rfc-editor.org/rfc/rfc4818>
+//! - RFC 5176 (Dynamic Authorization Extensions): <https://www.rfc-editor.org/rfc/rfc5176>
+//! - RFC 6911 (IPv6 Access Networks): <https://www.rfc-editor.org/rfc/rfc6911>
+//! - RFC 6929 (RADIUS Protocol Extensions): <https://www.rfc-editor.org/rfc/rfc6929>
+//! - RFC 8044 (Data Types in RADIUS): <https://www.rfc-editor.org/rfc/rfc8044>
+//! - RFC 2548 (Microsoft Vendor-specific RADIUS Attributes): <https://www.rfc-editor.org/rfc/rfc2548>
+//! - 3GPP TS 29.061 v19.1.0, clause 16.4.7 (3GPP Vendor-Specific attributes):
+//!   <https://www.3gpp.org/ftp/Specs/archive/29_series/29.061/>
+//! - IANA RADIUS Types: <https://www.iana.org/assignments/radius-types/radius-types.xhtml>
+//!
+//! EAP-Message (79) values are emitted as raw bytes; EAP packets are not
+//! reassembled or decoded here.
 //!
 //! RFC 2865 is also updated by the following RFCs. They do not alter the
 //! wire format parsed here, but are recorded for completeness:
@@ -20,11 +38,17 @@ use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{DisplayFn, Field, FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u16, read_be_u32, read_ipv4_addr};
+use packet_dissector_core::util::{
+    read_be_u16, read_be_u24, read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr,
+};
 
-use attr::{RadiusAttrType, code_name, enum_value_name, lookup_attr};
+use attr::{
+    EXTENDED_TYPE_EVS, RadiusAttrType, VENDOR_3GPP, VENDOR_MICROSOFT, attr_display_name, code_name,
+    enum_value_name, extended_enum_value_name, lookup_attr, lookup_extended_attr,
+    lookup_vendor_attr, microsoft_value_name, tgpp_value_name, vendor_name,
+};
 
 /// RADIUS header size: Code(1) + Identifier(1) + Length(2) + Authenticator(16).
 ///
@@ -67,6 +91,19 @@ const AFD_NAME: usize = 2;
 const AFD_VALUE: usize = 3;
 const AFD_VENDOR_ID: usize = 4;
 const AFD_VENDOR_DATA: usize = 5;
+const AFD_TAG: usize = 6;
+const AFD_SALT: usize = 7;
+const AFD_PREFIX_LENGTH: usize = 8;
+const AFD_EXTENDED_TYPE: usize = 9;
+const AFD_MORE: usize = 10;
+const AFD_VENDOR_TYPE: usize = 11;
+const AFD_VENDOR_ATTRIBUTES: usize = 12;
+
+/// Field descriptor indices for [`VSA_CHILD_FIELDS`].
+const VFD_TYPE: usize = 0;
+const VFD_LENGTH: usize = 1;
+const VFD_NAME: usize = 2;
+const VFD_VALUE: usize = 3;
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_CODE: usize = 0;
@@ -74,6 +111,95 @@ const FD_IDENTIFIER: usize = 1;
 const FD_LENGTH: usize = 2;
 const FD_AUTHENTICATOR: usize = 3;
 const FD_ATTRIBUTES: usize = 4;
+
+/// Largest Tag value; RFC 2868, Section 3.1 — "Valid values for this field
+/// are 0x01 through 0x1F, inclusive."
+/// <https://www.rfc-editor.org/rfc/rfc2868#section-3.1>
+const MAX_TAG: u8 = 0x1F;
+
+/// Return the `U8` value of the sibling field called `name`.
+fn sibling_u8(siblings: &[Field<'_>], name: &str) -> Option<u8> {
+    siblings
+        .iter()
+        .find(|f| f.name() == name)
+        .and_then(|f| match &f.value {
+            FieldValue::U8(v) => Some(*v),
+            _ => None,
+        })
+}
+
+/// Build the child descriptors of a Vendor-Specific sub-attribute Object.
+///
+/// Each vendor dictionary gets its own copy so that the `value` display
+/// function can resolve vendor-specific enumerations.
+const fn vsa_child_fields(value_display: Option<DisplayFn>) -> [FieldDescriptor; 4] {
+    [
+        FieldDescriptor::new("vendor_type", "Vendor Type", FieldType::U8),
+        FieldDescriptor::new("vendor_length", "Vendor Length", FieldType::U8),
+        FieldDescriptor::new("name", "Attribute Name", FieldType::Str),
+        FieldDescriptor {
+            name: "value",
+            display_name: "Value",
+            field_type: FieldType::Any,
+            optional: false,
+            children: None,
+            display_fn: value_display,
+            format_fn: None,
+        },
+    ]
+}
+
+/// Build the Object descriptor of a Vendor-Specific sub-attribute.
+const fn vsa_container(display: Option<DisplayFn>) -> FieldDescriptor {
+    FieldDescriptor {
+        name: "vendor_attribute",
+        display_name: "Vendor Attribute",
+        field_type: FieldType::Object,
+        optional: false,
+        children: None,
+        display_fn: display,
+        format_fn: None,
+    }
+}
+
+/// Resolve a 3GPP sub-attribute Object label from its `vendor_type` child.
+fn tgpp_container_name(_v: &FieldValue<'_>, children: &[Field<'_>]) -> Option<&'static str> {
+    lookup_vendor_attr(VENDOR_3GPP, sibling_u8(children, "vendor_type")?).map(|d| d.name)
+}
+
+/// Resolve a Microsoft sub-attribute Object label from its `vendor_type` child.
+fn microsoft_container_name(_v: &FieldValue<'_>, children: &[Field<'_>]) -> Option<&'static str> {
+    lookup_vendor_attr(VENDOR_MICROSOFT, sibling_u8(children, "vendor_type")?).map(|d| d.name)
+}
+
+/// Resolve a 3GPP sub-attribute value name.
+fn tgpp_value_display(v: &FieldValue<'_>, siblings: &[Field<'_>]) -> Option<&'static str> {
+    let val = match v {
+        FieldValue::U32(x) => *x,
+        FieldValue::U8(x) => u32::from(*x),
+        _ => return None,
+    };
+    tgpp_value_name(sibling_u8(siblings, "vendor_type")?, val)
+}
+
+/// Resolve a Microsoft sub-attribute value name.
+fn microsoft_value_display(v: &FieldValue<'_>, siblings: &[Field<'_>]) -> Option<&'static str> {
+    let FieldValue::U32(val) = v else {
+        return None;
+    };
+    microsoft_value_name(sibling_u8(siblings, "vendor_type")?, *val)
+}
+
+/// Sub-attribute descriptors used for the schema in [`ATTR_CHILD_FIELDS`].
+static VSA_CHILD_FIELDS: [FieldDescriptor; 4] = vsa_child_fields(None);
+/// Sub-attribute descriptors for 3GPP (TS 29.061, clause 16.4.7).
+static TGPP_VSA_FIELDS: [FieldDescriptor; 4] = vsa_child_fields(Some(tgpp_value_display));
+/// Sub-attribute descriptors for Microsoft (RFC 2548).
+static MICROSOFT_VSA_FIELDS: [FieldDescriptor; 4] = vsa_child_fields(Some(microsoft_value_display));
+/// Sub-attribute Object descriptor for 3GPP.
+static FD_VSA_3GPP: FieldDescriptor = vsa_container(Some(tgpp_container_name));
+/// Sub-attribute Object descriptor for Microsoft.
+static FD_VSA_MICROSOFT: FieldDescriptor = vsa_container(Some(microsoft_container_name));
 
 /// Child field descriptors for attribute Array elements.
 static ATTR_CHILD_FIELDS: &[FieldDescriptor] = &[
@@ -83,26 +209,49 @@ static ATTR_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor {
         name: "value",
         display_name: "Value",
-        field_type: FieldType::Bytes,
+        // The value is typed by the attribute dictionary: U32, U64, Str,
+        // Ipv4Addr, Ipv6Addr or Bytes.
+        field_type: FieldType::Any,
         optional: false,
         children: None,
         display_fn: Some(|v, siblings| {
             let FieldValue::U32(int_val) = v else {
                 return None;
             };
-            let attr_type = siblings
-                .iter()
-                .find(|f| f.name() == "type")
-                .and_then(|f| match &f.value {
-                    FieldValue::U8(v) => Some(*v),
-                    _ => None,
-                })?;
-            enum_value_name(attr_type, *int_val)
+            let code = sibling_u8(siblings, "type")?;
+            // RFC 6929, Section 2.1 — extended attributes are identified by
+            // "Type.Extended-Type", not by the outer Type alone.
+            // <https://www.rfc-editor.org/rfc/rfc6929#section-2.1>
+            match sibling_u8(siblings, "extended_type") {
+                Some(ext) => extended_enum_value_name(code, ext, *int_val),
+                None => enum_value_name(code, *int_val),
+            }
         }),
         format_fn: None,
     },
-    FieldDescriptor::new("vendor_id", "Vendor-Id", FieldType::U32).optional(),
+    FieldDescriptor::new("vendor_id", "Vendor-Id", FieldType::U32)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U32(id) => vendor_name(*id),
+            _ => None,
+        }),
     FieldDescriptor::new("vendor_data", "Vendor Data", FieldType::Bytes).optional(),
+    // RFC 2868, Section 3.1 — https://www.rfc-editor.org/rfc/rfc2868#section-3.1
+    FieldDescriptor::new("tag", "Tag", FieldType::U8).optional(),
+    // RFC 2868, Section 3.5 — https://www.rfc-editor.org/rfc/rfc2868#section-3.5
+    FieldDescriptor::new("salt", "Salt", FieldType::U16).optional(),
+    // RFC 8044, Sections 3.10-3.11 — https://www.rfc-editor.org/rfc/rfc8044#section-3.10
+    FieldDescriptor::new("prefix_length", "Prefix-Length", FieldType::U8).optional(),
+    // RFC 6929, Section 2.1 — https://www.rfc-editor.org/rfc/rfc6929#section-2.1
+    FieldDescriptor::new("extended_type", "Extended-Type", FieldType::U8).optional(),
+    // RFC 6929, Section 2.2 — https://www.rfc-editor.org/rfc/rfc6929#section-2.2
+    FieldDescriptor::new("more", "More", FieldType::U8).optional(),
+    // RFC 6929, Section 2.4 — https://www.rfc-editor.org/rfc/rfc6929#section-2.4
+    FieldDescriptor::new("vendor_type", "Vendor-Type", FieldType::U8).optional(),
+    // RFC 2865, Section 5.26 — https://www.rfc-editor.org/rfc/rfc2865#section-5.26
+    FieldDescriptor::new("vendor_attributes", "Vendor Attributes", FieldType::Array)
+        .optional()
+        .with_children(&VSA_CHILD_FIELDS),
 ];
 
 /// Field descriptors for the RADIUS dissector.
@@ -127,21 +276,13 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         .with_children(ATTR_CHILD_FIELDS),
 ];
 
-/// Attribute name lookup table for zero-copy attribute name references.
-///
-/// Returns a static byte slice for the attribute name to avoid String allocation.
-fn attr_name_str(attr_type_code: u8) -> &'static str {
-    let attr_def = lookup_attr(attr_type_code);
-    attr_def.map(|d| d.name).unwrap_or("Unknown")
-}
-
 /// Descriptor for the RADIUS attribute Object container.
 ///
 /// `display_fn` is invoked by
 /// [`DissectBuffer::resolve_container_display_name`] with the container's
 /// children, so the outer label resolves to the attribute name (e.g.
 /// "User-Name") instead of colliding with the inner `Attribute Type`
-/// field.
+/// field. Extended attributes resolve to their "Type.Extended-Type" name.
 static FD_ATTRIBUTE: FieldDescriptor = FieldDescriptor {
     name: "attribute",
     display_name: "Attribute",
@@ -149,10 +290,10 @@ static FD_ATTRIBUTE: FieldDescriptor = FieldDescriptor {
     optional: false,
     children: None,
     display_fn: Some(|v, children| match v {
-        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
-            ("type", FieldValue::U8(c)) => Some(attr_name_str(*c)),
-            _ => None,
-        }),
+        FieldValue::Object(_) => attr_display_name(
+            sibling_u8(children, "type")?,
+            sibling_u8(children, "extended_type"),
+        ),
         _ => None,
     }),
     format_fn: None,
@@ -162,16 +303,19 @@ static FD_ATTRIBUTE: FieldDescriptor = FieldDescriptor {
 ///
 /// RFC 2865, Section 5 — attribute data types.
 /// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
+/// RFC 8044, Section 3 — data type definitions.
+/// <https://www.rfc-editor.org/rfc/rfc8044#section-3>
+///
+/// Values whose length does not match the data type fall back to raw bytes.
 fn parse_attr_value<'pkt>(attr_type: RadiusAttrType, data: &'pkt [u8]) -> FieldValue<'pkt> {
     match attr_type {
         // RFC 2865, Section 5 — "1-253 octets containing UTF-8 encoded
-        // 10646 [7] characters".
+        // 10646 [7] characters". Invalid UTF-8 is kept as raw octets.
         // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
-        RadiusAttrType::Text => FieldValue::Bytes(data),
-        // RFC 2865, Section 5 — "1-253 octets containing binary data
-        // (values 0 through 255 decimal, inclusive)".
-        // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
-        RadiusAttrType::String => FieldValue::Bytes(data),
+        RadiusAttrType::Text => match core::str::from_utf8(data) {
+            Ok(s) => FieldValue::Str(s),
+            Err(_) => FieldValue::Bytes(data),
+        },
         // RFC 2865, Section 5 — "32 bit value, most significant octet
         // first".
         // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
@@ -179,14 +323,337 @@ fn parse_attr_value<'pkt>(attr_type: RadiusAttrType, data: &'pkt [u8]) -> FieldV
             FieldValue::Ipv4Addr(read_ipv4_addr(data, 0).unwrap_or_default())
         }
         // RFC 2865, Section 5 — "32 bit unsigned value, most significant
-        // octet first".
+        // octet first". RFC 8044, Section 3.3 — "time" uses the same
+        // encoding (seconds since 1970-01-01 00:00:00 UTC).
         // <https://www.rfc-editor.org/rfc/rfc2865#section-5>
-        RadiusAttrType::Integer if data.len() == 4 => {
+        // <https://www.rfc-editor.org/rfc/rfc8044#section-3.3>
+        RadiusAttrType::Integer | RadiusAttrType::Time if data.len() == 4 => {
             FieldValue::U32(read_be_u32(data, 0).unwrap_or_default())
         }
-        // Fallback for unexpected sizes or VendorSpecific (handled separately in parse_attrs).
+        // RFC 8044, Section 3.12 — "integer64".
+        // <https://www.rfc-editor.org/rfc/rfc8044#section-3.12>
+        RadiusAttrType::Integer64 if data.len() == 8 => {
+            FieldValue::U64(read_be_u64(data, 0).unwrap_or_default())
+        }
+        // RFC 8044, Section 3.9 — "ipv6addr" is 16 octets.
+        // <https://www.rfc-editor.org/rfc/rfc8044#section-3.9>
+        RadiusAttrType::Ipv6Addr if data.len() == 16 => {
+            FieldValue::Ipv6Addr(read_ipv6_addr(data, 0).unwrap_or_default())
+        }
+        RadiusAttrType::Octet if data.len() == 1 => FieldValue::U8(data[0]),
+        // String, and every structured type with an unexpected length.
         _ => FieldValue::Bytes(data),
     }
+}
+
+/// Push the `value` field of an attribute or sub-attribute.
+fn push_value<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    descriptor: &'static FieldDescriptor,
+    attr_type: Option<RadiusAttrType>,
+    data: &'pkt [u8],
+    start: usize,
+) {
+    let value = attr_type
+        .map(|t| parse_attr_value(t, data))
+        .unwrap_or(FieldValue::Bytes(data));
+    buf.push_field(descriptor, value, start..start + data.len());
+}
+
+/// Try to decode an RFC 2868 / RFC 8044 structured value. Returns `false`
+/// (and pushes nothing) when the value does not match the format, so the
+/// caller can fall back to raw bytes.
+fn push_structured<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    attr_type: RadiusAttrType,
+    data: &'pkt [u8],
+    start: usize,
+) -> bool {
+    match attr_type {
+        // RFC 2868, Section 3.1 — "Length: Always 6." Tag (1) + Value (3).
+        // <https://www.rfc-editor.org/rfc/rfc2868#section-3.1>
+        RadiusAttrType::TaggedInteger if data.len() == 4 => {
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_TAG],
+                FieldValue::U8(data[0]),
+                start..start + 1,
+            );
+            let value = read_be_u24(data, 1).unwrap_or_default();
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_VALUE],
+                FieldValue::U32(value),
+                start + 1..start + 4,
+            );
+            true
+        }
+        // RFC 2868, Section 3.3 — "If the value of the Tag field is greater
+        // than 0x00 and less than or equal to 0x1F, it SHOULD be interpreted
+        // as indicating which tunnel (of several alternatives) this attribute
+        // pertains. If the Tag field is greater than 0x1F, it SHOULD be
+        // interpreted as the first byte of the following String field."
+        // A leading 0x00 (unused Tag) is also treated as a Tag.
+        // <https://www.rfc-editor.org/rfc/rfc2868#section-3.3>
+        RadiusAttrType::TaggedText if !data.is_empty() => {
+            if data[0] <= MAX_TAG {
+                buf.push_field(
+                    &ATTR_CHILD_FIELDS[AFD_TAG],
+                    FieldValue::U8(data[0]),
+                    start..start + 1,
+                );
+                push_value(
+                    buf,
+                    &ATTR_CHILD_FIELDS[AFD_VALUE],
+                    Some(RadiusAttrType::Text),
+                    &data[1..],
+                    start + 1,
+                );
+            } else {
+                push_value(
+                    buf,
+                    &ATTR_CHILD_FIELDS[AFD_VALUE],
+                    Some(RadiusAttrType::Text),
+                    data,
+                    start,
+                );
+            }
+            true
+        }
+        // RFC 2868, Section 3.5 — Tag (1) + Salt (2) + String; "Length >= 5".
+        // <https://www.rfc-editor.org/rfc/rfc2868#section-3.5>
+        RadiusAttrType::TunnelPassword if data.len() >= 3 => {
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_TAG],
+                FieldValue::U8(data[0]),
+                start..start + 1,
+            );
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_SALT],
+                FieldValue::U16(read_be_u16(data, 1).unwrap_or_default()),
+                start + 1..start + 3,
+            );
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_VALUE],
+                FieldValue::Bytes(&data[3..]),
+                start + 3..start + data.len(),
+            );
+            true
+        }
+        // RFC 3162, Section 2.3 — "Length: At least 4 and no larger than 20."
+        // "Prefix-Length: ... At least 0 and no larger than 128."
+        // <https://www.rfc-editor.org/rfc/rfc3162#section-2.3>
+        RadiusAttrType::Ipv6Prefix if (2..=18).contains(&data.len()) && data[1] <= 128 => {
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_PREFIX_LENGTH],
+                FieldValue::U8(data[1]),
+                start + 1..start + 2,
+            );
+            let mut prefix = [0u8; 16];
+            prefix[..data.len() - 2].copy_from_slice(&data[2..]);
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_VALUE],
+                FieldValue::Ipv6Addr(prefix),
+                start + 2..start + data.len(),
+            );
+            true
+        }
+        // RFC 8044, Section 3.11 — "Length: Six octets"; "Attributes with a
+        // Prefix-Length field having a value greater than 32 MUST be treated
+        // as invalid attributes."
+        // <https://www.rfc-editor.org/rfc/rfc8044#section-3.11>
+        RadiusAttrType::Ipv4Prefix if data.len() == 6 && data[1] <= 32 => {
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_PREFIX_LENGTH],
+                FieldValue::U8(data[1]),
+                start + 1..start + 2,
+            );
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_VALUE],
+                FieldValue::Ipv4Addr(read_ipv4_addr(data, 2).unwrap_or_default()),
+                start + 2..start + 6,
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Size of the extended attribute header inside the Value: Extended-Type
+/// (1) for "Extended Type", plus the M / Reserved octet (1) for "Long
+/// Extended Type". `None` for non-extended attributes.
+///
+/// RFC 6929, Sections 2.1 and 2.2 —
+/// <https://www.rfc-editor.org/rfc/rfc6929#section-2.1>
+const fn extended_header_len(attr_type: Option<RadiusAttrType>) -> Option<usize> {
+    match attr_type {
+        Some(RadiusAttrType::Extended) => Some(1),
+        Some(RadiusAttrType::LongExtended) => Some(2),
+        _ => None,
+    }
+}
+
+/// Decode an RFC 6929 "Extended Type" (241-244) or "Long Extended Type"
+/// (245-246) attribute value. `header` comes from [`extended_header_len`]
+/// and the caller guarantees `data.len() > header`, i.e. RFC 6929,
+/// Section 2.1 — "Permitted values are between 4 and 255" and Section 2.2
+/// — "Permitted values are between 5 and 255".
+///
+/// RFC 6929, Sections 2.1, 2.2 and 2.4 —
+/// <https://www.rfc-editor.org/rfc/rfc6929#section-2>
+fn push_extended<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    code: u8,
+    header: usize,
+    data: &'pkt [u8],
+    start: usize,
+) {
+    let ext_type = data[0];
+    buf.push_field(
+        &ATTR_CHILD_FIELDS[AFD_EXTENDED_TYPE],
+        FieldValue::U8(ext_type),
+        start..start + 1,
+    );
+    // RFC 6929, Section 2.2 — "The More field is one (1) bit in length and
+    // indicates whether or not the current attribute contains "more" than
+    // 251 octets of data."
+    // <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
+    let long = header == 2;
+    let more = long && data[1] & 0x80 != 0;
+    if long {
+        buf.push_field(
+            &ATTR_CHILD_FIELDS[AFD_MORE],
+            FieldValue::U8(u8::from(more)),
+            start + 1..start + 2,
+        );
+    }
+    let value = &data[header..];
+    let value_start = start + header;
+
+    // RFC 6929, Section 2.4 — Extended-Vendor-Specific: Vendor-Id (4) +
+    // Vendor-Type (1) + Value.
+    // <https://www.rfc-editor.org/rfc/rfc6929#section-2.4>
+    if ext_type == EXTENDED_TYPE_EVS && value.len() >= 5 {
+        buf.push_field(
+            &ATTR_CHILD_FIELDS[AFD_VENDOR_ID],
+            FieldValue::U32(read_be_u32(value, 0).unwrap_or_default()),
+            value_start..value_start + 4,
+        );
+        buf.push_field(
+            &ATTR_CHILD_FIELDS[AFD_VENDOR_TYPE],
+            FieldValue::U8(value[4]),
+            value_start + 4..value_start + 5,
+        );
+        buf.push_field(
+            &ATTR_CHILD_FIELDS[AFD_VALUE],
+            FieldValue::Bytes(&value[5..]),
+            value_start + 5..value_start + value.len(),
+        );
+        return;
+    }
+
+    // RFC 6929, Section 2.2 — "Any interpretation of the resulting data
+    // MUST occur after the fragments have been reassembled." A fragment
+    // (M set) is therefore left raw.
+    // <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
+    let attr_type = if more {
+        None
+    } else {
+        lookup_extended_attr(code, ext_type).map(|d| d.attr_type)
+    };
+    push_value(
+        buf,
+        &ATTR_CHILD_FIELDS[AFD_VALUE],
+        attr_type,
+        value,
+        value_start,
+    );
+}
+
+/// Returns `true` when `data` is a non-empty sequence of RFC 2865
+/// Section 5.26 "Vendor type / Vendor length / Attribute-Specific"
+/// sub-attributes whose lengths add up exactly.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>
+fn is_vsa_tlv_shaped(data: &[u8]) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        match data.get(pos + 1) {
+            Some(&len) if len >= 2 && pos + len as usize <= data.len() => pos += len as usize,
+            _ => return false,
+        }
+    }
+    !data.is_empty()
+}
+
+/// Sub-attribute descriptors for vendors whose String is known to use the
+/// RFC 2865 Section 5.26 recommended format. Other vendors (some use 2- or
+/// 4-octet vendor types) keep only the raw `vendor_data`.
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>
+fn vsa_descriptors(
+    vendor_id: u32,
+) -> Option<(&'static FieldDescriptor, &'static [FieldDescriptor; 4])> {
+    match vendor_id {
+        // TS 29.061, clause 16.4.7.2 — "3GPP type" (1) / "3GPP Length" (1).
+        VENDOR_3GPP => Some((&FD_VSA_3GPP, &TGPP_VSA_FIELDS)),
+        // RFC 2548, Section 2 — Vendor-Type (1) / Vendor-Length (1).
+        // <https://www.rfc-editor.org/rfc/rfc2548#section-2>
+        VENDOR_MICROSOFT => Some((&FD_VSA_MICROSOFT, &MICROSOFT_VSA_FIELDS)),
+        _ => None,
+    }
+}
+
+/// Push the Vendor-Specific sub-attributes of `data` (the String part of a
+/// VSA) as an Array of Objects when the vendor uses the recommended format
+/// and the lengths add up exactly; otherwise push nothing.
+///
+/// RFC 2865, Section 5.26 — "It SHOULD be encoded as a sequence of vendor
+/// type / vendor length / value fields".
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>
+fn push_vendor_attributes<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    vendor_id: u32,
+    data: &'pkt [u8],
+    start: usize,
+) {
+    let Some((container, fields)) = vsa_descriptors(vendor_id) else {
+        return;
+    };
+    if !is_vsa_tlv_shaped(data) {
+        return;
+    }
+    let array_idx = buf.begin_container(
+        &ATTR_CHILD_FIELDS[AFD_VENDOR_ATTRIBUTES],
+        FieldValue::Array(0..0),
+        start..start + data.len(),
+    );
+    let mut pos = 0;
+    // `is_vsa_tlv_shaped` guarantees every sub-attribute is in bounds.
+    while pos < data.len() {
+        let vtype = data[pos];
+        let vlen = data[pos + 1] as usize;
+        let abs = start + pos;
+        let def = lookup_vendor_attr(vendor_id, vtype);
+        let obj_idx = buf.begin_container(container, FieldValue::Object(0..0), abs..abs + vlen);
+        buf.push_field(&fields[VFD_TYPE], FieldValue::U8(vtype), abs..abs + 1);
+        buf.push_field(
+            &fields[VFD_LENGTH],
+            FieldValue::U8(vlen as u8),
+            abs + 1..abs + 2,
+        );
+        buf.push_field(
+            &fields[VFD_NAME],
+            FieldValue::Str(def.map(|d| d.name).unwrap_or("Unknown")),
+            abs..abs + 1,
+        );
+        push_value(
+            buf,
+            &fields[VFD_VALUE],
+            def.map(|d| d.attr_type),
+            &data[pos + 2..pos + vlen],
+            abs + 2,
+        );
+        buf.end_container(obj_idx);
+        pos += vlen;
+    }
+    buf.end_container(array_idx);
 }
 
 /// Parse a slice of attribute bytes and push them into the buffer as
@@ -211,7 +678,8 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
 
         let value_data = &attr_data[pos + 2..pos + attr_len];
         let abs = buf_offset + pos;
-        let attr_def = lookup_attr(attr_type_code);
+        let value_start = abs + 2;
+        let attr_type = lookup_attr(attr_type_code).map(|d| d.attr_type);
 
         // Begin Object for this attribute.
         let obj_idx =
@@ -227,13 +695,18 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
             FieldValue::U8(attr_len as u8),
             abs + 1..abs + 2,
         );
+
+        // RFC 6929, Section 2.1 — the attribute is identified by
+        // "Type.Extended-Type".
+        // <https://www.rfc-editor.org/rfc/rfc6929#section-2.1>
+        // Shorter values are invalid and are left raw.
+        let ext_header = extended_header_len(attr_type).filter(|h| value_data.len() > *h);
+        let ext_type = ext_header.map(|_| value_data[0]);
         buf.push_field(
             &ATTR_CHILD_FIELDS[AFD_NAME],
-            FieldValue::Str(attr_name_str(attr_type_code)),
+            FieldValue::Str(attr_display_name(attr_type_code, ext_type).unwrap_or("Unknown")),
             abs..abs + 1,
         );
-
-        let value_range = abs + 2..abs + attr_len;
 
         if attr_type_code == ATTR_VENDOR_SPECIFIC && value_data.len() >= MIN_VSA_VALUE_SIZE {
             // RFC 2865, Section 5.26 — Vendor-Specific: Vendor-Id(4) + String.
@@ -243,7 +716,7 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
             buf.push_field(
                 &ATTR_CHILD_FIELDS[AFD_VALUE],
                 FieldValue::Bytes(value_data),
-                value_range,
+                value_start..abs + attr_len,
             );
             buf.push_field(
                 &ATTR_CHILD_FIELDS[AFD_VENDOR_ID],
@@ -256,13 +729,17 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
                 FieldValue::Bytes(vdata),
                 abs + 6..abs + attr_len,
             );
-        } else {
-            let parsed_type = attr_def.map(|d| d.attr_type);
-            let value = parsed_type
-                .map(|t| parse_attr_value(t, value_data))
-                .unwrap_or_else(|| FieldValue::Bytes(value_data));
-
-            buf.push_field(&ATTR_CHILD_FIELDS[AFD_VALUE], value, value_range);
+            push_vendor_attributes(buf, vendor_id, vdata, abs + 6);
+        } else if let Some(header) = ext_header {
+            push_extended(buf, attr_type_code, header, value_data, value_start);
+        } else if !attr_type.is_some_and(|t| push_structured(buf, t, value_data, value_start)) {
+            push_value(
+                buf,
+                &ATTR_CHILD_FIELDS[AFD_VALUE],
+                attr_type,
+                value_data,
+                value_start,
+            );
         }
 
         buf.end_container(obj_idx);
@@ -284,6 +761,61 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 2866",
         "RADIUS Accounting",
         "https://www.rfc-editor.org/rfc/rfc2866",
+    ),
+    SpecReference::new(
+        "RFC 2867",
+        "RADIUS Accounting Modifications for Tunnel Protocol Support",
+        "https://www.rfc-editor.org/rfc/rfc2867",
+    ),
+    SpecReference::new(
+        "RFC 2868",
+        "RADIUS Attributes for Tunnel Protocol Support",
+        "https://www.rfc-editor.org/rfc/rfc2868",
+    ),
+    SpecReference::new(
+        "RFC 2869",
+        "RADIUS Extensions",
+        "https://www.rfc-editor.org/rfc/rfc2869",
+    ),
+    SpecReference::new(
+        "RFC 3162",
+        "RADIUS and IPv6",
+        "https://www.rfc-editor.org/rfc/rfc3162",
+    ),
+    SpecReference::new(
+        "RFC 4818",
+        "RADIUS Delegated-IPv6-Prefix Attribute",
+        "https://www.rfc-editor.org/rfc/rfc4818",
+    ),
+    SpecReference::new(
+        "RFC 5176",
+        "Dynamic Authorization Extensions to Remote Authentication Dial In User Service (RADIUS)",
+        "https://www.rfc-editor.org/rfc/rfc5176",
+    ),
+    SpecReference::new(
+        "RFC 6911",
+        "RADIUS Attributes for IPv6 Access Networks",
+        "https://www.rfc-editor.org/rfc/rfc6911",
+    ),
+    SpecReference::new(
+        "RFC 6929",
+        "Remote Authentication Dial In User Service (RADIUS) Protocol Extensions",
+        "https://www.rfc-editor.org/rfc/rfc6929",
+    ),
+    SpecReference::new(
+        "RFC 8044",
+        "Data Types in RADIUS",
+        "https://www.rfc-editor.org/rfc/rfc8044",
+    ),
+    SpecReference::new(
+        "RFC 2548",
+        "Microsoft Vendor-specific RADIUS Attributes",
+        "https://www.rfc-editor.org/rfc/rfc2548",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.061",
+        "Interworking between the Public Land Mobile Network (PLMN) supporting packet based services and Packet Data Networks (PDN)",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.061/",
     ),
     SpecReference::new(
         "RFC 3575",
@@ -429,9 +961,44 @@ mod tests {
     // | 2865 § 5.26   | Vendor-Specific (type 26)            | test_parse_vendor_specific             |
     // | 2865 § 5      | String-typed attrs match RFC labels  | attr::test_string_typed_attrs_match_rfc_labels |
     // | 2865 § 5      | Text-typed attrs match RFC labels    | attr::test_text_typed_attrs_match_rfc_labels   |
+    // | 2865 § 5     | Text as Str when valid UTF-8         | test_parse_access_reject               |
+    // | 2865 § 5     | Text with invalid UTF-8 stays Bytes  | test_text_invalid_utf8_is_bytes        |
+    // | 2865 § 5.26   | VSA sub-attributes (3GPP)            | test_vsa_3gpp_sub_attributes           |
+    // | 2865 § 5.26   | VSA not TLV-shaped: raw fallback     | test_vsa_not_tlv_shaped_falls_back     |
+    // | 2865 § 5.26   | VSA sub-attributes (Microsoft)       | test_vsa_microsoft_sub_attribute       |
+    // | 2865 § 5.26   | VSA of vendor w/o dictionary: raw    | test_parse_vendor_specific             |
     // | 2866 § 3      | Code: Accounting-Request (4)         | test_parse_accounting_request          |
     // | 2866 § 3      | Code: Accounting-Response (5)        | test_parse_accounting_response         |
     // | 2866 § 5.1    | Acct-Status-Type (Integer/Enum)      | test_parse_accounting_request          |
+    // | 2866 § 5.10   | Acct-Terminate-Cause                 | attr::test_enum_value_name_acct_terminate_cause |
+    // | 2867 § 3      | Acct-Status-Type tunnel values       | attr::test_enum_value_name_acct_status_type_tunnel |
+    // | 2867 § 4.1-2  | Acct-Tunnel-Connection / -Packets-Lost | test_rfc2867_attributes              |
+    // | 2868 § 3.1    | Tunnel-Type (tagged Integer)         | test_tunnel_type_tagged                |
+    // | 2868 § 3.2    | Tunnel-Medium-Type (tagged Integer)  | test_tunnel_medium_type_tagged         |
+    // | 2868 § 3.3    | Tunnel-Client-Endpoint with Tag      | test_tunnel_text_with_tag              |
+    // | 2868 § 3.3    | Tunnel-Client-Endpoint without Tag   | test_tunnel_text_without_tag           |
+    // | 2868 § 3.5    | Tunnel-Password (Tag, Salt, String)  | test_tunnel_password                   |
+    // | 2868 § 3.1    | Tagged Integer with bad length       | test_tagged_integer_bad_length         |
+    // | 2869 § 5.1-2  | Acct-Input/Output-Gigawords          | test_acct_gigawords                    |
+    // | 2869 § 5.3    | Event-Timestamp (Time)               | test_event_timestamp                   |
+    // | 2869 § 5.13   | EAP-Message (raw)                    | test_eap_message_and_authenticator     |
+    // | 2869 § 5.14   | Message-Authenticator                | test_eap_message_and_authenticator     |
+    // | 3162 § 2.1    | NAS-IPv6-Address                     | test_nas_ipv6_address                  |
+    // | 3162 § 2.3    | Framed-IPv6-Prefix                   | test_framed_ipv6_prefix                |
+    // | 3162 § 2.3    | Invalid Prefix-Length: raw fallback  | test_ipv6_prefix_invalid_falls_back    |
+    // | 4372 § 2.1    | Chargeable-User-Identity             | test_chargeable_user_identity          |
+    // | 4818 § 3      | Delegated-IPv6-Prefix                | test_delegated_ipv6_prefix             |
+    // | 5176 § 2.3    | Codes 40-45 (Disconnect / CoA)       | test_dynamic_authorization_codes       |
+    // | 5176 § 3.5    | Error-Cause values                   | test_error_cause                       |
+    // | 5447 § 4.2.5  | MIP6-Feature-Vector (integer64)      | test_integer64_attribute               |
+    // | 6572 § 4.12   | PMIP6-Home-IPv4-HoA (ipv4prefix)     | test_ipv4_prefix_attribute             |
+    // | 6911 § 3.1    | Framed-IPv6-Address                  | test_framed_ipv6_address               |
+    // | 6929 § 2.1    | Extended-Type (241.1 Frag-Status)    | test_extended_type_attribute           |
+    // | 6929 § 2.2    | Long-Extended-Type with M flag       | test_long_extended_type_more_flag      |
+    // | 6929 § 2.4    | Extended-Vendor-Specific             | test_extended_vendor_specific          |
+    // | 6929 § 2.1    | Extended-Type too short: raw         | test_extended_type_too_short           |
+    // | 6929 § 2.1    | Unknown Extended-Type                | test_extended_type_unknown             |
+    // | 7930 § 4      | Protocol-Error / Original-Packet-Code | test_extended_original_packet_code    |
     // | ---           | Multiple attributes                  | test_parse_multiple_attributes         |
     // | ---           | Truncated header                     | test_truncated_header                  |
     // | ---           | Malformed attribute                  | test_malformed_attribute_stops_parsing |
@@ -644,7 +1211,7 @@ mod tests {
         let obj_range = nth_object_range(&buf, &array_range, 0);
         assert_eq!(
             *obj_field_value(&buf, &obj_range, "value"),
-            FieldValue::Bytes(b"Authentication failed" as &[u8])
+            FieldValue::Str("Authentication failed")
         );
     }
 
@@ -725,7 +1292,7 @@ mod tests {
         // Vendor-Specific (type=26): Vendor-Id=9 (Cisco), vendor data
         let mut vsa_value = Vec::new();
         vsa_value.extend_from_slice(&9u32.to_be_bytes()); // Vendor-Id = 9
-        vsa_value.extend_from_slice(b"\x01\x0bhello=world"); // vendor sub-attribute
+        vsa_value.extend_from_slice(b"\x01\x0dhello=world"); // vendor sub-attribute
         let vsa = build_attr(26, &vsa_value);
         let data = build_radius(1, 1, &auth(), &vsa);
         let mut buf = DissectBuffer::new();
@@ -740,7 +1307,7 @@ mod tests {
         // VSA emits raw value bytes for consistent filtering across all attributes.
         let mut expected_raw = Vec::new();
         expected_raw.extend_from_slice(&9u32.to_be_bytes());
-        expected_raw.extend_from_slice(b"\x01\x0bhello=world");
+        expected_raw.extend_from_slice(b"\x01\x0dhello=world");
         assert_eq!(
             *obj_field_value(&buf, &obj_range, "value"),
             FieldValue::Bytes(&expected_raw)
@@ -751,8 +1318,16 @@ mod tests {
         );
         assert_eq!(
             *obj_field_value(&buf, &obj_range, "vendor_data"),
-            FieldValue::Bytes(b"\x01\x0bhello=world")
+            FieldValue::Bytes(b"\x01\x0dhello=world")
         );
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj_range, "vendor_id_name"),
+            Some("Cisco")
+        );
+        // Vendors without a dictionary are not assumed to follow the
+        // RFC 2865, Section 5.26 recommended format (some use 2- or 4-octet
+        // vendor types), so no sub-attributes are emitted.
+        assert!(!has_field(&buf, &obj_range, "vendor_attributes"));
     }
 
     #[test]
@@ -947,6 +1522,686 @@ mod tests {
         } else {
             panic!("expected Array");
         }
+    }
+
+    /// Dissect a packet carrying a single attribute and return the buffer.
+    fn dissect_single_attr(attr_type: u8, value: &[u8]) -> DissectBuffer<'static> {
+        let data = build_radius(4, 1, &auth(), &build_attr(attr_type, value));
+        let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+        let mut buf = DissectBuffer::new();
+        RadiusDissector.dissect(leaked, &mut buf, 0).unwrap();
+        buf
+    }
+
+    /// Return the first attribute Object range of `buf`.
+    fn first_attr(buf: &DissectBuffer) -> core::ops::Range<u32> {
+        let array_range = attrs_array_range(buf);
+        nth_object_range(buf, &array_range, 0)
+    }
+
+    fn has_field(buf: &DissectBuffer, obj_range: &core::ops::Range<u32>, name: &str) -> bool {
+        buf.nested_fields(obj_range)
+            .iter()
+            .any(|f| f.name() == name)
+    }
+
+    #[test]
+    fn test_acct_gigawords() {
+        // RFC 2869, Section 5.1 / 5.2 — Acct-Input-Gigawords (52) and
+        // Acct-Output-Gigawords (53) are Integer attributes.
+        for (code, name) in [(52, "Acct-Input-Gigawords"), (53, "Acct-Output-Gigawords")] {
+            let buf = dissect_single_attr(code, &[0, 0, 0, 1]);
+            let obj = first_attr(&buf);
+            assert_eq!(*obj_field_value(&buf, &obj, "name"), FieldValue::Str(name));
+            assert_eq!(*obj_field_value(&buf, &obj, "value"), FieldValue::U32(1));
+        }
+    }
+
+    #[test]
+    fn test_event_timestamp() {
+        let buf = dissect_single_attr(55, &0x6500_0000u32.to_be_bytes());
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Event-Timestamp")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::U32(0x6500_0000)
+        );
+    }
+
+    #[test]
+    fn test_eap_message_and_authenticator() {
+        let buf = dissect_single_attr(79, &[0x02, 0x01, 0x00, 0x05, 0x01]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("EAP-Message")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0x02, 0x01, 0x00, 0x05, 0x01])
+        );
+
+        let buf = dissect_single_attr(80, &[0x11; 16]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Message-Authenticator")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0x11; 16])
+        );
+    }
+
+    #[test]
+    fn test_text_invalid_utf8_is_bytes() {
+        // Reply-Message (Text) with invalid UTF-8 keeps the raw octets.
+        let buf = dissect_single_attr(18, &[0xff, 0xfe]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0xff, 0xfe])
+        );
+    }
+
+    #[test]
+    fn test_rfc2867_attributes() {
+        let buf = dissect_single_attr(68, b"conn-1");
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Acct-Tunnel-Connection")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Str("conn-1")
+        );
+
+        let buf = dissect_single_attr(86, &7u32.to_be_bytes());
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Acct-Tunnel-Packets-Lost")
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "value"), FieldValue::U32(7));
+    }
+
+    #[test]
+    fn test_tunnel_type_tagged() {
+        // RFC 2868, Section 3.1 — Tag (1) + Value (3). 3 = L2TP.
+        let buf = dissect_single_attr(64, &[0x01, 0x00, 0x00, 0x03]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Tunnel-Type")
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "tag"), FieldValue::U8(1));
+        assert_eq!(*obj_field_value(&buf, &obj, "value"), FieldValue::U32(3));
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "value_name"),
+            Some("Layer Two Tunneling Protocol (L2TP)")
+        );
+        let fields = buf.nested_fields(&obj);
+        let tag = fields.iter().find(|f| f.name() == "tag").unwrap();
+        assert_eq!(tag.range, 22..23);
+        let value = fields.iter().find(|f| f.name() == "value").unwrap();
+        assert_eq!(value.range, 23..26);
+    }
+
+    #[test]
+    fn test_tunnel_medium_type_tagged() {
+        let buf = dissect_single_attr(65, &[0x00, 0x00, 0x00, 0x01]);
+        let obj = first_attr(&buf);
+        assert_eq!(*obj_field_value(&buf, &obj, "tag"), FieldValue::U8(0));
+        assert_eq!(*obj_field_value(&buf, &obj, "value"), FieldValue::U32(1));
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "value_name"),
+            Some("IPv4 (IP version 4)")
+        );
+
+        let buf = dissect_single_attr(83, &[0x02, 0x00, 0x00, 0x0a]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Tunnel-Preference")
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "tag"), FieldValue::U8(2));
+        assert_eq!(*obj_field_value(&buf, &obj, "value"), FieldValue::U32(10));
+    }
+
+    #[test]
+    fn test_tagged_integer_bad_length() {
+        // Tunnel-Type must be exactly Tag + 3 octets; anything else is raw.
+        let buf = dissect_single_attr(64, &[0x01, 0x03]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "tag"));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0x01, 0x03])
+        );
+    }
+
+    #[test]
+    fn test_tunnel_text_with_tag() {
+        // RFC 2868, Section 3.3 — Tag 0x01..=0x1F precedes the string.
+        let buf = dissect_single_attr(66, b"\x05192.0.2.1");
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Tunnel-Client-Endpoint")
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "tag"), FieldValue::U8(5));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Str("192.0.2.1")
+        );
+    }
+
+    #[test]
+    fn test_tunnel_text_without_tag() {
+        // RFC 2868, Section 3.3 — a first octet > 0x1F is part of the string.
+        let buf = dissect_single_attr(81, b"vlan10");
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Tunnel-Private-Group-ID")
+        );
+        assert!(!has_field(&buf, &obj, "tag"));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Str("vlan10")
+        );
+    }
+
+    #[test]
+    fn test_tunnel_password() {
+        // RFC 2868, Section 3.5 — Tag (1) + Salt (2) + String.
+        let buf = dissect_single_attr(69, &[0x01, 0x80, 0x01, 0xaa, 0xbb]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Tunnel-Password")
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "tag"), FieldValue::U8(1));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "salt"),
+            FieldValue::U16(0x8001)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0xaa, 0xbb])
+        );
+    }
+
+    #[test]
+    fn test_chargeable_user_identity() {
+        let buf = dissect_single_attr(89, b"cui-1");
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Chargeable-User-Identity")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(b"cui-1")
+        );
+    }
+
+    #[test]
+    fn test_nas_ipv6_address() {
+        let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let buf = dissect_single_attr(95, &addr);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("NAS-IPv6-Address")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Ipv6Addr(addr)
+        );
+    }
+
+    #[test]
+    fn test_framed_ipv6_address() {
+        let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let buf = dissect_single_attr(168, &addr);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Framed-IPv6-Address")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Ipv6Addr(addr)
+        );
+    }
+
+    #[test]
+    fn test_framed_ipv6_prefix() {
+        // RFC 3162, Section 2.3 — Reserved (1) + Prefix-Length (1) + Prefix.
+        let buf = dissect_single_attr(97, &[0x00, 32, 0x20, 0x01, 0x0d, 0xb8]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Framed-IPv6-Prefix")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "prefix_length"),
+            FieldValue::U8(32)
+        );
+        let mut expected = [0u8; 16];
+        expected[..4].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Ipv6Addr(expected)
+        );
+    }
+
+    #[test]
+    fn test_delegated_ipv6_prefix() {
+        // RFC 4818, Section 3 — same format as Framed-IPv6-Prefix.
+        let mut value = vec![0x00, 56];
+        value.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x02]);
+        let buf = dissect_single_attr(123, &value);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Delegated-IPv6-Prefix")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "prefix_length"),
+            FieldValue::U8(56)
+        );
+    }
+
+    #[test]
+    fn test_ipv6_prefix_invalid_falls_back() {
+        // Prefix-Length > 128 is invalid: keep raw bytes.
+        let buf = dissect_single_attr(97, &[0x00, 129, 0x20]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "prefix_length"));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0x00, 129, 0x20])
+        );
+        // Prefix longer than 16 octets is invalid as well.
+        let buf = dissect_single_attr(97, &[0u8; 19]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "prefix_length"));
+    }
+
+    #[test]
+    fn test_ipv4_prefix_attribute() {
+        // RFC 8044, Section 3.11 — Reserved (1) + Prefix-Length (1) + Prefix (4).
+        let buf = dissect_single_attr(155, &[0x00, 24, 192, 0, 2, 0]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("PMIP6-Home-IPv4-HoA")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "prefix_length"),
+            FieldValue::U8(24)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Ipv4Addr([192, 0, 2, 0])
+        );
+        // Prefix-Length > 32 is invalid.
+        let buf = dissect_single_attr(155, &[0x00, 33, 192, 0, 2, 0]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "prefix_length"));
+    }
+
+    #[test]
+    fn test_integer64_attribute() {
+        let buf = dissect_single_attr(124, &0x0102_0304_0506_0708u64.to_be_bytes());
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("MIP6-Feature-Vector")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::U64(0x0102_0304_0506_0708)
+        );
+    }
+
+    #[test]
+    fn test_error_cause() {
+        let buf = dissect_single_attr(101, &503u32.to_be_bytes());
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Error-Cause")
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "value"), FieldValue::U32(503));
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "value_name"),
+            Some("Session Context Not Found")
+        );
+    }
+
+    #[test]
+    fn test_dynamic_authorization_codes() {
+        // RFC 5176, Section 2.3 — codes 40-45.
+        let expected = [
+            (40, "Disconnect-Request"),
+            (41, "Disconnect-ACK"),
+            (42, "Disconnect-NAK"),
+            (43, "CoA-Request"),
+            (44, "CoA-ACK"),
+            (45, "CoA-NAK"),
+        ];
+        for (code, name) in expected {
+            let data = build_radius(code, 1, &auth(), &[]);
+            let mut buf = DissectBuffer::new();
+            RadiusDissector.dissect(&data, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert_eq!(buf.resolve_display_name(layer, "code_name"), Some(name));
+        }
+    }
+
+    #[test]
+    fn test_extended_type_attribute() {
+        // RFC 6929, Section 2.1 — 241.1 Frag-Status (RFC 7499), integer.
+        let buf = dissect_single_attr(241, &[0x01, 0, 0, 0, 2]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "extended_type"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Frag-Status")
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "value"), FieldValue::U32(2));
+        let (idx, _) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "attribute")
+            .unwrap();
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("Frag-Status")
+        );
+    }
+
+    #[test]
+    fn test_extended_original_packet_code() {
+        // RFC 7930, Section 4 — Protocol-Error (52) carrying
+        // Original-Packet-Code (241.4) = CoA-Request (43).
+        let data = build_radius(52, 1, &auth(), &build_attr(241, &[0x04, 0, 0, 0, 43]));
+        let mut buf = DissectBuffer::new();
+        RadiusDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.resolve_display_name(layer, "code_name"),
+            Some("Protocol-Error")
+        );
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Original-Packet-Code")
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "value_name"),
+            Some("CoA-Request")
+        );
+        // Other extended integers have no value names.
+        let buf = dissect_single_attr(241, &[0x02, 0, 0, 0, 43]);
+        let obj = first_attr(&buf);
+        assert_eq!(buf.resolve_nested_display_name(&obj, "value_name"), None);
+    }
+
+    #[test]
+    fn test_extended_type_unknown() {
+        let buf = dissect_single_attr(243, &[0x07, 0xaa]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "extended_type"),
+            FieldValue::U8(7)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Extended-Attribute-3")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0xaa])
+        );
+    }
+
+    #[test]
+    fn test_extended_type_too_short() {
+        // RFC 6929, Section 2.1 — Length >= 4; a bare Extended-Type is invalid.
+        let buf = dissect_single_attr(241, &[0x01]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "extended_type"));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0x01])
+        );
+        // Long Extended Type needs Extended-Type, flags and one value octet.
+        let buf = dissect_single_attr(245, &[0x01, 0x00]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "extended_type"));
+    }
+
+    #[test]
+    fn test_long_extended_type_more_flag() {
+        // RFC 6929, Section 2.2 — Extended-Type, M flag, Reserved, Value.
+        let buf = dissect_single_attr(245, &[0x01, 0x80, b'<', b'a', b'>']);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("SAML-Assertion")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "extended_type"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(*obj_field_value(&buf, &obj, "more"), FieldValue::U8(1));
+        // A fragment is not interpreted: the value stays raw.
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(b"<a>")
+        );
+
+        let buf = dissect_single_attr(245, &[0x01, 0x00, b'<', b'a', b'>']);
+        let obj = first_attr(&buf);
+        assert_eq!(*obj_field_value(&buf, &obj, "more"), FieldValue::U8(0));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Str("<a>")
+        );
+    }
+
+    #[test]
+    fn test_extended_vendor_specific() {
+        // RFC 6929, Section 2.4 — Extended-Type 26: Vendor-Id (4) +
+        // Vendor-Type (1) + Value.
+        let buf = dissect_single_attr(241, &[26, 0, 0, 0x28, 0xaf, 0x05, 0xde, 0xad]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "name"),
+            FieldValue::Str("Extended-Vendor-Specific-1")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "vendor_id"),
+            FieldValue::U32(10415)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "vendor_type"),
+            FieldValue::U8(5)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0xde, 0xad])
+        );
+
+        // Long Extended EVS carries the flags octet before the Vendor-Id.
+        let buf = dissect_single_attr(246, &[26, 0x00, 0, 0, 0x01, 0x37, 0x09, 0x01]);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "vendor_id"),
+            FieldValue::U32(311)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "vendor_type"),
+            FieldValue::U8(9)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0x01])
+        );
+
+        // EVS too short for Vendor-Id + Vendor-Type: raw value.
+        let buf = dissect_single_attr(241, &[26, 0, 0, 0x28]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "vendor_id"));
+    }
+
+    /// Return the `vendor_attributes` Array range of the first attribute.
+    fn vendor_attrs_range(buf: &DissectBuffer) -> core::ops::Range<u32> {
+        let obj = first_attr(buf);
+        match obj_field_value(buf, &obj, "vendor_attributes") {
+            FieldValue::Array(r) => r.clone(),
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_vsa_3gpp_sub_attributes() {
+        // TS 29.061 v19.1.0, clause 16.4.7.2 — 3GPP-IMSI (1, Text) and
+        // 3GPP-PDP-Type (3, Unsigned32).
+        let mut vsa = 10415u32.to_be_bytes().to_vec();
+        vsa.extend_from_slice(&[0x01, 0x0a]);
+        vsa.extend_from_slice(b"00101012");
+        vsa.extend_from_slice(&[0x03, 0x06, 0, 0, 0, 2]);
+        vsa.extend_from_slice(&[0x15, 0x03, 0x06]);
+        let buf = dissect_single_attr(26, &vsa);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "vendor_id"),
+            FieldValue::U32(10415)
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "vendor_id_name"),
+            Some("3GPP")
+        );
+
+        let arr = vendor_attrs_range(&buf);
+        assert_eq!(count_objects(&buf, &arr), 3);
+        let imsi = nth_object_range(&buf, &arr, 0);
+        assert_eq!(
+            *obj_field_value(&buf, &imsi, "vendor_type"),
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &imsi, "vendor_length"),
+            FieldValue::U8(10)
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &imsi, "name"),
+            FieldValue::Str("3GPP-IMSI")
+        );
+        assert_eq!(
+            *obj_field_value(&buf, &imsi, "value"),
+            FieldValue::Str("00101012")
+        );
+        let imsi_value = buf
+            .nested_fields(&imsi)
+            .iter()
+            .find(|f| f.name() == "value")
+            .unwrap()
+            .range
+            .clone();
+        assert_eq!(imsi_value, 28..36);
+
+        let pdp = nth_object_range(&buf, &arr, 1);
+        assert_eq!(
+            *obj_field_value(&buf, &pdp, "name"),
+            FieldValue::Str("3GPP-PDP-Type")
+        );
+        assert_eq!(*obj_field_value(&buf, &pdp, "value"), FieldValue::U32(2));
+        assert_eq!(
+            buf.resolve_nested_display_name(&pdp, "value_name"),
+            Some("IPv6")
+        );
+
+        let rat = nth_object_range(&buf, &arr, 2);
+        assert_eq!(
+            *obj_field_value(&buf, &rat, "name"),
+            FieldValue::Str("3GPP-RAT-Type")
+        );
+        assert_eq!(*obj_field_value(&buf, &rat, "value"), FieldValue::U8(6));
+
+        // Container label resolves to the vendor attribute name.
+        let (idx, _) = buf
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == "vendor_attribute")
+            .unwrap();
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("3GPP-IMSI")
+        );
+    }
+
+    #[test]
+    fn test_vsa_microsoft_sub_attribute() {
+        // RFC 2548, Section 2.4.4 — MS-MPPE-Encryption-Policy (7), Integer.
+        let mut vsa = 311u32.to_be_bytes().to_vec();
+        vsa.extend_from_slice(&[0x07, 0x06, 0, 0, 0, 2]);
+        let buf = dissect_single_attr(26, &vsa);
+        let obj = first_attr(&buf);
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "vendor_id_name"),
+            Some("Microsoft")
+        );
+        let arr = vendor_attrs_range(&buf);
+        let policy = nth_object_range(&buf, &arr, 0);
+        assert_eq!(
+            *obj_field_value(&buf, &policy, "name"),
+            FieldValue::Str("MS-MPPE-Encryption-Policy")
+        );
+        assert_eq!(*obj_field_value(&buf, &policy, "value"), FieldValue::U32(2));
+        assert_eq!(
+            buf.resolve_nested_display_name(&policy, "value_name"),
+            Some("Encryption-Required")
+        );
+    }
+
+    #[test]
+    fn test_vsa_not_tlv_shaped_falls_back() {
+        // The vendor String does not follow the recommended format: the
+        // sub-attribute lengths do not add up, so only raw bytes are kept.
+        let mut vsa = 10415u32.to_be_bytes().to_vec();
+        vsa.extend_from_slice(&[0x01, 0x09, b'a', b'b']);
+        let buf = dissect_single_attr(26, &vsa);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "vendor_attributes"));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "vendor_data"),
+            FieldValue::Bytes(&[0x01, 0x09, b'a', b'b'])
+        );
+        // Vendor length < 2 is invalid as well.
+        let mut vsa = 10415u32.to_be_bytes().to_vec();
+        vsa.extend_from_slice(&[0x01, 0x01]);
+        let buf = dissect_single_attr(26, &vsa);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "vendor_attributes"));
+        // Empty vendor String: no sub-attributes.
+        let buf = dissect_single_attr(26, &10415u32.to_be_bytes());
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "vendor_attributes"));
     }
 
     #[test]

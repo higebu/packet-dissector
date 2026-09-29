@@ -8,7 +8,7 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "stun"]
 categories = ["network-programming", "parser-implementations"]
-description = "STUN (RFC 8489) dissector for packet-dissector"
+description = "STUN (RFC 8489) and TURN ChannelData (RFC 8656) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }
