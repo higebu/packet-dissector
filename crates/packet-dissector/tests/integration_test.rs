@@ -12,6 +12,7 @@
 //! | Ethernet → IPv4 → TCP (SYN)             | integration_ethernet_ipv4_tcp_syn             |
 //! | Ethernet → ARP                           | integration_ethernet_arp                      |
 //! | Ethernet → LLDP                          | integration_ethernet_lldp                     |
+//! | Ethernet → LLDP (IEEE 802.1 Port VLAN ID TLV)   | integration_ethernet_lldp_org_port_vlan_id    |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -4130,6 +4131,44 @@ fn build_eth_lldp() -> Vec<u8> {
     // End Of LLDPDU
     pkt.extend_from_slice(&0x0000u16.to_be_bytes());
     pkt
+}
+
+/// Ethernet → LLDP with an IEEE 802.1 Port VLAN ID TLV decoded into `org`
+/// (IEEE 802.1AB-2005 Annex F.2).
+#[test]
+fn integration_ethernet_lldp_org_port_vlan_id() {
+    let reg = DissectorRegistry::default();
+    let mut data = build_eth_lldp();
+    data.truncate(data.len() - 2); // drop End Of LLDPDU
+    data.extend_from_slice(&[0xFE, 0x06, 0x00, 0x80, 0xC2, 0x01, 0x00, 0x64]);
+    data.extend_from_slice(&[0x00, 0x00]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+
+    // tlvs[4] (after Chassis ID, Port ID, TTL, System Name) → org → pvid.
+    let lldp = buf.layer_by_name("LLDP").unwrap();
+    let FieldValue::Array(tlvs) = &buf.field_by_name(lldp, "tlvs").unwrap().value else {
+        panic!("tlvs")
+    };
+    let org_tlv = buf
+        .nested_fields(tlvs)
+        .iter()
+        .filter_map(|f| match &f.value {
+            FieldValue::Object(r) => Some(buf.nested_fields(r)),
+            _ => None,
+        })
+        .nth(4)
+        .unwrap();
+    let FieldValue::Object(org) = &org_tlv.iter().find(|f| f.name() == "org").unwrap().value else {
+        panic!("org")
+    };
+    let pvid = buf
+        .nested_fields(org)
+        .iter()
+        .find(|f| f.name() == "pvid")
+        .unwrap();
+    assert_eq!(pvid.value, FieldValue::U16(100));
 }
 
 #[test]
