@@ -119,10 +119,10 @@ static EXT_ELEMENT_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("data", "Data", FieldType::Bytes),
 ];
 
-/// Element descriptor for `ext_elements`.
+/// Container descriptor for one element of `ext_elements`; its children are
+/// listed on the array descriptor.
 static FD_EXT_ELEMENT: FieldDescriptor =
-    FieldDescriptor::new("ext_element", "Extension Element", FieldType::Object)
-        .with_children(EXT_ELEMENT_FIELDS);
+    FieldDescriptor::new("ext_element", "Extension Element", FieldType::Object);
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
@@ -150,15 +150,17 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // RFC 8285, Sections 4.2, 4.3 — https://www.rfc-editor.org/rfc/rfc8285#section-4.2
     FieldDescriptor::new("ext_elements", "Extension Elements", FieldType::Array)
         .optional()
-        .with_children(core::slice::from_ref(&FD_EXT_ELEMENT)),
+        .with_children(EXT_ELEMENT_FIELDS),
 ];
 
 /// RFC 8285 header extension form.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExtForm {
-    /// One-byte header (Section 4.2).
+    /// One-byte header (RFC 8285, Section 4.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc8285#section-4.2>).
     OneByte,
-    /// Two-byte header (Section 4.3).
+    /// Two-byte header (RFC 8285, Section 4.3 —
+    /// <https://www.rfc-editor.org/rfc/rfc8285#section-4.3>).
     TwoByte,
 }
 
@@ -487,6 +489,22 @@ impl Dissector for RtpDissector {
             );
 
             let form = ExtForm::from_profile(ext_profile);
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_EXT_LENGTH],
+                FieldValue::U16(ext_length),
+                (offset + ext_header_start + 2)..(offset + ext_header_start + 4),
+            );
+
+            let body_start = ext_header_start + 4;
+            let body = &data[body_start..ext_header_start + ext_total];
+            if ext_data_bytes > 0 {
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_EXT_DATA],
+                    FieldValue::Bytes(body),
+                    (offset + body_start)..(offset + ext_header_start + ext_total),
+                );
+            }
+
             if form == Some(ExtForm::TwoByte) {
                 // RFC 8285, Section 4.3 — "The appbits field is 4 bits that are
                 // application dependent".
@@ -498,58 +516,48 @@ impl Dissector for RtpDissector {
                 );
             }
 
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_EXT_LENGTH],
-                FieldValue::U16(ext_length),
-                (offset + ext_header_start + 2)..(offset + ext_header_start + 4),
-            );
-
-            if ext_data_bytes > 0 {
-                let body_start = ext_header_start + 4;
-                let body = &data[body_start..ext_header_start + ext_total];
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_EXT_DATA],
-                    FieldValue::Bytes(body),
-                    (offset + body_start)..(offset + ext_header_start + ext_total),
-                );
-
-                // RFC 8285, Sections 4.2, 4.3 — split the extension into
-                // elements. A malformed trailing element ends the list; the
-                // raw bytes stay in `ext_data`.
-                // https://www.rfc-editor.org/rfc/rfc8285#section-4
-                if let Some(form) = form {
-                    let base = offset + body_start;
-                    let array_idx = buf.begin_container(
-                        &FIELD_DESCRIPTORS[FD_EXT_ELEMENTS],
-                        FieldValue::Array(0..0),
-                        base..base + body.len(),
+            // RFC 8285, Sections 4.2, 4.3 — split the extension into
+            // elements. A malformed trailing element ends the list; the raw
+            // bytes stay in `ext_data`. The array is only emitted when at
+            // least one element is found.
+            // https://www.rfc-editor.org/rfc/rfc8285#section-4
+            if let Some(form) = form {
+                let base = offset + body_start;
+                let mut array_idx = None;
+                walk_ext_elements(form, body, |pos, header_len, id, element| {
+                    if array_idx.is_none() {
+                        array_idx = Some(buf.begin_container(
+                            &FIELD_DESCRIPTORS[FD_EXT_ELEMENTS],
+                            FieldValue::Array(0..0),
+                            base..base + body.len(),
+                        ));
+                    }
+                    let start = base + pos;
+                    let data_start = start + header_len;
+                    let data_end = data_start + element.len();
+                    let obj_idx = buf.begin_container(
+                        &FD_EXT_ELEMENT,
+                        FieldValue::Object(0..0),
+                        start..data_end,
                     );
-                    walk_ext_elements(form, body, |pos, header_len, id, element| {
-                        let start = base + pos;
-                        let data_start = start + header_len;
-                        let data_end = data_start + element.len();
-                        let obj_idx = buf.begin_container(
-                            &FD_EXT_ELEMENT,
-                            FieldValue::Object(0..0),
-                            start..data_end,
-                        );
-                        buf.push_field(
-                            &EXT_ELEMENT_FIELDS[EFD_ID],
-                            FieldValue::U8(id),
-                            start..start + 1,
-                        );
-                        buf.push_field(
-                            &EXT_ELEMENT_FIELDS[EFD_LENGTH],
-                            FieldValue::U8(element.len() as u8),
-                            data_start - 1..data_start,
-                        );
-                        buf.push_field(
-                            &EXT_ELEMENT_FIELDS[EFD_DATA],
-                            FieldValue::Bytes(element),
-                            data_start..data_end,
-                        );
-                        buf.end_container(obj_idx);
-                    });
+                    buf.push_field(
+                        &EXT_ELEMENT_FIELDS[EFD_ID],
+                        FieldValue::U8(id),
+                        start..start + 1,
+                    );
+                    buf.push_field(
+                        &EXT_ELEMENT_FIELDS[EFD_LENGTH],
+                        FieldValue::U8(element.len() as u8),
+                        data_start - 1..data_start,
+                    );
+                    buf.push_field(
+                        &EXT_ELEMENT_FIELDS[EFD_DATA],
+                        FieldValue::Bytes(element),
+                        data_start..data_end,
+                    );
+                    buf.end_container(obj_idx);
+                });
+                if let Some(array_idx) = array_idx {
                     buf.end_container(array_idx);
                 }
             }
@@ -903,13 +911,10 @@ mod tests {
             FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04])
         );
         // RFC 8285, Section 4.1.2 — the first byte is ID 0 with a non-zero
-        // length, so processing stops before any element.
+        // length, so processing stops before any element and no
+        // `ext_elements` array is emitted.
         // https://www.rfc-editor.org/rfc/rfc8285#section-4.1.2
-        let FieldValue::Array(ref r) = buf.field_by_name(layer, "ext_elements").unwrap().value
-        else {
-            panic!("expected Array");
-        };
-        assert!(buf.nested_fields(r).is_empty());
+        assert!(buf.field_by_name(layer, "ext_elements").is_none());
     }
 
     #[test]
@@ -1113,6 +1118,13 @@ mod tests {
             buf.field_by_name(layer, "ext_appbits").unwrap().value,
             FieldValue::U8(5)
         );
+        // Fields follow the descriptor order: ... ext_data, ext_appbits,
+        // ext_elements.
+        let names: Vec<_> = buf.layer_fields(layer).iter().map(|f| f.name()).collect();
+        let pos = |n: &str| names.iter().position(|x| *x == n).unwrap();
+        assert!(pos("ext_length") < pos("ext_data"));
+        assert!(pos("ext_data") < pos("ext_appbits"));
+        assert!(pos("ext_appbits") < pos("ext_elements"));
     }
 
     #[test]
@@ -1123,7 +1135,7 @@ mod tests {
         let mut buf = DissectBuffer::new();
         RtpDissector.dissect(&data, &mut buf, 0).unwrap();
         let layer = &buf.layers()[0];
-        assert!(ext_elements(&buf).is_empty());
+        assert!(buf.field_by_name(layer, "ext_elements").is_none());
         assert_eq!(
             buf.field_by_name(layer, "ext_data").unwrap().value,
             FieldValue::Bytes(&[0x1F, 0x01, 0x02, 0x03])
@@ -1338,6 +1350,15 @@ mod tests {
         assert!(descriptors[15].optional);
         assert_eq!(descriptors[16].name, "ext_elements");
         assert!(descriptors[16].optional);
+        // Array children list the element fields directly, like other
+        // dissectors' arrays of objects.
+        let children: Vec<_> = descriptors[16]
+            .children
+            .unwrap()
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(children, ["id", "length", "data"]);
         assert_eq!(descriptors[0].name, "version");
         assert_eq!(descriptors[9].name, "csrc_list");
         assert!(descriptors[9].optional);
