@@ -4348,7 +4348,11 @@ fn integration_ethernet_mpls_two_labels_ipv4_udp() {
 
 /// Build an Ethernet → IPv4 → UDP(`dst_port`) packet carrying the `tunnel`
 /// header followed by whatever `inner` appends.
-fn dissect_udp_tunnel(dst_port: u16, tunnel: &[u8], inner: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+fn build_udp_tunnel_packet(
+    dst_port: u16,
+    tunnel: &[u8],
+    inner: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
     let mut pkt = Vec::new();
     push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
     let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
@@ -4376,7 +4380,7 @@ fn integration_ethernet_ipv4_udp_vxlan_gpe_ipv4() {
     let reg = DissectorRegistry::default();
     // Ver 0, I=1, P=1; Next Protocol 0x01 (IPv4); VNI 100
     let gpe = [0x0C, 0x00, 0x00, 0x01, 0x00, 0x00, 0x64, 0x00];
-    let pkt = dissect_udp_tunnel(4790, &gpe, push_inner_ipv4_udp);
+    let pkt = build_udp_tunnel_packet(4790, &gpe, push_inner_ipv4_udp);
 
     let mut buf = DissectBuffer::new();
     reg.dissect(&pkt, &mut buf).unwrap();
@@ -4397,7 +4401,7 @@ fn integration_ethernet_ipv4_udp_vxlan_gpe_ipv4() {
 fn integration_ethernet_ipv4_udp_vxlan_gpe_ethernet() {
     let reg = DissectorRegistry::default();
     let gpe = [0x0C, 0x00, 0x00, 0x03, 0x00, 0x00, 0x64, 0x00];
-    let pkt = dissect_udp_tunnel(4790, &gpe, |pkt| {
+    let pkt = build_udp_tunnel_packet(4790, &gpe, |pkt| {
         push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
         push_inner_ipv4_udp(pkt);
     });
@@ -4426,7 +4430,7 @@ fn integration_ethernet_ipv4_udp_vxlan_gbp() {
     let reg = DissectorRegistry::default();
     // G=1 I=1, Group Policy ID 0x1234, VNI 100
     let vxlan = [0x88, 0x00, 0x12, 0x34, 0x00, 0x00, 0x64, 0x00];
-    let pkt = dissect_udp_tunnel(4789, &vxlan, |pkt| {
+    let pkt = build_udp_tunnel_packet(4789, &vxlan, |pkt| {
         push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
         push_inner_ipv4_udp(pkt);
     });
@@ -4454,7 +4458,7 @@ fn integration_ethernet_ipv4_udp_vxlan_gbp() {
 fn integration_ethernet_ipv4_udp_vxlan_i_flag_clear() {
     let reg = DissectorRegistry::default();
     let vxlan = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00];
-    let pkt = dissect_udp_tunnel(4789, &vxlan, |pkt| {
+    let pkt = build_udp_tunnel_packet(4789, &vxlan, |pkt| {
         push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
         push_inner_ipv4_udp(pkt);
     });

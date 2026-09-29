@@ -309,7 +309,9 @@ fn push_tunnel_options<'pkt>(
     // The block is a 4-byte multiple, so a whole option header always fits.
     while pos < header_len {
         // |Option Class (16)|Type (8)|R|R|R|Length (5)|
-        let class = u16::from_be_bytes([data[pos], data[pos + 1]]);
+        let Ok(class) = read_be_u16(data, pos) else {
+            break;
+        };
         let option_type = data[pos + 2];
         let reserved = data[pos + 3] >> 5;
         let length = data[pos + 3] & 0x1F;

@@ -105,9 +105,20 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // Fields below `version` are present only for version 0.
     FieldDescriptor::new("next_protocol", "Next Protocol", FieldType::U8)
         .optional()
-        .with_display_fn(|v, _| match v {
-            FieldValue::U8(n) => next_protocol_name(*n),
-            _ => None,
+        // Section 3.2 — the field is a Next Protocol only when P=1; with
+        // P=0 "the "Next Protocol" field must be set to zero and the payload
+        // MUST be ETHERNET(L2)", so no name is given.
+        // https://datatracker.ietf.org/doc/html/draft-ietf-nvo3-vxlan-gpe-13#section-3.2
+        .with_display_fn(|v, siblings| {
+            let p_set = siblings
+                .iter()
+                .find(|f| f.name() == "next_protocol_present")
+                .and_then(|f| f.value.as_u8())
+                == Some(1);
+            match v {
+                FieldValue::U8(n) if p_set => next_protocol_name(*n),
+                _ => None,
+            }
         }),
     FieldDescriptor::new("vni", "VXLAN Network Identifier", FieldType::U32).optional(),
     FieldDescriptor::new("reserved2", "Reserved", FieldType::U8).optional(),
@@ -352,7 +363,7 @@ mod tests {
 
     /// NSH (RFC 8300) is dispatched by its IEEE EtherType 0x894F
     /// (RFC 8300, Section 10.1), so an NSH dissector registered there picks
-    /// it up.
+    /// it up. <https://www.rfc-editor.org/rfc/rfc8300#section-10.1>
     #[test]
     fn parse_gpe_nsh() {
         let raw = gpe(0x0C, 0x04);
@@ -380,6 +391,9 @@ mod tests {
         assert_eq!(result.next, DispatchHint::ByEtherType(0x6558));
         let layer = buf.layer_by_name("VXLAN-GPE").unwrap();
         assert_eq!(buf.field_u8(layer, "next_protocol_present"), Some(0));
+        // Without P the field is not a Next Protocol, so it gets no name.
+        assert_eq!(buf.field_u8(layer, "next_protocol"), Some(1));
+        assert_eq!(buf.resolve_display_name(layer, "next_protocol_name"), None);
     }
 
     #[test]

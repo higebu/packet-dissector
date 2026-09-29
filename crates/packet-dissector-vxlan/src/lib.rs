@@ -172,14 +172,23 @@ impl Dissector for VxlanDissector {
         // draft-smith-vxlan-group-policy-05, Section 2.1 — G bit. RFC 7348
         // reserves this bit, so a sender that does not use GBP sets it to 0.
         // https://datatracker.ietf.org/doc/html/draft-smith-vxlan-group-policy-05#section-2.1
+        // https://www.rfc-editor.org/rfc/rfc7348#section-5
         let gbp = flags & FLAG_G_MASK != 0;
 
         // RFC 7348, Section 5 — "Reserved fields (24 bits and 8 bits): MUST
         // be set to zero on transmission and ignored on receipt."
         // https://www.rfc-editor.org/rfc/rfc7348#section-5
+        // draft-smith-vxlan-group-policy-05, Section 2.1 — "D bit: Bit 9 of
+        // the initial word is defined as the Don't Learn bit." Only the A bit
+        // is "only defined as the A bit when the G bit is set to 1", so D is
+        // decoded whenever it is set.
+        // https://datatracker.ietf.org/doc/html/draft-smith-vxlan-group-policy-05#section-2.1
+        let dont_learn = data[1] & GBP_D_MASK != 0;
         let mut reserved = read_be_u24(data, 1)?;
         if gbp {
             reserved &= GBP_RESERVED_MASK;
+        } else if dont_learn {
+            reserved &= !(u32::from(GBP_D_MASK) << 16);
         }
         let vni = read_be_u24(data, 4)?;
         let reserved2 = data[7];
@@ -217,7 +226,7 @@ impl Dissector for VxlanDissector {
             );
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_DONT_LEARN],
-                FieldValue::U8(u8::from(data[1] & GBP_D_MASK != 0)),
+                FieldValue::U8(u8::from(dont_learn)),
                 offset + 1..offset + 2,
             );
             buf.push_field(
@@ -229,6 +238,12 @@ impl Dissector for VxlanDissector {
                 &FIELD_DESCRIPTORS[FD_GROUP_POLICY_ID],
                 FieldValue::U16(group_policy_id),
                 offset + 2..offset + 4,
+            );
+        } else if dont_learn {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_DONT_LEARN],
+                FieldValue::U8(1),
+                offset + 1..offset + 2,
             );
         }
         buf.push_field(
@@ -278,6 +293,7 @@ mod tests {
     // | §2.1    | G bit, Group Policy ID              | parse_vxlan_gbp                                |
     // | §2.1    | D (Don't Learn), A (Policy Applied) | parse_vxlan_gbp_dont_learn_and_policy_applied  |
     // | §2.1    | Remaining R bits with G=1           | parse_vxlan_gbp_reserved_bits                  |
+    // | §2.1    | D bit without G                     | parse_vxlan_dont_learn_without_gbp             |
 
     /// Helper: dissect raw bytes at offset 0 and return the result.
     fn dissect(data: &[u8]) -> Result<(DissectBuffer<'_>, DissectResult), PacketError> {
@@ -441,12 +457,32 @@ mod tests {
     #[test]
     fn parse_vxlan_without_gbp_keeps_reserved() {
         let raw: &[u8] = &[
-            0x08, 0x48, 0x12, 0x34, // I=1, reserved bits set
+            0x08, 0x08, 0x12, 0x34, // I=1, reserved bits set (A position too)
             0x00, 0x00, 0x01, 0x00, // VNI=1, reserved
         ];
         let (buf, _) = dissect(raw).unwrap();
         let layer = buf.layer_by_name("VXLAN").unwrap();
-        assert_eq!(buf.field_u32(layer, "reserved"), Some(0x0048_1234));
+        assert_eq!(buf.field_u32(layer, "reserved"), Some(0x0008_1234));
+        assert!(buf.field_by_name(layer, "gbp").is_none());
+        assert!(buf.field_by_name(layer, "dont_learn").is_none());
+        assert!(buf.field_by_name(layer, "policy_applied").is_none());
+        assert!(buf.field_by_name(layer, "group_policy_id").is_none());
+    }
+
+    /// draft-smith-vxlan-group-policy-05, Section 2.1 — "D bit: Bit 9 of the
+    /// initial word is defined as the Don't Learn bit." Unlike A, it is not
+    /// tied to G, so a set D bit is reported even when G=0.
+    /// <https://datatracker.ietf.org/doc/html/draft-smith-vxlan-group-policy-05#section-2.1>
+    #[test]
+    fn parse_vxlan_dont_learn_without_gbp() {
+        let raw: &[u8] = &[
+            0x08, 0x40, 0x00, 0x00, // I=1, D=1, G=0
+            0x00, 0x00, 0x01, 0x00, // VNI=1, reserved
+        ];
+        let (buf, _) = dissect(raw).unwrap();
+        let layer = buf.layer_by_name("VXLAN").unwrap();
+        assert_eq!(buf.field_u8(layer, "dont_learn"), Some(1));
+        assert_eq!(buf.field_u32(layer, "reserved"), Some(0));
         assert!(buf.field_by_name(layer, "gbp").is_none());
         assert!(buf.field_by_name(layer, "group_policy_id").is_none());
     }
