@@ -74,6 +74,7 @@
 //! | Ethernet → IPv4 → TCP → TLS ClientHello            | ethernet_ipv4_tcp_tls_client_hello                   |
 //! | Ethernet → IPv4 → TCP → TLS Alert                  | ethernet_ipv4_tcp_tls_alert                          |
 //! | Ethernet → IPv4 → TCP → TLS coalesced handshakes   | ethernet_ipv4_tcp_tls_coalesced_server_flight        |
+//! | Ethernet → IPv4 → TCP → TLS 1.3 CH extensions      | ethernet_ipv4_tcp_tls13_client_hello_extensions      |
 //! | Ethernet → IPv4 → TCP (443) → non-TLS rejected     | ethernet_ipv4_tcp_non_tls_on_port_443                |
 //! | Ethernet → IPv4 → UDP → STUN Binding Request       | integration_ethernet_ipv4_udp_stun_binding_request   |
 //! | Ethernet → IPv4 → UDP → TURN ChannelData           | integration_ethernet_ipv4_udp_turn_channeldata       |
@@ -6156,6 +6157,55 @@ fn ethernet_ipv4_tcp_tls_coalesced_server_flight() {
         types,
         vec![FieldValue::U8(2), FieldValue::U8(11), FieldValue::U8(14)]
     );
+}
+
+#[test]
+fn ethernet_ipv4_tcp_tls13_client_hello_extensions() {
+    // RFC 7301, Section 3.1 (ALPN) and RFC 9846, Section 4.3.8 (key_share).
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 50000, 443, 0x18);
+
+    let mut exts = Vec::new();
+    // application_layer_protocol_negotiation: ["h2"]
+    exts.extend_from_slice(&[0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'2']);
+    // key_share: x25519 with a 4-byte key
+    exts.extend_from_slice(&[
+        0x00, 0x33, 0x00, 0x0a, 0x00, 0x08, 0x00, 0x1d, 0x00, 0x04, 1, 2, 3, 4,
+    ]);
+    let mut ch = vec![0x03, 0x03];
+    ch.extend_from_slice(&[0xaa; 32]);
+    ch.extend_from_slice(&[0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00]);
+    ch.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+    ch.extend_from_slice(&exts);
+    let mut hs = vec![0x01, 0x00];
+    hs.extend_from_slice(&(ch.len() as u16).to_be_bytes());
+    hs.extend_from_slice(&ch);
+    push_tls_record(&mut pkt, 0x16, 0x0301, &hs);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+
+    let names: Vec<&str> = buf.fields().iter().map(|f| f.name()).collect();
+    let alpn = buf
+        .fields()
+        .iter()
+        .find(|f| f.name() == "protocol_name")
+        .unwrap();
+    assert_eq!(alpn.value, FieldValue::Bytes(b"h2"));
+    let key = buf
+        .fields()
+        .iter()
+        .find(|f| f.name() == "key_exchange")
+        .unwrap();
+    assert_eq!(key.value, FieldValue::Bytes(&[1, 2, 3, 4]));
+    assert!(names.contains(&"client_shares"));
 }
 
 #[test]

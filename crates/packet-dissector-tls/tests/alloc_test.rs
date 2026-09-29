@@ -150,3 +150,102 @@ fn zero_alloc_dissect_tls_encrypted_records() {
         "TLS encrypted record dissect allocated {allocs} times"
     );
 }
+
+/// Length-prefixed vector with an `n`-byte big-endian length.
+fn vec_n(n: usize, body: &[u8]) -> Vec<u8> {
+    let len = (body.len() as u32).to_be_bytes();
+    let mut v = len[4 - n..].to_vec();
+    v.extend_from_slice(body);
+    v
+}
+
+/// A TLS extension: type(2) + length(2) + data.
+fn ext(t: u16, data: &[u8]) -> Vec<u8> {
+    let mut v = t.to_be_bytes().to_vec();
+    v.extend_from_slice(&vec_n(2, data));
+    v
+}
+
+/// A handshake record carrying one message.
+fn handshake_record(ht: u8, body: &[u8]) -> Vec<u8> {
+    let mut hs = vec![ht];
+    hs.extend_from_slice(&vec_n(3, body)[..]);
+    let mut rec = vec![0x16, 0x03, 0x03];
+    rec.extend_from_slice(&vec_n(2, &hs));
+    rec
+}
+
+#[test]
+fn zero_alloc_dissect_tls13_client_hello_extensions() {
+    let mut exts = Vec::new();
+    exts.extend_from_slice(&ext(
+        0,
+        &vec_n(2, &[&[0u8][..], &vec_n(2, b"example.com")].concat()),
+    ));
+    exts.extend_from_slice(&ext(16, &vec_n(2, &vec_n(1, b"h2"))));
+    exts.extend_from_slice(&ext(10, &vec_n(2, &[0x3a, 0x3a, 0x00, 0x1d])));
+    exts.extend_from_slice(&ext(13, &vec_n(2, &[0x08, 0x04, 0x04, 0x03])));
+    exts.extend_from_slice(&ext(
+        51,
+        &vec_n(2, &[&[0x00, 0x1d][..], &vec_n(2, &[7; 32])].concat()),
+    ));
+    exts.extend_from_slice(&ext(45, &vec_n(1, &[1])));
+    exts.extend_from_slice(&ext(43, &vec_n(1, &[0x03, 0x04, 0x03, 0x03])));
+    exts.extend_from_slice(&ext(57, &[0x01, 0x02, 0x67, 0x10]));
+    let mut ech = vec![0x00, 0x00, 0x01, 0x00, 0x01, 0x42];
+    ech.extend_from_slice(&vec_n(2, &[1; 32]));
+    ech.extend_from_slice(&vec_n(2, &[2; 16]));
+    exts.extend_from_slice(&ext(0xfe0d, &ech));
+
+    let mut body = vec![0x03, 0x03];
+    body.extend_from_slice(&[0xab; 32]);
+    body.extend_from_slice(&vec_n(1, &[]));
+    body.extend_from_slice(&vec_n(2, &[0x13, 0x01]));
+    body.extend_from_slice(&vec_n(1, &[0]));
+    body.extend_from_slice(&vec_n(2, &exts));
+    let raw = handshake_record(1, &body);
+
+    let mut buf = DissectBuffer::new();
+    TlsDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        TlsDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "TLS 1.3 ClientHello dissect allocated {allocs} times"
+    );
+}
+
+#[test]
+fn zero_alloc_dissect_tls_handshake_bodies_and_heartbeat() {
+    let certificate = handshake_record(11, &vec_n(3, &vec_n(3, &[0x30, 0x00])));
+    let mut ske = vec![0x03, 0x00, 0x1d];
+    ske.extend_from_slice(&vec_n(1, &[4; 32]));
+    ske.extend_from_slice(&[0x08, 0x04]);
+    ske.extend_from_slice(&vec_n(2, &[5; 16]));
+    let ske = handshake_record(12, &ske);
+    let mut heartbeat = vec![
+        0x18, 0x03, 0x03, 0x00, 0x16, 0x01, 0x00, 0x03, b'a', b'b', b'c',
+    ];
+    heartbeat.extend_from_slice(&[0; 16]);
+    let records = [certificate, ske, heartbeat];
+
+    let mut buf = DissectBuffer::new();
+    for r in &records {
+        buf.clear();
+        TlsDissector.dissect(r, &mut buf, 0).unwrap();
+    }
+
+    let allocs = count_allocs(|| {
+        for r in &records {
+            buf.clear();
+            TlsDissector.dissect(r, &mut buf, 0).unwrap();
+        }
+    });
+    assert_eq!(
+        allocs, 0,
+        "TLS handshake body dissect allocated {allocs} times"
+    );
+}
