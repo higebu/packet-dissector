@@ -9,7 +9,9 @@ use packet_dissector_core::util::{
 };
 
 use crate::ie;
+use crate::ie_decoders;
 use crate::pco;
+use crate::tft;
 
 /// IE value descriptor for label-prefixed (APN / FQDN) payloads.
 ///
@@ -654,7 +656,7 @@ pub fn push_ie_value<'pkt>(
             let r = buf.push_scratch(s.as_bytes());
             buf.push_field(value_desc, FieldValue::Scratch(r), value_range.clone());
         }
-        77 => buf.push_field(value_desc, FieldValue::Bytes(data), value_range.clone()),
+        77 => ie_decoders::push_indication(data, offset, value_desc, value_range, buf),
         78 => pco::push_pco(data, offset, value_desc, value_range, buf),
         79 => push_paa(data, offset, value_desc, value_range, buf),
         80 => push_bearer_qos(data, offset, value_desc, value_range, buf),
@@ -669,8 +671,12 @@ pub fn push_ie_value<'pkt>(
             buf,
         ),
         83 => push_serving_network(data, offset, value_desc, value_range, buf),
+        84 => tft::push_tft(data, offset, value_desc, value_range, buf),
         86 => push_uli(data, offset, value_desc, value_range, buf),
         87 => push_f_teid(data, offset, value_desc, value_range, buf),
+        88 | 111 | 112 => {
+            ie_decoders::push_tmsi(ie_type, data, offset, value_desc, value_range, buf);
+        }
         92 => push_single_u8(
             data,
             offset,
@@ -740,6 +746,14 @@ pub fn push_ie_value<'pkt>(
             buf,
         ),
         114 => push_ue_time_zone(data, offset, value_desc, value_range, buf),
+        116 => {
+            ie_decoders::push_complete_request_message(data, offset, value_desc, value_range, buf)
+        }
+        117 => ie_decoders::push_guti(data, offset, value_desc, value_range, buf),
+        118 => ie_decoders::push_f_container(data, offset, value_desc, value_range, buf),
+        119 => ie_decoders::push_f_cause(data, offset, value_desc, value_range, buf),
+        120 => ie_decoders::push_plmn_id(data, offset, value_desc, value_range, buf),
+        121 => ie_decoders::push_target_identification(data, offset, value_desc, value_range, buf),
         126 => push_single_u16(
             data,
             offset,
@@ -766,6 +780,10 @@ pub fn push_ie_value<'pkt>(
             value_range,
             buf,
         ),
+        131 => {
+            ie_decoders::push_change_reporting_action(data, offset, value_desc, value_range, buf)
+        }
+        132 => ie_decoders::push_fq_csid(data, offset, value_desc, value_range, buf),
         135 => push_single_u8(
             data,
             offset,
@@ -783,9 +801,15 @@ pub fn push_ie_value<'pkt>(
                 value_range.clone(),
             );
         }
+        150 => ie_decoders::push_detach_type(data, offset, value_desc, value_range, buf),
+        152 => ie_decoders::push_node_features(data, offset, value_desc, value_range, buf),
+        154 => ie_decoders::push_throttling(data, offset, value_desc, value_range, buf),
         155 => push_arp(data, offset, value_desc, value_range, buf),
         156 => push_epc_timer(data, offset, value_desc, value_range, buf),
+        158 => ie_decoders::push_tmgi(data, offset, value_desc, value_range, buf),
         163 => pco::push_pco(data, offset, value_desc, value_range, buf), // APCO
+        169 => ie_decoders::push_twan_identifier(data, offset, value_desc, value_range, buf),
+        172 => ie_decoders::push_ran_nas_cause(data, offset, value_desc, value_range, buf),
         182 => push_single_u8(
             data,
             offset,
@@ -805,6 +829,13 @@ pub fn push_ie_value<'pkt>(
         ),
         187 => push_integer_number(data, value_desc, value_range, buf),
         197 => pco::push_pco(data, offset, value_desc, value_range, buf), // ePCO
+        201 => ie_decoders::push_secondary_rat_usage_data_report(
+            data,
+            offset,
+            value_desc,
+            value_range,
+            buf,
+        ),
         255 => push_private_extension(data, offset, value_desc, value_range, buf),
         _ => buf.push_field(value_desc, FieldValue::Bytes(data), value_range.clone()),
     }
@@ -1625,9 +1656,12 @@ mod tests {
 
     // 10. Indication (type 77)
     #[test]
-    fn indication_raw_bytes() {
+    fn indication_flags() {
+        // 3GPP TS 29.274, Figure 8.12-1: 0xAB = DAF, HI, OI, ISRAI, SGWCI
         let buf = push_and_get(77, &[0xAB, 0xCD], 0);
-        assert_eq!(*first_value(&buf), FieldValue::Bytes(&[0xAB, 0xCD]));
+        assert_eq!(obj_field_value(&buf, "daf"), Some(&FieldValue::U8(1)));
+        assert_eq!(obj_field_value(&buf, "dtf"), Some(&FieldValue::U8(0)));
+        assert_eq!(obj_field_value(&buf, "msv"), Some(&FieldValue::U8(1)));
     }
 
     // 11. PAA (type 79)
