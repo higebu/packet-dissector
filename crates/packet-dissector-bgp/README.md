@@ -66,6 +66,14 @@ SR Policy (AFI 1 / 2, SAFI 73) entries carry `nlri_length_bits`,
 [RFC 9830](https://www.rfc-editor.org/rfc/rfc9830#section-2.1); an NLRI
 Length other than 96 (AFI 1) / 192 (AFI 2) ends the decoded entries.
 
+MCAST-VPN (AFI 1 / 2, SAFI 5) entries carry `route_type`, `length` and, for
+Route Types 1-7 of [RFC 6514](https://www.rfc-editor.org/rfc/rfc6514#section-4),
+`rd` or `route_key`, `source_as`, `multicast_source_length`,
+`multicast_source`, `multicast_group_length`, `multicast_group` and
+`originating_router_ip` as the Route Type defines; other Route Types and
+malformed routes keep a `value`. SAFI 129 entries carry `rd` and `prefix`
+([RFC 6514, Section 10](https://www.rfc-editor.org/rfc/rfc6514#section-10)).
+
 Every `nlri` / `withdrawn_routes` array — top level and inside
 `MP_REACH_NLRI` / `MP_UNREACH_NLRI` — declares the same entry `children`: the
 union of the plain prefix fields and the
