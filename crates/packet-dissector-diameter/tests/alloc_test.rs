@@ -51,3 +51,63 @@ fn zero_alloc_dissect_diameter_cer() {
     });
     assert_eq!(allocs, 0, "Diameter dissect allocated {allocs} times");
 }
+
+/// Build a Diameter message from a command code and a list of raw AVPs.
+fn build_message(code: u32, app_id: u32, avps: &[Vec<u8>]) -> Vec<u8> {
+    let body: Vec<u8> = avps.concat();
+    let total = 20 + body.len();
+    let mut buf = vec![
+        1,
+        (total >> 16) as u8,
+        (total >> 8) as u8,
+        total as u8,
+        0x80,
+    ];
+    buf.extend_from_slice(&code.to_be_bytes()[1..]);
+    buf.extend_from_slice(&app_id.to_be_bytes());
+    buf.extend_from_slice(&[0; 8]);
+    buf.extend_from_slice(&body);
+    buf
+}
+
+/// Build an AVP (optionally vendor-specific), padded to 4 octets.
+fn avp(code: u32, vendor: Option<u32>, data: &[u8]) -> Vec<u8> {
+    let header = if vendor.is_some() { 12 } else { 8 };
+    let len = header + data.len();
+    let mut buf = code.to_be_bytes().to_vec();
+    buf.push(if vendor.is_some() { 0xC0 } else { 0x40 });
+    buf.extend_from_slice(&(len as u32).to_be_bytes()[1..]);
+    if let Some(v) = vendor {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+    buf.extend_from_slice(data);
+    buf.resize((len + 3) & !3, 0);
+    buf
+}
+
+#[test]
+fn zero_alloc_dissect_diameter_typed_avps() {
+    // CCR with an Enumerated, a Time, an IPv4 OctetString and a 3GPP AVP.
+    let raw = build_message(
+        272,
+        4,
+        &[
+            avp(416, None, &1u32.to_be_bytes()),
+            avp(55, None, &3_913_056_000u32.to_be_bytes()),
+            avp(8, None, &[10, 0, 0, 1]),
+            avp(1032, Some(10415), &1004u32.to_be_bytes()),
+        ],
+    );
+    let mut buf = DissectBuffer::new();
+    // Warm up so that buffer growth is not counted.
+    DiameterDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        DiameterDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "Diameter typed AVP dissect allocated {allocs} times"
+    );
+}

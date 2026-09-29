@@ -68,8 +68,12 @@ default = [
   "stun",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
-linux_sll = ["dep:packet-dissector-linux-sll"]
-linux_sll2 = ["dep:packet-dissector-linux-sll2"]
+# SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
+linux_sll = ["dep:packet-dissector-linux-sll", "dep:packet-dissector-ethernet"]
+linux_sll2 = [
+  "dep:packet-dissector-linux-sll2",
+  "dep:packet-dissector-ethernet",
+]
 null = ["dep:packet-dissector-null"]
 # The raw IP dispatchers add no layer of their own; without IPv4/IPv6 a
 # raw IP packet would dissect to nothing.

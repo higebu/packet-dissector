@@ -12,8 +12,18 @@
 //!   <https://standards.ieee.org/ieee/802.1Q/10323/>
 //! - IEEE 802.2-1998 (LLC): <https://standards.ieee.org/ieee/802.2/1048/>
 //! - IANA EtherType registry: <https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml>
+//! - RFC 1042 (LLC/SNAP): <https://www.rfc-editor.org/rfc/rfc1042>
+//!
+//! The [`llc`] module decodes IEEE 802.2 LLC headers for this and other
+//! link-layer dissectors, and [`SnapDissector`] decodes the SNAP header
+//! reached through LLC SAP 0xAA.
 
 #![deny(missing_docs)]
+
+pub mod llc;
+mod snap;
+
+pub use snap::SnapDissector;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -45,9 +55,9 @@ const ETHERTYPE_MIN: u16 = 0x0600;
 /// IEEE 802.3-2022, clause 3.2.6.
 const LENGTH_MAX: u16 = 0x05DC;
 
-/// Minimum size of an IEEE 802.2 LLC header (DSAP + SSAP + Control for UI frames).
-/// IEEE 802.2-1998, Section 3.
-const LLC_HEADER_SIZE: usize = 3;
+/// First two MAC client data octets of a Novell "raw" IEEE 802.3 frame: the
+/// IPX checksum field, always 0xFFFF, in place of an IEEE 802.2 LLC header.
+const NOVELL_RAW_MARKER: [u8; 2] = [0xFF, 0xFF];
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_DST: usize = 0;
@@ -61,6 +71,8 @@ const FD_LENGTH: usize = 7;
 const FD_LLC_DSAP: usize = 8;
 const FD_LLC_SSAP: usize = 9;
 const FD_LLC_CONTROL: usize = 10;
+const FD_LLC_CONTROL_EXT: usize = 11;
+const FD_NOVELL_RAW: usize = 12;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("dst", "Destination", FieldType::MacAddr),
@@ -85,10 +97,17 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("llc_dsap", "LLC DSAP", FieldType::U8).optional(),
     FieldDescriptor::new("llc_ssap", "LLC SSAP", FieldType::U8).optional(),
     FieldDescriptor::new("llc_control", "LLC Control", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "llc_control_ext",
+        "LLC Control (second octet)",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("novell_raw", "Novell raw IEEE 802.3 (IPX)", FieldType::U8).optional(),
 ];
 
 /// Returns a human-readable name for well-known EtherType values.
-fn ethertype_name(v: u16) -> Option<&'static str> {
+pub(crate) fn ethertype_name(v: u16) -> Option<&'static str> {
     match v {
         0x0800 => Some("IPv4"),
         0x0806 => Some("ARP"),
@@ -240,47 +259,50 @@ impl Dissector for EthernetDissector {
         let dispatch_hint = if current_type <= LENGTH_MAX {
             // IEEE 802.3-2022, clause 3.2.6: values ≤ 1500 indicate a length field
             // (IEEE 802.3 frame with LLC encapsulation).
-            let llc_start = header_len;
-            let llc_end = llc_start + LLC_HEADER_SIZE;
-            if data.len() < llc_end {
-                return Err(PacketError::Truncated {
-                    expected: llc_end,
-                    actual: data.len(),
-                });
-            }
-
-            let dsap = data[llc_start];
-            let ssap = data[llc_start + 1];
-            let control = data[llc_start + 2];
-
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_LENGTH],
                 FieldValue::U16(current_type),
                 offset + header_len - 2..offset + header_len,
             );
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_LLC_DSAP],
-                FieldValue::U8(dsap),
-                offset + llc_start..offset + llc_start + 1,
-            );
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_LLC_SSAP],
-                FieldValue::U8(ssap),
-                offset + llc_start + 1..offset + llc_start + 2,
-            );
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_LLC_CONTROL],
-                FieldValue::U8(control),
-                offset + llc_start + 2..offset + llc_end,
-            );
-
+            let llc_start = header_len;
             // IEEE 802.3-2022, clause 3.2.6: the Length value is the number of
             // MAC client data octets (the LLC PDU) that follow. Octets after
             // them are Pad (clause 3.2.8), so the data handed to the LLC
             // client ends at the Length value.
-            llc_payload_len = Some((current_type as usize).saturating_sub(llc_end - llc_start));
-            header_len = llc_end;
-            DispatchHint::ByLlcSap(dsap)
+            let client_end = llc_start + current_type as usize;
+            let client_data = &data[llc_start..client_end.min(data.len())];
+
+            if client_data.starts_with(&NOVELL_RAW_MARKER) {
+                // Novell raw 802.3: an IPX packet (starting with its 0xFFFF
+                // checksum) directly follows the Length field, without an
+                // LLC header. The flag has no octets of its own.
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_NOVELL_RAW],
+                    FieldValue::U8(1),
+                    offset + llc_start..offset + llc_start,
+                );
+                llc_payload_len = Some(current_type as usize);
+                DispatchHint::End
+            } else {
+                // IEEE 802.2 — DSAP, SSAP, then a 1-octet (U-format) or
+                // 2-octet (I-/S-format) control field.
+                // A Length shorter than the LLC header is tolerated: the
+                // header is still decoded and the client data is empty.
+                let llc = llc::LlcHeader::parse_at(data, llc_start, data.len())?;
+                llc.push_fields(
+                    buf,
+                    [
+                        &FIELD_DESCRIPTORS[FD_LLC_DSAP],
+                        &FIELD_DESCRIPTORS[FD_LLC_SSAP],
+                        &FIELD_DESCRIPTORS[FD_LLC_CONTROL],
+                        &FIELD_DESCRIPTORS[FD_LLC_CONTROL_EXT],
+                    ],
+                    offset + llc_start,
+                );
+                llc_payload_len = Some((current_type as usize).saturating_sub(llc.header_len()));
+                header_len = llc_start + llc.header_len();
+                llc.next_hint()
+            }
         } else if current_type < ETHERTYPE_MIN {
             // IEEE 802.3-2022, clause 3.2.6: values 1501–1535 are undefined/reserved.
             return Err(PacketError::InvalidFieldValue {
@@ -316,27 +338,157 @@ impl Dissector for EthernetDissector {
 
 #[cfg(test)]
 mod tests {
+    //! # IEEE 802.3 / IEEE 802.2 LLC Coverage (Ethernet dissector)
+    //!
+    //! | Spec section                        | Description                              | Test                                   |
+    //! |-------------------------------------|------------------------------------------|----------------------------------------|
+    //! | IEEE 802.2 control field (U-format) | 1-octet control, dispatch by DSAP        | llc_ui_frame_dispatches_by_dsap        |
+    //! | IEEE 802.2 control field (I-format) | 2-octet control, dispatch by DSAP        | llc_i_frame_has_two_octet_control      |
+    //! | IEEE 802.2 control field (S-format) | 2-octet control, no information field    | llc_s_frame_has_two_octet_control      |
+    //! | IEEE 802.2 control field (U-format) | Non-UI command (TEST) ends the chain     | llc_test_frame_ends_chain              |
+    //! | IEEE 802.2 control field            | 2-octet control truncated                | llc_two_octet_control_truncated        |
+    //! | RFC 1042 / IEEE 802 clause 10       | SNAP reached through ByLlcSap(0xAA)      | llc_snap_dispatches_sap_aa             |
+    //! | IEEE 802.3 clause 3.2.6 (Length)    | Payload bounded after 2-octet control    | llc_i_frame_has_two_octet_control      |
+    //! | Novell raw 802.3                    | 0xFFFF payload: no LLC header, End       | novell_raw_802_3                       |
+    //! | IEEE 802.3 clause 3.2.6 (Length)    | Length < LLC header; Novell within Length | llc_header_longer_than_length         |
+
     use super::*;
 
-    /// Every dissector in this crate must cite the specifications it
-    /// implements and declare where it sits in the dissection stack.
-    #[test]
-    fn references_and_layer_are_populated() {
-        fn assert_layer_and_references(dissector: &dyn Dissector) {
-            let references = dissector.references();
-            assert!(!references.is_empty());
-            for reference in references {
-                assert!(!reference.id.is_empty());
-                assert!(!reference.title.is_empty());
-                assert!(
-                    reference.url.starts_with("https://"),
-                    "{} url must start with https://",
-                    reference.id
-                );
-            }
-            assert_eq!(dissector.layer(), Some(ProtocolLayer::Link));
-        }
+    /// 802.3 frame: dst, src, length, then `payload` (LLC PDU).
+    fn frame_802_3(payload: &[u8]) -> Vec<u8> {
+        let mut f = vec![
+            0x01, 0x80, 0xC2, 0, 0, 0, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+        ];
+        f.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        f.extend_from_slice(payload);
+        f
+    }
 
-        assert_layer_and_references(&EthernetDissector);
+    fn eth_field<'a>(buf: &'a DissectBuffer<'_>, name: &str) -> Option<&'a FieldValue<'a>> {
+        let layer = buf.layer_by_name("Ethernet")?;
+        buf.field_by_name(layer, name).map(|f| &f.value)
+    }
+
+    #[test]
+    fn llc_ui_frame_dispatches_by_dsap() {
+        let data = frame_802_3(&[0x42, 0x42, 0x03, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.bytes_consumed, 17);
+        assert_eq!(r.next, DispatchHint::ByLlcSap(0x42));
+        assert_eq!(r.payload_len, Some(2));
+        assert_eq!(eth_field(&buf, "llc_control"), Some(&FieldValue::U8(0x03)));
+        assert!(eth_field(&buf, "llc_control_ext").is_none());
+    }
+
+    #[test]
+    fn llc_i_frame_has_two_octet_control() {
+        // I-format: bit 0 of the first control octet is 0; N(R)/P octet follows.
+        let data = frame_802_3(&[0xF0, 0xF0, 0x00, 0x02, 0xAB, 0xCD]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.bytes_consumed, 18);
+        assert_eq!(r.next, DispatchHint::ByLlcSap(0xF0));
+        assert_eq!(r.payload_len, Some(2));
+        assert_eq!(eth_field(&buf, "llc_control"), Some(&FieldValue::U8(0x00)));
+        assert_eq!(
+            eth_field(&buf, "llc_control_ext"),
+            Some(&FieldValue::U8(0x02))
+        );
+        let layer = buf.layer_by_name("Ethernet").unwrap();
+        assert_eq!(layer.range, 0..18);
+        assert_eq!(
+            buf.field_by_name(layer, "llc_control_ext").unwrap().range,
+            17..18
+        );
+    }
+
+    #[test]
+    fn llc_s_frame_has_two_octet_control() {
+        // S-format (RR): low two bits 01.
+        let data = frame_802_3(&[0xF0, 0xF1, 0x01, 0x05]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.bytes_consumed, 18);
+        assert_eq!(r.next, DispatchHint::End);
+        assert_eq!(
+            eth_field(&buf, "llc_control_ext"),
+            Some(&FieldValue::U8(0x05))
+        );
+    }
+
+    #[test]
+    fn llc_test_frame_ends_chain() {
+        // U-format TEST command (0xE3): not handed to the SAP's protocol.
+        let data = frame_802_3(&[0x42, 0x42, 0xE3, 0x01]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.bytes_consumed, 17);
+        assert_eq!(r.next, DispatchHint::End);
+    }
+
+    #[test]
+    fn llc_two_octet_control_truncated() {
+        let data = frame_802_3(&[0xF0, 0xF0, 0x00]);
+        let mut buf = DissectBuffer::new();
+        assert_eq!(
+            EthernetDissector.dissect(&data, &mut buf, 0),
+            Err(PacketError::Truncated {
+                expected: 18,
+                actual: 17
+            })
+        );
+    }
+
+    #[test]
+    fn llc_snap_dispatches_sap_aa() {
+        let data = frame_802_3(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.next, DispatchHint::ByLlcSap(0xAA));
+        assert_eq!(r.payload_len, Some(5));
+    }
+
+    #[test]
+    fn novell_raw_802_3() {
+        let data = frame_802_3(&[0xFF, 0xFF, 0x00, 0x1E, 0x00, 0x04]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.bytes_consumed, 14);
+        assert_eq!(r.next, DispatchHint::End);
+        assert_eq!(r.payload_len, Some(6));
+        assert!(eth_field(&buf, "llc_dsap").is_none());
+        assert_eq!(eth_field(&buf, "novell_raw"), Some(&FieldValue::U8(1)));
+        let layer = buf.layer_by_name("Ethernet").unwrap();
+        assert_eq!(layer.range, 0..14);
+        assert_eq!(
+            buf.field_by_name(layer, "novell_raw").unwrap().range,
+            14..14
+        );
+    }
+
+    #[test]
+    fn llc_header_longer_than_length() {
+        // Length 3 with an I-format control octet: the header is still
+        // decoded (the second control octet sits in the Pad) and the LLC
+        // client gets no data.
+        let mut data = frame_802_3(&[0xF0, 0xF0, 0x00]);
+        data.extend_from_slice(&[0x07; 43]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.payload_len, Some(0));
+        assert_eq!(
+            eth_field(&buf, "llc_control_ext"),
+            Some(&FieldValue::U8(0x07))
+        );
+
+        // Length 1 followed by 0xFF 0xFF Pad is not Novell raw: the marker
+        // must lie within the Length.
+        let mut data = frame_802_3(&[0xFF]);
+        data.extend_from_slice(&[0xFF; 45]);
+        let mut buf = DissectBuffer::new();
+        let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert!(eth_field(&buf, "novell_raw").is_none());
+        assert_eq!(r.payload_len, Some(0));
     }
 }

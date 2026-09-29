@@ -9,7 +9,9 @@ use packet_dissector_core::util::{
 };
 
 use crate::ie;
+use crate::ie_decoders;
 use crate::pco;
+use crate::tft;
 
 /// IE value descriptor for label-prefixed (APN / FQDN) payloads.
 ///
@@ -256,7 +258,7 @@ static FD_HELPER_CHARGING_CHARACTERISTICS: FieldDescriptor = FieldDescriptor::ne
 // ---------------------------------------------------------------------------
 
 /// Push a single-field Object IE with a U8 value (optionally masked).
-fn push_single_u8<'pkt>(
+pub(crate) fn push_single_u8<'pkt>(
     data: &'pkt [u8],
     offset: usize,
     desc: &'static FieldDescriptor,
@@ -337,53 +339,62 @@ fn decode_bcd(data: &[u8]) -> String {
     s
 }
 
-/// Decode PLMN (MCC + MNC) from 3 BCD-encoded bytes.
+/// Push MCC and MNC digits (as ASCII in scratch) without allocating.
+///
+/// `mcc` and `mnc` hold one BCD digit per element; an MNC whose third digit
+/// is 0xF ("1111") has two digits. A nibble above 9 is shown as its hex
+/// digit so that malformed input stays visible.
+pub(crate) fn push_mcc_mnc(
+    buf: &mut DissectBuffer<'_>,
+    mcc: [u8; 3],
+    mnc: [u8; 3],
+    range: core::ops::Range<usize>,
+) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let ascii = |d: u8| DIGITS[usize::from(d & 0x0F)];
+    let mcc = [ascii(mcc[0]), ascii(mcc[1]), ascii(mcc[2])];
+    let mnc_len = if mnc[2] & 0x0F == 0x0F { 2 } else { 3 };
+    let mnc = [ascii(mnc[0]), ascii(mnc[1]), ascii(mnc[2])];
+    let mcc_range = buf.push_scratch(&mcc);
+    let mnc_range = buf.push_scratch(&mnc[..mnc_len]);
+    buf.push_field(
+        &FD_INLINE_MCC,
+        FieldValue::Scratch(mcc_range),
+        range.clone(),
+    );
+    buf.push_field(&FD_INLINE_MNC, FieldValue::Scratch(mnc_range), range);
+}
+
+/// Push PLMN (MCC+MNC) fields decoded from 3 BCD-encoded bytes.
 ///
 /// 3GPP TS 24.008, Section 10.5.1.13:
 ///   Byte 0: MCC digit 2 | MCC digit 1
 ///   Byte 1: MNC digit 3 | MCC digit 3
 ///   Byte 2: MNC digit 2 | MNC digit 1
-fn decode_plmn(data: &[u8]) -> (String, String) {
-    if data.len() < 3 {
-        return (String::new(), String::new());
-    }
-
-    let mcc1 = data[0] & 0x0F;
-    let mcc2 = (data[0] >> 4) & 0x0F;
-    let mcc3 = data[1] & 0x0F;
-    let mnc3 = (data[1] >> 4) & 0x0F;
-    let mnc1 = data[2] & 0x0F;
-    let mnc2 = (data[2] >> 4) & 0x0F;
-
-    let mcc = format!("{mcc1}{mcc2}{mcc3}");
-    let mnc = if mnc3 == 0x0F {
-        format!("{mnc1}{mnc2}")
-    } else {
-        format!("{mnc1}{mnc2}{mnc3}")
-    };
-
-    (mcc, mnc)
-}
-
-/// Push PLMN (MCC+MNC) fields into a buffer using scratch for the string data.
-fn push_plmn_fields<'pkt>(
-    data: &'pkt [u8],
+///
+/// Fewer than 3 bytes yield empty MCC and MNC fields.
+pub(crate) fn push_plmn_fields(
+    data: &[u8],
     offset: usize,
     plmn_len: usize,
-    buf: &mut DissectBuffer<'pkt>,
+    buf: &mut DissectBuffer<'_>,
 ) {
-    let (mcc, mnc) = decode_plmn(data);
-    let mcc_range = buf.push_scratch(mcc.as_bytes());
-    let mnc_range = buf.push_scratch(mnc.as_bytes());
-    buf.push_field(
-        &FD_INLINE_MCC,
-        FieldValue::Scratch(mcc_range),
-        offset..offset + plmn_len,
-    );
-    buf.push_field(
-        &FD_INLINE_MNC,
-        FieldValue::Scratch(mnc_range),
-        offset..offset + plmn_len,
+    let range = offset..offset + plmn_len;
+    let [o1, o2, o3, ..] = *data else {
+        let empty = buf.push_scratch(&[]);
+        buf.push_field(
+            &FD_INLINE_MCC,
+            FieldValue::Scratch(empty.clone()),
+            range.clone(),
+        );
+        buf.push_field(&FD_INLINE_MNC, FieldValue::Scratch(empty), range);
+        return;
+    };
+    push_mcc_mnc(
+        buf,
+        [o1 & 0x0F, o1 >> 4, o2 & 0x0F],
+        [o3 & 0x0F, o3 >> 4, o2 >> 4],
+        range,
     );
 }
 
@@ -654,7 +665,7 @@ pub fn push_ie_value<'pkt>(
             let r = buf.push_scratch(s.as_bytes());
             buf.push_field(value_desc, FieldValue::Scratch(r), value_range.clone());
         }
-        77 => buf.push_field(value_desc, FieldValue::Bytes(data), value_range.clone()),
+        77 => ie_decoders::push_indication(data, offset, value_desc, value_range, buf),
         78 => pco::push_pco(data, offset, value_desc, value_range, buf),
         79 => push_paa(data, offset, value_desc, value_range, buf),
         80 => push_bearer_qos(data, offset, value_desc, value_range, buf),
@@ -669,8 +680,12 @@ pub fn push_ie_value<'pkt>(
             buf,
         ),
         83 => push_serving_network(data, offset, value_desc, value_range, buf),
+        84 => tft::push_tft(data, offset, value_desc, value_range, buf),
         86 => push_uli(data, offset, value_desc, value_range, buf),
         87 => push_f_teid(data, offset, value_desc, value_range, buf),
+        88 | 111 | 112 => {
+            ie_decoders::push_tmsi(ie_type, data, offset, value_desc, value_range, buf);
+        }
         92 => push_single_u8(
             data,
             offset,
@@ -740,6 +755,14 @@ pub fn push_ie_value<'pkt>(
             buf,
         ),
         114 => push_ue_time_zone(data, offset, value_desc, value_range, buf),
+        116 => {
+            ie_decoders::push_complete_request_message(data, offset, value_desc, value_range, buf)
+        }
+        117 => ie_decoders::push_guti(data, offset, value_desc, value_range, buf),
+        118 => ie_decoders::push_f_container(data, offset, value_desc, value_range, buf),
+        119 => ie_decoders::push_f_cause(data, offset, value_desc, value_range, buf),
+        120 => ie_decoders::push_plmn_id(data, offset, value_desc, value_range, buf),
+        121 => ie_decoders::push_target_identification(data, offset, value_desc, value_range, buf),
         126 => push_single_u16(
             data,
             offset,
@@ -766,6 +789,10 @@ pub fn push_ie_value<'pkt>(
             value_range,
             buf,
         ),
+        131 => {
+            ie_decoders::push_change_reporting_action(data, offset, value_desc, value_range, buf)
+        }
+        132 => ie_decoders::push_fq_csid(data, offset, value_desc, value_range, buf),
         135 => push_single_u8(
             data,
             offset,
@@ -783,9 +810,15 @@ pub fn push_ie_value<'pkt>(
                 value_range.clone(),
             );
         }
+        150 => ie_decoders::push_detach_type(data, offset, value_desc, value_range, buf),
+        152 => ie_decoders::push_node_features(data, offset, value_desc, value_range, buf),
+        154 => ie_decoders::push_throttling(data, offset, value_desc, value_range, buf),
         155 => push_arp(data, offset, value_desc, value_range, buf),
         156 => push_epc_timer(data, offset, value_desc, value_range, buf),
+        158 => ie_decoders::push_tmgi(data, offset, value_desc, value_range, buf),
         163 => pco::push_pco(data, offset, value_desc, value_range, buf), // APCO
+        169 => ie_decoders::push_twan_identifier(data, offset, value_desc, value_range, buf),
+        172 => ie_decoders::push_ran_nas_cause(data, offset, value_desc, value_range, buf),
         182 => push_single_u8(
             data,
             offset,
@@ -805,6 +838,13 @@ pub fn push_ie_value<'pkt>(
         ),
         187 => push_integer_number(data, value_desc, value_range, buf),
         197 => pco::push_pco(data, offset, value_desc, value_range, buf), // ePCO
+        201 => ie_decoders::push_secondary_rat_usage_data_report(
+            data,
+            offset,
+            value_desc,
+            value_range,
+            buf,
+        ),
         255 => push_private_extension(data, offset, value_desc, value_range, buf),
         _ => buf.push_field(value_desc, FieldValue::Bytes(data), value_range.clone()),
     }
@@ -1460,6 +1500,15 @@ mod tests {
         buf.resolve_nested_display_name(r, name)
     }
 
+    #[test]
+    fn plmn_fields_short_input_is_empty() {
+        let mut buf = DissectBuffer::new();
+        push_plmn_fields(&[0x21, 0x43], 0, 2, &mut buf);
+        assert_eq!(buf.fields().len(), 2);
+        assert_eq!(buf.fields()[0].value, FieldValue::Scratch(0..0));
+        assert_eq!(buf.fields()[1].value, FieldValue::Scratch(0..0));
+    }
+
     // 1. IMSI (type 1)
     #[test]
     fn imsi_bcd_decode() {
@@ -1625,9 +1674,12 @@ mod tests {
 
     // 10. Indication (type 77)
     #[test]
-    fn indication_raw_bytes() {
+    fn indication_flags() {
+        // 3GPP TS 29.274, Figure 8.12-1: 0xAB = DAF, HI, OI, ISRAI, SGWCI
         let buf = push_and_get(77, &[0xAB, 0xCD], 0);
-        assert_eq!(*first_value(&buf), FieldValue::Bytes(&[0xAB, 0xCD]));
+        assert_eq!(obj_field_value(&buf, "daf"), Some(&FieldValue::U8(1)));
+        assert_eq!(obj_field_value(&buf, "dtf"), Some(&FieldValue::U8(0)));
+        assert_eq!(obj_field_value(&buf, "msv"), Some(&FieldValue::U8(1)));
     }
 
     // 11. PAA (type 79)

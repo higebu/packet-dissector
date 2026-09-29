@@ -69,3 +69,41 @@ fn zero_alloc_dissect_pfcp_ue_ip_and_network_instance() {
     });
     assert_eq!(allocs, 0, "PFCP dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_pfcp_decoded_ies_and_vendor_ie() {
+    // IEs decoded by the TS 29.244 v19.6.0 decoders plus a vendor IE:
+    // Outer Header Creation, QFI, SDF Filter, MBR, UP Function Features,
+    // Volume Measurement, User ID (TBCD digits into scratch), Redirect
+    // Information and a vendor-specific IE with an Enterprise ID.
+    let ies: &[&[u8]] = &[
+        &[
+            0x00, 0x54, 0x00, 0x0A, 0x01, 0x00, 0, 0, 0x12, 0x34, 192, 168, 0, 1,
+        ],
+        &[0x00, 0x7C, 0x00, 0x01, 0x09],
+        &[
+            0x00, 0x17, 0x00, 0x07, 0x01, 0x00, 0x00, 0x03, b'a', b'b', b'c',
+        ],
+        &[0x00, 0x1A, 0x00, 0x0A, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0],
+        &[0x00, 0x2B, 0x00, 0x02, 0x10, 0x01],
+        &[0x00, 0x42, 0x00, 0x09, 0x01, 0, 0, 0, 0, 0, 0, 0, 9],
+        &[0x00, 0x8D, 0x00, 0x05, 0x01, 0x03, 0x21, 0x43, 0xF5],
+        &[0x00, 0x26, 0x00, 0x05, 0x05, 0x00, 0x50, 0x00, 0x00],
+        &[0x80, 0x01, 0x00, 0x04, 0x00, 0x7B, 0xAA, 0xBB],
+    ];
+    let body: Vec<u8> = ies.iter().flat_map(|ie| ie.iter().copied()).collect();
+    let mut raw = vec![0x21, 50];
+    raw.extend_from_slice(&((12 + body.len()) as u16).to_be_bytes());
+    raw.extend_from_slice(&1u64.to_be_bytes()); // SEID
+    raw.extend_from_slice(&[0x00, 0x00, 0x01, 0x00]); // seq + spare
+    raw.extend_from_slice(&body);
+
+    let mut buf = DissectBuffer::new();
+    PfcpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        PfcpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "PFCP decoded IEs allocated {allocs} times");
+}

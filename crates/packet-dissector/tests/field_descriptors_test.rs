@@ -100,10 +100,11 @@ fn ipv4_field_descriptors() {
         FieldType::Ipv4Addr
     );
 
-    // options is optional
+    // options is an optional array of option objects (RFC 791, Section 3.1)
     let options = descs.iter().find(|d| d.name == "options").unwrap();
     assert!(options.optional);
-    assert_eq!(options.field_type, FieldType::Bytes);
+    assert_eq!(options.field_type, FieldType::Array);
+    assert!(options.children.is_some());
 
     assert_names_unique(&d);
 }

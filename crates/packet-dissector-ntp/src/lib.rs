@@ -4,19 +4,60 @@
 //! - RFC 5905 (NTPv4): <https://www.rfc-editor.org/rfc/rfc5905>
 //! - RFC 7822 (Extension Fields update): <https://www.rfc-editor.org/rfc/rfc7822>
 //! - RFC 8573 (AES-CMAC for NTP): <https://www.rfc-editor.org/rfc/rfc8573>
+//! - RFC 8915 (Network Time Security): <https://www.rfc-editor.org/rfc/rfc8915>
 //! - RFC 9109 (Port Randomization): <https://www.rfc-editor.org/rfc/rfc9109>
 //! - RFC 9748 (IANA Registry updates): <https://www.rfc-editor.org/rfc/rfc9748>
 //! - RFC 9769 (Interleaved Modes): <https://www.rfc-editor.org/rfc/rfc9769>
 //! - RFC 9327 (Control Messages, mode 6; Historic):
 //!   <https://www.rfc-editor.org/rfc/rfc9327>
+//! - IANA "NTP Extension Field Types" registry:
+//!   <https://www.iana.org/assignments/ntp-parameters>
 //!
 //! The layout is selected by the Mode field:
 //!
-//! - Modes 0-5: the 48-octet fixed NTPv4 header (RFC 5905, Section 7.3).
-//!   Extension fields and MACs after the header are not dissected.
+//! - Modes 0-5: the 48-octet fixed NTPv4 header (RFC 5905, Section 7.3),
+//!   followed by optional extension fields and an optional MAC (see below).
 //! - Mode 6: the NTP Control Message header and data (RFC 9327, Section 2).
 //! - Mode 7: "reserved for private use" (RFC 5905, Section 7.3); only the
 //!   Version and Mode are decoded and the rest is kept as raw data.
+//!
+//! ## Extension fields and MAC (modes 0-5)
+//!
+//! RFC 5905, Section 7.3 (<https://www.rfc-editor.org/rfc/rfc5905#section-7.3>):
+//! "The NTP packet header shown in Figure 8 has 12 words followed by
+//! optional extension fields and finally an optional message authentication
+//! code (MAC) consisting of the Key Identifier field and Message Digest
+//! field."
+//!
+//! The octets after the header are split as follows:
+//!
+//! 1. NTPv4 only (VN = 4): while more than 24 octets remain, each block is
+//!    read as an extension field (`extension_fields`, RFC 7822, Section 3).
+//!    RFC 7822 updates RFC 5905 Section 7.5 so that a MAC "MUST NOT be
+//!    longer than 24 octets if there is no extension field present"
+//!    (7.5.1.3) and, without a MAC, "the length of the last extension field
+//!    MUST be at least 28 octets" (7.5.1.4). A remainder of more than 24
+//!    octets therefore cannot be a MAC alone, and a remainder of 24 octets
+//!    or fewer cannot be a trailing extension field.
+//!    (<https://www.rfc-editor.org/rfc/rfc7822#section-3>)
+//! 2. A remainder of 4 to 24 octets that is a whole number of 32-bit words
+//!    is the MAC: `key_id` (32 bits) and `digest` (MD5 or SHA-1 digest, or
+//!    an AES-CMAC tag per RFC 8573; absent for the 4-octet crypto-NAK of
+//!    RFC 5905, Section 9.2). The MAC is not verified.
+//! 3. Anything that does not decode is kept as `trailing_data`.
+//!
+//! This follows the RFC 7822 rules. A longer MAC "agreed upon by both client
+//! and server" (7.5.1.3), or one whose length is set by an extension field
+//! specification (7.5.1.1), cannot be recognised without that knowledge: it
+//! is shown as `trailing_data`, or, if its first octets happen to look like
+//! an extension field header, as an extension field followed by a MAC. Extension fields are "In NTPv4"
+//! only, so for other versions (e.g. NTPv3) only a MAC is recognised.
+//!
+//! The NTS extension fields of RFC 8915, Sections 5.3-5.6
+//! (<https://www.rfc-editor.org/rfc/rfc8915#section-5.3>) are decoded into
+//! typed children (`unique_id`, `cookie`, `nonce_length`,
+//! `ciphertext_length`, `nonce`, `ciphertext` and paddings). The ciphertext
+//! is kept opaque; nothing is decrypted.
 
 #![deny(missing_docs)]
 
@@ -219,6 +260,150 @@ const FD_COUNT: usize = 21;
 const FD_DATA: usize = 22;
 const FD_PADDING: usize = 23;
 const FD_AUTHENTICATOR: usize = 24;
+// RFC 7822, Section 3 / RFC 5905, Section 7.3 — extension fields and MAC.
+//   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+//   <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>
+const FD_EXTENSION_FIELDS: usize = 25;
+const FD_KEY_ID: usize = 26;
+const FD_DIGEST: usize = 27;
+const FD_TRAILING_DATA: usize = 28;
+
+/// Index constants for `EXTENSION_FIELD_CHILD_FIELDS`.
+const EFFD_FIELD_TYPE: usize = 0;
+const EFFD_LENGTH: usize = 1;
+const EFFD_VALUE: usize = 2;
+const EFFD_UNIQUE_ID: usize = 3;
+const EFFD_COOKIE: usize = 4;
+const EFFD_NONCE_LENGTH: usize = 5;
+const EFFD_CIPHERTEXT_LENGTH: usize = 6;
+const EFFD_NONCE: usize = 7;
+const EFFD_NONCE_PADDING: usize = 8;
+const EFFD_CIPHERTEXT: usize = 9;
+const EFFD_CIPHERTEXT_PADDING: usize = 10;
+const EFFD_ADDITIONAL_PADDING: usize = 11;
+const EFFD_PLACEHOLDER: usize = 12;
+
+/// Version Number of NTPv4.
+///
+/// RFC 7822, Section 3 — <https://www.rfc-editor.org/rfc/rfc7822#section-3>:
+/// "In NTPv4, one or more extension fields can be inserted after the header
+/// and before the MAC, if a MAC is present."
+const VERSION_4: u8 = 4;
+
+/// Size of the Field Type and Length words of an extension field.
+///
+/// RFC 7822, Section 3, Figure 14 —
+/// <https://www.rfc-editor.org/rfc/rfc7822#section-3>.
+const EF_HEADER_SIZE: usize = 4;
+
+/// Minimum extension field length.
+///
+/// RFC 7822, Section 3 — <https://www.rfc-editor.org/rfc/rfc7822#section-3>:
+/// "While the minimum field length containing required fields is four words
+/// (16 octets), the maximum field length cannot be longer than 65532 octets,
+/// due to the maximum size of the Length field."
+const EF_MIN_LEN: usize = 16;
+
+/// Maximum MAC length when no extension field is present.
+///
+/// RFC 7822, Section 3 (7.5.1.3) —
+/// <https://www.rfc-editor.org/rfc/rfc7822#section-3>: "A MAC MUST NOT be
+/// longer than 24 octets if there is no extension field present, unless a
+/// longer MAC is agreed upon by both client and server."
+const MAX_MAC_LEN: usize = 24;
+
+/// Size of the MAC Key Identifier.
+///
+/// RFC 5905, Section 7.3 — <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>:
+/// "Key Identifier (keyid): 32-bit unsigned integer used by the client and
+/// server to designate a secret 128-bit MD5 key."
+const KEY_ID_SIZE: usize = 4;
+
+/// Unique Identifier extension field.
+///
+/// RFC 8915, Section 5.3 — <https://www.rfc-editor.org/rfc/rfc8915#section-5.3>:
+/// "It has a Field Type of 0x0104."
+const EF_TYPE_UNIQUE_ID: u16 = 0x0104;
+
+/// NTS Cookie extension field.
+///
+/// RFC 8915, Section 5.4 — <https://www.rfc-editor.org/rfc/rfc8915#section-5.4>:
+/// "The NTS Cookie extension field has a Field Type of 0x0204."
+const EF_TYPE_NTS_COOKIE: u16 = 0x0204;
+
+/// NTS Cookie Placeholder extension field.
+///
+/// RFC 8915, Section 5.5 — <https://www.rfc-editor.org/rfc/rfc8915#section-5.5>:
+/// "The NTS Cookie Placeholder extension field has a Field Type of 0x0304."
+const EF_TYPE_NTS_COOKIE_PLACEHOLDER: u16 = 0x0304;
+
+/// NTS Authenticator and Encrypted Extension Fields extension field.
+///
+/// RFC 8915, Section 5.6 — <https://www.rfc-editor.org/rfc/rfc8915#section-5.6>:
+/// "Its Field Type is 0x0404."
+const EF_TYPE_NTS_AUTHENTICATOR: u16 = 0x0404;
+
+/// Returns the meaning of an NTP extension Field Type.
+///
+/// Verbatim from the IANA "NTP Extension Field Types" registry
+/// (<https://www.iana.org/assignments/ntp-parameters>).
+///
+/// Field Type 0x0204 is registered twice, as "Autokey Message Request"
+/// (RFC 5906, <https://www.rfc-editor.org/rfc/rfc5906>) and "NTS Cookie"
+/// (RFC 8915, Section 5.4,
+/// <https://www.rfc-editor.org/rfc/rfc8915#section-5.4>); the registry notes
+/// that "in practice this is not a problem as the field semantics will be
+/// determined by other parts of the message". Both names are shown. The
+/// body is decoded as an NTS `cookie` only when no MAC follows the extension
+/// fields: NTS packets are authenticated by the NTS Authenticator extension
+/// field instead, while Autokey (RFC 5906) packets always carry a MAC.
+fn extension_field_type_name(field_type: u16) -> Option<&'static str> {
+    match field_type {
+        0x0000 => Some("Crypto-NAK; authentication failure"),
+        0x0104 => Some("Unique Identifier"),
+        0x010A => Some("Network Correction"),
+        0x0200 => Some("No-Operation Request"),
+        0x0201 => Some("Association Message Request"),
+        0x0202 => Some("Certificate Message Request"),
+        0x0203 => Some("Cookie Message Request"),
+        0x0204 => Some("NTS Cookie / Autokey Message Request"),
+        0x0205 => Some("Leapseconds Message Request"),
+        0x0206 => Some("Sign Message Request"),
+        0x0207 => Some("IFF Identity Message Request"),
+        0x0208 => Some("GQ Identity Message Request"),
+        0x0209 => Some("MV Identity Message Request"),
+        0x0304 => Some("NTS Cookie Placeholder"),
+        0x0404 => Some("NTS Authenticator and Encrypted Extension Fields"),
+        0x2005 => Some("UDP Checksum Complement"),
+        0x8200 => Some("No-Operation Response"),
+        0x8201 => Some("Association Message Response"),
+        0x8202 => Some("Certificate Message Response"),
+        0x8203 => Some("Cookie Message Response"),
+        0x8204 => Some("Autokey Message Response"),
+        0x8205 => Some("Leapseconds Message Response"),
+        0x8206 => Some("Sign Message Response"),
+        0x8207 => Some("IFF Identity Message Response"),
+        0x8208 => Some("GQ Identity Message Response"),
+        0x8209 => Some("MV Identity Message Response"),
+        0xC200 => Some("No-Operation Error Response"),
+        0xC201 => Some("Association Message Error Response"),
+        0xC202 => Some("Certificate Message Error Response"),
+        0xC203 => Some("Cookie Message Error Response"),
+        0xC204 => Some("Autokey Message Error Response"),
+        0xC205 => Some("Leapseconds Message Error Response"),
+        0xC206 => Some("Sign Message Error Response"),
+        0xC207 => Some("IFF Identity Message Error Response"),
+        0xC208 => Some("GQ Identity Message Error Response"),
+        0xC209 => Some("MV Identity Message Error Response"),
+        0x0002 | 0x0102 | 0x0302 | 0x0402 | 0x0502 | 0x0602 | 0x0702 | 0x0802 | 0x0902 | 0x8002
+        | 0x8102 | 0x8302 | 0x8402 | 0x8502 | 0x8602 | 0x8702 | 0x8802 | 0x8902 | 0xC002
+        | 0xC102 | 0xC302 | 0xC402 | 0xC502 | 0xC602 | 0xC702 | 0xC802 | 0xC902 => {
+            Some("Reserved for historic reasons")
+        }
+        0xF000..=0xFFFF => Some("Reserved for Private or Experimental Use"),
+        _ => None,
+    }
+}
 
 /// Layer name used for every NTP mode.
 const SHORT_NAME: &str = "NTP";
@@ -242,6 +427,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 8573",
         "Message Authentication Code for the Network Time Protocol",
         "https://www.rfc-editor.org/rfc/rfc8573",
+    ),
+    SpecReference::new(
+        "RFC 8915",
+        "Network Time Security for the Network Time Protocol",
+        "https://www.rfc-editor.org/rfc/rfc8915",
     ),
     SpecReference::new(
         "RFC 9109",
@@ -343,6 +533,76 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
     FieldDescriptor::new("padding", "Padding", FieldType::Bytes).optional(),
     FieldDescriptor::new("authenticator", "Authenticator", FieldType::Bytes).optional(),
+    // Fields below follow the header in modes 0-5 (RFC 5905, Section 7.3;
+    // RFC 7822, Section 3).
+    //   <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>
+    //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+    FieldDescriptor::new("extension_fields", "Extension Fields", FieldType::Array)
+        .optional()
+        .with_children(EXTENSION_FIELD_CHILD_FIELDS),
+    FieldDescriptor::new("key_id", "Key Identifier", FieldType::U32).optional(),
+    FieldDescriptor::new("digest", "Message Digest", FieldType::Bytes).optional(),
+    FieldDescriptor::new("trailing_data", "Trailing Data", FieldType::Bytes).optional(),
+];
+
+/// Descriptor for one extension field Object in `extension_fields`.
+///
+/// `display_fn` lets [`DissectBuffer::resolve_container_display_name`]
+/// label the Object with the IANA name of its Field Type.
+static FD_EXTENSION_FIELD: FieldDescriptor = FieldDescriptor {
+    name: "extension_field",
+    display_name: "Extension Field",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("field_type", FieldValue::U16(t)) => extension_field_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
+/// Child field descriptors of an extension field.
+///
+/// RFC 7822, Section 3, Figure 14 —
+/// <https://www.rfc-editor.org/rfc/rfc7822#section-3>; NTS fields from
+/// RFC 8915, Sections 5.3-5.6 —
+/// <https://www.rfc-editor.org/rfc/rfc8915#section-5.3>.
+static EXTENSION_FIELD_CHILD_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor {
+        name: "field_type",
+        display_name: "Field Type",
+        field_type: FieldType::U16,
+        optional: false,
+        children: None,
+        display_fn: Some(|v, _siblings| match v {
+            FieldValue::U16(t) => extension_field_type_name(*t),
+            _ => None,
+        }),
+        format_fn: None,
+    },
+    FieldDescriptor::new("length", "Length", FieldType::U16),
+    // Value and Padding of a field without a typed decoder.
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+    // RFC 8915, Section 5.3 — Unique Identifier.
+    FieldDescriptor::new("unique_id", "Unique Identifier", FieldType::Bytes).optional(),
+    // RFC 8915, Sections 5.4-5.5 — NTS Cookie / NTS Cookie Placeholder.
+    FieldDescriptor::new("cookie", "Cookie", FieldType::Bytes).optional(),
+    // RFC 8915, Section 5.6, Figure 4 — NTS Authenticator and Encrypted
+    // Extension Fields.
+    FieldDescriptor::new("nonce_length", "Nonce Length", FieldType::U16).optional(),
+    FieldDescriptor::new("ciphertext_length", "Ciphertext Length", FieldType::U16).optional(),
+    FieldDescriptor::new("nonce", "Nonce", FieldType::Bytes).optional(),
+    FieldDescriptor::new("nonce_padding", "Nonce Padding", FieldType::Bytes).optional(),
+    FieldDescriptor::new("ciphertext", "Ciphertext", FieldType::Bytes).optional(),
+    FieldDescriptor::new("ciphertext_padding", "Ciphertext Padding", FieldType::Bytes).optional(),
+    FieldDescriptor::new("additional_padding", "Additional Padding", FieldType::Bytes).optional(),
+    // RFC 8915, Section 5.5 — NTS Cookie Placeholder body.
+    //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.5>
+    FieldDescriptor::new("placeholder", "Placeholder", FieldType::Bytes).optional(),
 ];
 
 impl Dissector for NtpDissector {
@@ -420,13 +680,9 @@ impl Dissector for NtpDissector {
         let origin_ts = read_be_u64(data, 24)?;
         let receive_ts = read_be_u64(data, 32)?;
         let transmit_ts = read_be_u64(data, 40)?;
+        let total = data.len();
 
-        buf.begin_layer(
-            SHORT_NAME,
-            None,
-            FIELD_DESCRIPTORS,
-            offset..offset + HEADER_SIZE,
-        );
+        buf.begin_layer(SHORT_NAME, None, FIELD_DESCRIPTORS, offset..offset + total);
         push_first_octet(buf, offset, Some(li), vn, mode);
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_STRATUM],
@@ -482,10 +738,273 @@ impl Dissector for NtpDissector {
             FieldValue::U64(transmit_ts),
             offset + 40..offset + 48,
         );
+        dissect_trailer(data, buf, offset, vn);
         buf.end_layer();
 
-        Ok(DissectResult::new(HEADER_SIZE, DispatchHint::End))
+        Ok(DissectResult::new(total, DispatchHint::End))
     }
+}
+
+/// Dissects the extension fields, MAC and any trailing octets that follow
+/// the 48-octet header of a mode 0-5 packet.
+///
+/// See the module documentation for how extension fields and the MAC are
+/// told apart (RFC 7822, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc7822#section-3>).
+fn dissect_trailer<'pkt>(data: &'pkt [u8], buf: &mut DissectBuffer<'pkt>, offset: usize, vn: u8) {
+    let total = data.len();
+    let mut pos = HEADER_SIZE;
+
+    // RFC 7822, Section 3 — "In NTPv4, one or more extension fields can be
+    // inserted after the header and before the MAC, if a MAC is present."
+    //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+    if vn == VERSION_4 {
+        let ef_end = extension_fields_end(data, pos);
+        if ef_end > pos {
+            let with_mac = is_mac_shaped(total - ef_end);
+            let arr_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_EXTENSION_FIELDS],
+                FieldValue::Array(0..0),
+                offset + pos..offset + ef_end,
+            );
+            while let Some(len) = extension_field_len(data, pos).filter(|_| pos < ef_end) {
+                push_extension_field(buf, &data[pos..pos + len], offset + pos, with_mac);
+                pos += len;
+            }
+            buf.end_container(arr_idx);
+        }
+    }
+
+    let rest = total - pos;
+    if rest == 0 {
+        return;
+    }
+
+    if is_mac_shaped(rest) {
+        let key_id = read_be_u32(data, pos).unwrap_or_default();
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_KEY_ID],
+            FieldValue::U32(key_id),
+            offset + pos..offset + pos + KEY_ID_SIZE,
+        );
+        let digest_start = pos + KEY_ID_SIZE;
+        // RFC 5905, Section 9.2 — a crypto-NAK carries "a MAC consisting
+        // of four octets of zeros", i.e. no digest.
+        //   <https://www.rfc-editor.org/rfc/rfc5905#section-9.2>
+        if digest_start < total {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_DIGEST],
+                FieldValue::Bytes(&data[digest_start..]),
+                offset + digest_start..offset + total,
+            );
+        }
+        return;
+    }
+
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_TRAILING_DATA],
+        FieldValue::Bytes(&data[pos..]),
+        offset + pos..offset + total,
+    );
+}
+
+/// Whether a trailer of `len` octets after the header and extension fields
+/// has the shape of a MAC.
+///
+/// RFC 5905, Section 7.3 — <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>:
+/// "The MAC consists of the Key Identifier followed by the Message Digest."
+/// The Key Identifier is a 32-bit word and the digests in use (MD5 and
+/// SHA-1, and the AES-CMAC tag of RFC 8573 —
+/// <https://www.rfc-editor.org/rfc/rfc8573#section-3>) are whole words.
+/// RFC 7822, Section 3 (7.5.1.3) —
+/// <https://www.rfc-editor.org/rfc/rfc7822#section-3>: "A MAC MUST NOT be
+/// longer than 24 octets if there is no extension field present, unless a
+/// longer MAC is agreed upon by both client and server."
+fn is_mac_shaped(len: usize) -> bool {
+    (KEY_ID_SIZE..=MAX_MAC_LEN).contains(&len) && len % 4 == 0
+}
+
+/// Returns the Length of a well-formed extension field starting at `pos`,
+/// or `None` if the octets at `pos` are not one.
+///
+/// RFC 7822, Section 3 — <https://www.rfc-editor.org/rfc/rfc7822#section-3>:
+/// "All extension fields are zero-padded to a word (four octets) boundary."
+/// "While the minimum field length containing required fields is four words
+/// (16 octets) [...]" "The Length field is a 16-bit unsigned integer that
+/// indicates the length of the entire extension field in octets, including
+/// the Padding field."
+fn extension_field_len(data: &[u8], pos: usize) -> Option<usize> {
+    let len = read_be_u16(data, pos.checked_add(2)?).ok()? as usize;
+    let end = pos.checked_add(len)?;
+    (len >= EF_MIN_LEN && len % 4 == 0 && end <= data.len()).then_some(len)
+}
+
+/// Returns the end of the run of extension fields starting at `start`.
+///
+/// A block is read as an extension field only while more than
+/// [`MAX_MAC_LEN`] octets remain: RFC 7822, Section 3 (7.5.1.4) —
+/// <https://www.rfc-editor.org/rfc/rfc7822#section-3> — "If the packet
+/// includes a single extension field, the length of the extension field MUST
+/// be at least 7 words, i.e., at least 28 octets." and "If the packet
+/// includes more than one extension field, the length of the last extension
+/// field MUST be at least 28 octets." A remainder of 24 octets or fewer is
+/// therefore a MAC (7.5.1.3), even when its Key Identifier happens to look
+/// like an extension field header.
+fn extension_fields_end(data: &[u8], start: usize) -> usize {
+    let mut pos = start;
+    while data.len() - pos > MAX_MAC_LEN {
+        match extension_field_len(data, pos) {
+            Some(len) => pos += len,
+            None => break,
+        }
+    }
+    pos
+}
+
+/// Pushes one extension field as an Object inside `extension_fields`.
+///
+/// `ef` is the whole field (header, Value and Padding) and `abs` is its
+/// absolute offset. `with_mac` tells whether a MAC follows the extension
+/// fields; it selects the meaning of Field Type 0x0204.
+///
+/// RFC 7822, Section 3, Figure 14 —
+/// <https://www.rfc-editor.org/rfc/rfc7822#section-3>.
+fn push_extension_field<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    ef: &'pkt [u8],
+    abs: usize,
+    with_mac: bool,
+) {
+    let field_type = read_be_u16(ef, 0).unwrap_or_default();
+    let length = read_be_u16(ef, 2).unwrap_or_default();
+    let body = &ef[EF_HEADER_SIZE.min(ef.len())..];
+    let body_abs = abs + EF_HEADER_SIZE;
+    let body_range = body_abs..abs + ef.len();
+
+    let obj_idx = buf.begin_container(
+        &FD_EXTENSION_FIELD,
+        FieldValue::Object(0..0),
+        abs..abs + ef.len(),
+    );
+    buf.push_field(
+        &EXTENSION_FIELD_CHILD_FIELDS[EFFD_FIELD_TYPE],
+        FieldValue::U16(field_type),
+        abs..abs + 2,
+    );
+    buf.push_field(
+        &EXTENSION_FIELD_CHILD_FIELDS[EFFD_LENGTH],
+        FieldValue::U16(length),
+        abs + 2..abs + 4,
+    );
+
+    match field_type {
+        // RFC 8915, Section 5.3 — "its body SHALL consist of a string of
+        // octets generated by a cryptographically secure random number
+        // generator".
+        //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.3>
+        EF_TYPE_UNIQUE_ID => buf.push_field(
+            &EXTENSION_FIELD_CHILD_FIELDS[EFFD_UNIQUE_ID],
+            FieldValue::Bytes(body),
+            body_range,
+        ),
+        // RFC 8915, Section 5.4 — "The contents of its body SHALL be
+        // implementation-defined, and clients MUST NOT attempt to interpret
+        // them." With a MAC present, 0x0204 is an Autokey Message Request
+        // (RFC 5906) and its body is kept as `value`.
+        //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.4>
+        EF_TYPE_NTS_COOKIE if !with_mac => buf.push_field(
+            &EXTENSION_FIELD_CHILD_FIELDS[EFFD_COOKIE],
+            FieldValue::Bytes(body),
+            body_range,
+        ),
+        // RFC 8915, Section 5.5 — "The contents of the NTS Cookie
+        // Placeholder extension field's body SHOULD be all zeros".
+        //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.5>
+        EF_TYPE_NTS_COOKIE_PLACEHOLDER => buf.push_field(
+            &EXTENSION_FIELD_CHILD_FIELDS[EFFD_PLACEHOLDER],
+            FieldValue::Bytes(body),
+            body_range,
+        ),
+        EF_TYPE_NTS_AUTHENTICATOR if push_nts_authenticator(buf, body, body_abs) => {}
+        _ => buf.push_field(
+            &EXTENSION_FIELD_CHILD_FIELDS[EFFD_VALUE],
+            FieldValue::Bytes(body),
+            body_range,
+        ),
+    }
+
+    buf.end_container(obj_idx);
+}
+
+/// Pushes the fields of an NTS Authenticator and Encrypted Extension Fields
+/// body. Returns `false` (pushing nothing) if the Nonce Length and
+/// Ciphertext Length do not fit in `body`.
+///
+/// RFC 8915, Section 5.6, Figure 4 —
+/// <https://www.rfc-editor.org/rfc/rfc8915#section-5.6>:
+///
+/// "Nonce Length:  Two octets in network byte order, giving the length of
+/// the Nonce field, excluding any padding, interpreted as an unsigned
+/// integer."
+///
+/// "Ciphertext Length:  Two octets in network byte order, giving the length
+/// of the Ciphertext field, excluding any padding, interpreted as an
+/// unsigned integer."
+///
+/// "Nonce:  A nonce as required by the negotiated AEAD algorithm.  The end
+/// of the field is zero-padded to a word (four octets) boundary."
+///
+/// "Ciphertext:  The output of the negotiated AEAD algorithm. [...] The end
+/// of the field is zero-padded to a word (four octets) boundary."
+///
+/// The Ciphertext is kept opaque; it is not decrypted.
+fn push_nts_authenticator<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    body: &'pkt [u8],
+    body_abs: usize,
+) -> bool {
+    let (Ok(nonce_len), Ok(ciphertext_len)) = (read_be_u16(body, 0), read_be_u16(body, 2)) else {
+        return false;
+    };
+    let nonce_start = 4;
+    let nonce_end = nonce_start + nonce_len as usize;
+    let nonce_pad_end = nonce_start + (nonce_len as usize).next_multiple_of(4);
+    let ciphertext_end = nonce_pad_end + ciphertext_len as usize;
+    let ciphertext_pad_end = nonce_pad_end + (ciphertext_len as usize).next_multiple_of(4);
+    if ciphertext_pad_end > body.len() {
+        return false;
+    }
+
+    buf.push_field(
+        &EXTENSION_FIELD_CHILD_FIELDS[EFFD_NONCE_LENGTH],
+        FieldValue::U16(nonce_len),
+        body_abs..body_abs + 2,
+    );
+    buf.push_field(
+        &EXTENSION_FIELD_CHILD_FIELDS[EFFD_CIPHERTEXT_LENGTH],
+        FieldValue::U16(ciphertext_len),
+        body_abs + 2..body_abs + 4,
+    );
+    // "Additional Padding:  Clients that use a nonce length shorter than the
+    // maximum allowed by the negotiated AEAD algorithm may be required to
+    // include additional zero-padding."
+    //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.6>
+    for (fd, range) in [
+        (EFFD_NONCE, nonce_start..nonce_end),
+        (EFFD_NONCE_PADDING, nonce_end..nonce_pad_end),
+        (EFFD_CIPHERTEXT, nonce_pad_end..ciphertext_end),
+        (EFFD_CIPHERTEXT_PADDING, ciphertext_end..ciphertext_pad_end),
+        (EFFD_ADDITIONAL_PADDING, ciphertext_pad_end..body.len()),
+    ] {
+        if !range.is_empty() {
+            buf.push_field(
+                &EXTENSION_FIELD_CHILD_FIELDS[fd],
+                FieldValue::Bytes(&body[range.clone()]),
+                body_abs + range.start..body_abs + range.end,
+            );
+        }
+    }
+    true
 }
 
 /// Pushes the LI / VN / Mode fields of the first octet.
@@ -681,6 +1200,34 @@ mod tests {
     // | 2           | Padding and Authenticator                    | test_parse_mode6_padding_and_authenticator |
     // | 2           | Truncated header (< 12 octets)               | test_mode6_truncated_header         |
     // | 2           | Truncated data (< 12 + count octets)         | test_mode6_truncated_data           |
+    //
+    // # RFC 7822 / RFC 5905 Section 7.3 (Extension Fields and MAC) Coverage
+    //
+    // | RFC Section        | Description                                  | Test                                |
+    // |--------------------|----------------------------------------------|-------------------------------------|
+    // | 7822 §3 (7.5)      | Field Type / Length / Value, single EF       | test_parse_single_unknown_extension_field |
+    // | 7822 §3 (7.5)      | Length >= 16, multiple of 4, fits datagram   | test_malformed_extension_field_length |
+    // | 7822 §3 (7.5)      | EFs are NTPv4 only (NTPv3: MAC only)         | test_ntpv3_mac_without_extension_fields |
+    // | 7822 §3 (7.5.1.3)  | MAC without EF, 24 octets                    | test_parse_mac_24_octets            |
+    // | 7822 §3 (7.5.1.4)  | <= 24-octet trailer is a MAC, not an EF      | test_parse_mac_20_octets            |
+    // | 7822 §3 (7.5)      | EF (16 octets) followed by a MAC             | test_parse_extension_field_followed_by_mac |
+    // | IANA NTP EF Types | 0x0204 with a MAC is Autokey, not NTS Cookie | test_autokey_message_request_with_mac_is_not_nts_cookie |
+    // | 5905 §7.3          | MAC: Key Identifier + Message Digest         | test_parse_mac_20_octets            |
+    // | 5905 §7.3          | Trailer not a whole number of words          | test_trailer_not_mac_shaped         |
+    // | 5905 §9.2          | Crypto-NAK (4-octet MAC of zeros)            | test_parse_crypto_nak               |
+    // | IANA registry      | Extension Field Type names                   | test_extension_field_type_names     |
+    //
+    // # RFC 8915 (NTS) Coverage
+    //
+    // | RFC Section | Description                                  | Test                                |
+    // |-------------|----------------------------------------------|-------------------------------------|
+    // | 5.3         | Unique Identifier extension field            | test_parse_nts_client_request       |
+    // | 5.4         | NTS Cookie extension field                   | test_parse_nts_client_request       |
+    // | 5.5         | NTS Cookie Placeholder extension field       | test_parse_nts_client_request       |
+    // | 5.6         | NTS Authenticator: lengths, nonce, ciphertext| test_parse_nts_client_request       |
+    // | 5.6         | Nonce/Ciphertext padding, Additional Padding | test_parse_nts_authenticator_padding |
+    // | 5.6         | Inconsistent Nonce/Ciphertext Length         | test_nts_authenticator_inconsistent_lengths |
+    // | 5.7         | NTS client request layout                    | test_parse_nts_client_request       |
 
     /// Build a minimal NTP packet with the given parameters.
     #[allow(clippy::too_many_arguments)]
@@ -1156,13 +1703,17 @@ mod tests {
     #[test]
     fn test_field_descriptors() {
         let descriptors = NtpDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 25);
+        assert_eq!(descriptors.len(), 29);
         assert_eq!(descriptors[0].name, "leap_indicator");
         assert_eq!(
             descriptors[FD_TRANSMIT_TIMESTAMP].name,
             "transmit_timestamp"
         );
-        assert_eq!(descriptors[descriptors.len() - 1].name, "authenticator");
+        assert_eq!(descriptors[FD_AUTHENTICATOR].name, "authenticator");
+        assert_eq!(descriptors[FD_EXTENSION_FIELDS].name, "extension_fields");
+        assert_eq!(descriptors[FD_KEY_ID].name, "key_id");
+        assert_eq!(descriptors[FD_DIGEST].name, "digest");
+        assert_eq!(descriptors[descriptors.len() - 1].name, "trailing_data");
         // Only VN and Mode are present in every mode.
         for (i, d) in descriptors.iter().enumerate() {
             assert_eq!(d.optional, i != FD_VERSION && i != FD_MODE, "{}", d.name);
@@ -1367,5 +1918,556 @@ mod tests {
             assert!(reference.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+    }
+
+    // ---------------------------------------------------------------
+    // Extension fields, NTS and MACs (RFC 7822, RFC 8915, RFC 5905 §7.3)
+    // ---------------------------------------------------------------
+
+    /// A 48-octet client request header: LI 0, mode 3, rest zero.
+    fn client_header(vn: u8) -> Vec<u8> {
+        build_ntp(0, vn, 3, 0, 0, 0, 0, 0, [0; 4], 0, 0, 0, 0)
+    }
+
+    /// Build an extension field (RFC 7822, Section 3) whose Length covers
+    /// the 4-octet type/length header plus `body`.
+    ///   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+    fn build_ef(field_type: u16, body: &[u8]) -> Vec<u8> {
+        let mut ef = field_type.to_be_bytes().to_vec();
+        ef.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+        ef.extend_from_slice(body);
+        ef
+    }
+
+    /// Build the body of an NTS Authenticator and Encrypted Extension Fields
+    /// extension field (RFC 8915, Section 5.6, Figure 4).
+    ///   <https://www.rfc-editor.org/rfc/rfc8915#section-5.6>
+    fn build_nts_auth_body(nonce: &[u8], ciphertext: &[u8], additional_padding: usize) -> Vec<u8> {
+        let pad4 = |n: usize| (4 - n % 4) % 4;
+        let mut body = (nonce.len() as u16).to_be_bytes().to_vec();
+        body.extend_from_slice(&(ciphertext.len() as u16).to_be_bytes());
+        body.extend_from_slice(nonce);
+        body.extend(std::iter::repeat_n(0u8, pad4(nonce.len())));
+        body.extend_from_slice(ciphertext);
+        body.extend(std::iter::repeat_n(0u8, pad4(ciphertext.len())));
+        body.extend(std::iter::repeat_n(0u8, additional_padding));
+        body
+    }
+
+    /// Returns `(object field index, children range)` for every Object in
+    /// the `extension_fields` Array, in wire order.
+    fn extension_fields(
+        buf: &DissectBuffer<'_>,
+        layer: &packet_dissector_core::packet::Layer,
+    ) -> Vec<(u32, core::ops::Range<u32>)> {
+        let Some(arr) = buf.field_by_name(layer, "extension_fields") else {
+            return Vec::new();
+        };
+        let range = arr.value.as_container_range().unwrap().clone();
+        let mut out = Vec::new();
+        let mut idx = range.start;
+        while idx < range.end {
+            let children = buf.fields()[idx as usize]
+                .value
+                .as_container_range()
+                .unwrap()
+                .clone();
+            out.push((idx, children.clone()));
+            idx = children.end;
+        }
+        out
+    }
+
+    /// Finds a child field by name within an Object's children.
+    fn child<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        range: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Option<&'a packet_dissector_core::field::Field<'pkt>> {
+        buf.nested_fields(range).iter().find(|f| f.name() == name)
+    }
+
+    #[test]
+    fn test_parse_single_unknown_extension_field() {
+        // Client request with a single 28-octet extension field of an
+        // experimental type and a zero Value (RFC 7822, Section 3,
+        // 7.5.1.4: a lone extension field without a MAC is at least 28
+        // octets).
+        //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+        let mut data = client_header(4);
+        data.extend_from_slice(&build_ef(0xFF00, &[0; 24]));
+        assert_eq!(data.len(), 76);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 76);
+        assert!(matches!(result.next, DispatchHint::End));
+
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..76);
+        let arr = buf.field_by_name(layer, "extension_fields").unwrap();
+        assert_eq!(arr.range, 48..76);
+        let efs = extension_fields(&buf, layer);
+        assert_eq!(efs.len(), 1);
+        let (obj_idx, ef) = &efs[0];
+        assert_eq!(buf.fields()[*obj_idx as usize].range, 48..76);
+        assert_eq!(
+            buf.resolve_container_display_name(*obj_idx),
+            Some("Reserved for Private or Experimental Use")
+        );
+        let ft = child(&buf, ef, "field_type").unwrap();
+        assert_eq!(ft.value, FieldValue::U16(0xFF00));
+        assert_eq!(ft.range, 48..50);
+        assert_eq!(
+            buf.resolve_nested_display_name(ef, "field_type_name"),
+            Some("Reserved for Private or Experimental Use")
+        );
+        let len = child(&buf, ef, "length").unwrap();
+        assert_eq!(len.value, FieldValue::U16(28));
+        assert_eq!(len.range, 50..52);
+        let value = child(&buf, ef, "value").unwrap();
+        assert_eq!(value.value, FieldValue::Bytes(&[0; 24]));
+        assert_eq!(value.range, 52..76);
+        assert!(buf.field_by_name(layer, "key_id").is_none());
+        assert!(buf.field_by_name(layer, "digest").is_none());
+        assert!(buf.field_by_name(layer, "trailing_data").is_none());
+    }
+
+    #[test]
+    fn test_parse_nts_client_request() {
+        // RFC 8915, Section 5.7 — a client request carries a Unique
+        // Identifier, an NTS Cookie, optional Cookie Placeholders and an NTS
+        // Authenticator and Encrypted Extension Fields extension field.
+        //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.7>
+        let uid: Vec<u8> = (0u8..32).collect();
+        let cookie: Vec<u8> = (0u8..100).map(|b| b ^ 0xA5).collect();
+        let nonce = [0x11u8; 16];
+        let ciphertext = [0x22u8; 16];
+        let mut data = client_header(4);
+        data.extend_from_slice(&build_ef(0x0104, &uid)); // 36 octets
+        data.extend_from_slice(&build_ef(0x0204, &cookie)); // 104 octets
+        data.extend_from_slice(&build_ef(0x0304, &[0; 100])); // 104 octets
+        data.extend_from_slice(&build_ef(
+            0x0404,
+            &build_nts_auth_body(&nonce, &ciphertext, 0),
+        )); // 40 octets
+        assert_eq!(data.len(), 48 + 36 + 104 + 104 + 40);
+
+        let off = 42;
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, off).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.range, off..off + data.len());
+
+        let efs = extension_fields(&buf, layer);
+        assert_eq!(efs.len(), 4);
+
+        // Unique Identifier (RFC 8915, Section 5.3).
+        let (idx, ef) = &efs[0];
+        assert_eq!(
+            buf.resolve_container_display_name(*idx),
+            Some("Unique Identifier")
+        );
+        assert_eq!(
+            child(&buf, ef, "field_type").unwrap().value,
+            FieldValue::U16(0x0104)
+        );
+        let u = child(&buf, ef, "unique_id").unwrap();
+        assert_eq!(u.value, FieldValue::Bytes(&uid));
+        assert_eq!(u.range, off + 52..off + 84);
+        assert!(child(&buf, ef, "value").is_none());
+
+        // NTS Cookie (RFC 8915, Section 5.4).
+        let (idx, ef) = &efs[1];
+        assert_eq!(
+            buf.resolve_container_display_name(*idx),
+            Some("NTS Cookie / Autokey Message Request")
+        );
+        let c = child(&buf, ef, "cookie").unwrap();
+        assert_eq!(c.value, FieldValue::Bytes(&cookie));
+        assert_eq!(c.range, off + 88..off + 188);
+
+        // NTS Cookie Placeholder (RFC 8915, Section 5.5).
+        let (idx, ef) = &efs[2];
+        assert_eq!(
+            buf.resolve_container_display_name(*idx),
+            Some("NTS Cookie Placeholder")
+        );
+        assert_eq!(
+            child(&buf, ef, "placeholder").unwrap().value,
+            FieldValue::Bytes(&[0; 100])
+        );
+        assert!(child(&buf, ef, "cookie").is_none());
+
+        // NTS Authenticator and Encrypted Extension Fields (Section 5.6).
+        let (idx, ef) = &efs[3];
+        assert_eq!(
+            buf.resolve_container_display_name(*idx),
+            Some("NTS Authenticator and Encrypted Extension Fields")
+        );
+        let base = off + 48 + 36 + 104 + 104;
+        let nl = child(&buf, ef, "nonce_length").unwrap();
+        assert_eq!(nl.value, FieldValue::U16(16));
+        assert_eq!(nl.range, base + 4..base + 6);
+        let cl = child(&buf, ef, "ciphertext_length").unwrap();
+        assert_eq!(cl.value, FieldValue::U16(16));
+        assert_eq!(cl.range, base + 6..base + 8);
+        let n = child(&buf, ef, "nonce").unwrap();
+        assert_eq!(n.value, FieldValue::Bytes(&nonce));
+        assert_eq!(n.range, base + 8..base + 24);
+        let ct = child(&buf, ef, "ciphertext").unwrap();
+        assert_eq!(ct.value, FieldValue::Bytes(&ciphertext));
+        assert_eq!(ct.range, base + 24..base + 40);
+        for name in [
+            "nonce_padding",
+            "ciphertext_padding",
+            "additional_padding",
+            "value",
+        ] {
+            assert!(child(&buf, ef, name).is_none(), "{name}");
+        }
+        assert!(buf.field_by_name(layer, "key_id").is_none());
+        assert!(buf.field_by_name(layer, "trailing_data").is_none());
+    }
+
+    #[test]
+    fn test_parse_nts_authenticator_padding() {
+        // RFC 8915, Section 5.6 — Nonce and Ciphertext are each zero-padded
+        // to a word boundary and may be followed by Additional Padding.
+        //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.6>
+        let nonce = [0x33u8; 13];
+        let ciphertext = [0x44u8; 17];
+        let mut data = client_header(4);
+        data.extend_from_slice(&build_ef(
+            0x0404,
+            &build_nts_auth_body(&nonce, &ciphertext, 4),
+        ));
+        // 4 (EF header) + 4 (lengths) + 16 (nonce) + 20 (ciphertext) + 4.
+        assert_eq!(data.len(), 96);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 96);
+        let layer = &buf.layers()[0];
+        let efs = extension_fields(&buf, layer);
+        assert_eq!(efs.len(), 1);
+        let ef = &efs[0].1;
+        let n = child(&buf, ef, "nonce").unwrap();
+        assert_eq!(n.value, FieldValue::Bytes(&nonce));
+        assert_eq!(n.range, 56..69);
+        let np = child(&buf, ef, "nonce_padding").unwrap();
+        assert_eq!(np.value, FieldValue::Bytes(&[0, 0, 0]));
+        assert_eq!(np.range, 69..72);
+        let ct = child(&buf, ef, "ciphertext").unwrap();
+        assert_eq!(ct.value, FieldValue::Bytes(&ciphertext));
+        assert_eq!(ct.range, 72..89);
+        let cp = child(&buf, ef, "ciphertext_padding").unwrap();
+        assert_eq!(cp.range, 89..92);
+        let ap = child(&buf, ef, "additional_padding").unwrap();
+        assert_eq!(ap.value, FieldValue::Bytes(&[0; 4]));
+        assert_eq!(ap.range, 92..96);
+
+        // Zero-length Nonce and Ciphertext: only the lengths and padding.
+        let mut data = client_header(4);
+        data.extend_from_slice(&build_ef(0x0404, &build_nts_auth_body(&[], &[], 24)));
+        let mut buf = DissectBuffer::new();
+        NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let efs = extension_fields(&buf, layer);
+        let ef = &efs[0].1;
+        assert_eq!(
+            child(&buf, ef, "nonce_length").unwrap().value,
+            FieldValue::U16(0)
+        );
+        assert!(child(&buf, ef, "nonce").is_none());
+        assert!(child(&buf, ef, "ciphertext").is_none());
+        assert_eq!(child(&buf, ef, "additional_padding").unwrap().range, 56..80);
+    }
+
+    #[test]
+    fn test_nts_authenticator_inconsistent_lengths() {
+        // Nonce Length + Ciphertext Length exceed the extension field: the
+        // body cannot be decoded as Figure 4 and is kept as opaque `value`.
+        //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.6>
+        for (nonce_len, ct_len) in [(200u16, 16u16), (16, 200), (0xFFFF, 0xFFFF)] {
+            let mut body = build_nts_auth_body(&[0x55; 16], &[0x66; 16], 0);
+            body[0..2].copy_from_slice(&nonce_len.to_be_bytes());
+            body[2..4].copy_from_slice(&ct_len.to_be_bytes());
+            let mut data = client_header(4);
+            data.extend_from_slice(&build_ef(0x0404, &body));
+            let mut buf = DissectBuffer::new();
+            let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(result.bytes_consumed, data.len());
+            let layer = &buf.layers()[0];
+            let efs = extension_fields(&buf, layer);
+            assert_eq!(efs.len(), 1);
+            let ef = &efs[0].1;
+            assert_eq!(
+                child(&buf, ef, "value").unwrap().value,
+                FieldValue::Bytes(&body)
+            );
+            assert!(child(&buf, ef, "nonce_length").is_none());
+            assert!(child(&buf, ef, "nonce").is_none());
+        }
+    }
+
+    #[test]
+    fn test_parse_mac_20_octets() {
+        // RFC 5905, Section 7.3 — MAC = 32-bit Key Identifier + 128-bit
+        // digest (MD5, or AES-CMAC per RFC 8573). Key ID 16 makes the first
+        // word look like an extension field header (type 0x0000, length 16),
+        // but RFC 7822, Section 3 (7.5.1.4) requires a trailing extension
+        // field without a MAC to be at least 28 octets, so the block is a MAC.
+        //   <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>
+        //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+        let digest: Vec<u8> = (0xE0u8..0xF0).collect();
+        let mut data = build_ntp(0, 4, 1, 2, 6, -20, 0, 0, [10, 0, 0, 1], 0, 0, 0, 0);
+        data.extend_from_slice(&16u32.to_be_bytes());
+        data.extend_from_slice(&digest);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 68);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.range, 0..68);
+        assert!(buf.field_by_name(layer, "extension_fields").is_none());
+        let key_id = buf.field_by_name(layer, "key_id").unwrap();
+        assert_eq!(key_id.value, FieldValue::U32(16));
+        assert_eq!(key_id.range, 48..52);
+        let d = buf.field_by_name(layer, "digest").unwrap();
+        assert_eq!(d.value, FieldValue::Bytes(&digest));
+        assert_eq!(d.range, 52..68);
+        assert!(buf.field_by_name(layer, "trailing_data").is_none());
+    }
+
+    #[test]
+    fn test_parse_mac_24_octets() {
+        // RFC 7822, Section 3 (7.5.1.3) — "A MAC MUST NOT be longer than 24
+        // octets if there is no extension field present": 32-bit key ID +
+        // 160-bit digest.
+        //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+        let mut data = build_ntp(0, 4, 2, 2, 6, -20, 0, 0, [10, 0, 0, 1], 0, 0, 0, 0);
+        data.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        data.extend_from_slice(&[0x77; 20]);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 72);
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "extension_fields").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "key_id").unwrap().value,
+            FieldValue::U32(0xDEAD_BEEF)
+        );
+        let d = buf.field_by_name(layer, "digest").unwrap();
+        assert_eq!(d.value, FieldValue::Bytes(&[0x77; 20]));
+        assert_eq!(d.range, 52..72);
+    }
+
+    #[test]
+    fn test_parse_crypto_nak() {
+        // RFC 5905, Section 9.2 — a crypto-NAK "includes the normal NTP
+        // header data shown in Figure 8, but with a MAC consisting of four
+        // octets of zeros".
+        //   <https://www.rfc-editor.org/rfc/rfc5905#section-9.2>
+        let mut data = build_ntp(0, 4, 4, 2, 6, -20, 0, 0, [10, 0, 0, 1], 0, 0, 0, 0);
+        data.extend_from_slice(&[0; 4]);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 52);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "key_id").unwrap().value,
+            FieldValue::U32(0)
+        );
+        assert!(buf.field_by_name(layer, "digest").is_none());
+    }
+
+    #[test]
+    fn test_parse_extension_field_followed_by_mac() {
+        // RFC 7822, Section 3 (7.5) — extension fields are "inserted after
+        // the header and before the MAC, if a MAC is present"; with a MAC
+        // an extension field may be as short as 16 octets.
+        //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+        let mut data = client_header(4);
+        data.extend_from_slice(&build_ef(0x0200, &[0xAB; 12])); // 16 octets
+        data.extend_from_slice(&7u32.to_be_bytes());
+        data.extend_from_slice(&[0xCD; 16]);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 84);
+        let layer = &buf.layers()[0];
+        let efs = extension_fields(&buf, layer);
+        assert_eq!(efs.len(), 1);
+        assert_eq!(
+            buf.resolve_container_display_name(efs[0].0),
+            Some("No-Operation Request")
+        );
+        assert_eq!(child(&buf, &efs[0].1, "value").unwrap().range, 52..64);
+        let key_id = buf.field_by_name(layer, "key_id").unwrap();
+        assert_eq!(key_id.value, FieldValue::U32(7));
+        assert_eq!(key_id.range, 64..68);
+        assert_eq!(buf.field_by_name(layer, "digest").unwrap().range, 68..84);
+        assert!(buf.field_by_name(layer, "trailing_data").is_none());
+    }
+
+    #[test]
+    fn test_autokey_message_request_with_mac_is_not_nts_cookie() {
+        // IANA "NTP Extension Field Types": 0x0204 is both "Autokey Message
+        // Request" (RFC 5906) and "NTS Cookie" (RFC 8915, Section 5.4). An
+        // Autokey packet carries a MAC, so the body is kept as `value`.
+        let mut data = client_header(4);
+        data.extend_from_slice(&build_ef(0x0204, &[0x11; 12])); // 16 octets
+        data.extend_from_slice(&9u32.to_be_bytes());
+        data.extend_from_slice(&[0x22; 16]);
+        let mut buf = DissectBuffer::new();
+        NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let efs = extension_fields(&buf, layer);
+        assert_eq!(efs.len(), 1);
+        assert!(child(&buf, &efs[0].1, "cookie").is_none());
+        assert_eq!(
+            child(&buf, &efs[0].1, "value").unwrap().value,
+            FieldValue::Bytes(&[0x11; 12])
+        );
+        assert!(buf.field_by_name(layer, "key_id").is_some());
+    }
+
+    #[test]
+    fn test_malformed_extension_field_length() {
+        // RFC 7822, Section 3 (7.5) — Length covers the whole field, is at
+        // least 16 octets and every field is padded to a word boundary.
+        // Violations leave the remaining octets as `trailing_data`.
+        //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+        for bad_len in [30u16, 12, 200, 0] {
+            let mut data = client_header(4);
+            let mut ef = build_ef(0xFF00, &[0; 28]);
+            ef[2..4].copy_from_slice(&bad_len.to_be_bytes());
+            data.extend_from_slice(&ef);
+            let mut buf = DissectBuffer::new();
+            let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(result.bytes_consumed, 80, "len {bad_len}");
+            let layer = &buf.layers()[0];
+            assert_eq!(layer.range, 0..80);
+            assert!(
+                buf.field_by_name(layer, "extension_fields").is_none(),
+                "len {bad_len}"
+            );
+            let t = buf.field_by_name(layer, "trailing_data").unwrap();
+            assert_eq!(t.value, FieldValue::Bytes(&ef));
+            assert_eq!(t.range, 48..80);
+        }
+
+        // A valid extension field followed by an undecodable block keeps the
+        // decoded field and the rest as `trailing_data`.
+        let mut data = client_header(4);
+        data.extend_from_slice(&build_ef(0xFF00, &[0; 24]));
+        let junk = [0xFFu8; 27];
+        data.extend_from_slice(&junk);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        let layer = &buf.layers()[0];
+        assert_eq!(extension_fields(&buf, layer).len(), 1);
+        let t = buf.field_by_name(layer, "trailing_data").unwrap();
+        assert_eq!(t.value, FieldValue::Bytes(&junk));
+        assert_eq!(t.range, 76..103);
+    }
+
+    #[test]
+    fn test_trailer_not_mac_shaped() {
+        // Blocks of 24 octets or fewer that are not a whole number of 32-bit
+        // words (RFC 5905, Section 7.3) cannot be a MAC and are kept raw.
+        //   <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>
+        for n in [1usize, 3, 7, 23] {
+            let mut data = client_header(4);
+            data.extend(std::iter::repeat_n(0x42u8, n));
+            let mut buf = DissectBuffer::new();
+            let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(result.bytes_consumed, 48 + n);
+            let layer = &buf.layers()[0];
+            assert!(buf.field_by_name(layer, "key_id").is_none(), "{n}");
+            let t = buf.field_by_name(layer, "trailing_data").unwrap();
+            assert_eq!(t.range, 48..48 + n);
+        }
+    }
+
+    #[test]
+    fn test_ntpv3_mac_without_extension_fields() {
+        // RFC 7822, Section 3 (7.5) — extension fields are an NTPv4
+        // feature ("In NTPv4, one or more extension fields can be
+        // inserted after the header and before the MAC, if a MAC is
+        // present."). An NTPv3 packet may only carry a MAC.
+        //   <https://www.rfc-editor.org/rfc/rfc7822#section-3>
+        let mut data = client_header(3);
+        data.extend_from_slice(&5u32.to_be_bytes());
+        data.extend_from_slice(&[0x99; 16]);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 68);
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "key_id").unwrap().value,
+            FieldValue::U32(5)
+        );
+
+        // An extension-field-shaped block in an NTPv3 packet is not decoded.
+        let mut data = client_header(3);
+        let ef = build_ef(0xFF00, &[0; 24]);
+        data.extend_from_slice(&ef);
+        let mut buf = DissectBuffer::new();
+        let result = NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 76);
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "extension_fields").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "trailing_data").unwrap().value,
+            FieldValue::Bytes(&ef)
+        );
+    }
+
+    #[test]
+    fn test_extension_field_type_names() {
+        // IANA "NTP Extension Field Types" registry.
+        //   <https://www.iana.org/assignments/ntp-parameters>
+        let expected = [
+            (0x0000, Some("Crypto-NAK; authentication failure")),
+            (0x0002, Some("Reserved for historic reasons")),
+            (0x0102, Some("Reserved for historic reasons")),
+            (0x0104, Some("Unique Identifier")),
+            (0x010A, Some("Network Correction")),
+            (0x0200, Some("No-Operation Request")),
+            (0x0201, Some("Association Message Request")),
+            (0x0202, Some("Certificate Message Request")),
+            (0x0203, Some("Cookie Message Request")),
+            (0x0204, Some("NTS Cookie / Autokey Message Request")),
+            (0x0205, Some("Leapseconds Message Request")),
+            (0x0206, Some("Sign Message Request")),
+            (0x0207, Some("IFF Identity Message Request")),
+            (0x0208, Some("GQ Identity Message Request")),
+            (0x0209, Some("MV Identity Message Request")),
+            (0x0302, Some("Reserved for historic reasons")),
+            (0x0304, Some("NTS Cookie Placeholder")),
+            (
+                0x0404,
+                Some("NTS Authenticator and Encrypted Extension Fields"),
+            ),
+            (0x0902, Some("Reserved for historic reasons")),
+            (0x2005, Some("UDP Checksum Complement")),
+            (0x8002, Some("Reserved for historic reasons")),
+            (0x8200, Some("No-Operation Response")),
+            (0x8204, Some("Autokey Message Response")),
+            (0x8209, Some("MV Identity Message Response")),
+            (0x8902, Some("Reserved for historic reasons")),
+            (0xC002, Some("Reserved for historic reasons")),
+            (0xC200, Some("No-Operation Error Response")),
+            (0xC209, Some("MV Identity Message Error Response")),
+            (0xC902, Some("Reserved for historic reasons")),
+            (0xF000, Some("Reserved for Private or Experimental Use")),
+            (0xFFFF, Some("Reserved for Private or Experimental Use")),
+            (0x0001, None),
+            (0x0A02, None),
+            (0x1234, None),
+        ];
+        for (t, name) in expected {
+            assert_eq!(extension_field_type_name(t), name, "{t:#06x}");
+        }
     }
 }
