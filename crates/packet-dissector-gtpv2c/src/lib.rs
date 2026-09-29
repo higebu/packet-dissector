@@ -118,19 +118,13 @@ impl Dissector for Gtpv2cDissector {
         // then another GTPv2-C message with its own header and body shall
         // be present at the end of the current message." and "When present,
         // a piggybacked message shall have its "P" flag set to "0" in its
-        // own header." Only one piggybacked message is therefore decoded;
-        // if it is malformed, the first message is still returned.
+        // own header." Only one piggybacked message is therefore decoded.
+        // `dissect_message` returns every error before it pushes anything,
+        // so a malformed piggybacked message leaves the first one intact.
         if p_flag == 1 && consumed < data.len() {
-            let layers = buf.layers().len();
-            let fields = buf.fields().len();
-            match dissect_message(&data[consumed..], buf, offset + consumed) {
-                Ok((piggybacked, _)) => consumed += piggybacked,
-                Err(_) => {
-                    while buf.layers().len() > layers {
-                        buf.pop_layer();
-                    }
-                    buf.truncate_fields(fields);
-                }
+            if let Ok((piggybacked, _)) = dissect_message(&data[consumed..], buf, offset + consumed)
+            {
+                consumed += piggybacked;
             }
         }
 

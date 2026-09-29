@@ -258,7 +258,7 @@ static FD_HELPER_CHARGING_CHARACTERISTICS: FieldDescriptor = FieldDescriptor::ne
 // ---------------------------------------------------------------------------
 
 /// Push a single-field Object IE with a U8 value (optionally masked).
-fn push_single_u8<'pkt>(
+pub(crate) fn push_single_u8<'pkt>(
     data: &'pkt [u8],
     offset: usize,
     desc: &'static FieldDescriptor,
@@ -339,53 +339,62 @@ fn decode_bcd(data: &[u8]) -> String {
     s
 }
 
-/// Decode PLMN (MCC + MNC) from 3 BCD-encoded bytes.
+/// Push MCC and MNC digits (as ASCII in scratch) without allocating.
+///
+/// `mcc` and `mnc` hold one BCD digit per element; an MNC whose third digit
+/// is 0xF ("1111") has two digits. A nibble above 9 is shown as its hex
+/// digit so that malformed input stays visible.
+pub(crate) fn push_mcc_mnc(
+    buf: &mut DissectBuffer<'_>,
+    mcc: [u8; 3],
+    mnc: [u8; 3],
+    range: core::ops::Range<usize>,
+) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let ascii = |d: u8| DIGITS[usize::from(d & 0x0F)];
+    let mcc = [ascii(mcc[0]), ascii(mcc[1]), ascii(mcc[2])];
+    let mnc_len = if mnc[2] & 0x0F == 0x0F { 2 } else { 3 };
+    let mnc = [ascii(mnc[0]), ascii(mnc[1]), ascii(mnc[2])];
+    let mcc_range = buf.push_scratch(&mcc);
+    let mnc_range = buf.push_scratch(&mnc[..mnc_len]);
+    buf.push_field(
+        &FD_INLINE_MCC,
+        FieldValue::Scratch(mcc_range),
+        range.clone(),
+    );
+    buf.push_field(&FD_INLINE_MNC, FieldValue::Scratch(mnc_range), range);
+}
+
+/// Push PLMN (MCC+MNC) fields decoded from 3 BCD-encoded bytes.
 ///
 /// 3GPP TS 24.008, Section 10.5.1.13:
 ///   Byte 0: MCC digit 2 | MCC digit 1
 ///   Byte 1: MNC digit 3 | MCC digit 3
 ///   Byte 2: MNC digit 2 | MNC digit 1
-fn decode_plmn(data: &[u8]) -> (String, String) {
-    if data.len() < 3 {
-        return (String::new(), String::new());
-    }
-
-    let mcc1 = data[0] & 0x0F;
-    let mcc2 = (data[0] >> 4) & 0x0F;
-    let mcc3 = data[1] & 0x0F;
-    let mnc3 = (data[1] >> 4) & 0x0F;
-    let mnc1 = data[2] & 0x0F;
-    let mnc2 = (data[2] >> 4) & 0x0F;
-
-    let mcc = format!("{mcc1}{mcc2}{mcc3}");
-    let mnc = if mnc3 == 0x0F {
-        format!("{mnc1}{mnc2}")
-    } else {
-        format!("{mnc1}{mnc2}{mnc3}")
-    };
-
-    (mcc, mnc)
-}
-
-/// Push PLMN (MCC+MNC) fields into a buffer using scratch for the string data.
-fn push_plmn_fields<'pkt>(
-    data: &'pkt [u8],
+///
+/// Fewer than 3 bytes yield empty MCC and MNC fields.
+pub(crate) fn push_plmn_fields(
+    data: &[u8],
     offset: usize,
     plmn_len: usize,
-    buf: &mut DissectBuffer<'pkt>,
+    buf: &mut DissectBuffer<'_>,
 ) {
-    let (mcc, mnc) = decode_plmn(data);
-    let mcc_range = buf.push_scratch(mcc.as_bytes());
-    let mnc_range = buf.push_scratch(mnc.as_bytes());
-    buf.push_field(
-        &FD_INLINE_MCC,
-        FieldValue::Scratch(mcc_range),
-        offset..offset + plmn_len,
-    );
-    buf.push_field(
-        &FD_INLINE_MNC,
-        FieldValue::Scratch(mnc_range),
-        offset..offset + plmn_len,
+    let range = offset..offset + plmn_len;
+    let [o1, o2, o3, ..] = *data else {
+        let empty = buf.push_scratch(&[]);
+        buf.push_field(
+            &FD_INLINE_MCC,
+            FieldValue::Scratch(empty.clone()),
+            range.clone(),
+        );
+        buf.push_field(&FD_INLINE_MNC, FieldValue::Scratch(empty), range);
+        return;
+    };
+    push_mcc_mnc(
+        buf,
+        [o1 & 0x0F, o1 >> 4, o2 & 0x0F],
+        [o3 & 0x0F, o3 >> 4, o2 >> 4],
+        range,
     );
 }
 

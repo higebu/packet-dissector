@@ -51,6 +51,7 @@
 //! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
+//! | Ethernet → IPv4 → UDP → GTPv2-C + piggyback      | integration_ethernet_ipv4_udp_gtpv2c_piggyback      |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
@@ -3276,6 +3277,37 @@ fn integration_ethernet_ipv4_udp_gtpv2c_create_session() {
     );
     // IEs should be present
     assert!(buf.field_by_name(gtpv2c, "ies").is_some());
+}
+
+/// Ethernet → IPv4 → UDP → GTPv2-C Create Session Response with a
+/// piggybacked Create Bearer Request (3GPP TS 29.274, Section 5.5.1)
+#[test]
+fn integration_ethernet_ipv4_udp_gtpv2c_piggyback() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xAA; 6], [0xBB; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 2123, 2123);
+    let first = push_gtpv2c_with_teid(&mut pkt, 33, 0x11, 1, &[3, 0, 1, 0, 5]);
+    pkt[first] |= 0x10; // P flag
+    push_gtpv2c_with_teid(&mut pkt, 95, 0x22, 2, &[]);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 5);
+    assert_eq!(buf.layers()[3].name, "GTPv2-C");
+    assert_eq!(buf.layers()[4].name, "GTPv2-C");
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[4].range.end, pkt.len());
+    let piggybacked = &buf.layers()[4];
+    assert_eq!(
+        display_name_for(&buf, piggybacked, "message_type"),
+        Some("Create Bearer Request")
+    );
 }
 
 /// Ethernet → IPv4 → UDP → GTPv2-C (Echo Request, no TEID)

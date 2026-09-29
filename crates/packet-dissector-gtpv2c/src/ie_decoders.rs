@@ -7,6 +7,7 @@
 
 use core::ops::Range;
 
+use crate::ie_parsers;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, MacAddr};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{
@@ -57,31 +58,9 @@ fn bytes<'pkt>(
     buf.push_field(fd, FieldValue::Bytes(v), at..at + v.len());
 }
 
-static FD_MCC: FieldDescriptor = FieldDescriptor::new("mcc", "MCC", FieldType::Bytes);
-static FD_MNC: FieldDescriptor = FieldDescriptor::new("mnc", "MNC", FieldType::Bytes);
-
-/// Push MCC and MNC digits (as ASCII in scratch) for a 3-octet PLMN.
-fn push_mcc_mnc(buf: &mut DissectBuffer<'_>, mcc: [u8; 3], mnc: [u8; 3], at: usize) {
-    let ascii = |d: u8| b'0' + (d & 0x0F).min(9);
-    let mcc = [ascii(mcc[0]), ascii(mcc[1]), ascii(mcc[2])];
-    let mnc_len = if mnc[2] == 0x0F { 2 } else { 3 };
-    let mnc = [ascii(mnc[0]), ascii(mnc[1]), ascii(mnc[2])];
-    let r = buf.push_scratch(&mcc);
-    buf.push_field(&FD_MCC, FieldValue::Scratch(r), at..at + 3);
-    let r = buf.push_scratch(&mnc[..mnc_len]);
-    buf.push_field(&FD_MNC, FieldValue::Scratch(r), at..at + 3);
-}
-
-/// PLMN identity coded as in 3GPP TS 24.008, Figure 10.5.13:
-/// octet 1 = MCC digit 2 | MCC digit 1, octet 2 = MNC digit 3 | MCC digit 3,
-/// octet 3 = MNC digit 2 | MNC digit 1 ("1111" for a 2-digit MNC).
+/// PLMN identity coded as in 3GPP TS 24.008, Figure 10.5.13.
 fn push_plmn(buf: &mut DissectBuffer<'_>, p: &[u8], at: usize) {
-    push_mcc_mnc(
-        buf,
-        [p[0] & 0x0F, p[0] >> 4, p[1] & 0x0F],
-        [p[2] & 0x0F, p[2] >> 4, p[1] >> 4],
-        at,
-    );
+    ie_parsers::push_plmn_fields(p, at, 3, buf);
 }
 
 /// PLMN ID coded as in 3GPP TS 29.274, Figures 8.50-2 / 8.50-3 (the
@@ -95,7 +74,7 @@ fn push_plmn_s1ap(buf: &mut DissectBuffer<'_>, p: &[u8], at: usize) {
     } else {
         [p[1] >> 4, p[2] & 0x0F, p[2] >> 4]
     };
-    push_mcc_mnc(buf, mcc, mnc, at);
+    ie_parsers::push_mcc_mnc(buf, mcc, mnc, at..at + 3);
 }
 
 /// One bit flag of a flags IE: octet index within the value, bit mask.
@@ -346,24 +325,6 @@ static FD_DETACH_TYPE: FieldDescriptor =
         },
     );
 
-/// Push a one-octet enumerated value as `{ fd: octet 5 }`.
-fn push_enum_u8<'pkt>(
-    data: &'pkt [u8],
-    offset: usize,
-    fd: &'static FieldDescriptor,
-    value_desc: &'static FieldDescriptor,
-    value_range: &Range<usize>,
-    buf: &mut DissectBuffer<'pkt>,
-) {
-    let Some(&v) = data.first() else {
-        push_raw(data, value_desc, value_range, buf);
-        return;
-    };
-    let obj = begin(value_desc, value_range, buf);
-    u8f(buf, fd, v, offset);
-    buf.end_container(obj);
-}
-
 /// 3GPP TS 29.274, Section 8.61 — Change Reporting Action.
 pub(crate) fn push_change_reporting_action<'pkt>(
     data: &'pkt [u8],
@@ -372,7 +333,7 @@ pub(crate) fn push_change_reporting_action<'pkt>(
     value_range: &Range<usize>,
     buf: &mut DissectBuffer<'pkt>,
 ) {
-    push_enum_u8(data, offset, &FD_ACTION, value_desc, value_range, buf);
+    ie_parsers::push_single_u8(data, offset, &FD_ACTION, 0xFF, value_desc, value_range, buf);
 }
 
 /// 3GPP TS 29.274, Section 8.81 — Detach Type.
@@ -383,7 +344,15 @@ pub(crate) fn push_detach_type<'pkt>(
     value_range: &Range<usize>,
     buf: &mut DissectBuffer<'pkt>,
 ) {
-    push_enum_u8(data, offset, &FD_DETACH_TYPE, value_desc, value_range, buf);
+    ie_parsers::push_single_u8(
+        data,
+        offset,
+        &FD_DETACH_TYPE,
+        0xFF,
+        value_desc,
+        value_range,
+        buf,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +458,10 @@ static FD_CAUSE_TYPE: FieldDescriptor =
             _ => None,
         },
     );
+/// F-Cause Cause Type: only meaningful for S1-AP causes, which the IE
+/// instance selects (3GPP TS 29.274, Section 8.49), so no name is resolved.
+static FD_F_CAUSE_TYPE: FieldDescriptor =
+    FieldDescriptor::new("cause_type", "Cause Type", FieldType::U8);
 static FD_CAUSE_VALUE: FieldDescriptor =
     FieldDescriptor::new("cause_value", "Cause Value", FieldType::U16);
 static FD_F_CAUSE: FieldDescriptor = FieldDescriptor::new("f_cause", "F-Cause", FieldType::Bytes);
@@ -569,7 +542,7 @@ pub(crate) fn push_f_cause<'pkt>(
         return;
     };
     let obj = begin(value_desc, value_range, buf);
-    u8f(buf, &FD_CAUSE_TYPE, t & 0x0F, offset);
+    u8f(buf, &FD_F_CAUSE_TYPE, t & 0x0F, offset);
     push_cause_value(&data[1..], offset + 1, &FD_F_CAUSE, buf);
     buf.end_container(obj);
 }
@@ -618,7 +591,8 @@ static FD_PROTOCOL_TYPE: FieldDescriptor =
     );
 
 /// 3GPP TS 29.274, Section 8.103 — RAN/NAS Cause. S1AP, EMM and ESM causes
-/// are one octet; Diameter and IKEv2 causes are two octets.
+/// are one octet; Diameter and IKEv2 causes are two octets. Octets after the
+/// cause value are kept as `additional_octets`.
 pub(crate) fn push_ran_nas_cause<'pkt>(
     data: &'pkt [u8],
     offset: usize,
@@ -630,10 +604,33 @@ pub(crate) fn push_ran_nas_cause<'pkt>(
         push_raw(data, value_desc, value_range, buf);
         return;
     };
+    let protocol_type = o5 >> 4;
+    let rest = &data[1..];
     let obj = begin(value_desc, value_range, buf);
-    u8f(buf, &FD_PROTOCOL_TYPE, o5 >> 4, offset);
-    u8f(buf, &FD_CAUSE_TYPE, o5 & 0x0F, offset);
-    push_cause_value(&data[1..], offset + 1, &FD_CAUSE_VALUE_RAW, buf);
+    u8f(buf, &FD_PROTOCOL_TYPE, protocol_type, offset);
+    // "The Cause Type field shall be ignored by the receiver" for all but
+    // S1-AP causes.
+    if protocol_type == 1 {
+        u8f(buf, &FD_CAUSE_TYPE, o5 & 0x0F, offset);
+    }
+    let width = match protocol_type {
+        1..=3 => 1,
+        4 | 5 => 2,
+        _ => 0,
+    };
+    if width > 0 && rest.len() >= width {
+        push_cause_value(&rest[..width], offset + 1, &FD_CAUSE_VALUE_RAW, buf);
+        if rest.len() > width {
+            bytes(
+                buf,
+                &FD_ADDITIONAL_OCTETS,
+                &rest[width..],
+                offset + 1 + width,
+            );
+        }
+    } else {
+        bytes(buf, &FD_CAUSE_VALUE_RAW, rest, offset + 1);
+    }
     buf.end_container(obj);
 }
 
@@ -997,6 +994,12 @@ pub(crate) fn push_fq_csid<'pkt>(
         }
     }
     buf.end_container(arr);
+    // "(q+2) to (n+4): These octet(s) is/are present only if explicitly
+    // specified"
+    let end = csid_start + count * 2;
+    if data.len() > end {
+        bytes(buf, &FD_ADDITIONAL_OCTETS, &data[end..], offset + end);
+    }
     buf.end_container(obj);
 }
 
@@ -1290,19 +1293,12 @@ pub(crate) fn push_secondary_rat_usage_data_report<'pkt>(
     // SRUDN: "the Length of Secondary RAT Data Usage Report Transfer and
     // Secondary RAT Data Usage Report Transfer field shall be present".
     let transfer = if data[0] & 0x04 != 0 {
-        match data
-            .get(27)
+        data.get(27)
             .and_then(|l| data.get(28..28 + usize::from(*l)))
-        {
-            Some(t) => Some(t),
-            None => {
-                push_raw(data, value_desc, value_range, buf);
-                return;
-            }
-        }
     } else {
         None
     };
+    let decoded_end = transfer.map_or(27, |t| 28 + t.len());
     let obj = begin(value_desc, value_range, buf);
     for f in SRUDR_FLAGS {
         u8f(buf, &f.fd, u8::from(data[0] & f.mask != 0), offset);
@@ -1323,6 +1319,16 @@ pub(crate) fn push_secondary_rat_usage_data_report<'pkt>(
     );
     if let Some(t) = transfer {
         bytes(buf, &FD_SRUDR_TRANSFER, t, offset + 28);
+    }
+    // Octets past the decoded fields: a transfer that runs past the value,
+    // or octets "present only if explicitly specified".
+    if data.len() > decoded_end {
+        bytes(
+            buf,
+            &FD_ADDITIONAL_OCTETS,
+            &data[decoded_end..],
+            offset + decoded_end,
+        );
     }
     buf.end_container(obj);
 }
@@ -1367,6 +1373,7 @@ mod tests {
     // | 8.103           | RAN/NAS Cause                        | ran_nas_cause                          |
     // | 8.132           | Secondary RAT Usage Data Report      | secondary_rat_usage_data_report        |
     // | 8.x             | Short values fall back to raw        | short_values_fall_back_to_raw          |
+    // | 8.50            | BCD nibble above 9 shown as hex      | plmn_nibble_above_nine_is_visible      |
 
     static FD_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value", FieldType::Bytes);
 
@@ -1508,8 +1515,9 @@ mod tests {
         let v: u32 = ((440 * 1000 + 10) << 12) | 0x123;
         let mut data = vec![0x21];
         data.extend_from_slice(&v.to_be_bytes());
-        data.extend_from_slice(&[0x00, 0x07]);
+        data.extend_from_slice(&[0x00, 0x07, 0xEE]);
         let buf = push(132, &data);
+        assert_eq!(*val(&buf, "additional_octets"), FieldValue::Bytes(&[0xEE]));
         assert_eq!(*val(&buf, "node_id"), FieldValue::U32(v));
         assert_eq!(*val(&buf, "mcc_mnc"), FieldValue::U32(440_010));
         assert_eq!(*val(&buf, "node_local_id"), FieldValue::U16(0x123));
@@ -1568,7 +1576,9 @@ mod tests {
         // S1-AP cause: Cause Type 2 (NAS), one-octet value
         let buf = push(119, &[0x02, 0x03]);
         assert_eq!(*val(&buf, "cause_type"), FieldValue::U8(2));
-        assert_eq!(display(&buf, "cause_type"), Some("NAS"));
+        // The meaning of Cause Type depends on the IE instance (S1-AP only),
+        // which the value decoder does not see, so no name is given.
+        assert_eq!(display(&buf, "cause_type"), None);
         assert_eq!(*val(&buf, "cause_value"), FieldValue::U16(3));
         // RANAP cause: two-octet value
         let buf = push(119, &[0x00, 0x01, 0x02]);
@@ -1772,11 +1782,20 @@ mod tests {
         assert_eq!(display(&buf, "protocol_type"), Some("S1AP Cause"));
         assert_eq!(*val(&buf, "cause_type"), FieldValue::U8(1));
         assert_eq!(*val(&buf, "cause_value"), FieldValue::U16(0));
-        // Diameter cause: two-octet value
+        assert_eq!(display(&buf, "cause_type"), Some("Transport Layer"));
+        // Diameter cause: two-octet value; Cause Type is not shown
         let buf = push(172, &[0x40, 0x00, 0x01]);
         assert_eq!(*val(&buf, "cause_value"), FieldValue::U16(1));
-        // Unexpected length is kept raw
-        let buf = push(172, &[0x20, 1, 2, 3]);
+        assert!(!has(&buf, "cause_type"));
+        // EMM cause is one octet; later octets are "present only if
+        // explicitly specified"
+        let buf = push(172, &[0x20, 0x07, 0x00]);
+        assert_eq!(*val(&buf, "cause_value"), FieldValue::U16(7));
+        assert_eq!(*val(&buf, "additional_octets"), FieldValue::Bytes(&[0x00]));
+        // IKEv2 cause cut short, and a spare protocol type, stay raw
+        let buf = push(172, &[0x50, 0x01]);
+        assert_eq!(*val(&buf, "cause_value_raw"), FieldValue::Bytes(&[0x01]));
+        let buf = push(172, &[0x60, 1, 2, 3]);
         assert_eq!(*val(&buf, "cause_value_raw"), FieldValue::Bytes(&[1, 2, 3]));
     }
 
@@ -1860,6 +1879,20 @@ mod tests {
         no_transfer[0] = 0x03;
         let buf = push(201, &no_transfer);
         assert!(!has(&buf, "secondary_rat_data_usage_report_transfer"));
+        // SRUDN set but the transfer runs past the value: the fixed part is
+        // decoded and the rest is kept raw.
+        let mut short = data[..28].to_vec();
+        short[27] = 0x10;
+        let buf = push(201, &short);
+        assert_eq!(*val(&buf, "ebi"), FieldValue::U8(5));
+        assert_eq!(*val(&buf, "additional_octets"), FieldValue::Bytes(&[0x10]));
+        assert!(!has(&buf, "secondary_rat_data_usage_report_transfer"));
+    }
+
+    #[test]
+    fn plmn_nibble_above_nine_is_visible() {
+        let buf = push(120, &[0xF2, 0xF0, 0x01]);
+        assert_eq!(text(&buf, "mcc"), b"2F0");
     }
 
     #[test]
