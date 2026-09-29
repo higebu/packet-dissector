@@ -27,6 +27,24 @@ pub enum DispatchHint {
     /// The registry tries the lower port first, then the higher port as a
     /// fallback, mirroring Wireshark's `sctp.port` dual-port dispatch strategy.
     BySctpPort(u16, u16),
+    /// Look up the next dissector for one SCTP user message by its Payload
+    /// Protocol Identifier, falling back to the SCTP ports.
+    ///
+    /// The registry tries the PPID table first (unless `ppid` is 0, which
+    /// means "unspecified"), then the lower and the higher port like
+    /// [`BySctpPort`](Self::BySctpPort).
+    ///
+    /// RFC 9260, Section 3.3.1 — "The value 0 indicates that no application
+    /// identifier is specified by the upper layer for this payload data." —
+    /// <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+    BySctpPpid {
+        /// Payload Protocol Identifier of the DATA / I-DATA chunk.
+        ppid: u32,
+        /// SCTP source port.
+        src_port: u16,
+        /// SCTP destination port.
+        dst_port: u16,
+    },
     /// Look up the next dissector by IPv6 Routing Header type.
     ///
     /// Uses a dedicated routing-type table, mirroring Wireshark's
@@ -71,6 +89,11 @@ pub enum DissectorTable {
     UdpPort(u16),
     /// Register by SCTP port number.
     SctpPort(u16),
+    /// Register by SCTP Payload Protocol Identifier (e.g., `46` for
+    /// Diameter), from the IANA "SCTP Payload Protocol Identifiers"
+    /// registry. PPID 0 ("unspecified") is never looked up; see
+    /// [`DispatchHint::BySctpPpid`].
+    SctpPpid(u32),
     /// Register by IPv6 Routing Header type (e.g., `4` for SRv6).
     Ipv6RoutingType(u8),
     /// Register by MIME content type (e.g., `"application/sdp"`).
