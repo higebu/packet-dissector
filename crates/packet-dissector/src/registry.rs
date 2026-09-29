@@ -64,6 +64,9 @@ pub struct DissectorRegistry {
     by_llc_sap: HashMap<u8, Box<dyn Dissector>>,
     /// Link-layer type table — maps pcap LINKTYPE values to entry dissectors.
     by_link_type: HashMap<u32, Box<dyn Dissector>>,
+    /// MPLS G-ACh Channel Type table — dispatches the message after an
+    /// Associated Channel Header (RFC 5586, Section 2.1).
+    by_ach_channel_type: HashMap<u16, Box<dyn Dissector>>,
     /// Factory functions for creating fresh dissector instances by decode-as name.
     /// Keys are lowercase protocol names (e.g., "http", "dns", "dns.tcp").
     dissector_factories: HashMap<String, fn() -> Box<dyn Dissector>>,
@@ -90,6 +93,7 @@ impl DissectorRegistry {
             ipv6_routing_fallback: None,
             by_llc_sap: HashMap::new(),
             by_link_type: HashMap::new(),
+            by_ach_channel_type: HashMap::new(),
             dissector_factories: HashMap::new(),
             #[cfg(feature = "tcp")]
             tcp_reassembly: super::tcp_reassembly::new_tcp_reassembly(),
@@ -455,6 +459,48 @@ impl DissectorRegistry {
         self.by_llc_sap.get(&sap).map(|d| d.as_ref())
     }
 
+    /// Register a dissector for a given MPLS G-ACh Channel Type.
+    ///
+    /// Returns an error if a dissector is already registered for this
+    /// channel type. Use
+    /// [`register_by_ach_channel_type_or_replace`](Self::register_by_ach_channel_type_or_replace)
+    /// to intentionally override an existing registration.
+    pub fn register_by_ach_channel_type(
+        &mut self,
+        channel_type: u16,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        if let Some(existing) = self.by_ach_channel_type.get(&channel_type) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "ach_channel_type",
+                key: channel_type as u64,
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        self.by_ach_channel_type.insert(channel_type, dissector);
+        Ok(())
+    }
+
+    /// Register a dissector for a given G-ACh Channel Type, replacing any
+    /// existing one.
+    ///
+    /// Returns the previously registered dissector, if any.
+    pub fn register_by_ach_channel_type_or_replace(
+        &mut self,
+        channel_type: u16,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        self.by_ach_channel_type.insert(channel_type, dissector)
+    }
+
+    /// Look up a dissector by MPLS G-ACh Channel Type.
+    pub fn get_by_ach_channel_type(&self, channel_type: u16) -> Option<&dyn Dissector> {
+        self.by_ach_channel_type
+            .get(&channel_type)
+            .map(|d| d.as_ref())
+    }
+
     /// Look up a dissector by pcap link-layer header type.
     pub fn get_by_link_type(&self, link_type: u32) -> Option<&dyn Dissector> {
         self.by_link_type.get(&link_type).map(|d| d.as_ref())
@@ -801,6 +847,7 @@ impl DissectorRegistry {
             DispatchHint::ByContentType(ct) => self.get_by_content_type(ct),
             DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
             DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
+            DispatchHint::ByAchChannelType(ct) => self.get_by_ach_channel_type(*ct),
         }
     }
 
@@ -1236,6 +1283,9 @@ impl DissectorRegistry {
         for d in self.by_llc_sap.values() {
             push(d.as_ref());
         }
+        for d in self.by_ach_channel_type.values() {
+            push(d.as_ref());
+        }
         if let Some(ref d) = self.ipv6_routing_fallback {
             push(d.as_ref());
         }
@@ -1252,6 +1302,13 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+        // The MPLS dissector emits ACH and PW control word layers itself
+        // (RFC 5586, Section 2.1 — https://www.rfc-editor.org/rfc/rfc5586#section-2.1;
+        // RFC 4385, Section 3 — https://www.rfc-editor.org/rfc/rfc4385#section-3).
+        #[cfg(feature = "mpls")]
+        push(&packet_dissector_mpls::AchDissector);
+        #[cfg(feature = "mpls")]
+        push(&packet_dissector_mpls::PwControlWordDissector);
     }
 
     /// Returns field metadata for all registered dissectors.
@@ -1326,6 +1383,7 @@ impl DissectorRegistry {
                 Ok(())
             }
             DissectorTable::LinkType(lt) => self.register_by_link_type(lt, dissector),
+            DissectorTable::AchChannelType(ct) => self.register_by_ach_channel_type(ct, dissector),
         }
     }
 
@@ -1362,6 +1420,9 @@ impl DissectorRegistry {
                 prev
             }
             DissectorTable::LinkType(lt) => self.register_by_link_type_or_replace(lt, dissector),
+            DissectorTable::AchChannelType(ct) => {
+                self.register_by_ach_channel_type_or_replace(ct, dissector)
+            }
         }
     }
 
@@ -1922,6 +1983,37 @@ impl Default for DissectorRegistry {
             assert_builtin(
                 reg.register_by_ethertype(0x8848, Box::new(packet_dissector_mpls::MplsDissector)),
             );
+        }
+
+        // MPLS G-ACh / PW Associated Channel Types (IANA "MPLS Generalized
+        // Associated Channel (G-ACh) Types" registry):
+        // 0x0021 IPv4 and 0x0057 IPv6 (RFC 4385, Section 6 —
+        // https://www.rfc-editor.org/rfc/rfc4385#section-6).
+        #[cfg(all(feature = "mpls", feature = "ipv4"))]
+        assert_builtin(
+            reg.register_by_ach_channel_type(
+                0x0021,
+                Box::new(packet_dissector_ipv4::Ipv4Dissector),
+            ),
+        );
+        #[cfg(all(feature = "mpls", feature = "ipv6"))]
+        assert_builtin(
+            reg.register_by_ach_channel_type(
+                0x0057,
+                Box::new(packet_dissector_ipv6::Ipv6Dissector),
+            ),
+        );
+        // BFD Control without IP/UDP headers: 0x0007 (RFC 5885, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc5885#section-3.2), S-BFD 0x0008
+        // (RFC 7885, Section 2.3 — https://www.rfc-editor.org/rfc/rfc7885#section-2.3),
+        // MPLS-TP CC 0x0022 and CV 0x0023 (RFC 6428, Section 3.3 —
+        // https://www.rfc-editor.org/rfc/rfc6428#section-3.3).
+        #[cfg(all(feature = "mpls", feature = "bfd"))]
+        for channel_type in [0x0007, 0x0008, 0x0022, 0x0023] {
+            assert_builtin(reg.register_by_ach_channel_type(
+                channel_type,
+                Box::new(packet_dissector_bfd::BfdDissector),
+            ));
         }
 
         // ICMP is IP protocol number 1 (RFC 792)
@@ -2567,6 +2659,98 @@ mod tests {
     fn get_by_llc_sap_returns_none_for_unknown() {
         let reg = DissectorRegistry::new();
         assert!(reg.get_by_llc_sap(0xFF).is_none());
+    }
+
+    #[test]
+    fn get_by_ach_channel_type_returns_none_for_unknown() {
+        let reg = DissectorRegistry::new();
+        assert!(reg.get_by_ach_channel_type(0x0007).is_none());
+    }
+
+    #[test]
+    fn duplicate_ach_channel_type_registration_returns_error() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_ach_channel_type(0x0007, Box::new(StubDissector("bfd")))
+            .unwrap();
+        let result = reg.register_by_ach_channel_type(0x0007, Box::new(StubDissector("bfd-dup")));
+        assert!(matches!(
+            result,
+            Err(RegistrationError::DuplicateDispatchKey {
+                table: "ach_channel_type",
+                key: 0x0007,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn register_by_ach_channel_type_or_replace_returns_previous() {
+        let mut reg = DissectorRegistry::new();
+        assert!(
+            reg.register_by_ach_channel_type_or_replace(0x0021, Box::new(StubDissector("a")))
+                .is_none()
+        );
+        let prev =
+            reg.register_by_ach_channel_type_or_replace(0x0021, Box::new(StubDissector("b")));
+        assert_eq!(prev.map(|d| d.short_name()), Some("a"));
+        assert_eq!(
+            reg.get_by_ach_channel_type(0x0021).map(|d| d.short_name()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn register_dissector_dispatches_to_ach_channel_type() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_dissector(
+            DissectorTable::AchChannelType(0x0022),
+            Box::new(StubDissector("bfd")),
+        )
+        .unwrap();
+        assert!(reg.get_by_ach_channel_type(0x0022).is_some());
+        assert!(
+            reg.register_dissector_or_replace(
+                DissectorTable::AchChannelType(0x0022),
+                Box::new(StubDissector("bfd2")),
+            )
+            .is_some()
+        );
+        assert!(
+            reg.all_field_schemas()
+                .iter()
+                .any(|schema| schema.short_name == "bfd2")
+        );
+    }
+
+    /// The ACH and PW control word layers emitted by the MPLS dissector
+    /// appear in the field schemas.
+    #[cfg(feature = "mpls")]
+    #[test]
+    fn all_field_schemas_include_ach_and_pw_control_word() {
+        let reg = DissectorRegistry::default();
+        let schemas = reg.all_field_schemas();
+        for name in ["ACH", "PW-CW"] {
+            assert!(
+                schemas.iter().any(|s| s.short_name == name),
+                "{name} missing from all_field_schemas"
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_dissector_by_ach_channel_type_hint() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_ach_channel_type(0x0007, Box::new(StubDissector("bfd")))
+            .unwrap();
+        assert_eq!(
+            reg.lookup_dissector(&DispatchHint::ByAchChannelType(0x0007))
+                .map(|d| d.short_name()),
+            Some("bfd")
+        );
+        assert!(
+            reg.lookup_dissector(&DispatchHint::ByAchChannelType(0x0008))
+                .is_none()
+        );
     }
 
     #[test]
@@ -3442,6 +3626,22 @@ mod tests {
 
         #[cfg(all(feature = "vxlan", feature = "udp"))]
         assert!(reg.get_by_udp_port(4789).is_some());
+
+        // G-ACh channel types: RFC 4385, Section 6
+        // (https://www.rfc-editor.org/rfc/rfc4385#section-6), RFC 5885
+        // (https://www.rfc-editor.org/rfc/rfc5885), RFC 6428
+        // (https://www.rfc-editor.org/rfc/rfc6428)
+        #[cfg(all(feature = "mpls", feature = "ipv4"))]
+        assert!(reg.get_by_ach_channel_type(0x0021).is_some());
+        #[cfg(all(feature = "mpls", feature = "ipv6"))]
+        assert!(reg.get_by_ach_channel_type(0x0057).is_some());
+        #[cfg(all(feature = "mpls", feature = "bfd"))]
+        {
+            assert!(reg.get_by_ach_channel_type(0x0007).is_some());
+            assert!(reg.get_by_ach_channel_type(0x0008).is_some());
+            assert!(reg.get_by_ach_channel_type(0x0022).is_some());
+            assert!(reg.get_by_ach_channel_type(0x0023).is_some());
+        }
 
         #[cfg(all(feature = "geneve", feature = "udp"))]
         assert!(reg.get_by_udp_port(6081).is_some());

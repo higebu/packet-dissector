@@ -8,7 +8,7 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "mpls"]
 categories = ["network-programming", "parser-implementations"]
-description = "MPLS (RFC 3032) dissector for packet-dissector"
+description = "MPLS (RFC 3032), PW control word and G-ACh (RFC 4385, RFC 5586) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }

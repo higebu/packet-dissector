@@ -76,6 +76,9 @@
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
 //! | Ethernet → MPLS (2 labels) → IPv4 → UDP              | integration_ethernet_mpls_two_labels_ipv4_udp        |
+//! | Ethernet → MPLS (GAL) → ACH → BFD                    | integration_ethernet_mpls_gal_ach_bfd                |
+//! | Ethernet → MPLS → PW-ACH → IPv4 → UDP                | integration_ethernet_mpls_pw_ach_ipv4                |
+//! | Ethernet → MPLS → PW-CW → Ethernet → IPv4 → UDP      | integration_ethernet_mpls_pw_control_word_ethernet   |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
 //! | Ethernet → IPv4 → UDP → NTP (Control, mode 6)        | integration_ethernet_ipv4_udp_ntp_control_request    |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
@@ -4273,6 +4276,92 @@ fn integration_ethernet_mpls_ipv4_udp() {
             }
         },
         FieldValue::U32(100)
+    );
+}
+
+/// Minimal BFD Control packet (24 bytes, RFC 5880 §4.1, state Up).
+/// <https://www.rfc-editor.org/rfc/rfc5880#section-4.1>
+fn push_bfd_control(pkt: &mut Vec<u8>) {
+    pkt.extend_from_slice(&[0x20, 0xC0, 0x03, 0x18]); // v1, Up, detect mult 3, len 24
+    pkt.extend_from_slice(&1u32.to_be_bytes()); // my discriminator
+    pkt.extend_from_slice(&2u32.to_be_bytes()); // your discriminator
+    pkt.extend_from_slice(&1_000_000u32.to_be_bytes()); // desired min tx
+    pkt.extend_from_slice(&1_000_000u32.to_be_bytes()); // required min rx
+    pkt.extend_from_slice(&0u32.to_be_bytes()); // required min echo rx
+}
+
+/// Ethernet → MPLS (GAL) → ACH (0x0007) → BFD — VCCV BFD without IP/UDP
+/// (RFC 5586 §4 — <https://www.rfc-editor.org/rfc/rfc5586#section-4>, RFC 5885 §3.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5885#section-3.2>)
+#[test]
+fn integration_ethernet_mpls_gal_ach_bfd() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, 13, 0, 1, 1);
+    pkt.extend_from_slice(&[0x10, 0x00, 0x00, 0x07]);
+    push_bfd_control(&mut pkt);
+
+    let reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "ACH", "BFD"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → MPLS → PW-ACH (0x0021) → IPv4 → UDP (RFC 4385 §5 —
+/// <https://www.rfc-editor.org/rfc/rfc4385#section-5>)
+#[test]
+fn integration_ethernet_mpls_pw_ach_ipv4() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, 100, 0, 1, 64);
+    pkt.extend_from_slice(&[0x10, 0x00, 0x00, 0x21]);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "ACH", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → MPLS → PW control word → Ethernet → IPv4 → UDP (RFC 4385 §3 —
+/// <https://www.rfc-editor.org/rfc/rfc4385#section-3>, RFC 4448 §4.6 — <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>)
+#[test]
+fn integration_ethernet_mpls_pw_control_word_ethernet() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, 16, 0, 1, 64);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // control word, sequence 1
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0x66; 6],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "MPLS", "PW-CW", "Ethernet", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+    let cw = buf.layer_by_name("PW-CW").unwrap();
+    assert_eq!(
+        buf.field_by_name(cw, "payload_heuristic").unwrap().value,
+        FieldValue::Str("ethernet")
     );
 }
 
