@@ -465,3 +465,48 @@ pub(crate) fn extract_message_type(data: &[u8]) -> Option<u16> {
     }
     read_be_u16(data, 6).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attr_type(v: u16) -> Field<'static> {
+        Field {
+            descriptor: &AVP_CHILD_FIELDS[4],
+            value: FieldValue::U16(v),
+            range: 0..2,
+        }
+    }
+
+    #[test]
+    fn typed_value_display_fn() {
+        // RFC 2661, Section 4.4.1 — Message Type AVP (Attribute Type 0).
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-4.4.1>
+        let display = AVP_CHILD_FIELDS[6].display_fn.unwrap();
+        assert_eq!(
+            display(&FieldValue::U16(1), &[attr_type(ATTR_MESSAGE_TYPE)]),
+            Some("SCCRQ")
+        );
+        assert_eq!(display(&FieldValue::U16(1), &[attr_type(7)]), None);
+        assert_eq!(display(&FieldValue::U8(1), &[attr_type(0)]), None);
+    }
+
+    #[test]
+    fn avp_display_fn_requires_object() {
+        let display = FD_AVP.display_fn.unwrap();
+        assert_eq!(display(&FieldValue::U8(0), &[attr_type(0)]), None);
+    }
+
+    #[test]
+    fn extract_message_type_rejects_non_message_type_avp() {
+        // RFC 2661, Section 4.4.1 — M=1, Length=8, Vendor 0, Type 0.
+        // <https://www.rfc-editor.org/rfc/rfc2661#section-4.4.1>
+        assert_eq!(extract_message_type(&[0x80, 8, 0, 0, 0, 0, 0, 1]), Some(1));
+        // Hidden bit set.
+        assert_eq!(extract_message_type(&[0xC0, 8, 0, 0, 0, 0, 0, 1]), None);
+        // Wrong attribute type.
+        assert_eq!(extract_message_type(&[0x80, 8, 0, 0, 0, 7, 0, 1]), None);
+        // Truncated.
+        assert_eq!(extract_message_type(&[0x80, 8, 0, 0]), None);
+    }
+}

@@ -1067,4 +1067,68 @@ mod tests {
         let (buf, r) = first_avp(&data);
         assert!(get(&buf, &r, "typed_value").is_none());
     }
+
+    #[test]
+    fn enumerated_value_names() {
+        // IANA "L2TPv3 Pseudowire Types" registry.
+        // <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-34>
+        for (v, name) in [
+            (0x0001, "Frame Relay DLCI Pseudowire Type"),
+            (0x0002, "ATM AAL5 SDU VCC transport"),
+            (0x0003, "ATM Cell transparent Port Mode"),
+            (0x0004, "Ethernet VLAN Pseudowire Type"),
+            (0x0005, "Ethernet Pseudowire Type"),
+            (0x0006, "HDLC Pseudowire Type"),
+            (0x0009, "ATM Cell transport VCC Mode"),
+            (0x000A, "ATM Cell transport VPC Mode"),
+            (0x000C, "MPEG-TS Payload Type (MPTPW)"),
+            (0x000D, "Packet Streaming Protocol (PSPPW)"),
+            (0x0011, "Structure-agnostic E1 circuit"),
+            (0x0012, "Structure-agnostic T1 (DS1) circuit"),
+            (0x0013, "Structure-agnostic E3 circuit"),
+            (0x0014, "Structure-agnostic T3 (DS3) circuit"),
+            (0x0015, "CESoPSN basic mode"),
+            (0x0017, "CESoPSN TDM with CAS"),
+        ] {
+            assert_eq!(pseudowire_type_name(v), Some(name));
+        }
+        assert_eq!(pseudowire_type_name(0x0007), None);
+        // RFC 3931, Section 5.4.4 — L2-Specific Sublayer / Data Sequencing.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.4>
+        for v in 0..=4 {
+            assert!(l2_specific_sublayer_name(v).is_some());
+        }
+        assert_eq!(l2_specific_sublayer_name(5), None);
+        for v in 0..=2 {
+            assert!(data_sequencing_name(v).is_some());
+        }
+        assert_eq!(data_sequencing_name(3), None);
+    }
+
+    #[test]
+    fn display_fns_resolve_names() {
+        let siblings = [Field {
+            descriptor: &AVP_CHILD_FIELDS[4],
+            value: FieldValue::U16(ATTR_PSEUDOWIRE_TYPE),
+            range: 0..2,
+        }];
+        assert_eq!(
+            typed_value_name(&FieldValue::U16(5), &siblings),
+            Some("Ethernet Pseudowire Type")
+        );
+        assert_eq!(typed_value_name(&FieldValue::U8(5), &siblings), None);
+        let other = [Field {
+            descriptor: &AVP_CHILD_FIELDS[4],
+            value: FieldValue::U16(ATTR_HOST_NAME),
+            range: 0..2,
+        }];
+        assert_eq!(typed_value_name(&FieldValue::U16(5), &other), None);
+
+        let display = FD_PW_TYPE_ITEM.display_fn.unwrap();
+        assert_eq!(
+            display(&FieldValue::U16(4), &[]),
+            Some("Ethernet VLAN Pseudowire Type")
+        );
+        assert_eq!(display(&FieldValue::U8(4), &[]), None);
+    }
 }
