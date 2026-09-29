@@ -21,6 +21,13 @@
 //! | §4                | Length field (Type 1, non-zero)      | parse_icmpv6_destination_unreachable_rfc4884_length         |
 //! | §4                | Length=0 not emitted (Type 1)        | parse_icmpv6_destination_unreachable_rfc4884_length_zero    |
 //! | §4                | Length field (Type 3, non-zero)      | parse_icmpv6_time_exceeded_rfc4884_length                   |
+//! | §4.5, §7, §8      | Time Exceeded + Extension Structure  | parse_icmpv6_time_exceeded_with_extensions                  |
+//! | §4.4, §7          | Dest Unreachable, Length > 128 octets| parse_icmpv6_destination_unreachable_long_original_datagram |
+//! | §4                | Length set but no room for extension | parse_icmpv6_time_exceeded_length_without_extension         |
+//! | RFC 4950 §3       | MPLS Label Stack object              | parse_icmpv6_time_exceeded_with_extensions                  |
+//! | RFC 4443 §3.1     | Invoking packet UDP ports            | parse_icmpv6_invoking_packet_udp_ports                      |
+//! | RFC 4443 §3.3     | Invoking packet TCP ports            | parse_icmpv6_invoking_packet_tcp_ports                      |
+//! | RFC 4443 §3.1     | Invoking packet other Next Header    | parse_icmpv6_invoking_packet_other_next_header              |
 //!
 //! # RFC 4861 (Neighbor Discovery) Coverage
 //!
@@ -44,6 +51,59 @@
 //! | 4.6               | NDP Option: MTU                      | parse_icmpv6_ndp_option_mtu                        |
 //! | 4.6               | NDP Option: Unknown                  | parse_icmpv6_ndp_option_unknown                    |
 //! | 4.6               | NDP Option: Zero length              | parse_icmpv6_ndp_option_zero_length                |
+//!
+//! # NDP options beyond RFC 4861 Coverage
+//!
+//! | Spec              | Description                          | Test                                              |
+//! |-------------------|--------------------------------------|-------------------------------------------------  |
+//! | RFC 6275 §7.3     | Advertisement Interval (Type 7)      | parse_icmpv6_ndp_option_advertisement_interval     |
+//! | RFC 6275 §7.4     | Home Agent Information (Type 8)      | parse_icmpv6_ndp_option_home_agent_info            |
+//! | RFC 3122 §3.1     | Source / Target Address List (9/10)  | parse_icmpv6_ndp_option_address_list              |
+//! | RFC 3971 §5.1     | CGA (Type 11)                        | parse_icmpv6_ndp_option_cga                        |
+//! | RFC 3971 §5.2     | RSA Signature (Type 12)              | parse_icmpv6_ndp_option_rsa_signature              |
+//! | RFC 3971 §5.3.1   | Timestamp (Type 13)                  | parse_icmpv6_ndp_option_timestamp                  |
+//! | RFC 3971 §5.3.2   | Nonce (Type 14)                      | parse_icmpv6_ndp_option_nonce                      |
+//! | RFC 3971 §6.4.3   | Trust Anchor (Type 15)               | parse_icmpv6_ndp_option_trust_anchor               |
+//! | RFC 3971 §6.4.4   | Certificate (Type 16)                | parse_icmpv6_ndp_option_certificate                |
+//! | RFC 8801 §3.1     | PvD ID (Type 21)                     | parse_icmpv6_ndp_option_pvd_id                     |
+//! | RFC 8801 §3.1     | PvD ID with trailing RA options      | parse_icmpv6_ndp_option_pvd_id_with_options        |
+//! | RFC 8801 §3.1     | PvD ID with a compression pointer    | parse_icmpv6_ndp_option_pvd_id_bad_name            |
+//! | RFC 8910 §2.3     | Captive-Portal URI not UTF-8         | parse_icmpv6_ndp_option_captive_portal_not_utf8    |
+//! | RFC 5175 §4       | RA Flags Extension (Type 26)         | parse_icmpv6_ndp_option_ra_flags_extension         |
+//! | RFC 8505 §4.1     | (Extended) Address Registration (33) | parse_icmpv6_ndp_option_address_registration       |
+//! | RFC 6775 §4.2     | 6LoWPAN Context (Type 34)            | parse_icmpv6_ndp_option_6lowpan_context            |
+//! | RFC 6775 §4.3     | Authoritative Border Router (35)     | parse_icmpv6_ndp_option_abro                       |
+//! | RFC 8910 §2.3     | Captive-Portal URI (Type 37)         | parse_icmpv6_ndp_option_captive_portal             |
+//! | IANA registry     | Option names                         | parse_icmpv6_ndp_option_names                      |
+//! | IANA registry     | ICMPv6 type names                    | icmpv6_type_names                                  |
+//!
+//! # Other ICMPv6 message bodies Coverage
+//!
+//! | Spec              | Description                          | Test                                              |
+//! |-------------------|--------------------------------------|-------------------------------------------------  |
+//! | RFC 2894 §3.1     | Router Renumbering header (138)      | parse_icmpv6_router_renumbering                    |
+//! | RFC 4620 §4       | Node Information Query/Reply (139/140)| parse_icmpv6_node_information                     |
+//! | RFC 3122 §2.1/2.2 | Inverse ND Solicitation/Adv (141/142)| parse_icmpv6_inverse_nd                            |
+//! | RFC 6275 §6.7     | Mobile Prefix Solicitation (146)     | parse_icmpv6_mobile_prefix_solicitation            |
+//! | RFC 6275 §6.8     | Mobile Prefix Advertisement (147)    | parse_icmpv6_mobile_prefix_advertisement           |
+//! | RFC 3971 §6.4.1   | Certification Path Solicitation (148)| parse_icmpv6_certification_path_solicitation      |
+//! | RFC 3971 §6.4.2   | Certification Path Advertisement(149)| parse_icmpv6_certification_path_advertisement     |
+//! | RFC 6775 §4.4     | Duplicate Address Request (157)      | parse_icmpv6_duplicate_address_request             |
+//! | RFC 8505 §4.2     | Extended DAC (158, Code Suffix 2)    | parse_icmpv6_extended_duplicate_address_confirmation |
+//! | RFC 6550 §6.2.1   | RPL DIS                              | parse_icmpv6_rpl_dis                               |
+//! | RFC 6550 §6.2.1   | RPL DIS without options (6 octets)   | parse_icmpv6_rpl_dis_without_options               |
+//! | RFC 4443 §2.1     | Other types shorter than 8 octets    | parse_icmpv6_short_non_rpl_is_truncated            |
+//! | RFC 6550 §6.3.1   | RPL DIO                              | parse_icmpv6_rpl_dio_with_dodag_configuration      |
+//! | RFC 6550 §6.7.6   | DODAG Configuration option           | parse_icmpv6_rpl_dio_with_dodag_configuration      |
+//! | RFC 6550 §6.4.1   | RPL DAO with DODAGID                 | parse_icmpv6_rpl_dao_with_target                   |
+//! | RFC 6550 §6.7.7   | RPL Target option                    | parse_icmpv6_rpl_dao_with_target                   |
+//! | RFC 6550 §6.5.1   | RPL DAO-ACK                          | parse_icmpv6_rpl_dao_ack                           |
+//! | RFC 6550 §6.7.1   | Malformed RPL option                 | parse_icmpv6_rpl_option_malformed                  |
+//! | RFC 6550 §6.1     | Secure RPL message kept raw          | parse_icmpv6_rpl_secure_raw                        |
+//! | —                 | Short bodies do not fail             | parse_icmpv6_short_message_bodies                  |
+//! | RFC 6550 §6.7     | RPL option names                     | parse_icmpv6_rpl_option_names                      |
+//! | RFC 6550 §6.4.1/6.5.1 | D flag without room for DODAGID  | parse_icmpv6_rpl_dao_short_dodag_id                |
+//! | RFC 6550 §6.7.1   | RPL option without Length octet      | parse_icmpv6_rpl_option_missing_length             |
 //!
 //! # RFC 4191 (Route Information Option) Coverage
 //!
@@ -75,6 +135,9 @@
 //! |-------------------|--------------------------------------|-------------------------------------------------  |
 //! | §2.1              | Extended Echo Request (Type 160)     | parse_icmpv6_extended_echo_request                 |
 //! | §2.2              | Extended Echo Reply (Type 161)       | parse_icmpv6_extended_echo_reply                   |
+//! | §2, §2.1          | Interface Identification by name     | parse_icmpv6_extended_echo_request_by_name         |
+//! | §2, §2.1          | Interface Identification by index    | parse_icmpv6_extended_echo_request_by_index        |
+//! | §2, §2.1          | Interface Identification by address  | parse_icmpv6_extended_echo_request_by_address      |
 //!
 //! # RFC 2710 / RFC 3810 (MLD) Coverage
 //!
@@ -83,6 +146,9 @@
 //! | RFC 2710 §3.6     | MLDv1 Query (Type 130)               | parse_icmpv6_mld_query_v1                          |
 //! | RFC 3810 §5.1     | MLDv2 Query (Type 130)               | parse_icmpv6_mld_query_v2                          |
 //! | RFC 3810 §5.1     | MLDv2 Query with sources             | parse_icmpv6_mld_query_v2_with_sources             |
+//! | RFC 9777 §5.1.3   | Max Resp Code floating point         | parse_icmpv6_mldv2_query_decoded_intervals         |
+//! | RFC 9777 §5.1.9   | QQIC floating point                  | parse_icmpv6_mldv2_query_decoded_intervals         |
+//! | RFC 9777 §5.1.3/9 | Codes below the float threshold      | parse_icmpv6_mldv2_query_linear_intervals          |
 //! | RFC 2710 §3.7     | MLDv1 Report (Type 131)              | parse_icmpv6_mld_report_v1                         |
 //! | RFC 2710 §3.8     | MLDv1 Done (Type 132)                | parse_icmpv6_mld_done                              |
 //! | —                 | MLD Query truncated                  | parse_icmpv6_mld_query_truncated                   |
@@ -109,7 +175,7 @@
 //! | §6.5              | HA Reply multiple addresses          | parse_icmpv6_home_agent_reply_multiple_addresses   |
 
 use packet_dissector::dissector::{DispatchHint, Dissector};
-use packet_dissector::field::FieldValue;
+use packet_dissector::field::{Field, FieldValue};
 use packet_dissector::packet::DissectBuffer;
 
 use packet_dissector::dissectors::icmpv6::Icmpv6Dissector;
@@ -2128,4 +2194,1149 @@ fn parse_icmpv6_ndp_option_dnssl_truncated_label() {
         !has_domains,
         "no domain should be emitted for a truncated label"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for nested containers
+// ---------------------------------------------------------------------------
+
+/// Nested fields of a container field.
+fn nested<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>, field: &Field<'pkt>) -> &'a [Field<'pkt>] {
+    match &field.value {
+        FieldValue::Object(r) | FieldValue::Array(r) => buf.nested_fields(r),
+        other => panic!("expected a container, got {other:?}"),
+    }
+}
+
+fn child<'a, 'pkt>(fields: &'a [Field<'pkt>], name: &str) -> Option<&'a FieldValue<'pkt>> {
+    fields.iter().find(|f| f.name() == name).map(|f| &f.value)
+}
+
+/// Build an invoking IPv6 packet: 40-byte header plus `payload`.
+fn build_invoking_ipv6(next_header: u8, payload: &[u8]) -> Vec<u8> {
+    let mut hdr = vec![0u8; 40];
+    hdr[0] = 0x60;
+    hdr[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    hdr[6] = next_header;
+    hdr[8] = 0x20;
+    hdr[9] = 0x01;
+    hdr[24] = 0x20;
+    hdr[25] = 0x01;
+    hdr.extend_from_slice(payload);
+    hdr
+}
+
+// ---------------------------------------------------------------------------
+// RFC 4884 — Extension Structure in ICMPv6 error messages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_icmpv6_time_exceeded_with_extensions() {
+    // RFC 4884, Section 4.5 — Length 16 (64-bit words) = 128 octets of
+    // original datagram, followed by an Extension Structure (Section 7) with
+    // an MPLS Label Stack object (RFC 4950, Section 3).
+    let mut data = build_icmpv6_packet(3, 0, [16, 0, 0, 0]);
+    let mut original = build_invoking_ipv6(17, &[0x30, 0x39, 0x82, 0x9A, 0, 8, 0, 0]);
+    original.resize(128, 0);
+    data.extend_from_slice(&original);
+    data.extend_from_slice(&[
+        0x20, 0x00, 0x00, 0x00, // version 2, reserved, checksum
+        0x00, 0x08, 0x01, 0x01, // object length 8, class 1, c-type 1
+        0x12, 0x34, 0x5B, 0x40, // label 0x12345, TC 5, S 1, TTL 64
+    ]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+
+    let invoking = buf.field_by_name(layer, "invoking_packet").unwrap();
+    assert_eq!(invoking.range, 8..136);
+
+    let ext = buf.field_by_name(layer, "extensions").unwrap();
+    assert_eq!(ext.range, 136..148);
+    let ext_fields = nested(&buf, ext);
+    assert_eq!(child(ext_fields, "version"), Some(&FieldValue::U8(2)));
+    assert_eq!(child(ext_fields, "class_num"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(ext_fields, "label"), Some(&FieldValue::U32(0x12345)));
+    assert_eq!(child(ext_fields, "tc"), Some(&FieldValue::U8(5)));
+    assert_eq!(child(ext_fields, "s"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(ext_fields, "ttl"), Some(&FieldValue::U8(64)));
+}
+
+#[test]
+fn parse_icmpv6_destination_unreachable_long_original_datagram() {
+    // RFC 4884, Section 4.4 — Length 18 = 144 octets of original datagram.
+    let mut data = build_icmpv6_packet(1, 4, [18, 0, 0, 0]);
+    let mut original = build_invoking_ipv6(59, &[]);
+    original.resize(144, 0);
+    data.extend_from_slice(&original);
+    data.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]); // header, no objects
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(
+        buf.field_by_name(layer, "invoking_packet").unwrap().range,
+        8..152
+    );
+    assert_eq!(
+        buf.field_by_name(layer, "extensions").unwrap().range,
+        152..156
+    );
+}
+
+#[test]
+fn parse_icmpv6_time_exceeded_length_without_extension() {
+    // A Length that leaves no room for an Extension Header: the whole
+    // remainder stays the invoking packet.
+    let mut data = build_icmpv6_packet(3, 0, [16, 0, 0, 0]);
+    data.extend_from_slice(&build_invoking_ipv6(59, &[0; 20]));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert!(buf.field_by_name(layer, "extensions").is_none());
+    assert_eq!(
+        buf.field_by_name(layer, "invoking_packet").unwrap().range,
+        8..68
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Invoking packet transport ports
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_icmpv6_invoking_packet_udp_ports() {
+    // RFC 4443, Section 3.1 — the invoking packet starts with the IPv6
+    // header; for UDP (Next Header 17) the next 4 octets are the ports.
+    let mut data = build_icmpv6_packet(1, 4, [0; 4]);
+    data.extend_from_slice(&build_invoking_ipv6(
+        17,
+        &[0x30, 0x39, 0x82, 0x9A, 0, 8, 0, 0],
+    ));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let invoking = nested(&buf, buf.field_by_name(layer, "invoking_packet").unwrap());
+    assert_eq!(child(invoking, "src_port"), Some(&FieldValue::U16(12345)));
+    assert_eq!(child(invoking, "dst_port"), Some(&FieldValue::U16(33434)));
+    let port = invoking.iter().find(|f| f.name() == "src_port").unwrap();
+    assert_eq!(port.range, 48..50);
+}
+
+#[test]
+fn parse_icmpv6_invoking_packet_tcp_ports() {
+    // RFC 4443, Section 3.3 — TCP (Next Header 6) ports.
+    let mut data = build_icmpv6_packet(3, 0, [0; 4]);
+    data.extend_from_slice(&build_invoking_ipv6(
+        6,
+        &[0xC0, 0x00, 0x01, 0xBB, 0, 0, 0, 1],
+    ));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let invoking = nested(&buf, buf.field_by_name(layer, "invoking_packet").unwrap());
+    assert_eq!(child(invoking, "src_port"), Some(&FieldValue::U16(0xC000)));
+    assert_eq!(child(invoking, "dst_port"), Some(&FieldValue::U16(443)));
+}
+
+#[test]
+fn parse_icmpv6_invoking_packet_other_next_header() {
+    // Other Next Header values keep the octets after the IPv6 header raw.
+    let mut data = build_icmpv6_packet(1, 0, [0; 4]);
+    data.extend_from_slice(&build_invoking_ipv6(58, &[128, 0, 0, 0]));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let invoking = nested(&buf, buf.field_by_name(layer, "invoking_packet").unwrap());
+    assert_eq!(child(invoking, "src_port"), None);
+    assert_eq!(
+        child(invoking, "transport_data"),
+        Some(&FieldValue::Bytes(&[128, 0, 0, 0]))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8335 — Extended Echo Request Interface Identification Object
+// ---------------------------------------------------------------------------
+
+fn build_extended_echo_request(object: &[u8]) -> Vec<u8> {
+    let mut data = build_icmpv6_packet(160, 0, [0x12, 0x34, 0x01, 0x01]);
+    data.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]);
+    data.extend_from_slice(object);
+    data
+}
+
+#[test]
+fn parse_icmpv6_extended_echo_request_by_name() {
+    // RFC 8335, Section 2.1 — C-Type 1: interface name, NUL padded.
+    let data =
+        build_extended_echo_request(&[0x00, 0x0C, 0x03, 0x01, b'e', b't', b'h', b'0', 0, 0, 0, 0]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let ext = buf.field_by_name(layer, "extensions").unwrap();
+    assert_eq!(ext.range, 8..24);
+    let ext_fields = nested(&buf, ext);
+    assert_eq!(child(ext_fields, "class_num"), Some(&FieldValue::U8(3)));
+    assert_eq!(
+        child(ext_fields, "interface_name"),
+        Some(&FieldValue::Bytes(b"eth0\0\0\0\0"))
+    );
+}
+
+#[test]
+fn parse_icmpv6_extended_echo_request_by_index() {
+    // RFC 8335, Section 2.1 — C-Type 2: "the length is equal to 8 and the
+    // payload contains the if-index".
+    let data = build_extended_echo_request(&[0x00, 0x08, 0x03, 0x02, 0, 0, 0, 7]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let ext_fields = nested(&buf, buf.field_by_name(layer, "extensions").unwrap());
+    assert_eq!(child(ext_fields, "if_index"), Some(&FieldValue::U32(7)));
+}
+
+#[test]
+fn parse_icmpv6_extended_echo_request_by_address() {
+    // RFC 8335, Section 2.1 — C-Type 3: AFI 2 (IPv6), Address Length 16.
+    let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut object = vec![0x00, 0x18, 0x03, 0x03, 0x00, 0x02, 16, 0];
+    object.extend_from_slice(&addr);
+    let data = build_extended_echo_request(&object);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let ext_fields = nested(&buf, buf.field_by_name(layer, "extensions").unwrap());
+    assert_eq!(child(ext_fields, "afi"), Some(&FieldValue::U16(2)));
+    assert_eq!(
+        child(ext_fields, "address_length"),
+        Some(&FieldValue::U8(16))
+    );
+    assert_eq!(
+        child(ext_fields, "ipv6_address"),
+        Some(&FieldValue::Ipv6Addr(addr))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 9777 (obsoletes RFC 3810) — decoded MLDv2 Query intervals
+// ---------------------------------------------------------------------------
+
+fn build_mldv2_query(max_resp_code: u16, qqic: u8) -> Vec<u8> {
+    let mut data = build_icmpv6_packet(130, 0, [0; 4]);
+    data[4..6].copy_from_slice(&max_resp_code.to_be_bytes());
+    data.extend_from_slice(&[0u8; 16]); // multicast address (general query)
+    data.extend_from_slice(&[0x02, qqic, 0x00, 0x00]); // S=0, QRV=2, QQIC, N=0
+    data
+}
+
+#[test]
+fn parse_icmpv6_mldv2_query_decoded_intervals() {
+    // RFC 9777, Section 5.1.3 — "Maximum Response Delay = (mant | 0x1000)
+    // << (exp+3)"; 0x8010 → exp 0, mant 0x010 → 0x1010 << 3 = 32896 ms.
+    // RFC 9777, Section 5.1.9 — "QQI = (mant | 0x10) << (exp + 3)";
+    // 0x90 → exp 1, mant 0 → 0x10 << 4 = 256 s.
+    let data = build_mldv2_query(0x8010, 0x90);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u16(layer, "max_response_delay"), Some(0x8010));
+    assert_eq!(buf.field_u32(layer, "max_response_delay_ms"), Some(32896));
+    assert_eq!(buf.field_u8(layer, "qqic"), Some(0x90));
+    assert_eq!(buf.field_u16(layer, "qqi"), Some(256));
+    assert_eq!(
+        buf.field_by_name(layer, "max_response_delay_ms")
+            .unwrap()
+            .range,
+        4..6
+    );
+}
+
+#[test]
+fn parse_icmpv6_mldv2_query_linear_intervals() {
+    // RFC 9777, Sections 5.1.3 / 5.1.9 — values below 32768 / 128 are used
+    // as is. The largest float values still fit the decoded fields.
+    let data = build_mldv2_query(10000, 125);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u32(layer, "max_response_delay_ms"), Some(10000));
+    assert_eq!(buf.field_u16(layer, "qqi"), Some(125));
+
+    let data = build_mldv2_query(0xFFFF, 0xFF);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(
+        buf.field_u32(layer, "max_response_delay_ms"),
+        Some(0x1FFF << 10)
+    );
+    assert_eq!(buf.field_u16(layer, "qqi"), Some(0x1F << 10));
+}
+
+// ---------------------------------------------------------------------------
+// NDP options beyond RFC 4861 / type names
+// ---------------------------------------------------------------------------
+
+/// Dissect a Neighbor Solicitation carrying `options` and return the nested
+/// fields of each option object.
+fn ns_with_options(options: &[u8]) -> Vec<u8> {
+    let mut data = build_icmpv6_packet(135, 0, [0; 4]);
+    data.extend_from_slice(&[
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55,
+    ]);
+    data.extend_from_slice(options);
+    data
+}
+
+fn first_option<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>) -> &'a [Field<'pkt>] {
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let options = buf.field_by_name(layer, "options").unwrap();
+    let children = nested(buf, options);
+    nested(buf, &children[0])
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_nonce() {
+    // RFC 3971, Section 5.3.2 — the example from the issue: an enhanced-DAD
+    // Neighbor Solicitation (RFC 7527) with a 6-octet Nonce.
+    let data = ns_with_options(&[0x0e, 0x01, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "type"), Some(&FieldValue::U8(14)));
+    assert_eq!(
+        child(opt, "nonce"),
+        Some(&FieldValue::Bytes(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6]))
+    );
+    assert_eq!(child(opt, "value"), None);
+    let idx = buf
+        .fields()
+        .iter()
+        .position(|f| f.name() == "option")
+        .unwrap() as u32;
+    assert_eq!(buf.resolve_container_display_name(idx), Some("Nonce"));
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_advertisement_interval() {
+    // RFC 6275, Section 7.3 — Reserved (16), Advertisement Interval (32, ms).
+    let data = ns_with_options(&build_ndp_option(7, &[0, 0, 0, 0, 0x0B, 0xB8]));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(
+        child(first_option(&buf), "advertisement_interval"),
+        Some(&FieldValue::U32(3000))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_home_agent_info() {
+    // RFC 6275, Section 7.4 — Reserved, Home Agent Preference (signed 16),
+    // Home Agent Lifetime (16, seconds).
+    let data = ns_with_options(&build_ndp_option(8, &[0, 0, 0xFF, 0xFE, 0x07, 0x08]));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(
+        child(opt, "home_agent_preference"),
+        Some(&FieldValue::I32(-2))
+    );
+    assert_eq!(
+        child(opt, "home_agent_lifetime"),
+        Some(&FieldValue::U16(1800))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_address_list() {
+    // RFC 3122, Section 3.1 — 6 octets Reserved, then IPv6 addresses.
+    let a = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    for opt_type in [9u8, 10u8] {
+        let mut body = vec![0u8; 6];
+        body.extend_from_slice(&a);
+        let data = ns_with_options(&build_ndp_option(opt_type, &body));
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+        let opt = first_option(&buf);
+        let addrs = opt.iter().find(|f| f.name() == "addresses").unwrap();
+        let addrs = nested(&buf, addrs);
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].value, FieldValue::Ipv6Addr(a));
+    }
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_cga() {
+    // RFC 3971, Section 5.1 — Pad Length, Reserved, CGA Parameters, Padding.
+    let data = ns_with_options(&[0x0b, 0x02, 0x03, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "pad_length"), Some(&FieldValue::U8(3)));
+    assert_eq!(
+        child(opt, "cga_parameters"),
+        Some(&FieldValue::Bytes(&[1, 2, 3, 4, 5, 6, 7, 8, 9]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_rsa_signature() {
+    // RFC 3971, Section 5.2 — Reserved (16), Key Hash (128), Digital
+    // Signature and Padding.
+    let mut opt = vec![0x0c, 0x04, 0x00, 0x00];
+    opt.extend_from_slice(&[0x11; 16]);
+    opt.extend_from_slice(&[0x22; 12]);
+    let data = ns_with_options(&opt);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(
+        child(opt, "key_hash"),
+        Some(&FieldValue::Bytes(&[0x11; 16]))
+    );
+    assert_eq!(
+        child(opt, "digital_signature"),
+        Some(&FieldValue::Bytes(&[0x22; 12]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_timestamp() {
+    // RFC 3971, Section 5.3.1 — Reserved (48), Timestamp (64).
+    let mut opt = vec![0x0d, 0x02, 0, 0, 0, 0, 0, 0];
+    opt.extend_from_slice(&0x0000_5F5E_1000_8000u64.to_be_bytes());
+    let data = ns_with_options(&opt);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(
+        child(first_option(&buf), "timestamp"),
+        Some(&FieldValue::U64(0x0000_5F5E_1000_8000))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_trust_anchor() {
+    // RFC 3971, Section 6.4.3 — Name Type, Pad Length, Name, Padding.
+    let data = ns_with_options(&[0x0f, 0x01, 0x02, 0x02, b'a', b'b', 0, 0]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "name_type"), Some(&FieldValue::U8(2)));
+    assert_eq!(child(opt, "pad_length"), Some(&FieldValue::U8(2)));
+    assert_eq!(child(opt, "name"), Some(&FieldValue::Bytes(b"ab")));
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_certificate() {
+    // RFC 3971, Section 6.4.4 — Cert Type, Reserved, Certificate, Padding.
+    let data = ns_with_options(&[0x10, 0x01, 0x01, 0x00, 0x30, 0x82, 0x01, 0x00]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "cert_type"), Some(&FieldValue::U8(1)));
+    assert_eq!(
+        child(opt, "certificate"),
+        Some(&FieldValue::Bytes(&[0x30, 0x82, 0x01, 0x00]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_pvd_id() {
+    // RFC 8801, Section 3.1 — the "example.org" example: H=1, Delay=1,
+    // Sequence Number 123, PvD ID FQDN, Padding.
+    let mut opt = vec![21, 3, 0x80, 0x01, 0x00, 0x7B];
+    opt.extend_from_slice(b"\x07example\x03org\x00");
+    opt.resize(24, 0);
+    let data = ns_with_options(&opt);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "pvd_flags"), Some(&FieldValue::U16(0x8001)));
+    assert_eq!(child(opt, "delay"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(opt, "sequence_number"), Some(&FieldValue::U16(123)));
+    assert_eq!(
+        child(opt, "pvd_id"),
+        Some(&FieldValue::Bytes(b"\x07example\x03org\x00"))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_ra_flags_extension() {
+    // RFC 5175, Section 4 — 48 bits of flags after Type and Length.
+    let data = ns_with_options(&[26, 1, 0x80, 0, 0, 0, 0, 1]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(
+        child(first_option(&buf), "ra_flags"),
+        Some(&FieldValue::Bytes(&[0x80, 0, 0, 0, 0, 1]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_address_registration() {
+    // RFC 8505, Section 4.1 (EARO, extends the RFC 6775 ARO) — Status,
+    // Opaque, Rsvd|I|R|T, TID, Registration Lifetime, ROVR.
+    let data = ns_with_options(&[
+        33, 2, 0x00, 0x05, 0x03, 0x2A, 0x00, 0x3C, //
+        0x02, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55,
+    ]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "status"), Some(&FieldValue::U8(0)));
+    assert_eq!(child(opt, "opaque"), Some(&FieldValue::U8(5)));
+    assert_eq!(child(opt, "aro_flags"), Some(&FieldValue::U8(3)));
+    assert_eq!(child(opt, "tid"), Some(&FieldValue::U8(0x2A)));
+    assert_eq!(
+        child(opt, "registration_lifetime"),
+        Some(&FieldValue::U16(60))
+    );
+    assert_eq!(
+        child(opt, "rovr"),
+        Some(&FieldValue::Bytes(&[
+            0x02, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55
+        ]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_6lowpan_context() {
+    // RFC 6775, Section 4.2 — Context Length 64, C=1, CID 3, Valid
+    // Lifetime (units of 60 s), Context Prefix (8 octets with Length 2).
+    let data = ns_with_options(&[
+        34, 2, 64, 0x13, 0x00, 0x00, 0x00, 0x0A, //
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1,
+    ]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "context_length"), Some(&FieldValue::U8(64)));
+    assert_eq!(child(opt, "compression_flag"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(opt, "cid"), Some(&FieldValue::U8(3)));
+    assert_eq!(
+        child(opt, "valid_lifetime_minutes"),
+        Some(&FieldValue::U16(10))
+    );
+    assert_eq!(
+        child(opt, "context_prefix"),
+        Some(&FieldValue::Ipv6Addr([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0
+        ]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_abro() {
+    // RFC 6775, Section 4.3 — Version Low, Version High, Valid Lifetime,
+    // 6LBR Address.
+    let lbr = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b,
+    ];
+    let mut opt = vec![35, 3, 0x00, 0x02, 0x00, 0x01, 0x27, 0x10];
+    opt.extend_from_slice(&lbr);
+    let data = ns_with_options(&opt);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "version_low"), Some(&FieldValue::U16(2)));
+    assert_eq!(child(opt, "version_high"), Some(&FieldValue::U16(1)));
+    assert_eq!(
+        child(opt, "valid_lifetime_minutes"),
+        Some(&FieldValue::U16(10000))
+    );
+    assert_eq!(
+        child(opt, "border_router_address"),
+        Some(&FieldValue::Ipv6Addr(lbr))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_captive_portal() {
+    // RFC 8910, Section 2.3 — URI padded with NUL to a multiple of 8.
+    let mut opt = vec![37, 3];
+    opt.extend_from_slice(b"https://cp.example/");
+    opt.resize(24, 0);
+    let data = ns_with_options(&opt);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(
+        child(first_option(&buf), "uri"),
+        Some(&FieldValue::Str("https://cp.example/"))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_names() {
+    // IANA "IPv6 Neighbor Discovery Option Formats" registry.
+    let cases: &[(u8, &str)] = &[
+        (7, "Advertisement Interval"),
+        (8, "Home Agent Information"),
+        (9, "Source Address List"),
+        (10, "Target Address List"),
+        (11, "CGA"),
+        (12, "RSA Signature"),
+        (13, "Timestamp"),
+        (15, "Trust Anchor"),
+        (16, "Certificate"),
+        (21, "PvD ID Router Advertisement"),
+        (26, "RA Flags Extension"),
+        (33, "Address Registration"),
+        (34, "6LoWPAN Context"),
+        (35, "Authoritative Border Router"),
+        (37, "Captive-Portal"),
+    ];
+    for &(t, name) in cases {
+        let data = ns_with_options(&[t, 1, 0, 0, 0, 0, 0, 0]);
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+        let idx = buf
+            .fields()
+            .iter()
+            .position(|f| f.name() == "option")
+            .unwrap() as u32;
+        assert_eq!(
+            buf.resolve_container_display_name(idx),
+            Some(name),
+            "type {t}"
+        );
+    }
+}
+
+#[test]
+fn icmpv6_type_names() {
+    // IANA "ICMPv6 'type' Numbers" registry.
+    let cases: &[(u8, &str)] = &[
+        (130, "Multicast Listener Query"),
+        (131, "Multicast Listener Report"),
+        (132, "Multicast Listener Done"),
+        (137, "Redirect"),
+        (138, "Router Renumbering"),
+        (139, "ICMP Node Information Query"),
+        (140, "ICMP Node Information Response"),
+        (141, "Inverse Neighbor Discovery Solicitation Message"),
+        (142, "Inverse Neighbor Discovery Advertisement Message"),
+        (143, "Version 2 Multicast Listener Report"),
+        (144, "Home Agent Address Discovery Request Message"),
+        (145, "Home Agent Address Discovery Reply Message"),
+        (146, "Mobile Prefix Solicitation"),
+        (147, "Mobile Prefix Advertisement"),
+        (148, "Certification Path Solicitation Message"),
+        (149, "Certification Path Advertisement Message"),
+        (151, "Multicast Router Advertisement"),
+        (152, "Multicast Router Solicitation"),
+        (153, "Multicast Router Termination"),
+        (
+            150,
+            "ICMP messages utilized by experimental mobility protocols such as Seamoby",
+        ),
+        (154, "FMIPv6 Messages"),
+        (155, "RPL Control Message"),
+        (156, "ILNPv6 Locator Update Message"),
+        (159, "MPL Control Message"),
+        (157, "Duplicate Address Request"),
+        (158, "Duplicate Address Confirmation"),
+        (160, "Extended Echo Request"),
+        (161, "Extended Echo Reply"),
+    ];
+    for &(t, name) in cases {
+        let mut data = build_icmpv6_packet(t, 0, [0; 4]);
+        // Fixed part only, so no NDP options follow.
+        data.resize(
+            match t {
+                130..=132 => 24,
+                137 => 40,
+                _ => 8,
+            },
+            0,
+        );
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("ICMPv6").unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "type_name"),
+            Some(name),
+            "type {t}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Other ICMPv6 message bodies
+// ---------------------------------------------------------------------------
+
+fn dissect_icmpv6(data: &[u8]) -> DissectBuffer<'_> {
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(data, &mut buf, 0).unwrap();
+    buf
+}
+
+#[test]
+fn parse_icmpv6_router_renumbering() {
+    // RFC 2894, Section 3.1 — SequenceNumber, SegmentNumber, Flags,
+    // MaxDelay, reserved, then the message body.
+    let mut data = build_icmpv6_packet(138, 0, [0, 0, 0, 7]);
+    data.extend_from_slice(&[0x02, 0x80, 0x03, 0xE8, 0, 0, 0, 0]);
+    data.extend_from_slice(&[0xAA; 4]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u32(layer, "rr_sequence_number"), Some(7));
+    assert_eq!(buf.field_u8(layer, "segment_number"), Some(2));
+    assert_eq!(buf.field_u8(layer, "flags"), Some(0x80));
+    assert_eq!(buf.field_u16(layer, "max_delay"), Some(1000));
+    assert_eq!(buf.field_bytes(layer, "data"), Some(&[0xAA; 4][..]));
+}
+
+#[test]
+fn parse_icmpv6_node_information() {
+    // RFC 4620, Section 4 — Qtype, Flags, Nonce (64 bits), Data.
+    for t in [139u8, 140u8] {
+        let mut data = build_icmpv6_packet(t, 0, [0x00, 0x02, 0x00, 0x01]);
+        data.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        data.extend_from_slice(b"\x04host\x00");
+        let buf = dissect_icmpv6(&data);
+        let layer = buf.layer_by_name("ICMPv6").unwrap();
+        assert_eq!(buf.field_u16(layer, "qtype"), Some(2));
+        assert_eq!(buf.field_u16(layer, "ni_flags"), Some(1));
+        assert_eq!(
+            buf.field_bytes(layer, "nonce"),
+            Some(&[1, 2, 3, 4, 5, 6, 7, 8][..])
+        );
+        assert_eq!(buf.field_bytes(layer, "data"), Some(&b"\x04host\x00"[..]));
+    }
+}
+
+#[test]
+fn parse_icmpv6_inverse_nd() {
+    // RFC 3122, Sections 2.1 / 2.2 — Reserved (32 bits) then options.
+    for t in [141u8, 142u8] {
+        let mut data = build_icmpv6_packet(t, 0, [0; 4]);
+        data.extend_from_slice(&build_ndp_option(1, &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]));
+        let buf = dissect_icmpv6(&data);
+        let opt = first_option(&buf);
+        assert_eq!(child(opt, "type"), Some(&FieldValue::U8(1)));
+    }
+}
+
+#[test]
+fn parse_icmpv6_mobile_prefix_solicitation() {
+    // RFC 6275, Section 6.7 — Identifier, Reserved.
+    let data = build_icmpv6_packet(146, 0, [0x12, 0x34, 0, 0]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u16(layer, "identifier"), Some(0x1234));
+}
+
+#[test]
+fn parse_icmpv6_mobile_prefix_advertisement() {
+    // RFC 6275, Section 6.8 — Identifier, M|O|Reserved, Options.
+    let mut data = build_icmpv6_packet(147, 0, [0x12, 0x34, 0xC0, 0]);
+    data.extend_from_slice(&build_ndp_option(7, &[0, 0, 0, 0, 0x03, 0xE8]));
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u16(layer, "identifier"), Some(0x1234));
+    assert_eq!(buf.field_u8(layer, "flags"), Some(0xC0));
+    assert_eq!(
+        child(first_option(&buf), "advertisement_interval"),
+        Some(&FieldValue::U32(1000))
+    );
+}
+
+#[test]
+fn parse_icmpv6_certification_path_solicitation() {
+    // RFC 3971, Section 6.4.1 — Identifier, Component, Options.
+    let mut data = build_icmpv6_packet(148, 0, [0x00, 0x09, 0xFF, 0xFF]);
+    data.extend_from_slice(&[0x0f, 0x01, 0x02, 0x02, b'a', b'b', 0, 0]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u16(layer, "identifier"), Some(9));
+    assert_eq!(buf.field_u16(layer, "component"), Some(0xFFFF));
+    assert_eq!(
+        child(first_option(&buf), "name_type"),
+        Some(&FieldValue::U8(2))
+    );
+}
+
+#[test]
+fn parse_icmpv6_certification_path_advertisement() {
+    // RFC 3971, Section 6.4.2 — Identifier, All Components, Component,
+    // Reserved, Options.
+    let mut data = build_icmpv6_packet(149, 0, [0x00, 0x09, 0x00, 0x02]);
+    data.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    data.extend_from_slice(&[0x10, 0x01, 0x01, 0x00, 0x30, 0x82, 0x01, 0x00]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u16(layer, "all_components"), Some(2));
+    assert_eq!(buf.field_u16(layer, "component"), Some(1));
+    assert_eq!(
+        child(first_option(&buf), "cert_type"),
+        Some(&FieldValue::U8(1))
+    );
+}
+
+#[test]
+fn parse_icmpv6_duplicate_address_request() {
+    // RFC 6775, Section 4.4 — Status, Reserved, Registration Lifetime,
+    // EUI-64, Registered Address.
+    let reg = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42,
+    ];
+    let mut data = build_icmpv6_packet(157, 0, [0x00, 0x00, 0x00, 0x3C]);
+    data.extend_from_slice(&[0x02, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55]);
+    data.extend_from_slice(&reg);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "status"), Some(0));
+    assert!(buf.field_by_name(layer, "tid").is_none());
+    assert_eq!(buf.field_u16(layer, "registration_lifetime"), Some(60));
+    assert_eq!(
+        buf.field_bytes(layer, "rovr"),
+        Some(&[0x02, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55][..])
+    );
+    assert_eq!(
+        buf.field_by_name(layer, "registered_address")
+            .unwrap()
+            .value,
+        FieldValue::Ipv6Addr(reg)
+    );
+}
+
+#[test]
+fn parse_icmpv6_extended_duplicate_address_confirmation() {
+    // RFC 8505, Section 4.2 — Code Suffix 2 means a 128-bit ROVR and the
+    // second octet is the TID.
+    let reg = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42,
+    ];
+    let mut data = build_icmpv6_packet(158, 0x02, [0x01, 0x07, 0x00, 0x3C]);
+    data.extend_from_slice(&[0xAB; 16]);
+    data.extend_from_slice(&reg);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "status"), Some(1));
+    assert_eq!(buf.field_u8(layer, "tid"), Some(7));
+    assert_eq!(buf.field_bytes(layer, "rovr"), Some(&[0xAB; 16][..]));
+    assert_eq!(
+        buf.field_by_name(layer, "registered_address")
+            .unwrap()
+            .range,
+        24..40
+    );
+}
+
+#[test]
+fn parse_icmpv6_rpl_dis() {
+    // RFC 6550, Section 6.2.1 — Flags, Reserved, Options (here Pad1).
+    let data = build_icmpv6_packet(155, 0x00, [0x00, 0x00, 0x00, 0x00]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "rpl_flags"), Some(0));
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    // Two Pad1 options (each a one-field object).
+    assert_eq!(opts.iter().filter(|f| f.name() == "option").count(), 2);
+}
+
+#[test]
+fn parse_icmpv6_rpl_dio_with_dodag_configuration() {
+    // RFC 6550, Section 6.3.1 — DIO base object, then a DODAG Configuration
+    // option (Section 6.7.6).
+    let dodag = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut data = build_icmpv6_packet(155, 0x01, [0x1E, 0x02, 0x01, 0x00]);
+    data.extend_from_slice(&[0x88 | 0x03, 0x05, 0x00, 0x00]); // G=1, MOP=1, Prf=3
+    data.extend_from_slice(&dodag);
+    data.extend_from_slice(&[
+        0x04,
+        0x0E,
+        0x08 | 0x01,
+        0x08, // DODAG Configuration, A=1, PCS=1, DIOIntDoubl 8
+        0x0C,
+        0x0A,
+        0x08,
+        0x00, // DIOIntMin 12, DIORedun 10, MaxRankIncrease 0x0800
+        0x01,
+        0x00,
+        0x00,
+        0x01, // MinHopRankIncrease 256, OCP 1
+        0x00,
+        0x1E,
+        0x00,
+        0x3C, // Reserved, Def. Lifetime 30, Lifetime Unit 60
+    ]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "rpl_instance_id"), Some(0x1E));
+    assert_eq!(buf.field_u8(layer, "version_number"), Some(2));
+    assert_eq!(buf.field_u16(layer, "rank"), Some(0x0100));
+    assert_eq!(buf.field_u8(layer, "grounded"), Some(1));
+    assert_eq!(buf.field_u8(layer, "mop"), Some(1));
+    assert_eq!(buf.field_u8(layer, "prf"), Some(3));
+    assert_eq!(buf.field_u8(layer, "dtsn"), Some(5));
+    assert_eq!(
+        buf.field_by_name(layer, "dodag_id").unwrap().value,
+        FieldValue::Ipv6Addr(dodag)
+    );
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    let opt = nested(&buf, &opts[0]);
+    assert_eq!(child(opt, "authentication"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(opt, "pcs"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(opt, "dio_int_doublings"), Some(&FieldValue::U8(8)));
+    assert_eq!(child(opt, "dio_int_min"), Some(&FieldValue::U8(12)));
+    assert_eq!(child(opt, "dio_redundancy"), Some(&FieldValue::U8(10)));
+    assert_eq!(
+        child(opt, "max_rank_increase"),
+        Some(&FieldValue::U16(0x0800))
+    );
+    assert_eq!(
+        child(opt, "min_hop_rank_increase"),
+        Some(&FieldValue::U16(256))
+    );
+    assert_eq!(child(opt, "ocp"), Some(&FieldValue::U16(1)));
+    assert_eq!(child(opt, "default_lifetime"), Some(&FieldValue::U8(30)));
+    assert_eq!(child(opt, "lifetime_unit"), Some(&FieldValue::U16(60)));
+    let idx = buf
+        .fields()
+        .iter()
+        .position(|f| f.name() == "option")
+        .unwrap() as u32;
+    assert_eq!(
+        buf.resolve_container_display_name(idx),
+        Some("DODAG Configuration")
+    );
+}
+
+#[test]
+fn parse_icmpv6_rpl_dao_with_target() {
+    // RFC 6550, Section 6.4.1 — K|D flags; D=1 means DODAGID is present.
+    // Section 6.7.7 — RPL Target: Flags, Prefix Length, Target Prefix.
+    let dodag = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut data = build_icmpv6_packet(155, 0x02, [0x1E, 0xC0, 0x00, 0x09]);
+    data.extend_from_slice(&dodag);
+    data.extend_from_slice(&[0x05, 0x0A, 0x00, 0x40, 0xfd, 0, 0, 0, 0, 0, 0, 0]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "rpl_flags"), Some(0xC0));
+    assert_eq!(buf.field_u8(layer, "dao_sequence"), Some(9));
+    assert!(buf.field_by_name(layer, "dodag_id").is_some());
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    let opt = nested(&buf, &opts[0]);
+    assert_eq!(child(opt, "prefix_length"), Some(&FieldValue::U8(64)));
+    assert_eq!(
+        child(opt, "target_prefix"),
+        Some(&FieldValue::Bytes(&[0xfd, 0, 0, 0, 0, 0, 0, 0]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_rpl_dao_ack() {
+    // RFC 6550, Section 6.5.1 — D=0, DAOSequence, Status; no DODAGID.
+    let data = build_icmpv6_packet(155, 0x03, [0x1E, 0x00, 0x09, 0x00]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "dao_sequence"), Some(9));
+    assert_eq!(buf.field_u8(layer, "status"), Some(0));
+    assert!(buf.field_by_name(layer, "dodag_id").is_none());
+    assert!(buf.field_by_name(layer, "rpl_options").is_none());
+}
+
+#[test]
+fn parse_icmpv6_rpl_option_malformed() {
+    // RFC 6550, Section 6.7.1 — an Option Length running past the message
+    // is reported as malformed.
+    let mut data = build_icmpv6_packet(155, 0x00, [0x00, 0x00, 0x04, 0x09]);
+    data.extend_from_slice(&[0x00, 0x00]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    let opt = nested(&buf, &opts[0]);
+    assert_eq!(child(opt, "type"), Some(&FieldValue::U8(4)));
+    assert_eq!(child(opt, "malformed"), Some(&FieldValue::Bytes(&[0, 0])));
+}
+
+#[test]
+fn parse_icmpv6_rpl_secure_raw() {
+    // RFC 6550, Section 6.1 — secure variants (Code 0x80-0x83) carry a
+    // Security section; the body stays raw.
+    let data = build_icmpv6_packet(155, 0x81, [1, 2, 3, 4]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_bytes(layer, "data"), Some(&[1, 2, 3, 4][..]));
+    assert!(buf.field_by_name(layer, "rpl_instance_id").is_none());
+}
+
+#[test]
+fn parse_icmpv6_short_message_bodies() {
+    // Bodies shorter than their fixed fields are kept raw instead of
+    // failing the whole layer.
+    for (t, code) in [
+        (138u8, 0u8),
+        (139, 0),
+        (149, 0),
+        (157, 0),
+        (158, 2),
+        (155, 1),
+    ] {
+        let data = build_icmpv6_packet(t, code, [0; 4]);
+        let buf = dissect_icmpv6(&data);
+        let layer = buf.layer_by_name("ICMPv6").unwrap();
+        assert!(
+            buf.field_by_name(layer, "data").is_some(),
+            "type {t} code {code}"
+        );
+    }
+}
+
+#[test]
+fn parse_icmpv6_rpl_dis_without_options() {
+    // RFC 6550, Section 6.2.1 — the DIS base object is Flags and Reserved
+    // only, so a DIS without options is a 6-octet ICMPv6 message.
+    let data = [155, 0x00, 0x12, 0x34, 0x00, 0x00];
+    let mut buf = DissectBuffer::new();
+    let result = Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(result.bytes_consumed, 6);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "rpl_flags"), Some(0));
+    assert!(buf.field_by_name(layer, "rpl_options").is_none());
+}
+
+#[test]
+fn parse_icmpv6_short_non_rpl_is_truncated() {
+    // Other types still need the 8-octet header (RFC 4443, Section 2.1).
+    let data = [128, 0x00, 0x12, 0x34, 0x00, 0x00];
+    let mut buf = DissectBuffer::new();
+    let err = Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap_err();
+    assert!(matches!(
+        err,
+        packet_dissector::error::PacketError::Truncated {
+            expected: 8,
+            actual: 6
+        }
+    ));
+    // Fewer than 4 octets cannot even hold the RPL common header.
+    let err = Icmpv6Dissector
+        .dissect(&[155, 0, 0], &mut buf, 0)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        packet_dissector::error::PacketError::Truncated {
+            expected: 4,
+            actual: 3
+        }
+    ));
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_pvd_id_with_options() {
+    // RFC 8801, Section 3.1 — RA options after the padded PvD ID FQDN stay
+    // raw in `value`.
+    let mut opt = vec![21, 3, 0x00, 0x00, 0x00, 0x00];
+    opt.extend_from_slice(b"\x01a\x00");
+    opt.resize(16, 0);
+    opt.extend_from_slice(&[0x05, 0x01, 0, 0, 0, 0, 0x05, 0xDC]);
+    let data = ns_with_options(&opt);
+    let buf = dissect_icmpv6(&data);
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "pvd_id"), Some(&FieldValue::Bytes(b"\x01a\x00")));
+    assert_eq!(
+        child(opt, "value"),
+        Some(&FieldValue::Bytes(&[0x05, 0x01, 0, 0, 0, 0, 0x05, 0xDC]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_pvd_id_bad_name() {
+    // RFC 8801, Section 3.1 — "Domain name compression ... MUST NOT be
+    // used"; a name that cannot be walked stays raw.
+    let data = ns_with_options(&[21, 1, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x0C]);
+    let buf = dissect_icmpv6(&data);
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "pvd_id"), None);
+    assert_eq!(child(opt, "value"), Some(&FieldValue::Bytes(&[0xC0, 0x0C])));
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_captive_portal_not_utf8() {
+    let data = ns_with_options(&[37, 1, 0xFF, 0xFE, 0, 0, 0, 0]);
+    let buf = dissect_icmpv6(&data);
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "uri"), None);
+    assert_eq!(
+        child(opt, "value"),
+        Some(&FieldValue::Bytes(&[0xFF, 0xFE, 0, 0, 0, 0]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_rpl_option_names() {
+    // RFC 6550, Sections 6.7.2-6.7.11.
+    let mut data = build_icmpv6_packet(155, 0x00, [0x00, 0x00, 0x00, 0x01]);
+    data.extend_from_slice(&[0x00]); // PadN length 0
+    for t in [2u8, 3, 4, 5, 6, 7, 8, 9, 0x2A] {
+        data.extend_from_slice(&[t, 0x01, 0xEE]);
+    }
+    let buf = dissect_icmpv6(&data);
+    let names: Vec<_> = buf
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name() == "option")
+        .map(|(i, f)| {
+            let FieldValue::Object(range) = &f.value else {
+                panic!("option must be an object");
+            };
+            let name = buf.resolve_container_display_name(i as u32);
+            assert_eq!(name, buf.resolve_nested_display_name(range, "type_name"));
+            name
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            Some("Pad1"),
+            Some("PadN"),
+            Some("DAG Metric Container"),
+            Some("Route Information"),
+            Some("DODAG Configuration"),
+            Some("RPL Target"),
+            Some("Transit Information"),
+            Some("Solicited Information"),
+            Some("Prefix Information"),
+            Some("RPL Target Descriptor"),
+            None,
+        ]
+    );
+    // Options without a decoder, or with a short body, keep `value`.
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    assert!(opts.iter().any(|f| f.name() == "value"));
+}
+
+#[test]
+fn parse_icmpv6_rpl_dao_short_dodag_id() {
+    // RFC 6550, Sections 6.4.1 / 6.5.1 — the D flag announces a DODAGID
+    // that does not fit: the body stays raw.
+    let data = build_icmpv6_packet(155, 0x02, [0x1E, 0x40, 0x00, 0x01]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert!(buf.field_by_name(layer, "rpl_instance_id").is_none());
+    assert_eq!(
+        buf.field_bytes(layer, "data"),
+        Some(&[0x1E, 0x40, 0x00, 0x01][..])
+    );
+
+    let data = build_icmpv6_packet(155, 0x03, [0x1E, 0x80, 0x01, 0x00]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert!(buf.field_by_name(layer, "dao_sequence").is_none());
+}
+
+#[test]
+fn parse_icmpv6_rpl_option_missing_length() {
+    // A non-Pad1 option in the last octet has no Option Length.
+    let data = build_icmpv6_packet(155, 0x00, [0x00, 0x00, 0x00, 0x04]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    let last = opts.iter().rposition(|f| f.name() == "option").unwrap();
+    let opt = nested(&buf, &opts[last]);
+    assert_eq!(child(opt, "type"), Some(&FieldValue::U8(4)));
+    assert_eq!(child(opt, "malformed"), Some(&FieldValue::Bytes(&[])));
 }

@@ -31,3 +31,21 @@ fn zero_alloc_dissect_sll() {
     assert_eq!(fields.len(), 5);
     assert_eq!(fields[4].value, FieldValue::U16(0x0800));
 }
+
+#[test]
+fn zero_alloc_dissect_sll_llc() {
+    // SLL with protocol type 0x0004 followed by an LLC UI header.
+    let raw: &[u8] = &[
+        0x00, 0x02, 0x00, 0x01, 0x00, 0x06, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00, 0x00,
+        0x04, 0x42, 0x42, 0x03,
+    ];
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        LinuxSllDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "SLL LLC dissect allocated {allocs} times");
+    let fields = buf.layer_fields(&buf.layers()[0]);
+    assert_eq!(fields.len(), 8);
+}

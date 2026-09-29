@@ -12,6 +12,7 @@
 //! | Ethernet → IPv4 → TCP (SYN)             | integration_ethernet_ipv4_tcp_syn             |
 //! | Ethernet → ARP                           | integration_ethernet_arp                      |
 //! | Ethernet → LLDP                          | integration_ethernet_lldp                     |
+//! | Ethernet → LLDP (IEEE 802.1 Port VLAN ID TLV)   | integration_ethernet_lldp_org_port_vlan_id    |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -21,6 +22,10 @@
 //! | Ethernet → IPv6 → UDP → DNS             | integration_ethernet_ipv6_udp_dns             |
 //! | Ethernet → IPv4 → SCTP                   | integration_ethernet_ipv4_sctp                |
 //! | Ethernet → IPv4 → SCTP → Diameter (CER)  | integration_ethernet_ipv4_sctp_diameter       |
+//! | Ethernet → IPv4 → SCTP (2 bundled DATA) → Diameter ×2 | integration_ethernet_ipv4_sctp_bundled_data_chunks |
+//! | Ethernet → IPv4 → SCTP (DATA fragment, not dispatched) | integration_ethernet_ipv4_sctp_fragment_not_dispatched |
+//! | Ethernet → IPv4 → SCTP (bundled, 2nd malformed) → Diameter ×2 + Err | integration_ethernet_ipv4_sctp_bundled_error_keeps_other_chunks |
+//! | Ethernet → IPv4 → SCTP (bundled) summary stops at SCTP | integration_ethernet_ipv4_sctp_bundled_summary |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
 //! | 802.1ad QinQ → IPv4 → UDP                | integration_qinq_ipv4_udp                     |
@@ -31,6 +36,7 @@
 //! | Ethernet → IPv6 → UDP → DHCPv6 Solicit    | integration_ethernet_ipv6_udp_dhcpv6_solicit |
 //! | Ethernet → IPv6 → UDP → DHCPv6 Advertise  | integration_ethernet_ipv6_udp_dhcpv6_advertise |
 //! | Ethernet → IPv6 → UDP → DHCPv6 Reply (PD) | integration_ethernet_ipv6_udp_dhcpv6_reply_pd |
+//! | Ethernet → IPv6 → UDP → DHCPv6 DHCPV4-QUERY → DHCP Discover | integration_ethernet_ipv6_udp_dhcpv4_query_dhcp_discover |
 //! | Ethernet → IPv6 → SRv6 → TCP              | integration_ethernet_ipv6_srv6_tcp            |
 //! | Ethernet → IPv6 → SRv6 (3 SIDs) → UDP     | integration_ethernet_ipv6_srv6_multi_seg_udp  |
 //! | Ethernet → IPv6 → SRv6 → IPv4 → TCP       | integration_ethernet_ipv6_srv6_inner_ipv4_tcp |
@@ -51,6 +57,7 @@
 //! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
+//! | Ethernet → IPv4 → UDP → GTPv2-C + piggyback      | integration_ethernet_ipv4_udp_gtpv2c_piggyback      |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
@@ -60,8 +67,17 @@
 //! | Ethernet → IPv4 → GRE → IPv6 → UDP                | integration_ethernet_ipv4_gre_ipv6                   |
 //! | Ethernet → IPv4 → TCP → TLS ClientHello            | ethernet_ipv4_tcp_tls_client_hello                   |
 //! | Ethernet → IPv4 → TCP → TLS Alert                  | ethernet_ipv4_tcp_tls_alert                          |
+//! | Ethernet → IPv4 → TCP → TLS coalesced handshakes   | ethernet_ipv4_tcp_tls_coalesced_server_flight        |
+//! | Ethernet → IPv4 → TCP (443) → non-TLS rejected     | ethernet_ipv4_tcp_non_tls_on_port_443                |
 //! | Ethernet → IPv4 → UDP → STUN Binding Request       | integration_ethernet_ipv4_udp_stun_binding_request   |
+//! | Ethernet → IPv4 → UDP → TURN ChannelData           | integration_ethernet_ipv4_udp_turn_channeldata       |
+//! | Ethernet → IPv4 → TCP → TURN ChannelData ×2        | integration_ethernet_ipv4_tcp_turn_channeldata_pipelined |
+//! | Ethernet → IPv4 → UDP → classic STUN (RFC 3489)    | integration_ethernet_ipv4_udp_classic_stun           |
+//! | Ethernet → IPv4 → TCP → ChannelData split in padding | integration_ethernet_ipv4_tcp_turn_channeldata_split_padding |
+//! | Ethernet → IPv4 → TCP → classic STUN rejected      | integration_ethernet_ipv4_tcp_classic_stun_rejected  |
 //! | Ethernet → IPv4 → GRE (Key) → IPv4 → UDP          | integration_ethernet_ipv4_gre_key_ipv4               |
+//! | Ethernet → IPv4 → Enhanced GRE (v1) → PPP → IPv4 → UDP | integration_ethernet_ipv4_gre_v1_ppp_ipv4       |
+//! | Ethernet → IPv4 → Enhanced GRE (v1, ack only)     | integration_ethernet_ipv4_gre_v1_ack_only            |
 //! | link_type=1 (Ethernet) via dissect_with_link_type  | integration_dissect_with_link_type_ethernet          |
 //! | link_type=0 (NULL, LE/BE) → IPv4/IPv6 → UDP         | integration_link_type_null_ipv4_le, integration_link_type_null_ipv4_be, integration_link_type_null_ipv6 |
 //! | link_type=108 (LOOP) → IPv4 → UDP                   | integration_link_type_loop_ipv4                      |
@@ -74,6 +90,10 @@
 //! | Ethernet → LLC → STP Config BPDU                    | integration_ethernet_llc_stp_config                  |
 //! | Ethernet → LLC → STP TCN BPDU                       | integration_ethernet_llc_stp_tcn                     |
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
+//! | Ethernet → LLC → SNAP (RFC 1042) → IPv4 → ICMP      | integration_ethernet_llc_snap_ipv4_icmp              |
+//! | Ethernet → LLC → SNAP (non-zero OUI) ends the chain | integration_ethernet_llc_snap_other_oui              |
+//! | SLL (protocol 0x0004) → LLC → STP                   | integration_sll_llc_stp                              |
+//! | SLL2 (protocol 0x0004) → LLC → SNAP → IPv4          | integration_sll2_llc_snap_ipv4                       |
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
 //! | Ethernet → MPLS (2 labels) → IPv4 → UDP              | integration_ethernet_mpls_two_labels_ipv4_udp        |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
@@ -86,10 +106,15 @@
 //! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
 //! | Ethernet → IPv4 → UDP → GENEVE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_geneve_ipv4        |
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
+//! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ipv4      |
+//! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ethernet |
+//! | Ethernet → IPv4 → UDP → VXLAN-GBP → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gbp      |
+//! | Ethernet → IPv4 → UDP → VXLAN (I=0) → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_i_flag_clear |
 //! | Ethernet → IPv4 → UDP → L2TP → PPP → IPv4 → UDP          | ethernet_ipv4_udp_l2tp_ppp_ipv4_udp              |
 //! | Ethernet → IPv4 → UDP → L2TP(L) → PPP → IPv4 → UDP      | ethernet_ipv4_udp_l2tp_length_ppp_ipv4_udp       |
 //! | Ethernet → IPv4 → UDP → L2TP (control)                   | ethernet_ipv4_udp_l2tp_control                   |
 //! | Ethernet → IPv4 → L2TPv3 (IP, data)                       | integration_ethernet_ipv4_l2tpv3_ip_data             |
+//! | Ethernet → IPv4 → L2TPv3 (IP, data) → Ethernet → IPv4     | integration_ethernet_ipv4_l2tpv3_ethernet_pw         |
 //! | Ethernet → IPv4 → L2TPv3 (IP, control SCCRQ)              | integration_ethernet_ipv4_l2tpv3_ip_control          |
 //! | Ethernet → IPv4 → UDP → L2TPv3-UDP (control SCCRP)        | integration_ethernet_ipv4_udp_l2tpv3_control         |
 //! | Ethernet → IPv4 → UDP → L2TPv3-UDP (data)                 | integration_ethernet_ipv4_udp_l2tpv3_data            |
@@ -104,6 +129,7 @@
 //! | Ethernet → IPv4 → UDP → RTP                                  | integration_ethernet_ipv4_udp_rtp                    |
 //! | Ethernet → IPv4 → UDP → QUIC Initial                          | integration_ethernet_ipv4_udp_quic_initial            |
 //! | Ethernet → IPv4 → UDP → QUIC Short Header                     | integration_ethernet_ipv4_udp_quic_short              |
+//! | Ethernet → IPv4 → UDP → QUIC Initial + Handshake (coalesced)  | integration_ethernet_ipv4_udp_quic_coalesced          |
 //! | Ethernet → IPv4 → TCP → HTTP/2 (h2c)                        | integration_ethernet_ipv4_tcp_http2_settings         |
 //! | Ethernet → IPv4 → TCP → HTTP/1.1 (via HttpDispatcher)       | integration_ethernet_ipv4_tcp_http_dispatcher_http11 |
 //! | Ethernet → IPv4 → TCP → HTTP 301 (Content-Type dispatch)   | integration_ethernet_ipv4_tcp_http_response_content_type |
@@ -996,6 +1022,130 @@ fn integration_ethernet_ipv4_sctp_diameter() {
     );
 }
 
+/// 20-byte Diameter CER header without AVPs.
+///
+/// RFC 6733, Section 3 — <https://www.rfc-editor.org/rfc/rfc6733#section-3>
+fn diameter_cer_header(hop_by_hop: u32) -> [u8; 20] {
+    let mut h = [0u8; 20];
+    h[0] = 1; // Version
+    h[1..4].copy_from_slice(&[0x00, 0x00, 0x14]); // Message Length = 20
+    h[4] = 0x80; // R flag
+    h[5..8].copy_from_slice(&[0x00, 0x01, 0x01]); // Command Code 257 (CER)
+    h[12..16].copy_from_slice(&hop_by_hop.to_be_bytes());
+    h[16..20].copy_from_slice(&hop_by_hop.to_be_bytes());
+    h
+}
+
+/// Ethernet → IPv4 → SCTP(49152 → 3868) with the given DATA chunks
+/// (`flags`, user data).
+fn build_eth_ipv4_sctp_data_chunks(chunks: &[(u8, &[u8])]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 49152, 3868);
+    for (i, (flags, user_data)) in chunks.iter().enumerate() {
+        push_sctp_data_chunk(&mut pkt, *flags, i as u32 + 1, 46, user_data);
+    }
+    fixup_ipv4_length(&mut pkt, ip_start);
+    pkt
+}
+
+fn diameter_hop_by_hop_ids(buf: &DissectBuffer<'_>) -> Vec<u32> {
+    buf.layers()
+        .iter()
+        .filter(|l| l.name == "Diameter")
+        .map(
+            |l| match buf.field_by_name(l, "hop_by_hop_id").unwrap().value {
+                FieldValue::U32(v) => v,
+                ref other => panic!("expected U32, got {other:?}"),
+            },
+        )
+        .collect()
+}
+
+/// Two bundled unfragmented DATA chunks each carry a Diameter message, and
+/// both are dissected.
+///
+/// RFC 9260, Section 6.10 — <https://www.rfc-editor.org/rfc/rfc9260#section-6.10>
+#[test]
+fn integration_ethernet_ipv4_sctp_bundled_data_chunks() {
+    let reg = DissectorRegistry::default();
+    let first = diameter_cer_header(1);
+    let second = diameter_cer_header(2);
+    let data = build_eth_ipv4_sctp_data_chunks(&[(0x03, &first), (0x03, &second)]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "Diameter", "Diameter"]);
+    assert_eq!(diameter_hop_by_hop_ids(&buf), [1, 2]);
+
+    // Each Diameter layer covers its own DATA chunk's user data:
+    // Ethernet(14) + IPv4(20) + SCTP common header(12) + DATA header(16).
+    let sctp = buf.layer_by_name("SCTP").unwrap();
+    assert_eq!(sctp.range, 34..data.len());
+    assert_eq!(buf.layers()[3].range, 62..82);
+    assert_eq!(buf.layers()[4].range, 98..118);
+}
+
+/// A DATA chunk with only the B bit set holds the first fragment of a user
+/// message. It is shown in the SCTP layer but not handed to Diameter, and
+/// the packet is not an error.
+///
+/// RFC 9260, Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+/// RFC 9260, Section 6.9 — <https://www.rfc-editor.org/rfc/rfc9260#section-6.9>
+#[test]
+fn integration_ethernet_ipv4_sctp_fragment_not_dispatched() {
+    let reg = DissectorRegistry::default();
+    let cer = diameter_cer_header(1);
+    let data = build_eth_ipv4_sctp_data_chunks(&[(0x02, &cer[..12])]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP"]);
+}
+
+/// A malformed user message in one bundled DATA chunk does not stop the
+/// other chunks from being dissected. The error is still reported, and the
+/// SCTP layer plus the well-formed Diameter messages are kept.
+#[test]
+fn integration_ethernet_ipv4_sctp_bundled_error_keeps_other_chunks() {
+    let reg = DissectorRegistry::default();
+    let first = diameter_cer_header(1);
+    let malformed = [0x01, 0x00, 0x00, 0x14, 0x80, 0x00, 0x01, 0x01]; // 8 of 20 bytes
+    let third = diameter_cer_header(3);
+    let data =
+        build_eth_ipv4_sctp_data_chunks(&[(0x03, &first), (0x03, &malformed), (0x03, &third)]);
+    let mut buf = DissectBuffer::new();
+    let err = reg.dissect(&data, &mut buf).unwrap_err();
+    assert!(
+        matches!(err, PacketError::Truncated { .. }),
+        "unexpected error {err:?}"
+    );
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "Diameter", "Diameter"]);
+    assert_eq!(diameter_hop_by_hop_ids(&buf), [1, 3]);
+}
+
+/// `dissect_summary` stops at the SCTP layer for bundled DATA chunks and
+/// reports the upper protocol.
+#[test]
+fn integration_ethernet_ipv4_sctp_bundled_summary() {
+    let reg = DissectorRegistry::default();
+    let first = diameter_cer_header(1);
+    let second = diameter_cer_header(2);
+    let data = build_eth_ipv4_sctp_data_chunks(&[(0x03, &first), (0x03, &second)]);
+    let mut buf = DissectBuffer::new();
+    let summary = reg.dissect_summary(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP"]);
+    assert_eq!(summary.next_protocol, Some("Diameter"));
+    assert!(buf.embedded_payloads().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // IPv6 extension headers
 // ---------------------------------------------------------------------------
@@ -1681,6 +1831,50 @@ fn integration_ethernet_ipv6_udp_dhcpv6_reply_pd() {
     );
 }
 
+/// RFC 7341, Sections 6 and 7.1 — a DHCPv4-query carries a DHCPDISCOVER in
+/// its DHCPv4 Message option (87); the DHCPv4 message is dissected by the
+/// DHCP dissector as the next layer.
+#[test]
+fn integration_ethernet_ipv6_udp_dhcpv4_query_dhcp_discover() {
+    let reg = DissectorRegistry::default();
+
+    let mut dhcp_opts = Vec::new();
+    dhcp_opts.extend_from_slice(&dhcp_option(53, &[1])); // DHCPDISCOVER
+    dhcp_opts.push(255);
+    let dhcpv4 = build_dhcp_message(1, 0x0102_0304, MAC_DHCP_CLIENT, [0; 4], &dhcp_opts);
+
+    // msg-type DHCPV4-QUERY (20), flags with the U bit clear.
+    let mut dhcpv6_msg = vec![20, 0, 0, 0];
+    dhcpv6_msg.extend_from_slice(&dhcpv6_option(87, &dhcpv4));
+    let data = build_eth_ipv6_udp_dhcpv6(546, 547, &dhcpv6_msg);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "UDP", "DHCPv6", "DHCP"]);
+
+    let dhcpv6 = &buf.layers()[3];
+    assert_eq!(
+        buf.resolve_display_name(dhcpv6, "msg_type_name"),
+        Some("DHCPV4_QUERY")
+    );
+    assert_eq!(buf.field_u32(dhcpv6, "flags"), Some(0));
+    assert_eq!(buf.field_u8(dhcpv6, "unicast"), Some(0));
+
+    // The DHCP layer covers exactly the DHCPv4 Message option data, which
+    // follows the DHCPv6 header (4) and the option header (4).
+    let dhcp = &buf.layers()[4];
+    let dhcpv4_start = dhcpv6.range.start + 8;
+    assert_eq!(dhcp.range, dhcpv4_start..dhcpv4_start + dhcpv4.len());
+    assert_eq!(dhcp.range.end, dhcpv6.range.end);
+    assert_eq!(buf.field_u32(dhcp, "xid"), Some(0x0102_0304));
+    assert_eq!(
+        buf.resolve_display_name(dhcp, "dhcp_message_type_name"),
+        Some("DISCOVER")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // SRv6
 // ---------------------------------------------------------------------------
@@ -2270,7 +2464,7 @@ fn push_gtpv1u_with_ext(pkt: &mut Vec<u8>, teid: u32) -> usize {
     pkt.push(0x85);
     // Extension header: PDU Session Container (4 bytes)
     pkt.push(0x01); // Length = 1 (4 bytes)
-    pkt.extend_from_slice(&[0x09, 0x00]); // Content
+    pkt.extend_from_slice(&[0x00, 0x09]); // DL PDU SESSION INFORMATION, QFI 9
     pkt.push(0x00); // Next Extension Header Type = 0 (no more)
     start
 }
@@ -2454,6 +2648,19 @@ fn integration_ethernet_ipv4_udp_gtpv1u_ext_ipv4() {
         .len(),
         1
     );
+    // 3GPP TS 38.415, Section 5.5.2.1 — QFI decoded from the container
+    let FieldValue::Array(ref ext_range) = ext.value else {
+        panic!("expected Array")
+    };
+    let FieldValue::Object(ref obj) = direct_children(&buf, ext_range)[0].value else {
+        panic!("expected Object")
+    };
+    let qfi = buf
+        .nested_fields(obj)
+        .iter()
+        .find(|f| f.name() == "qfi")
+        .unwrap();
+    assert_eq!(qfi.value, FieldValue::U8(9));
 }
 
 /// Verify that `DissectorRegistry` implements `Send`, allowing it to be moved
@@ -3278,6 +3485,37 @@ fn integration_ethernet_ipv4_udp_gtpv2c_create_session() {
     assert!(buf.field_by_name(gtpv2c, "ies").is_some());
 }
 
+/// Ethernet → IPv4 → UDP → GTPv2-C Create Session Response with a
+/// piggybacked Create Bearer Request (3GPP TS 29.274, Section 5.5.1)
+#[test]
+fn integration_ethernet_ipv4_udp_gtpv2c_piggyback() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xAA; 6], [0xBB; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 2123, 2123);
+    let first = push_gtpv2c_with_teid(&mut pkt, 33, 0x11, 1, &[3, 0, 1, 0, 5]);
+    pkt[first] |= 0x10; // P flag
+    push_gtpv2c_with_teid(&mut pkt, 95, 0x22, 2, &[]);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 5);
+    assert_eq!(buf.layers()[3].name, "GTPv2-C");
+    assert_eq!(buf.layers()[4].name, "GTPv2-C");
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[4].range.end, pkt.len());
+    let piggybacked = &buf.layers()[4];
+    assert_eq!(
+        display_name_for(&buf, piggybacked, "message_type"),
+        Some("Create Bearer Request")
+    );
+}
+
 /// Ethernet → IPv4 → UDP → GTPv2-C (Echo Request, no TEID)
 #[test]
 fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
@@ -3917,6 +4155,75 @@ fn integration_ethernet_ipv4_gre_key_ipv4() {
     );
 }
 
+/// Ethernet → IPv4 → Enhanced GRE (PPTP, RFC 2637 §4.1) → PPP → IPv4 → UDP
+/// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
+#[test]
+fn integration_ethernet_ipv4_gre_v1_ppp_ipv4() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+
+    // Enhanced GRE: K=1 S=1 A=1, ver=1, Protocol Type 0x880B (PPP)
+    pkt.extend_from_slice(&[0x30, 0x81, 0x88, 0x0B]);
+    let payload_length_offset = pkt.len();
+    pkt.extend_from_slice(&[0x00, 0x00]); // Payload Length (placeholder)
+    pkt.extend_from_slice(&42u16.to_be_bytes()); // Call ID
+    pkt.extend_from_slice(&1u32.to_be_bytes()); // Sequence Number
+    pkt.extend_from_slice(&0u32.to_be_bytes()); // Acknowledgment Number
+    let gre_payload_start = pkt.len();
+
+    // PPP without HDLC framing, Protocol 0x0021 (IPv4)
+    pkt.extend_from_slice(&[0x00, 0x21]);
+    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
+    let payload_length = (pkt.len() - gre_payload_start) as u16;
+    pkt[payload_length_offset..payload_length_offset + 2]
+        .copy_from_slice(&payload_length.to_be_bytes());
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "GRE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+
+    let gre = buf.layer_by_name("GRE").unwrap();
+    assert_eq!(gre.range.len(), 16);
+    assert_eq!(buf.field_u8(gre, "version"), Some(1));
+    assert_eq!(buf.field_u16(gre, "payload_length"), Some(payload_length));
+    assert_eq!(buf.field_u16(gre, "call_id"), Some(42));
+    assert_eq!(buf.field_u32(gre, "sequence_number"), Some(1));
+    assert_eq!(buf.field_u32(gre, "acknowledgment_number"), Some(0));
+}
+
+/// Ethernet → IPv4 → Enhanced GRE acknowledgment-only packet (RFC 2637 §4.1)
+/// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
+#[test]
+fn integration_ethernet_ipv4_gre_v1_ack_only() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+    // K=1 A=1, ver=1, PPP, Payload Length 0, Call ID 42, Ack 5
+    pkt.extend_from_slice(&[
+        0x20, 0x81, 0x88, 0x0B, 0x00, 0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x05,
+    ]);
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "GRE"]);
+    assert_layers_contiguous(&buf);
+    let gre = buf.layer_by_name("GRE").unwrap();
+    assert_eq!(buf.field_u32(gre, "acknowledgment_number"), Some(5));
+}
+
 // STP / RSTP helpers
 // ---------------------------------------------------------------------------
 
@@ -4132,6 +4439,44 @@ fn build_eth_lldp() -> Vec<u8> {
     pkt
 }
 
+/// Ethernet → LLDP with an IEEE 802.1 Port VLAN ID TLV decoded into `org`
+/// (IEEE 802.1AB-2005 Annex F.2).
+#[test]
+fn integration_ethernet_lldp_org_port_vlan_id() {
+    let reg = DissectorRegistry::default();
+    let mut data = build_eth_lldp();
+    data.truncate(data.len() - 2); // drop End Of LLDPDU
+    data.extend_from_slice(&[0xFE, 0x06, 0x00, 0x80, 0xC2, 0x01, 0x00, 0x64]);
+    data.extend_from_slice(&[0x00, 0x00]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+
+    // tlvs[4] (after Chassis ID, Port ID, TTL, System Name) → org → pvid.
+    let lldp = buf.layer_by_name("LLDP").unwrap();
+    let FieldValue::Array(tlvs) = &buf.field_by_name(lldp, "tlvs").unwrap().value else {
+        panic!("tlvs")
+    };
+    let org_tlv = buf
+        .nested_fields(tlvs)
+        .iter()
+        .filter_map(|f| match &f.value {
+            FieldValue::Object(r) => Some(buf.nested_fields(r)),
+            _ => None,
+        })
+        .nth(4)
+        .unwrap();
+    let FieldValue::Object(org) = &org_tlv.iter().find(|f| f.name() == "org").unwrap().value else {
+        panic!("org")
+    };
+    let pvid = buf
+        .nested_fields(org)
+        .iter()
+        .find(|f| f.name() == "pvid")
+        .unwrap();
+    assert_eq!(pvid.value, FieldValue::U16(100));
+}
+
 #[test]
 fn integration_ethernet_lldp() {
     let reg = DissectorRegistry::default();
@@ -4341,6 +4686,131 @@ fn integration_ethernet_mpls_two_labels_ipv4_udp() {
 }
 
 // ---- VXLAN tests ----
+
+/// Build an Ethernet → IPv4 → UDP(`dst_port`) packet carrying the `tunnel`
+/// header followed by whatever `inner` appends.
+fn build_udp_tunnel_packet(
+    dst_port: u16,
+    tunnel: &[u8],
+    inner: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, dst_port);
+    pkt.extend_from_slice(tunnel);
+    inner(&mut pkt);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    pkt
+}
+
+/// Inner IPv4 → UDP.
+fn push_inner_ipv4_udp(pkt: &mut Vec<u8>) {
+    let start = push_ipv4(pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(pkt, 12345, 80);
+    fixup_udp_length(pkt, udp_start);
+    fixup_ipv4_length(pkt, start);
+}
+
+/// Ethernet → IPv4 → UDP(4790) → VXLAN-GPE (Next Protocol IPv4) → IPv4 → UDP
+/// (draft-ietf-nvo3-vxlan-gpe-13 §3.2 —
+/// <https://datatracker.ietf.org/doc/html/draft-ietf-nvo3-vxlan-gpe-13#section-3.2>)
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gpe_ipv4() {
+    let reg = DissectorRegistry::default();
+    // Ver 0, I=1, P=1; Next Protocol 0x01 (IPv4); VNI 100
+    let gpe = [0x0C, 0x00, 0x00, 0x01, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4790, &gpe, push_inner_ipv4_udp);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv4", "UDP", "VXLAN-GPE", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+    let layer = buf.layer_by_name("VXLAN-GPE").unwrap();
+    assert_eq!(buf.field_u32(layer, "vni"), Some(100));
+    assert_eq!(buf.field_u8(layer, "next_protocol"), Some(1));
+}
+
+/// Ethernet → IPv4 → UDP(4790) → VXLAN-GPE (Next Protocol Ethernet) →
+/// Ethernet → IPv4 → UDP
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gpe_ethernet() {
+    let reg = DissectorRegistry::default();
+    let gpe = [0x0C, 0x00, 0x00, 0x03, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4790, &gpe, |pkt| {
+        push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet",
+            "IPv4",
+            "UDP",
+            "VXLAN-GPE",
+            "Ethernet",
+            "IPv4",
+            "UDP"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → IPv4 → UDP(4789) → VXLAN-GBP → Ethernet → IPv4 → UDP
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gbp() {
+    let reg = DissectorRegistry::default();
+    // G=1 I=1, Group Policy ID 0x1234, VNI 100
+    let vxlan = [0x88, 0x00, 0x12, 0x34, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4789, &vxlan, |pkt| {
+        push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet", "IPv4", "UDP", "VXLAN", "Ethernet", "IPv4", "UDP"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+    let layer = buf.layer_by_name("VXLAN").unwrap();
+    assert_eq!(buf.field_u16(layer, "group_policy_id"), Some(0x1234));
+}
+
+/// Ethernet → IPv4 → UDP(4789) → VXLAN (I=0) → Ethernet → IPv4 → UDP
+///
+/// RFC 7348, Section 5 gives receivers no instruction to discard I=0
+/// packets, so the payload is still decoded.
+/// <https://www.rfc-editor.org/rfc/rfc7348#section-5>
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_i_flag_clear() {
+    let reg = DissectorRegistry::default();
+    let vxlan = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4789, &vxlan, |pkt| {
+        push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 7);
+    assert_layers_contiguous(&buf);
+    let layer = buf.layer_by_name("VXLAN").unwrap();
+    assert_eq!(buf.field_u8(layer, "vni_valid"), Some(0));
+}
 
 /// Ethernet → IPv4 → UDP(4789) → VXLAN → inner Ethernet → inner IPv4 → inner UDP
 #[test]
@@ -4834,6 +5304,19 @@ fn integration_ethernet_ipv4_udp_geneve_with_options() {
         buf.field_by_name(geneve, "options").unwrap().value,
         FieldValue::Bytes(options)
     );
+    // RFC 8926 §3.5 — the option TLV is decoded too.
+    // https://www.rfc-editor.org/rfc/rfc8926#section-3.5
+    let list = buf.field_by_name(geneve, "tunnel_options").unwrap();
+    let objects: Vec<_> = buf
+        .nested_fields(list.value.as_container_range().unwrap())
+        .iter()
+        .filter_map(|f| f.value.as_container_range())
+        .collect();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(
+        buf.resolve_nested_display_name(objects[0], "class_name"),
+        Some("Open Virtual Networking (OVN)")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5317,22 +5800,24 @@ fn ethernet_ipv4_tcp_tls_client_hello() {
         FieldValue::U16(0x0301)
     );
     assert_eq!(display_name_for(&buf, tls, "version"), Some("TLS 1.0"));
+    // Labelled from the ClientHello legacy_version, not the 0x0301 record.
+    assert_eq!(tls.display_name, Some("TLSv1.2"));
+    let msgs = tls_handshake_messages(&buf, tls);
+    assert_eq!(msgs.len(), 1);
+    let FieldValue::Object(ref ch_range) = msgs[0].value else {
+        panic!("expected Object")
+    };
+    let ch = buf.nested_fields(ch_range);
+    assert_eq!(ch[0].name(), "type");
+    assert_eq!(ch[0].value, FieldValue::U8(1));
     assert_eq!(
-        buf.field_by_name(tls, "handshake_type").unwrap().value,
-        FieldValue::U8(1)
-    );
-    assert_eq!(
-        display_name_for(&buf, tls, "handshake_type"),
+        buf.resolve_nested_display_name(ch_range, "type_name"),
         Some("Client Hello")
     );
     // ClientHello body fields
-    assert_eq!(
-        buf.field_by_name(tls, "handshake_version").unwrap().value,
-        FieldValue::U16(0x0303)
-    );
-    let FieldValue::Array(ref suites_range) =
-        buf.field_by_name(tls, "cipher_suites").unwrap().value
-    else {
+    let field = |name: &str| ch.iter().find(|f| f.name() == name).unwrap();
+    assert_eq!(field("version").value, FieldValue::U16(0x0303));
+    let FieldValue::Array(ref suites_range) = field("cipher_suites").value else {
         panic!("expected Array")
     };
     let suites = buf.nested_fields(suites_range);
@@ -5340,8 +5825,7 @@ fn ethernet_ipv4_tcp_tls_client_hello() {
     assert_eq!(suites[0].value, FieldValue::U16(0x1301));
     assert_eq!(suites[1].value, FieldValue::U16(0xc02f));
     // SNI extension
-    let FieldValue::Array(ref exts_range) = buf.field_by_name(tls, "extensions").unwrap().value
-    else {
+    let FieldValue::Array(ref exts_range) = field("extensions").value else {
         panic!("expected Array")
     };
     let exts = direct_children(&buf, exts_range);
@@ -5388,22 +5872,108 @@ fn ethernet_ipv4_tcp_tls_server_hello() {
     assert_layers_contiguous(&buf);
 
     let tls = buf.layer_by_name("TLS").unwrap();
+    let msgs = tls_handshake_messages(&buf, tls);
+    assert_eq!(msgs.len(), 1);
+    let FieldValue::Object(ref sh_range) = msgs[0].value else {
+        panic!("expected Object")
+    };
+    let sh = buf.nested_fields(sh_range);
+    assert_eq!(sh[0].value, FieldValue::U8(2));
     assert_eq!(
-        buf.field_by_name(tls, "handshake_type").unwrap().value,
-        FieldValue::U8(2)
-    );
-    assert_eq!(
-        display_name_for(&buf, tls, "handshake_type"),
+        buf.resolve_nested_display_name(sh_range, "type_name"),
         Some("Server Hello")
     );
     assert_eq!(
-        buf.field_by_name(tls, "cipher_suite").unwrap().value,
+        sh.iter()
+            .find(|f| f.name() == "cipher_suite")
+            .unwrap()
+            .value,
         FieldValue::U16(0x1301)
     );
     assert_eq!(
-        display_name_for(&buf, tls, "cipher_suite"),
+        buf.resolve_nested_display_name(sh_range, "cipher_suite_name"),
         Some("TLS_AES_128_GCM_SHA256")
     );
+}
+
+/// Direct children of the TLS layer's `handshake_messages` array.
+fn tls_handshake_messages<'a, 'pkt>(
+    buf: &'a DissectBuffer<'pkt>,
+    tls: &packet_dissector::packet::Layer,
+) -> Vec<&'a packet_dissector::field::Field<'pkt>> {
+    let FieldValue::Array(ref range) = buf.field_by_name(tls, "handshake_messages").unwrap().value
+    else {
+        panic!("expected Array")
+    };
+    direct_children(buf, range)
+}
+
+#[test]
+fn ethernet_ipv4_tcp_tls_coalesced_server_flight() {
+    // RFC 9846, Section 5.1 — https://www.rfc-editor.org/rfc/rfc9846#section-5.1
+    // ServerHello, Certificate and ServerHelloDone in one record.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 2], [10, 0, 0, 1]);
+    push_tcp(&mut pkt, 443, 50000, 0x18);
+
+    let mut hs = vec![0x02, 0x00, 0x00, 0x26, 0x03, 0x03];
+    hs.extend_from_slice(&[0x11; 32]);
+    hs.extend_from_slice(&[0x00, 0xc0, 0x2f, 0x00]);
+    hs.extend_from_slice(&[0x0b, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00]);
+    hs.extend_from_slice(&[0x0e, 0x00, 0x00, 0x00]);
+    push_tls_record(&mut pkt, 0x16, 0x0303, &hs);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+
+    let tls = buf.layer_by_name("TLS").unwrap();
+    assert_eq!(tls.display_name, Some("TLSv1.2"));
+    let types: Vec<FieldValue> = tls_handshake_messages(&buf, tls)
+        .iter()
+        .map(|m| {
+            let FieldValue::Object(ref r) = m.value else {
+                panic!("expected Object")
+            };
+            buf.nested_fields(r)[0].value.clone()
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![FieldValue::U8(2), FieldValue::U8(11), FieldValue::U8(14)]
+    );
+}
+
+#[test]
+fn ethernet_ipv4_tcp_non_tls_on_port_443() {
+    // A payload that is not a TLS record is not reported as TLS.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 50000, 443, 0x18);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    let err = registry.dissect(&pkt, &mut buf).unwrap_err();
+    assert_eq!(
+        err,
+        PacketError::InvalidFieldValue {
+            field: "content_type",
+            value: 0
+        }
+    );
+    assert!(buf.layer_by_name("TLS").is_none());
 }
 
 #[test]
@@ -5720,6 +6290,34 @@ fn integration_ethernet_ipv4_l2tpv3_ip_data() {
         buf.field_by_name(l2tp, "is_control").unwrap().value,
         FieldValue::U8(0)
     );
+}
+
+/// Ethernet → IPv4 → L2TPv3 (IP, data) → Ethernet → IPv4 (RFC 4719
+/// Ethernet pseudowire, no cookie, no L2-Specific Sublayer).
+/// <https://www.rfc-editor.org/rfc/rfc4719>
+#[test]
+fn integration_ethernet_ipv4_l2tpv3_ethernet_pw() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 115, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x12, 0x34]);
+    push_ethernet(&mut pkt, [0x02; 6], [0x03; 6], 0x0800);
+    let inner_ip = pkt.len();
+    push_ipv4(&mut pkt, 17, [192, 168, 0, 1], [192, 168, 0, 2]);
+    fixup_ipv4_length(&mut pkt, inner_ip);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names[..5],
+        ["Ethernet", "IPv4", "L2TPv3", "Ethernet", "IPv4"]
+    );
+    assert_layers_contiguous(&buf);
 }
 
 /// Ethernet → IPv4 → L2TPv3 (IP, control SCCRQ)
@@ -6944,7 +7542,7 @@ fn integration_ethernet_ipv4_udp_quic_short() {
     let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
     let udp_start = push_udp(&mut pkt, 443, 54321);
 
-    // QUIC Short Header: header_form=0, fixed_bit=1, spin_bit=1, key_phase=0
+    // QUIC Short Header: header_form=0, fixed_bit=1, spin_bit=1
     pkt.push(0x60); // 0b01100000
     pkt.extend_from_slice(&[0xBB; 20]); // DCID + encrypted payload
 
@@ -6967,10 +7565,55 @@ fn integration_ethernet_ipv4_udp_quic_short() {
         buf.field_by_name(quic, "spin_bit").unwrap().value,
         FieldValue::U8(1)
     );
-    assert_eq!(
-        buf.field_by_name(quic, "key_phase").unwrap().value,
-        FieldValue::U8(0)
-    );
+    // Key Phase is header-protected (RFC 9001, Section 5.4.1) and not shown.
+    // https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1
+    assert!(buf.field_by_name(quic, "key_phase").is_none());
+}
+
+/// RFC 9000, Section 12.2 — Initial and Handshake packets coalesced into one
+/// UDP datagram become two QUIC layers split at the Length field.
+/// <https://www.rfc-editor.org/rfc/rfc9000#section-12.2>
+#[test]
+fn integration_ethernet_ipv4_udp_quic_coalesced() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 2], [10, 0, 0, 1]);
+    let udp_start = push_udp(&mut pkt, 443, 50000);
+
+    let dcid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    // Initial (v1): Length = 20
+    pkt.push(0xc0);
+    pkt.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(&dcid);
+    pkt.push(0); // SCID length
+    pkt.extend_from_slice(&encode_quic_varint(0)); // token length
+    pkt.extend_from_slice(&encode_quic_varint(20));
+    pkt.extend_from_slice(&[0xAA; 20]);
+    // Handshake (v1): Length = 16
+    pkt.push(0xe0);
+    pkt.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(&dcid);
+    pkt.push(0); // SCID length
+    pkt.extend_from_slice(&encode_quic_varint(16));
+    pkt.extend_from_slice(&[0xBB; 16]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 5);
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].name, "QUIC");
+    assert_eq!(buf.layers()[3].display_name, Some("QUIC Initial"));
+    assert_eq!(buf.layers()[3].range, 42..79);
+    assert_eq!(buf.layers()[4].name, "QUIC");
+    assert_eq!(buf.layers()[4].display_name, Some("QUIC Handshake"));
+    assert_eq!(buf.layers()[4].range, 79..111);
+    assert_eq!(pkt.len(), 111);
 }
 
 // ---------------------------------------------------------------------------
@@ -7026,6 +7669,178 @@ fn integration_ethernet_ipv4_udp_stun_binding_request() {
     assert_eq!(
         buf.field_by_name(stun, "magic_cookie").unwrap().value,
         FieldValue::U32(0x2112_A442)
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_turn_channeldata() {
+    // RFC 8656, Section 12.4 — ChannelData on the TURN server port.
+    // https://www.rfc-editor.org/rfc/rfc8656#section-12.4
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 3478, 50000);
+    pkt.extend_from_slice(&[0x40, 0x00, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let cd = &buf.layers()[3];
+    assert_eq!(cd.name, "TURN-ChannelData");
+    assert_eq!(
+        buf.field_by_name(cd, "channel_number").unwrap().value,
+        FieldValue::U16(0x4000)
+    );
+    assert_eq!(
+        buf.field_by_name(cd, "data").unwrap().value,
+        FieldValue::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF])
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_tcp_turn_channeldata_pipelined() {
+    // RFC 8656, Section 12.5 — over TCP each ChannelData message is padded to
+    // a multiple of four bytes; two messages share one segment.
+    // https://www.rfc-editor.org/rfc/rfc8656#section-12.5
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 3478, 50000, 0x18);
+    pkt.extend_from_slice(&[
+        0x40, 0x00, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF, // channel 0x4000
+        0x40, 0x01, 0x00, 0x02, 0x11, 0x22, 0x00, 0x00, // channel 0x4001 + pad
+    ]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet",
+            "IPv4",
+            "TCP",
+            "TURN-ChannelData",
+            "TURN-ChannelData"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+    let second = &buf.layers()[4];
+    assert_eq!(
+        buf.field_by_name(second, "channel_number").unwrap().value,
+        FieldValue::U16(0x4001)
+    );
+    assert_eq!(
+        buf.field_by_name(second, "padding").unwrap().value,
+        FieldValue::Bytes(&[0x00, 0x00])
+    );
+    assert!(
+        buf.layer_fields(second)
+            .iter()
+            .all(|f| f.name() != "reassembly_in_progress")
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_tcp_turn_channeldata_split_padding() {
+    // RFC 8656, Section 12.5 — the padding of a ChannelData message over TCP
+    // is part of the message; a segment boundary inside it must not shift
+    // the stream. https://www.rfc-editor.org/rfc/rfc8656#section-12.5
+    let reg = DissectorRegistry::default();
+    let segment = |seq: u32, payload: &[u8]| {
+        let mut pkt: Vec<u8> = Vec::new();
+        push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+        let ip_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+        let tcp_start = pkt.len();
+        push_tcp(&mut pkt, 3478, 50000, 0x18);
+        pkt[tcp_start + 4..tcp_start + 8].copy_from_slice(&seq.to_be_bytes());
+        pkt.extend_from_slice(payload);
+        fixup_ipv4_length(&mut pkt, ip_start);
+        pkt
+    };
+
+    // Segment 1: channel 0x4001, length 2, data, but no padding yet.
+    let first = segment(1, &[0x40, 0x01, 0x00, 0x02, 0x11, 0x22]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&first, &mut buf).unwrap();
+    assert!(buf.layer_by_name("TURN-ChannelData").is_none());
+
+    // Segment 2: the two padding bytes, then channel 0x4000 with 4 bytes.
+    let second = segment(
+        7,
+        &[0x00, 0x00, 0x40, 0x00, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF],
+    );
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&second, &mut buf).unwrap();
+    let channels: Vec<_> = buf
+        .layers()
+        .iter()
+        .filter(|l| l.name == "TURN-ChannelData")
+        .map(|l| {
+            buf.field_by_name(l, "channel_number")
+                .unwrap()
+                .value
+                .clone()
+        })
+        .collect();
+    assert_eq!(channels, [FieldValue::U16(0x4001), FieldValue::U16(0x4000)]);
+}
+
+#[test]
+fn integration_ethernet_ipv4_tcp_classic_stun_rejected() {
+    // RFC 5389, Section 12 — "UDP was the only supported transport."
+    // https://www.rfc-editor.org/rfc/rfc5389#section-12
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 50000, 3478, 0x18);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0x5A; 16]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    let err = reg.dissect(&pkt, &mut buf).unwrap_err();
+    assert!(matches!(
+        err,
+        PacketError::InvalidFieldValue {
+            field: "magic_cookie",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_classic_stun() {
+    // RFC 5389, Section 12 — RFC 3489 Binding Request without magic cookie.
+    // https://www.rfc-editor.org/rfc/rfc5389#section-12
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 3478);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0x5A; 16]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let stun = &buf.layers()[3];
+    assert_eq!(stun.name, "STUN");
+    assert_eq!(stun.display_name, Some("Classic STUN (RFC 3489)"));
+    assert!(buf.field_by_name(stun, "magic_cookie").is_none());
+    assert_eq!(
+        buf.field_by_name(stun, "transaction_id").unwrap().value,
+        FieldValue::Bytes(&[0x5A; 16])
     );
 }
 
@@ -7578,6 +8393,103 @@ fn integration_ethernet_802_3_llc_payload_bounded_by_length() {
 
     let probe = buf.layer_by_name("Probe").unwrap();
     assert_eq!(probe.range, 17..llc_pdu_end);
+}
+
+/// IPv4 (total length 28, ICMP) + ICMP Echo Request (8 octets).
+fn ipv4_icmp_echo_bytes() -> Vec<u8> {
+    vec![
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x00,
+        0x01, 0x0a, 0x00, 0x00, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+    ]
+}
+
+/// Ethernet (802.3 Length) → LLC (0xAA, UI) → SNAP OUI 00-00-00 → IPv4 → ICMP.
+///
+/// RFC 1042, "Frame Format and MAC Level Issues".
+#[test]
+fn integration_ethernet_llc_snap_ipv4_icmp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let mut llc = vec![0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00];
+    llc.extend_from_slice(&ipv4_icmp_echo_bytes());
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP", "IPv4", "ICMP"]);
+    assert_layers_contiguous(&buf);
+    let snap = buf.layer_by_name("SNAP").unwrap();
+    assert_eq!(snap.range, 17..22);
+    assert_eq!(buf.field_u16(snap, "pid"), Some(0x0800));
+}
+
+/// Ethernet → LLC → SNAP with Cisco OUI 00-00-0C (CDP): the SNAP layer is
+/// shown and the chain ends.
+#[test]
+fn integration_ethernet_llc_snap_other_oui() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let llc = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x00, 0x02, 0xB4];
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP"]);
+}
+
+/// SLL header (LINKTYPE_LINUX_SLL) with the given protocol type.
+fn sll_header(protocol_type: u16) -> Vec<u8> {
+    let mut pkt = vec![0x00, 0x02, 0x00, 0x01, 0x00, 0x06];
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00]);
+    pkt.extend_from_slice(&protocol_type.to_be_bytes());
+    pkt
+}
+
+/// SLL with protocol type 0x0004 → LLC (0x42) → STP Configuration BPDU.
+///
+/// LINKTYPE_LINUX_SLL: 0x0004 "if the payload begins with an 802.2 LLC header".
+#[test]
+fn integration_sll_llc_stp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = sll_header(0x0004);
+    pkt.extend_from_slice(&[0x42, 0x42, 0x03]);
+    push_stp_config_bpdu(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect_with_link_type(&pkt, 113, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL", "STP"]);
+    assert_layers_contiguous(&buf);
+    let sll = buf.layer_by_name("SLL").unwrap();
+    assert_eq!(sll.range, 0..19);
+    assert_eq!(buf.field_u8(sll, "llc_dsap"), Some(0x42));
+}
+
+/// SLL2 with protocol type 0x0004 → LLC (0xAA) → SNAP → IPv4 → ICMP.
+#[test]
+fn integration_sll2_llc_snap_ipv4() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x06,
+    ];
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+    pkt.extend_from_slice(&ipv4_icmp_echo_bytes());
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect_with_link_type(&pkt, 276, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL2", "SNAP", "IPv4", "ICMP"]);
+    assert_layers_contiguous(&buf);
 }
 
 /// Ethernet → IPv4 → TCP SYN with Ethernet padding and a trailer: the TCP payload

@@ -73,3 +73,72 @@ fn zero_alloc_dissect_dhcpv6_advertise() {
         "DHCPv6 advertise dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_dhcpv6_extended_options() {
+    let mut opts = Vec::new();
+    // DUID-LLT, DUID-EN, DUID-UUID
+    opts.extend_from_slice(&dhcpv6_option(
+        1,
+        &[0, 1, 0, 1, 0, 0, 0, 1, 0, 0x11, 0x22, 0x33, 0x44, 0x55],
+    ));
+    opts.extend_from_slice(&dhcpv6_option(2, &[0, 2, 0, 0, 0, 9, 1, 2]));
+    let mut uuid = vec![0, 4];
+    uuid.extend_from_slice(&[0xAB; 16]);
+    opts.extend_from_slice(&dhcpv6_option(53, &uuid));
+    let mut vendor = 4491u32.to_be_bytes().to_vec();
+    vendor.extend_from_slice(&dhcpv6_option(1, b"ab"));
+    opts.extend_from_slice(&dhcpv6_option(17, &vendor));
+    opts.extend_from_slice(&dhcpv6_option(21, b"\x03sip\x07example\x00"));
+    opts.extend_from_slice(&dhcpv6_option(22, &[0x20; 16]));
+    opts.extend_from_slice(&dhcpv6_option(31, &[0x20; 16]));
+    opts.extend_from_slice(&dhcpv6_option(32, &86400u32.to_be_bytes()));
+    opts.extend_from_slice(&dhcpv6_option(37, &[0, 0, 0x0d, 0xe9, 1]));
+    opts.extend_from_slice(&dhcpv6_option(38, b"sub"));
+    opts.extend_from_slice(&dhcpv6_option(39, b"\x01\x04host\x00"));
+    opts.extend_from_slice(&dhcpv6_option(56, &dhcpv6_option(3, b"\x03ntp\x00")));
+    opts.extend_from_slice(&dhcpv6_option(59, b"tftp://x/boot"));
+    opts.extend_from_slice(&dhcpv6_option(60, &[0, 1, b'q']));
+    opts.extend_from_slice(&dhcpv6_option(61, &[0, 7]));
+    opts.extend_from_slice(&dhcpv6_option(64, b"\x04aftr\x00"));
+    opts.extend_from_slice(&dhcpv6_option(79, &[0, 1, 2, 0, 0, 0, 0, 1]));
+    opts.extend_from_slice(&dhcpv6_option(82, &3600u32.to_be_bytes()));
+    opts.extend_from_slice(&dhcpv6_option(83, &3600u32.to_be_bytes()));
+    opts.extend_from_slice(&dhcpv6_option(88, &[0x20; 16]));
+    let mut rule = vec![1, 16, 24, 192, 0, 2, 0, 32, 0x20, 0x01, 0x0d, 0xb8];
+    rule.extend_from_slice(&dhcpv6_option(93, &[6, 8, 0, 0x34]));
+    let mut mape = dhcpv6_option(89, &rule);
+    mape.extend_from_slice(&dhcpv6_option(90, &[0x20; 16]));
+    opts.extend_from_slice(&dhcpv6_option(94, &mape));
+    opts.extend_from_slice(&dhcpv6_option(103, b"urn:x"));
+
+    let raw = build_dhcpv6(7, 0x123456, &opts);
+    let mut buf = DissectBuffer::new();
+    // This message produces more fields than the buffer's default capacity;
+    // warm the buffer once so the measurement covers the steady state
+    // (`DissectBuffer::clear` keeps the capacity).
+    Dhcpv6Dissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        Dhcpv6Dissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "DHCPv6 extended options dissect allocated {allocs} times"
+    );
+}
+
+#[test]
+fn zero_alloc_dissect_dhcpv4_query() {
+    // RFC 7341 DHCPV4-QUERY: msg-type 20, flags, DHCPv4 Message option.
+    let mut raw = vec![20, 0x80, 0, 0];
+    raw.extend_from_slice(&dhcpv6_option(87, &[0u8; 240]));
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        Dhcpv6Dissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "DHCPv4-query dissect allocated {allocs} times");
+}

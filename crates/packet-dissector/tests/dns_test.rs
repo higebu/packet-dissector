@@ -1004,7 +1004,7 @@ fn parse_dns_edns0_opt_do_bit_set() {
 
 #[test]
 fn parse_dns_edns0_opt_with_options() {
-    // EDNS option: code=10 (COOKIE), length=8, data=8 bytes
+    // EDNS option: code=10 (COOKIE), length=8, 8-byte client cookie (RFC 7873 §4)
     let mut opt_rdata = Vec::new();
     opt_rdata.extend_from_slice(&10u16.to_be_bytes()); // option code
     opt_rdata.extend_from_slice(&8u16.to_be_bytes()); // option length
@@ -1066,7 +1066,7 @@ fn parse_dns_edns0_opt_with_options() {
     assert_eq!(
         opt0_fields
             .iter()
-            .find(|f| f.name() == "data")
+            .find(|f| f.name() == "client_cookie")
             .unwrap()
             .value,
         FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])

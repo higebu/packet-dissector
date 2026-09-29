@@ -13,6 +13,7 @@
 //! - RFC 3515: Refer Method <https://www.rfc-editor.org/rfc/rfc3515>
 //! - RFC 3903: SIP Extension for Event State Publication (PUBLISH) <https://www.rfc-editor.org/rfc/rfc3903>
 //! - RFC 6086: INFO Method and Package Framework <https://www.rfc-editor.org/rfc/rfc6086>
+//! - RFC 5626: Managing Client-Initiated Connections (CRLF keep-alive) <https://www.rfc-editor.org/rfc/rfc5626>
 
 #![deny(missing_docs)]
 
@@ -24,8 +25,13 @@ use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{intern_content_type, slice_offset, str_offset, trim_ows};
 
-/// Maximum number of SIP headers to parse.
+/// Number of SIP header fields parsed with the first (small) stack array.
 const MAX_HEADERS: usize = 64;
+
+/// Number of SIP header fields parsed with the retry stack array, used when
+/// a message has more than [`MAX_HEADERS`] fields. Messages with more
+/// fields are rejected.
+const MAX_HEADERS_LARGE: usize = 1024;
 
 /// Minimum valid SIP start-line length.
 ///
@@ -47,6 +53,7 @@ const FD_REASON_PHRASE: usize = 5;
 const FD_HEADERS: usize = 6;
 const FD_CONTENT_LENGTH: usize = 7;
 const FD_CONTENT_TYPE: usize = 8;
+const FD_KEEP_ALIVE: usize = 9;
 
 /// Child descriptor indices for [`HEADER_CHILDREN`].
 const HC_NAME: usize = 0;
@@ -78,13 +85,13 @@ static FD_HEADER: FieldDescriptor = FieldDescriptor {
 /// All field descriptors for the SIP dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // RFC 3261, Section 7 — distinguishes request from response
-    FieldDescriptor::new("is_response", "Is Response", FieldType::U8),
+    FieldDescriptor::new("is_response", "Is Response", FieldType::U8).optional(),
     // RFC 3261, Section 7.1 — request method
     FieldDescriptor::new("method", "Method", FieldType::Str).optional(),
     // RFC 3261, Section 7.1 — Request-URI
     FieldDescriptor::new("uri", "Request URI", FieldType::Str).optional(),
     // RFC 3261, Section 7 — SIP-Version
-    FieldDescriptor::new("version", "Version", FieldType::Str),
+    FieldDescriptor::new("version", "Version", FieldType::Str).optional(),
     // RFC 3261, Section 7.2 — Status-Code
     FieldDescriptor::new("status_code", "Status Code", FieldType::U16).optional(),
     // RFC 3261, Section 7.2 — Reason-Phrase
@@ -97,14 +104,41 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("content_length", "Content Length", FieldType::U32).optional(),
     // RFC 3261, Section 20.15 — Content-Type
     FieldDescriptor::new("content_type", "Content Type", FieldType::Str).optional(),
+    // RFC 5626, Section 4.4.1 — CRLF keep-alive between messages:
+    // "ping" (double CRLF) or "pong" (single CRLF); "crlf" on UDP
+    // https://www.rfc-editor.org/rfc/rfc5626#section-4.4.1
+    FieldDescriptor::new("keep_alive", "Keep-Alive", FieldType::Str).optional(),
 ];
 
-/// SIP dissector.
+/// SIP dissector for stream transports (TCP, TLS, SCTP).
 ///
 /// Parses both SIP request and response messages. The dissector detects
 /// whether the message is a request or response by checking if the
 /// start-line begins with `"SIP/"` (response) or a method token (request).
+///
+/// On a stream transport the body is exactly Content-Length bytes (an
+/// absent Content-Length means no body). RFC 3261, Section 18.3 — "In the
+/// case of stream-oriented transports such as TCP, the Content-Length
+/// header field indicates the size of the body."
+/// <https://www.rfc-editor.org/rfc/rfc3261#section-18.3>
+///
+/// CRLF keep-alives between messages (RFC 5626, Section 4.4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5626#section-4.4.1>) are dissected
+/// as a SIP layer with a `keep_alive` field. Use [`SipDatagramDissector`]
+/// for UDP.
 pub struct SipDissector;
+
+/// SIP dissector for message-oriented transports (UDP).
+///
+/// Identical to [`SipDissector`] except for body framing. RFC 3261,
+/// Section 18.3 — "If the message has no Content-Length header field, the
+/// message body is assumed to end at the end of the transport packet."
+/// With a Content-Length, "If there are additional bytes in the transport
+/// packet beyond the end of the body, they MUST be discarded", and "If the
+/// transport packet ends before the end of the message body, this is
+/// considered an error."
+/// <https://www.rfc-editor.org/rfc/rfc3261#section-18.3>
+pub struct SipDatagramDissector;
 
 /// Specification references for the SIP dissector.
 static REFERENCES: &[SpecReference] = &[
@@ -144,125 +178,240 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc3903",
     ),
     SpecReference::new(
+        "RFC 5626",
+        "Managing Client-Initiated Connections in the Session Initiation Protocol (SIP)",
+        "https://www.rfc-editor.org/rfc/rfc5626",
+    ),
+    SpecReference::new(
         "RFC 6086",
         "Session Initiation Protocol (SIP) INFO Method and Package Framework",
         "https://www.rfc-editor.org/rfc/rfc6086",
     ),
 ];
 
-impl Dissector for SipDissector {
-    fn name(&self) -> &'static str {
-        "Session Initiation Protocol"
-    }
+macro_rules! impl_sip_dissector {
+    ($ty:ty, $datagram:expr) => {
+        impl Dissector for $ty {
+            fn name(&self) -> &'static str {
+                "Session Initiation Protocol"
+            }
 
-    fn short_name(&self) -> &'static str {
-        "SIP"
-    }
+            fn short_name(&self) -> &'static str {
+                "SIP"
+            }
 
-    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
-        FIELD_DESCRIPTORS
-    }
+            fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+                FIELD_DESCRIPTORS
+            }
 
-    fn references(&self) -> &'static [SpecReference] {
-        REFERENCES
-    }
+            fn references(&self) -> &'static [SpecReference] {
+                REFERENCES
+            }
 
-    fn layer(&self) -> Option<ProtocolLayer> {
-        Some(ProtocolLayer::Application)
-    }
+            fn layer(&self) -> Option<ProtocolLayer> {
+                Some(ProtocolLayer::Application)
+            }
 
-    fn dissect<'pkt>(
-        &self,
-        data: &'pkt [u8],
-        buf: &mut DissectBuffer<'pkt>,
-        offset: usize,
-    ) -> Result<DissectResult, PacketError> {
-        if data.len() < MIN_START_LINE_LEN {
-            return Err(PacketError::Truncated {
-                expected: MIN_START_LINE_LEN,
-                actual: data.len(),
-            });
+            fn dissect<'pkt>(
+                &self,
+                data: &'pkt [u8],
+                buf: &mut DissectBuffer<'pkt>,
+                offset: usize,
+            ) -> Result<DissectResult, PacketError> {
+                dissect_sip(data, buf, offset, $datagram)
+            }
         }
+    };
+}
 
-        // RFC 3261, Section 7 — detect request vs response
-        let is_response = data.starts_with(b"SIP/");
+impl_sip_dissector!(SipDissector, false);
+impl_sip_dissector!(SipDatagramDissector, true);
 
-        buf.begin_layer("SIP", None, FIELD_DESCRIPTORS, offset..offset);
+/// Dissect one SIP message (or CRLF keep-alive) at the start of `data`.
+///
+/// `datagram` selects the body framing of RFC 3261, Section 18.3
+/// <https://www.rfc-editor.org/rfc/rfc3261#section-18.3>.
+fn dissect_sip<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    datagram: bool,
+) -> Result<DissectResult, PacketError> {
+    // RFC 3261, Section 7.5 — "Implementations processing SIP messages over
+    // stream-oriented transports MUST ignore any CRLF appearing before the
+    // start-line [H4.1]." <https://www.rfc-editor.org/rfc/rfc3261#section-7.5>
+    // Leading CR/LF bytes are skipped on UDP as well (Postel's Law).
+    let skip = data
+        .iter()
+        .position(|&b| b != b'\r' && b != b'\n')
+        .unwrap_or(data.len());
+    if skip == data.len() && skip > 0 {
+        return dissect_keep_alive(data, buf, offset, datagram);
+    }
+    let result = dissect_message(&data[skip..], buf, offset, skip, datagram);
+    match result {
+        Ok(mut r) => {
+            r.bytes_consumed += skip;
+            Ok(r)
+        }
+        Err(PacketError::Truncated { expected, actual }) => Err(PacketError::Truncated {
+            expected: expected + skip,
+            actual: actual + skip,
+        }),
+        Err(e) => Err(e),
+    }
+}
 
+/// Dissect a run of CR/LF bytes sent between messages as a keep-alive.
+///
+/// RFC 5626, Section 4.4.1 — "the client "ping" is a double-CRLF sequence,
+/// and the server "pong" is a single CRLF"
+/// <https://www.rfc-editor.org/rfc/rfc5626#section-4.4.1>. That mechanism
+/// is defined for connection-oriented transports only; CR/LF-only UDP
+/// datagrams (seen in practice) are reported as `"crlf"`.
+///
+/// The kind is decided per call: a ping split across two TCP segments is
+/// reported as two pongs.
+fn dissect_keep_alive<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    datagram: bool,
+) -> Result<DissectResult, PacketError> {
+    if !datagram && data.ends_with(b"\r") {
+        // The LF of the last CRLF is still to come.
+        return Err(PacketError::Truncated {
+            expected: data.len() + 1,
+            actual: data.len(),
+        });
+    }
+    let line_feeds = data.iter().filter(|&&b| b == b'\n').count();
+    let kind = match (datagram, line_feeds >= 2) {
+        (true, _) => "crlf",
+        (false, true) => "ping",
+        (false, false) => "pong",
+    };
+    let range = offset..offset + data.len();
+    buf.begin_layer("SIP", None, FIELD_DESCRIPTORS, range.clone());
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_KEEP_ALIVE],
+        FieldValue::Str(kind),
+        range,
+    );
+    buf.end_layer();
+    Ok(DissectResult::new(data.len(), DispatchHint::End))
+}
+
+/// Dissect a SIP message that starts at `data[0]`. The layer starts `skip`
+/// bytes earlier, covering the CR/LF bytes before the start-line. The
+/// returned `bytes_consumed` does not include `skip`.
+fn dissect_message<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    layer_start: usize,
+    skip: usize,
+    datagram: bool,
+) -> Result<DissectResult, PacketError> {
+    let offset = layer_start + skip;
+    if data.len() < MIN_START_LINE_LEN {
+        return Err(PacketError::Truncated {
+            expected: MIN_START_LINE_LEN,
+            actual: data.len(),
+        });
+    }
+
+    // RFC 3261, Section 7 — detect request vs response
+    let is_response = data.starts_with(b"SIP/");
+
+    buf.begin_layer("SIP", None, FIELD_DESCRIPTORS, layer_start..layer_start);
+
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_IS_RESPONSE],
+        FieldValue::U8(u8::from(is_response)),
+        offset..offset + 1,
+    );
+
+    let header_len = if is_response {
+        parse_response(data, offset, buf)?
+    } else {
+        parse_request(data, offset, buf)?
+    };
+
+    // Extract Content-Length and Content-Type from parsed headers
+    let content_length = extract_header_value(buf, "Content-Length")
+        .or_else(|| extract_header_value(buf, "l"))
+        .and_then(|v| v.parse::<u32>().ok());
+    let content_type =
+        extract_header_value(buf, "Content-Type").or_else(|| extract_header_value(buf, "c"));
+
+    if let Some(cl) = content_length {
         buf.push_field(
-            &FIELD_DESCRIPTORS[FD_IS_RESPONSE],
-            FieldValue::U8(u8::from(is_response)),
-            offset..offset + 1,
+            &FIELD_DESCRIPTORS[FD_CONTENT_LENGTH],
+            FieldValue::U32(cl),
+            offset..offset + header_len,
         );
+    }
 
-        let header_len = if is_response {
-            parse_response(data, offset, buf)?
-        } else {
-            parse_request(data, offset, buf)?
-        };
+    if let Some(ct) = content_type {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_CONTENT_TYPE],
+            FieldValue::Str(ct),
+            offset..offset + header_len,
+        );
+    }
 
-        // Extract Content-Length and Content-Type from parsed headers
-        let content_length = extract_header_value(buf, "Content-Length")
-            .or_else(|| extract_header_value(buf, "l"))
-            .and_then(|v| v.parse::<u32>().ok());
-        let content_type =
-            extract_header_value(buf, "Content-Type").or_else(|| extract_header_value(buf, "c"));
+    // RFC 3261, Section 18.3 — body framing depends on the transport
+    // <https://www.rfc-editor.org/rfc/rfc3261#section-18.3>. On UDP a
+    // missing Content-Length means the body runs to the end of the datagram
+    // and bytes after a Content-Length body are discarded (not consumed as
+    // another message). On a stream transport Content-Length is mandatory
+    // (RFC 3261, Section 20.14 —
+    // https://www.rfc-editor.org/rfc/rfc3261#section-20.14) and a missing
+    // one means no body.
+    let body_len = match content_length {
+        Some(cl) => cl as usize,
+        None if datagram => data.len() - header_len,
+        None => 0,
+    };
+    let total = header_len + body_len;
 
-        if let Some(cl) = content_length {
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_CONTENT_LENGTH],
-                FieldValue::U32(cl),
-                offset..offset + header_len,
-            );
-        }
-
-        if let Some(ct) = content_type {
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_CONTENT_TYPE],
-                FieldValue::Str(ct),
-                offset..offset + header_len,
-            );
-        }
-
-        let body_len = content_length.unwrap_or(0) as usize;
-        let total = header_len + body_len;
-
-        if total > data.len() {
-            if let Some(layer) = buf.last_layer_mut() {
-                layer.range = offset..offset + header_len;
-            }
-            buf.end_layer();
-            return Err(PacketError::Truncated {
-                expected: total,
-                actual: data.len(),
-            });
-        }
-
-        // RFC 3261, Section 7.4 — dispatch body by Content-Type.
-        if body_len > 0 {
-            if let Some(ct) =
-                extract_header_value(buf, "Content-Type").or_else(|| extract_header_value(buf, "c"))
-            {
-                if let Some(interned) = intern_content_type(ct) {
-                    if let Some(layer) = buf.last_layer_mut() {
-                        layer.range = offset..offset + header_len;
-                    }
-                    buf.end_layer();
-                    return Ok(DissectResult::new(
-                        header_len,
-                        DispatchHint::ByContentType(interned),
-                    ));
-                }
-            }
-        }
-
+    if total > data.len() {
         if let Some(layer) = buf.last_layer_mut() {
-            layer.range = offset..offset + total;
+            layer.range = layer_start..offset + header_len;
         }
         buf.end_layer();
-
-        Ok(DissectResult::new(total, DispatchHint::End))
+        return Err(PacketError::Truncated {
+            expected: total,
+            actual: data.len(),
+        });
     }
+
+    // RFC 3261, Section 7.4 — dispatch body by Content-Type.
+    if body_len > 0 {
+        if let Some(ct) = content_type {
+            if let Some(interned) = intern_content_type(ct) {
+                if let Some(layer) = buf.last_layer_mut() {
+                    layer.range = layer_start..offset + header_len;
+                }
+                buf.end_layer();
+                // The body ends after body_len bytes; anything after it
+                // is the next message on a stream transport.
+                // RFC 3261, Section 18.3 — "the Content-Length header field indicates the size
+                // of the body" <https://www.rfc-editor.org/rfc/rfc3261#section-18.3>.
+                return Ok(
+                    DissectResult::new(header_len, DispatchHint::ByContentType(interned))
+                        .with_payload_len(body_len),
+                );
+            }
+        }
+    }
+
+    if let Some(layer) = buf.last_layer_mut() {
+        layer.range = layer_start..offset + total;
+    }
+    buf.end_layer();
+
+    Ok(DissectResult::new(total, DispatchHint::End))
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +451,16 @@ fn parse_remaining_headers<'pkt>(
     line_end: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<usize, PacketError> {
-    let header_len = parse_headers(&data[line_end..], offset, line_end, buf)?;
+    // Report Truncated relative to the start of the message, not the header
+    // section, so `expected`/`actual` match the caller's input.
+    let header_len =
+        parse_headers(&data[line_end..], offset, line_end, buf).map_err(|e| match e {
+            PacketError::Truncated { expected, actual } => PacketError::Truncated {
+                expected: expected + line_end,
+                actual: actual + line_end,
+            },
+            e => e,
+        })?;
     Ok(line_end + header_len)
 }
 
@@ -434,25 +592,53 @@ fn parse_response<'pkt>(
 // ---------------------------------------------------------------------------
 
 /// Parse header fields using `httparse::parse_headers`.
+///
+/// A small stack array is tried first; a message with more than
+/// [`MAX_HEADERS`] fields is parsed again with a larger stack array, so
+/// dissection stays allocation-free.
 fn parse_headers<'pkt>(
     header_data: &'pkt [u8],
     base_offset: usize,
     line_end: usize,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Result<usize, PacketError> {
-    let mut headers_buf = [httparse::EMPTY_HEADER; MAX_HEADERS];
-
-    match httparse::parse_headers(header_data, &mut headers_buf) {
-        Ok(httparse::Status::Complete((len, headers))) => {
-            build_header_fields(header_data, base_offset + line_end, headers, buf)?;
-            Ok(len)
+    match parse_headers_with::<MAX_HEADERS>(header_data, base_offset, line_end, buf) {
+        Err(httparse::Error::TooManyHeaders) => {
+            parse_headers_with::<MAX_HEADERS_LARGE>(header_data, base_offset, line_end, buf)
         }
-        Ok(httparse::Status::Partial) => Err(PacketError::Truncated {
-            expected: header_data.len() + 1,
-            actual: header_data.len(),
-        }),
-        Err(_) => Err(PacketError::InvalidHeader("invalid SIP header")),
+        other => other,
     }
+    .map_err(|e| match e {
+        httparse::Error::TooManyHeaders => PacketError::InvalidHeader("too many SIP header fields"),
+        _ => PacketError::InvalidHeader("invalid SIP header"),
+    })?
+}
+
+/// Parse header fields with room for `N` fields.
+///
+/// Never inlined, so the large retry array only occupies the stack when it
+/// is actually used. The outer `Result` carries
+/// `httparse` errors so the caller can retry on `TooManyHeaders`.
+#[inline(never)]
+fn parse_headers_with<'pkt, const N: usize>(
+    header_data: &'pkt [u8],
+    base_offset: usize,
+    line_end: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> Result<Result<usize, PacketError>, httparse::Error> {
+    let mut headers_buf = [httparse::EMPTY_HEADER; N];
+
+    Ok(
+        match httparse::parse_headers(header_data, &mut headers_buf)? {
+            httparse::Status::Complete((len, headers)) => {
+                build_header_fields(header_data, base_offset + line_end, headers, buf).map(|()| len)
+            }
+            httparse::Status::Partial => Err(PacketError::Truncated {
+                expected: header_data.len() + 1,
+                actual: header_data.len(),
+            }),
+        },
+    )
 }
 
 /// Convert httparse headers into container fields in the buffer, with OWS trimming.
@@ -565,6 +751,18 @@ mod tests {
     // | -           | No body → End hint      | parse_sip_no_body_dispatch_end          |
     // | -           | Offset handling         | parse_sip_with_offset                   |
     // | -           | Dissector metadata       | dissector_metadata                      |
+    // | 18.3        | UDP: no Content-Length → body to end of datagram | datagram_body_without_content_length_runs_to_end |
+    // | 18.3        | UDP: bytes after Content-Length discarded | datagram_extra_bytes_after_body_discarded |
+    // | 18.3        | UDP: datagram shorter than Content-Length | datagram_short_body_is_error          |
+    // | 18.3/20.14  | TCP: no Content-Length → empty body      | stream_body_without_content_length_is_empty |
+    // | 7.5         | CRLF before start-line ignored           | leading_crlf_before_start_line_ignored |
+    // | RFC 5626 4.4.1 | Double-CRLF ping                      | crlf_ping_is_keep_alive               |
+    // | RFC 5626 4.4.1 | Single-CRLF pong                      | crlf_pong_is_keep_alive               |
+    // | RFC 5626 4.4.1 | Partial CRLF                          | partial_crlf_is_truncated             |
+    // | RFC 5626 4.4.1 | CR/LF-only UDP datagram               | datagram_crlf_is_not_truncated        |
+    // | -           | Truncated counts the whole input         | truncated_headers_after_crlf_report_full_length |
+    // | 7.3         | More than 64 header fields               | many_headers_are_all_parsed           |
+    // | 7.3         | Header count limit named in the error    | too_many_headers_error                |
 
     fn dissect(data: &[u8]) -> Result<DissectBuffer<'_>, PacketError> {
         let dissector = SipDissector;
@@ -945,6 +1143,160 @@ mod tests {
         assert_eq!(d.name(), "Session Initiation Protocol");
         assert_eq!(d.short_name(), "SIP");
         assert!(!d.field_descriptors().is_empty());
+    }
+
+    const INVITE_NO_CL: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\n\
+        Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
+        Content-Type: application/sdp\r\n\r\n";
+    const SDP_BODY: &[u8] = b"v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=-\r\n";
+
+    #[test]
+    fn datagram_body_without_content_length_runs_to_end() {
+        let mut data = INVITE_NO_CL.to_vec();
+        data.extend_from_slice(SDP_BODY);
+        let mut buf = DissectBuffer::new();
+        let result = SipDatagramDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, INVITE_NO_CL.len());
+        assert_eq!(result.next, DispatchHint::ByContentType("application/sdp"));
+        assert_eq!(result.payload_len, Some(SDP_BODY.len()));
+    }
+
+    #[test]
+    fn datagram_extra_bytes_after_body_discarded() {
+        let data = b"MESSAGE sip:bob@example.com SIP/2.0\r\n\
+                     Content-Length: 5\r\n\r\nhelloEXTRA";
+        let mut buf = DissectBuffer::new();
+        let result = SipDatagramDissector.dissect(data, &mut buf, 0).unwrap();
+        assert_eq!(result.next, DispatchHint::End);
+        assert_eq!(result.bytes_consumed, data.len() - 5);
+        let layer = buf.layer_by_name("SIP").unwrap();
+        assert_eq!(layer.range, 0..data.len() - 5);
+    }
+
+    #[test]
+    fn datagram_short_body_is_error() {
+        let data = b"MESSAGE sip:bob@example.com SIP/2.0\r\n\
+                     Content-Length: 50\r\n\r\nhello";
+        let mut buf = DissectBuffer::new();
+        let err = SipDatagramDissector.dissect(data, &mut buf, 0).unwrap_err();
+        assert!(matches!(err, PacketError::Truncated { .. }));
+    }
+
+    #[test]
+    fn stream_body_without_content_length_is_empty() {
+        let mut data = INVITE_NO_CL.to_vec();
+        data.extend_from_slice(SDP_BODY);
+        let mut buf = DissectBuffer::new();
+        let result = SipDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, INVITE_NO_CL.len());
+        assert_eq!(result.next, DispatchHint::End);
+    }
+
+    #[test]
+    fn leading_crlf_before_start_line_ignored() {
+        let data = b"\r\n\r\nOPTIONS sip:bob@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        for d in [&SipDissector as &dyn Dissector, &SipDatagramDissector] {
+            let mut buf = DissectBuffer::new();
+            let result = d.dissect(data, &mut buf, 10).unwrap();
+            assert_eq!(result.bytes_consumed, data.len());
+            let layer = buf.layer_by_name("SIP").unwrap();
+            assert_eq!(layer.range, 10..10 + data.len());
+            assert_eq!(buf.field_str(layer, "method"), Some("OPTIONS"));
+        }
+    }
+
+    #[test]
+    fn crlf_ping_is_keep_alive() {
+        let mut buf = DissectBuffer::new();
+        let result = SipDissector.dissect(b"\r\n\r\n", &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 4);
+        assert_eq!(result.next, DispatchHint::End);
+        let layer = buf.layer_by_name("SIP").unwrap();
+        assert_eq!(layer.range, 0..4);
+        assert_eq!(buf.field_str(layer, "keep_alive"), Some("ping"));
+        assert!(buf.field_by_name(layer, "is_response").is_none());
+    }
+
+    #[test]
+    fn crlf_pong_is_keep_alive() {
+        let mut buf = DissectBuffer::new();
+        let result = SipDissector.dissect(b"\r\n", &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 2);
+        let layer = buf.layer_by_name("SIP").unwrap();
+        assert_eq!(buf.field_str(layer, "keep_alive"), Some("pong"));
+    }
+
+    #[test]
+    fn datagram_crlf_is_not_truncated() {
+        let mut buf = DissectBuffer::new();
+        let result = SipDatagramDissector
+            .dissect(b"\r\n\r", &mut buf, 0)
+            .unwrap();
+        assert_eq!(result.bytes_consumed, 3);
+        let layer = buf.layer_by_name("SIP").unwrap();
+        assert_eq!(buf.field_str(layer, "keep_alive"), Some("crlf"));
+    }
+
+    #[test]
+    fn truncated_headers_after_crlf_report_full_length() {
+        let data = b"\r\n\r\nINVITE sip:a@b SIP/2.0\r\nVia: x\r\n";
+        assert_eq!(
+            dissect_err(data),
+            PacketError::Truncated {
+                expected: data.len() + 1,
+                actual: data.len()
+            }
+        );
+    }
+
+    #[test]
+    fn partial_crlf_is_truncated() {
+        let mut buf = DissectBuffer::new();
+        let err = SipDissector.dissect(b"\r\n\r", &mut buf, 0).unwrap_err();
+        assert_eq!(
+            err,
+            PacketError::Truncated {
+                expected: 4,
+                actual: 3
+            }
+        );
+        assert!(buf.layers().is_empty());
+    }
+
+    fn options_with_headers(n: usize) -> Vec<u8> {
+        let mut data = b"OPTIONS sip:bob@example.com SIP/2.0\r\n".to_vec();
+        for i in 0..n {
+            data.extend_from_slice(format!("X-H{i}: v\r\n").as_bytes());
+        }
+        data.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+        data
+    }
+
+    #[test]
+    fn many_headers_are_all_parsed() {
+        let data = options_with_headers(65);
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("SIP").unwrap();
+        let headers = buf.field_by_name(layer, "headers").unwrap();
+        let FieldValue::Array(ref range) = headers.value else {
+            panic!("headers is not an array");
+        };
+        let count = buf
+            .nested_fields(range)
+            .iter()
+            .filter(|f| matches!(f.value, FieldValue::Object(_)))
+            .count();
+        assert_eq!(count, 66);
+        assert_eq!(buf.field_u32(layer, "content_length"), Some(0));
+    }
+
+    #[test]
+    fn too_many_headers_error() {
+        let data = options_with_headers(MAX_HEADERS_LARGE);
+        assert_eq!(
+            dissect_err(&data),
+            PacketError::InvalidHeader("too many SIP header fields")
+        );
     }
 
     #[test]
