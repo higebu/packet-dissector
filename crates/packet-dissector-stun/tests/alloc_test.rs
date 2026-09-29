@@ -57,3 +57,37 @@ fn zero_alloc_dissect_stun_binding_response() {
     assert_eq!(buf.layers().len(), 1);
     assert_eq!(buf.layers()[0].name, "STUN");
 }
+
+#[test]
+fn zero_alloc_dissect_turn_channeldata() {
+    // TURN ChannelData with padding (RFC 8656, Section 12.4 —
+    // https://www.rfc-editor.org/rfc/rfc8656#section-12.4).
+    let raw: &[u8] = &[0x40, 0x01, 0x00, 0x02, 0x11, 0x22, 0x00, 0x00];
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        StunDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "TURN ChannelData dissect allocated {allocs} times"
+    );
+    assert_eq!(buf.layers()[0].name, "TURN-ChannelData");
+}
+
+#[test]
+fn zero_alloc_dissect_classic_stun() {
+    // Classic STUN Binding Request without magic cookie (RFC 5389,
+    // Section 12 — https://www.rfc-editor.org/rfc/rfc5389#section-12).
+    let mut raw = [0x5Au8; 20];
+    raw[..4].copy_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        StunDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "classic STUN dissect allocated {allocs} times");
+    assert_eq!(buf.layers()[0].name, "STUN");
+}
