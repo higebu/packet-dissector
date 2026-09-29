@@ -4529,9 +4529,10 @@ fn parse_ext_community<'pkt>(buf: &mut DissectBuffer<'pkt>, c: &'pkt [u8], offse
         }
         V::EsiLabel => {
             push(FD_EC_EVPN_FLAGS, FieldValue::U8(c[2]), 2, 1);
-            // "encoded as 3 octets, where the high-order 20 bits contain the
-            // label value" (RFC 7432, Section 7.2 —
-            // https://www.rfc-editor.org/rfc/rfc7432#section-7.2).
+            // An MPLS label, encoded like the other EVPN label fields: "The
+            // MPLS Label1 field is encoded as 3 octets, where the high-order
+            // 20 bits contain the label value" (RFC 7432, Section 9.2.1 —
+            // https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1).
             let label = read_be_u24(c, 5).unwrap_or_default() >> 4;
             push(FD_EC_ESI_LABEL, FieldValue::U32(label), 5, 3);
         }
