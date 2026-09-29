@@ -17,6 +17,8 @@
 
 #![deny(missing_docs)]
 
+mod rpl;
+
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -238,6 +240,31 @@ const FD_SEQUENCE_NUMBER_U8: usize = 30;
 const FD_EXTENSIONS: usize = 31;
 const FD_MAX_RESPONSE_DELAY_MS: usize = 32;
 const FD_QQI: usize = 33;
+const FD_RR_SEQUENCE_NUMBER: usize = 34;
+const FD_SEGMENT_NUMBER: usize = 35;
+const FD_MAX_DELAY: usize = 36;
+const FD_QTYPE: usize = 37;
+const FD_NI_FLAGS: usize = 38;
+const FD_NONCE: usize = 39;
+const FD_COMPONENT: usize = 40;
+const FD_ALL_COMPONENTS: usize = 41;
+const FD_STATUS: usize = 42;
+const FD_TID: usize = 43;
+const FD_REGISTRATION_LIFETIME: usize = 44;
+const FD_ROVR: usize = 45;
+const FD_REGISTERED_ADDRESS: usize = 46;
+pub(crate) const FD_RPL_INSTANCE_ID: usize = 47;
+pub(crate) const FD_VERSION_NUMBER: usize = 48;
+pub(crate) const FD_RANK: usize = 49;
+pub(crate) const FD_GROUNDED: usize = 50;
+pub(crate) const FD_MOP: usize = 51;
+pub(crate) const FD_PRF: usize = 52;
+pub(crate) const FD_DTSN: usize = 53;
+pub(crate) const FD_RPL_FLAGS: usize = 54;
+pub(crate) const FD_DODAG_ID: usize = 55;
+pub(crate) const FD_DAO_SEQUENCE: usize = 56;
+pub(crate) const FD_RPL_OPTIONS: usize = 57;
+pub(crate) const FD_RPL_STATUS: usize = FD_STATUS;
 
 /// Minimum IPv6 header size (RFC 8200, Section 3).
 const IPV6_MIN_HEADER: usize = 40;
@@ -463,7 +490,7 @@ static MLDV2_RECORD_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("sources", "Source Addresses", FieldType::Array).optional(),
 ];
 
-static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
+pub(crate) static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor {
         name: "type",
         display_name: "Type",
@@ -561,10 +588,138 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // from QQIC.
     // <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.9>
     FieldDescriptor::new("qqi", "Querier's Query Interval", FieldType::U16).optional(),
+    // RFC 2894, Section 3.1 — Router Renumbering SequenceNumber (32 bits),
+    // SegmentNumber and MaxDelay (milliseconds)
+    // <https://www.rfc-editor.org/rfc/rfc2894#section-3.1>
+    FieldDescriptor::new("rr_sequence_number", "Sequence Number", FieldType::U32).optional(),
+    FieldDescriptor::new("segment_number", "Segment Number", FieldType::U8).optional(),
+    FieldDescriptor::new("max_delay", "Maximum Delay", FieldType::U16).optional(),
+    // RFC 4620, Section 4 — Node Information Qtype, Flags and Nonce
+    // <https://www.rfc-editor.org/rfc/rfc4620#section-4>
+    FieldDescriptor::new("qtype", "Qtype", FieldType::U16).optional(),
+    FieldDescriptor::new("ni_flags", "Flags", FieldType::U16).optional(),
+    FieldDescriptor::new("nonce", "Nonce", FieldType::Bytes).optional(),
+    // RFC 3971, Sections 6.4.1 / 6.4.2 — Certification Path Component and
+    // All Components
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.1>
+    FieldDescriptor::new("component", "Component", FieldType::U16).optional(),
+    FieldDescriptor::new("all_components", "All Components", FieldType::U16).optional(),
+    // RFC 6775, Section 4.4 / RFC 8505, Section 4.2 — Duplicate Address
+    // Request / Confirmation fields; `status` is also the RPL DAO-ACK Status
+    // (RFC 6550, Section 6.5.1)
+    // <https://www.rfc-editor.org/rfc/rfc8505#section-4.2>
+    FieldDescriptor::new("status", "Status", FieldType::U8).optional(),
+    FieldDescriptor::new("tid", "Transaction ID", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "registration_lifetime",
+        "Registration Lifetime",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new("rovr", "Registration Ownership Verifier", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "registered_address",
+        "Registered Address",
+        FieldType::Ipv6Addr,
+    )
+    .optional(),
+    // RFC 6550, Sections 6.2-6.5 — RPL control message base objects
+    // <https://www.rfc-editor.org/rfc/rfc6550#section-6>
+    FieldDescriptor::new("rpl_instance_id", "RPLInstanceID", FieldType::U8).optional(),
+    FieldDescriptor::new("version_number", "Version Number", FieldType::U8).optional(),
+    FieldDescriptor::new("rank", "Rank", FieldType::U16).optional(),
+    FieldDescriptor::new("grounded", "Grounded", FieldType::U8).optional(),
+    FieldDescriptor::new("mop", "Mode of Operation", FieldType::U8).optional(),
+    FieldDescriptor::new("prf", "DODAG Preference", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "dtsn",
+        "Destination Advertisement Trigger Sequence Number",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("rpl_flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("dodag_id", "DODAGID", FieldType::Ipv6Addr).optional(),
+    FieldDescriptor::new("dao_sequence", "DAOSequence", FieldType::U8).optional(),
+    // RFC 6550, Section 6.7 — RPL Control Message Options
+    // <https://www.rfc-editor.org/rfc/rfc6550#section-6.7>
+    FieldDescriptor::new("rpl_options", "RPL Options", FieldType::Array)
+        .optional()
+        .with_children(rpl::RPL_OPTION_CHILDREN),
 ];
 
 /// ICMPv6 dissector.
 pub struct Icmpv6Dissector;
+
+/// Router Renumbering header size (RFC 2894, Section 3.1).
+const RR_HEADER_SIZE: usize = 16;
+/// Node Information header size (RFC 4620, Section 4).
+const NI_HEADER_SIZE: usize = 16;
+/// Certification Path Advertisement header size (RFC 3971, Section 6.4.2).
+const CPA_HEADER_SIZE: usize = 12;
+
+pub(crate) fn push_u8(
+    buf: &mut DissectBuffer<'_>,
+    fd: usize,
+    data: &[u8],
+    at: usize,
+    offset: usize,
+) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd],
+        FieldValue::U8(data[at]),
+        offset + at..offset + at + 1,
+    );
+}
+
+pub(crate) fn push_u16(
+    buf: &mut DissectBuffer<'_>,
+    fd: usize,
+    data: &[u8],
+    at: usize,
+    offset: usize,
+) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd],
+        FieldValue::U16(u16::from_be_bytes([data[at], data[at + 1]])),
+        offset + at..offset + at + 2,
+    );
+}
+
+fn push_u32(buf: &mut DissectBuffer<'_>, fd: usize, data: &[u8], at: usize, offset: usize) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd],
+        FieldValue::U32(u32::from_be_bytes([
+            data[at],
+            data[at + 1],
+            data[at + 2],
+            data[at + 3],
+        ])),
+        offset + at..offset + at + 4,
+    );
+}
+
+/// Push `data[from..]` as `fd` when it is not empty.
+pub(crate) fn push_bytes_from<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    fd: usize,
+    data: &'pkt [u8],
+    from: usize,
+    offset: usize,
+) {
+    if data.len() > from {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[fd],
+            FieldValue::Bytes(&data[from..]),
+            offset + from..offset + data.len(),
+        );
+    }
+}
+
+/// Keep a message body that is shorter than its fixed fields (or has an
+/// undecoded layout) as raw `data` after the 4-octet common header.
+pub(crate) fn push_raw_body<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    push_bytes_from(buf, FD_DATA, data, 4, offset);
+}
 
 /// Decode an MLDv2 Maximum Response Code into milliseconds.
 ///
@@ -1969,6 +2124,124 @@ impl Dissector for Icmpv6Dissector {
                         &FIELD_DESCRIPTORS[FD_EXTENSIONS],
                         &data[HEADER_SIZE..],
                         offset + HEADER_SIZE,
+                    );
+                }
+            }
+
+            // RFC 2894, Section 3.1 — Router Renumbering header:
+            // SequenceNumber (32), SegmentNumber, Flags, MaxDelay, reserved
+            // (32), then the message body.
+            // <https://www.rfc-editor.org/rfc/rfc2894#section-3.1>
+            138 => {
+                if data.len() < RR_HEADER_SIZE {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u32(buf, FD_RR_SEQUENCE_NUMBER, data, 4, offset);
+                    push_u8(buf, FD_SEGMENT_NUMBER, data, 8, offset);
+                    push_u8(buf, FD_FLAGS, data, 9, offset);
+                    push_u16(buf, FD_MAX_DELAY, data, 10, offset);
+                    push_bytes_from(buf, FD_DATA, data, RR_HEADER_SIZE, offset);
+                }
+            }
+
+            // RFC 4620, Section 4 — Node Information Query / Reply: Qtype,
+            // Flags, Nonce (64 bits), Data.
+            // <https://www.rfc-editor.org/rfc/rfc4620#section-4>
+            139 | 140 => {
+                if data.len() < NI_HEADER_SIZE {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u16(buf, FD_QTYPE, data, 4, offset);
+                    push_u16(buf, FD_NI_FLAGS, data, 6, offset);
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_NONCE],
+                        FieldValue::Bytes(&data[8..16]),
+                        offset + 8..offset + 16,
+                    );
+                    push_bytes_from(buf, FD_DATA, data, NI_HEADER_SIZE, offset);
+                }
+            }
+
+            // RFC 3122, Sections 2.1 / 2.2 — Inverse Neighbor Discovery
+            // Solicitation / Advertisement: Reserved (32 bits), Options.
+            // <https://www.rfc-editor.org/rfc/rfc3122#section-2.1>
+            141 | 142 => {
+                append_ndp_options(buf, data, offset, HEADER_SIZE)?;
+            }
+
+            // RFC 6275, Section 6.7 — Mobile Prefix Solicitation:
+            // Identifier, Reserved.
+            // <https://www.rfc-editor.org/rfc/rfc6275#section-6.7>
+            146 => {
+                push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+            }
+
+            // RFC 6275, Section 6.8 — Mobile Prefix Advertisement:
+            // Identifier, M|O|Reserved (the M and O flags are the top bits
+            // of the first octet), Options.
+            // <https://www.rfc-editor.org/rfc/rfc6275#section-6.8>
+            147 => {
+                push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+                push_u8(buf, FD_FLAGS, data, 6, offset);
+                append_ndp_options(buf, data, offset, HEADER_SIZE)?;
+            }
+
+            // RFC 3971, Section 6.4.1 — Certification Path Solicitation:
+            // Identifier, Component, Options.
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.1>
+            148 => {
+                push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+                push_u16(buf, FD_COMPONENT, data, 6, offset);
+                append_ndp_options(buf, data, offset, HEADER_SIZE)?;
+            }
+
+            // RFC 3971, Section 6.4.2 — Certification Path Advertisement:
+            // Identifier, All Components, Component, Reserved, Options.
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.2>
+            149 => {
+                if data.len() < CPA_HEADER_SIZE {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+                    push_u16(buf, FD_ALL_COMPONENTS, data, 6, offset);
+                    push_u16(buf, FD_COMPONENT, data, 8, offset);
+                    append_ndp_options(buf, data, offset, CPA_HEADER_SIZE)?;
+                }
+            }
+
+            // RFC 6550, Section 6 — RPL Control Message.
+            // <https://www.rfc-editor.org/rfc/rfc6550#section-6>
+            155 => rpl::push_rpl_message(buf, code, data, offset),
+
+            // RFC 6775, Section 4.4 — Duplicate Address Request /
+            // Confirmation: Status, Reserved, Registration Lifetime, EUI-64,
+            // Registered Address.
+            // RFC 8505, Section 4.2 — with a non-zero Code Suffix the
+            // Reserved octet is the TID and "The size of the ROVR is known
+            // from the ICMP Code Suffix" (1-4 for 64-256 bits).
+            // <https://www.rfc-editor.org/rfc/rfc6775#section-4.4>
+            // <https://www.rfc-editor.org/rfc/rfc8505#section-4.2>
+            157 | 158 => {
+                let code_suffix = (code & 0x0F) as usize;
+                let rovr_len = code_suffix.max(1) * 8;
+                if code_suffix > 4 || data.len() < 8 + rovr_len + 16 {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u8(buf, FD_STATUS, data, 4, offset);
+                    if code_suffix != 0 {
+                        push_u8(buf, FD_TID, data, 5, offset);
+                    }
+                    push_u16(buf, FD_REGISTRATION_LIFETIME, data, 6, offset);
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_ROVR],
+                        FieldValue::Bytes(&data[8..8 + rovr_len]),
+                        offset + 8..offset + 8 + rovr_len,
+                    );
+                    let addr_at = 8 + rovr_len;
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_REGISTERED_ADDRESS],
+                        FieldValue::Ipv6Addr(read_ipv6_addr(data, addr_at)?),
+                        offset + addr_at..offset + addr_at + 16,
                     );
                 }
             }
