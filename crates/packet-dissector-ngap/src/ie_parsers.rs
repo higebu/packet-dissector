@@ -15,6 +15,8 @@ use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, forma
 use packet_dissector_core::packet::DissectBuffer;
 
 use crate::aper::AperReader;
+use crate::container::IeContext;
+use crate::pdu_session;
 
 // ── Field descriptors ──────────────────────────────────────────────────
 
@@ -88,9 +90,10 @@ static FD_DEFAULT_PAGING_DRX: FieldDescriptor = FieldDescriptor {
 static FD_NAME_STRING: FieldDescriptor =
     FieldDescriptor::new("name", "Name", FieldType::Bytes).with_format_fn(format_utf8_lossy);
 
-static FD_SST: FieldDescriptor = FieldDescriptor::new("sst", "SST", FieldType::U8);
+pub(crate) static FD_SST: FieldDescriptor = FieldDescriptor::new("sst", "SST", FieldType::U8);
 
-static FD_SD: FieldDescriptor = FieldDescriptor::new("sd", "SD", FieldType::U32).optional();
+pub(crate) static FD_SD: FieldDescriptor =
+    FieldDescriptor::new("sd", "SD", FieldType::U32).optional();
 
 static FD_PLMN_IDENTITY: FieldDescriptor =
     FieldDescriptor::new("plmn_identity", "PLMN Identity", FieldType::Bytes);
@@ -179,6 +182,105 @@ static FD_TIME_TO_WAIT: FieldDescriptor = FieldDescriptor {
     format_fn: None,
 };
 
+static FD_PDU_SESSION_TYPE: FieldDescriptor =
+    FieldDescriptor::new("pdu_session_type", "PDU Session Type", FieldType::U8).with_display_fn(
+        |v, _| match v {
+            FieldValue::U8(t) => pdu_session_type_name(*t),
+            _ => None,
+        },
+    );
+
+static FD_PDU_SESSION_AMBR_DL: FieldDescriptor = FieldDescriptor::new(
+    "pdu_session_ambr_dl",
+    "PDU Session Aggregate Maximum Bit Rate DL",
+    FieldType::U64,
+);
+
+static FD_PDU_SESSION_AMBR_UL: FieldDescriptor = FieldDescriptor::new(
+    "pdu_session_ambr_ul",
+    "PDU Session Aggregate Maximum Bit Rate UL",
+    FieldType::U64,
+);
+
+static FD_UE_AMBR_DL: FieldDescriptor = FieldDescriptor::new(
+    "ue_ambr_dl",
+    "UE Aggregate Maximum Bit Rate DL",
+    FieldType::U64,
+);
+
+static FD_UE_AMBR_UL: FieldDescriptor = FieldDescriptor::new(
+    "ue_ambr_ul",
+    "UE Aggregate Maximum Bit Rate UL",
+    FieldType::U64,
+);
+
+static FD_MASKED_IMEISV: FieldDescriptor =
+    FieldDescriptor::new("masked_imeisv", "Masked IMEISV", FieldType::U64);
+
+static FD_SECURITY_KEY: FieldDescriptor =
+    FieldDescriptor::new("security_key", "Security Key", FieldType::Bytes);
+
+static FD_TRANSPARENT_CONTAINER: FieldDescriptor = FieldDescriptor::new(
+    "transparent_container",
+    "Transparent Container",
+    FieldType::Bytes,
+);
+
+static FD_UE_RADIO_CAPABILITY: FieldDescriptor = FieldDescriptor::new(
+    "ue_radio_capability",
+    "UE Radio Capability",
+    FieldType::Bytes,
+);
+
+static FD_FIVE_G_TMSI: FieldDescriptor =
+    FieldDescriptor::new("five_g_tmsi", "5G-TMSI", FieldType::U32);
+
+static UE_SECURITY_CAPABILITY_FIELDS: [FieldDescriptor; 4] = [
+    FieldDescriptor::new(
+        "nr_encryption_algorithms",
+        "NR Encryption Algorithms",
+        FieldType::U16,
+    ),
+    FieldDescriptor::new(
+        "nr_integrity_protection_algorithms",
+        "NR Integrity Protection Algorithms",
+        FieldType::U16,
+    ),
+    FieldDescriptor::new(
+        "eutra_encryption_algorithms",
+        "E-UTRA Encryption Algorithms",
+        FieldType::U16,
+    ),
+    FieldDescriptor::new(
+        "eutra_integrity_protection_algorithms",
+        "E-UTRA Integrity Protection Algorithms",
+        FieldType::U16,
+    ),
+];
+
+static S_NSSAI_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor::new("sst", "SST", FieldType::U8),
+    FieldDescriptor::new("sd", "SD", FieldType::U32).optional(),
+];
+
+static FD_S_NSSAI_ITEM: FieldDescriptor =
+    FieldDescriptor::new("s_nssai", "S-NSSAI", FieldType::Object).with_children(S_NSSAI_FIELDS);
+
+static FD_ALLOWED_NSSAI: FieldDescriptor =
+    FieldDescriptor::new("allowed_nssai", "Allowed NSSAI", FieldType::Array)
+        .with_children(S_NSSAI_FIELDS);
+
+static TAI_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor::new("plmn_identity", "PLMN Identity", FieldType::Bytes),
+    FieldDescriptor::new("tac", "TAC", FieldType::U32),
+];
+
+static FD_TAI: FieldDescriptor =
+    FieldDescriptor::new("tai", "TAI", FieldType::Object).with_children(TAI_FIELDS);
+
+static FD_TAI_LIST: FieldDescriptor =
+    FieldDescriptor::new("tai_list", "TAI List", FieldType::Array).with_children(TAI_FIELDS);
+
 /// Descriptor used for the IE value fallback field.
 static FD_IE_VALUE_FALLBACK: FieldDescriptor =
     FieldDescriptor::new("value", "Value", FieldType::Bytes);
@@ -200,8 +302,43 @@ pub fn push_ie_value<'pkt>(
     data: &'pkt [u8],
     offset: usize,
 ) {
+    push_ie_value_in(buf, ie_id, data, offset, IeContext::Message);
+}
+
+/// [`push_ie_value`] for an IE found in the IE container `ctx`.
+pub(crate) fn push_ie_value_in<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    ie_id: u16,
+    data: &'pkt [u8],
+    offset: usize,
+    ctx: IeContext,
+) {
     let pushed = match ie_id {
-        1 => push_printable_name(buf, data, offset),  // AMFName
+        0 => push_allowed_nssai(buf, data, offset), // AllowedNSSAI
+        26 => push_five_g_s_tmsi(buf, data, offset), // FiveG-S-TMSI
+        34 => push_fixed_bit_string_u64(buf, &FD_MASKED_IMEISV, 64, data, offset), // MaskedIMEISV
+        94 => push_security_key(buf, data, offset), // SecurityKey
+        101 | 106 => push_octet_string(buf, &FD_TRANSPARENT_CONTAINER, data, offset), // Source/TargetToSource-TransparentContainer
+        103 => push_tai_list_for_paging(buf, data, offset), // TAIListForPaging
+        110 => push_bit_rate_pair(buf, &FD_UE_AMBR_DL, &FD_UE_AMBR_UL, data, offset), // UEAggregateMaximumBitRate
+        117 => push_octet_string(buf, &FD_UE_RADIO_CAPABILITY, data, offset), // UERadioCapability
+        119 => push_ue_security_capabilities(buf, data, offset), // UESecurityCapabilities
+        130 => push_bit_rate_pair(
+            buf,
+            &FD_PDU_SESSION_AMBR_DL,
+            &FD_PDU_SESSION_AMBR_UL,
+            data,
+            offset,
+        ), // PDUSessionAggregateMaximumBitRate
+        134 => push_enumerated(
+            buf,
+            &FD_PDU_SESSION_TYPE,
+            PDU_SESSION_TYPE_ROOT_COUNT,
+            data,
+            offset,
+        ), // PDUSessionType
+        139 | 195 => pdu_session::push_up_transport_layer_information(buf, data, offset), // (Redundant)UL-NGU-UP-TNLInformation
+        1 => push_printable_name(buf, data, offset),                                      // AMFName
         10 => push_amf_ue_ngap_id(buf, data, offset), // AMF-UE-NGAP-ID
         15 => push_cause(buf, data, offset),          // Cause
         21 => push_enumerated(
@@ -243,7 +380,15 @@ pub fn push_ie_value<'pkt>(
         ), // UEContextRequest
         121 => push_user_location_information(buf, data, offset), // UserLocationInformation
         148 => push_s_nssai(buf, data, offset),                   // S-NSSAI
-        _ => false,
+        // PDU session resource lists (TS 38.413, Section 9.4.5). The
+        // specification never places them inside a transfer; keeping them
+        // raw there bounds the nesting depth.
+        _ => match pdu_session::item_layout(ie_id) {
+            Some(layout) if ctx == IeContext::Message => {
+                pdu_session::push_pdu_session_resource_list(buf, layout, data, offset)
+            }
+            _ => false,
+        },
     };
 
     if !pushed {
@@ -293,6 +438,22 @@ const HANDOVER_TYPE_ROOT_COUNT: u64 = 3;
 /// 3GPP TS 38.413, Section 9.4.5.
 const TIME_TO_WAIT_ROOT_COUNT: u64 = 6;
 
+/// Number of root values of `PDUSessionType` (extensible).
+///
+/// 3GPP TS 38.413, Section 9.4.5.
+const PDU_SESSION_TYPE_ROOT_COUNT: u64 = 5;
+
+/// Upper bound of `BitRate ::= INTEGER (0..4000000000000, ...)`.
+///
+/// 3GPP TS 38.413, Section 9.4.5.
+const BIT_RATE_MAX: u64 = 4_000_000_000_000;
+
+/// `maxnoofAllowedS-NSSAIs` — 3GPP TS 38.413, Section 9.4.7.
+const MAX_NO_OF_ALLOWED_S_NSSAIS: u64 = 8;
+
+/// `maxnoofTAIforPaging` — 3GPP TS 38.413, Section 9.4.7.
+const MAX_NO_OF_TAI_FOR_PAGING: u64 = 16;
+
 /// Number of alternatives of `Cause` (no extension marker; the last
 /// alternative is `choice-Extensions`).
 ///
@@ -335,7 +496,7 @@ fn cause_root_count(group: u64) -> Option<u64> {
 // ── Shared APER decoding helpers ───────────────────────────────────────
 
 /// Shifts a byte range relative to the IE value by `offset`.
-fn shift(range: Range<usize>, offset: usize) -> Range<usize> {
+pub(crate) fn shift(range: Range<usize>, offset: usize) -> Range<usize> {
     range.start + offset..range.end + offset
 }
 
@@ -345,7 +506,7 @@ fn shift(range: Range<usize>, offset: usize) -> Range<usize> {
 /// complete encoding of its value: the encoded bits padded to an octet
 /// boundary, or a single zero octet for an empty encoding (Section
 /// 10.1.3). Leftover octets mean the value is malformed.
-fn ensure_consumed(r: &AperReader<'_>, data: &[u8]) -> Result<(), PacketError> {
+pub(crate) fn ensure_consumed(r: &AperReader<'_>, data: &[u8]) -> Result<(), PacketError> {
     if r.bit_position().div_ceil(8).max(1) != data.len() {
         return Err(PacketError::InvalidHeader(
             "APER open type value has trailing octets",
@@ -360,7 +521,7 @@ fn ensure_consumed(r: &AperReader<'_>, data: &[u8]) -> Result<(), PacketError> {
 /// Used for octet-aligned fields: fixed-size OCTET STRINGs longer than two
 /// octets (ITU-T Rec. X.691, Section 17.7) and the contents that follow a
 /// length determinant (Sections 17.8, 30.5).
-fn read_aligned_octets<'a>(
+pub(crate) fn read_aligned_octets<'a>(
     r: &mut AperReader<'a>,
     n: usize,
 ) -> Result<(&'a [u8], Range<usize>), PacketError> {
@@ -391,7 +552,7 @@ fn read_bit_string_field(
 /// OF ProtocolExtensionField`, each field being `id` (INTEGER
 /// (0..65535)), `criticality` (ENUMERATED {reject, ignore, notify}) and
 /// `extensionValue` (open type, ITU-T Rec. X.691, Section 11.2).
-fn skip_protocol_extension_container(r: &mut AperReader<'_>) -> Result<(), PacketError> {
+pub(crate) fn skip_protocol_extension_container(r: &mut AperReader<'_>) -> Result<(), PacketError> {
     let count = r.read_length(1, Some(MAX_PROTOCOL_EXTENSIONS))?;
     for _ in 0..count {
         r.read_constrained_whole_number(0, 65535)?;
@@ -402,13 +563,27 @@ fn skip_protocol_extension_container(r: &mut AperReader<'_>) -> Result<(), Packe
     Ok(())
 }
 
+/// Skips a `ProtocolIE-SingleContainer`, the value of a
+/// `choice-Extensions` alternative.
+///
+/// 3GPP TS 38.413, Section 9.4.8 — `ProtocolIE-Field`: `id` (INTEGER
+/// (0..65535)), `criticality` (ENUMERATED {reject, ignore, notify}) and
+/// `value` (open type, ITU-T Rec. X.691, Section 11.2).
+pub(crate) fn skip_protocol_ie_single_container(r: &mut AperReader<'_>) -> Result<(), PacketError> {
+    r.read_constrained_whole_number(0, 65535)?;
+    r.read_enumerated(3, false)?;
+    let len = r.read_length(0, None)?;
+    r.read_octets(len as usize)?;
+    Ok(())
+}
+
 /// Skips the extension additions of an extensible SEQUENCE whose
 /// extension bit was set.
 ///
 /// ITU-T Rec. X.691, Section 19.8–19.9: a normally small length giving
 /// the size of the presence bitmap, the bitmap, then each present
 /// addition as an open type.
-fn skip_sequence_extension_additions(r: &mut AperReader<'_>) -> Result<(), PacketError> {
+pub(crate) fn skip_sequence_extension_additions(r: &mut AperReader<'_>) -> Result<(), PacketError> {
     let count = r.read_normally_small()?.saturating_add(1);
     let mut present = 0u64;
     for _ in 0..count {
@@ -428,7 +603,7 @@ fn skip_sequence_extension_additions(r: &mut AperReader<'_>) -> Result<(), Packe
 ///
 /// ITU-T Rec. X.691, Section 19.1 (extension bit) and 19.2 (bitmap of
 /// OPTIONAL components).
-fn read_sequence_preamble(r: &mut AperReader<'_>) -> Result<(bool, bool), PacketError> {
+pub(crate) fn read_sequence_preamble(r: &mut AperReader<'_>) -> Result<(bool, bool), PacketError> {
     let extended = r.read_bit()?;
     let has_ie_extensions = r.read_bit()?;
     Ok((extended, has_ie_extensions))
@@ -436,7 +611,7 @@ fn read_sequence_preamble(r: &mut AperReader<'_>) -> Result<(bool, bool), Packet
 
 /// Skips what follows the root components of an extensible SEQUENCE:
 /// the `iE-Extensions` container and the extension additions.
-fn skip_sequence_tail(
+pub(crate) fn skip_sequence_tail(
     r: &mut AperReader<'_>,
     extended: bool,
     has_ie_extensions: bool,
@@ -569,42 +744,69 @@ fn push_ran_ue_ngap_id<'pkt>(
 ///
 /// 3GPP TS 38.413, Section 9.3.1.2; ITU-T Rec. X.691, Sections 14, 23.
 fn push_cause<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    let mut r = AperReader::new(data);
-    let Ok(group) = r.read_choice_index(CAUSE_CHOICE_COUNT, false) else {
+    let decode = || -> Result<Cause, PacketError> {
+        let mut r = AperReader::new(data);
+        let cause = read_cause(&mut r)?;
+        ensure_consumed(&r, data)?;
+        Ok(cause)
+    };
+    let Ok(cause) = decode() else {
         return false;
     };
-    let group_range = r.byte_range_since(0);
+    push_cause_fields(buf, &cause, offset);
+    true
+}
 
+/// A decoded Cause.
+pub(crate) struct Cause {
+    group: u8,
+    group_range: Range<usize>,
+    /// The ENUMERATED value of the group, absent for choice-Extensions.
+    value: Option<(u8, Range<usize>)>,
+}
+
+/// Reads a Cause (see [`push_cause`]) at the reader's position.
+///
+/// For `choice-Extensions` the group is read and its
+/// ProtocolIE-SingleContainer is skipped.
+pub(crate) fn read_cause(r: &mut AperReader<'_>) -> Result<Cause, PacketError> {
+    let start = r.bit_position();
+    let group = r.read_choice_index(CAUSE_CHOICE_COUNT, false)?;
+    let group_range = r.byte_range_since(start);
     let value = match cause_root_count(group) {
         Some(root_count) => {
             let start = r.bit_position();
-            let Some(value) = r
-                .read_enumerated(root_count, true)
-                .ok()
-                .and_then(|v| u8::try_from(v).ok())
-            else {
-                return false;
-            };
-            if ensure_consumed(&r, data).is_err() {
-                return false;
-            }
+            let value = u8::try_from(r.read_enumerated(root_count, true)?)
+                .map_err(|_| PacketError::InvalidHeader("Cause value out of range"))?;
             Some((value, r.byte_range_since(start)))
         }
-        // choice-Extensions carries a ProtocolIE-SingleContainer that is
-        // not decoded here.
-        None => None,
+        None => {
+            skip_protocol_ie_single_container(r)?;
+            None
+        }
     };
-
     // `group` is at most 5 (3-bit constrained whole number 0..5).
+    Ok(Cause {
+        group: group as u8,
+        group_range,
+        value,
+    })
+}
+
+/// Pushes `cause_group` and, if present, `cause_value`.
+pub(crate) fn push_cause_fields(buf: &mut DissectBuffer<'_>, cause: &Cause, offset: usize) {
     buf.push_field(
         &FD_CAUSE_GROUP,
-        FieldValue::U8(group as u8),
-        shift(group_range, offset),
+        FieldValue::U8(cause.group),
+        shift(cause.group_range.clone(), offset),
     );
-    if let Some((value, range)) = value {
-        buf.push_field(&FD_CAUSE_VALUE, FieldValue::U8(value), shift(range, offset));
+    if let Some((value, ref range)) = cause.value {
+        buf.push_field(
+            &FD_CAUSE_VALUE,
+            FieldValue::U8(value),
+            shift(range.clone(), offset),
+        );
     }
-    true
 }
 
 /// RelativeAMFCapacity (IE 86) — INTEGER (0..255).
@@ -719,28 +921,11 @@ fn push_printable_name<'pkt>(
 ///
 /// 3GPP TS 38.413, Section 9.3.1.24; ITU-T Rec. X.691, Sections 17.6, 17.7, 19.
 fn push_s_nssai<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
-    type SNssai = ((u8, Range<usize>), Option<(u32, Range<usize>)>);
     let decode = || -> Result<SNssai, PacketError> {
         let mut r = AperReader::new(data);
-        // Extension additions (if any) follow the root components and do
-        // not affect them — ITU-T Rec. X.691, Section 19.7.
-        let extended = r.read_bit()?;
-        let sd_present = r.read_bit()?;
-        let has_ie_extensions = r.read_bit()?;
-        let start = r.bit_position();
-        // Eight bits read from a u64 always fit in a u8.
-        let sst = r.read_bits(8)? as u8;
-        let sst_range = r.byte_range_since(start);
-        let sd = if sd_present {
-            let (sd, range) = read_aligned_octets(&mut r, 3)?;
-            let sd = (u32::from(sd[0]) << 16) | (u32::from(sd[1]) << 8) | u32::from(sd[2]);
-            Some((sd, range))
-        } else {
-            None
-        };
-        skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+        let s_nssai = read_s_nssai(&mut r)?;
         ensure_consumed(&r, data)?;
-        Ok(((sst, sst_range), sd))
+        Ok(s_nssai)
     };
     let Ok(((sst, sst_range), sd)) = decode() else {
         return false;
@@ -751,6 +936,31 @@ fn push_s_nssai<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: u
         buf.push_field(&FD_SD, FieldValue::U32(sd), shift(range, offset));
     }
     true
+}
+
+/// A decoded S-NSSAI: `(sst, range)` and optional `(sd, range)`.
+pub(crate) type SNssai = ((u8, Range<usize>), Option<(u32, Range<usize>)>);
+
+/// Reads an S-NSSAI (see [`push_s_nssai`]) at the reader's position.
+pub(crate) fn read_s_nssai(r: &mut AperReader<'_>) -> Result<SNssai, PacketError> {
+    // Extension additions (if any) follow the root components and do not
+    // affect them — ITU-T Rec. X.691, Section 19.7.
+    let extended = r.read_bit()?;
+    let sd_present = r.read_bit()?;
+    let has_ie_extensions = r.read_bit()?;
+    let start = r.bit_position();
+    // Eight bits read from a u64 always fit in a u8.
+    let sst = r.read_bits(8)? as u8;
+    let sst_range = r.byte_range_since(start);
+    let sd = if sd_present {
+        let (sd, range) = read_aligned_octets(r, 3)?;
+        let sd = (u32::from(sd[0]) << 16) | (u32::from(sd[1]) << 8) | u32::from(sd[2]);
+        Some((sd, range))
+    } else {
+        None
+    };
+    skip_sequence_tail(r, extended, has_ie_extensions)?;
+    Ok(((sst, sst_range), sd))
 }
 
 /// GUAMI (IE 28) — SEQUENCE { pLMNIdentity, aMFRegionID, aMFSetID,
@@ -1077,16 +1287,344 @@ fn push_nas_pdu<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: u
     if nas_data.is_empty() {
         return false;
     }
-    let range = shift(range, offset);
-    let nas_offset = range.start;
+    push_nas_pdu_octets(buf, nas_data, shift(range, offset));
+    true
+}
 
+/// Pushes a `nas_pdu` object for the NAS-PDU octets `nas` at `range`: the
+/// 5G NAS message, or its raw octets when it cannot be decoded.
+///
+/// 3GPP TS 38.413, Section 9.3.3.4; 3GPP TS 24.501.
+pub(crate) fn push_nas_pdu_octets<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    nas: &'pkt [u8],
+    range: Range<usize>,
+) {
     let obj_idx = buf.begin_container(&FD_NAS_PDU, FieldValue::Object(0..0), range.clone());
-    let ok = packet_dissector_nas5g::push_nas_pdu(buf, nas_data, nas_offset);
-    if !ok {
+    if !packet_dissector_nas5g::push_nas_pdu(buf, nas, range.start) {
         // Could not parse — store raw bytes.
-        buf.push_field(&FD_IE_VALUE_FALLBACK, FieldValue::Bytes(nas_data), range);
+        buf.push_field(&FD_IE_VALUE_FALLBACK, FieldValue::Bytes(nas), range);
     }
     buf.end_container(obj_idx);
+}
+
+/// Reads a `BitRate ::= INTEGER (0..4000000000000, ...)`.
+///
+/// ITU-T Rec. X.691, Section 13.2: an extension bit, then a constrained
+/// whole number in the root range (the indefinite length case, Section
+/// 11.5.7.4), or, for an extension value, an unconstrained whole number
+/// (Section 12.2.6: an octet-aligned length and a two's-complement value,
+/// so a value with the top bit set takes a leading zero octet). A negative
+/// extension value is not a valid bit rate.
+fn read_bit_rate(r: &mut AperReader<'_>) -> Result<u64, PacketError> {
+    if !r.read_bit()? {
+        return r.read_constrained_whole_number(0, BIT_RATE_MAX);
+    }
+    let len = r.read_length(0, None)?;
+    let octets = r.read_octets(len as usize)?;
+    match octets {
+        [first, ..] if first & 0x80 != 0 => Err(PacketError::InvalidHeader(
+            "BitRate extension value is negative",
+        )),
+        [0, rest @ ..] if rest.len() == 8 => Ok(fold_be(rest)),
+        _ if (1..=8).contains(&octets.len()) => Ok(fold_be(octets)),
+        _ => Err(PacketError::InvalidHeader(
+            "BitRate extension value too long",
+        )),
+    }
+}
+
+/// Big-endian value of at most eight octets.
+fn fold_be(octets: &[u8]) -> u64 {
+    octets
+        .iter()
+        .fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+}
+
+/// PDUSessionAggregateMaximumBitRate (IE 130) and UEAggregateMaximumBitRate
+/// (IE 110) — SEQUENCE { DL BitRate, UL BitRate, iE-Extensions OPTIONAL,
+/// ... }.
+///
+/// 3GPP TS 38.413, Sections 9.3.1.102 and 9.3.1.58 (ASN.1 in 9.4.5).
+fn push_bit_rate_pair<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    dl_desc: &'static FieldDescriptor,
+    ul_desc: &'static FieldDescriptor,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    type Rates = ((u64, Range<usize>), (u64, Range<usize>));
+    let decode = || -> Result<Rates, PacketError> {
+        let mut r = AperReader::new(data);
+        let (extended, has_ie_extensions) = read_sequence_preamble(&mut r)?;
+        let start = r.bit_position();
+        let dl = read_bit_rate(&mut r)?;
+        let dl_range = r.byte_range_since(start);
+        let start = r.bit_position();
+        let ul = read_bit_rate(&mut r)?;
+        let ul_range = r.byte_range_since(start);
+        skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+        ensure_consumed(&r, data)?;
+        Ok(((dl, dl_range), (ul, ul_range)))
+    };
+    let Ok(((dl, dl_range), (ul, ul_range))) = decode() else {
+        return false;
+    };
+    buf.push_field(dl_desc, FieldValue::U64(dl), shift(dl_range, offset));
+    buf.push_field(ul_desc, FieldValue::U64(ul), shift(ul_range, offset));
+    true
+}
+
+/// Unconstrained OCTET STRING IEs (UERadioCapability, IE 117; Source- and
+/// TargetToSource-TransparentContainer, IEs 101 and 106): an octet-aligned
+/// length determinant, then the octets, kept raw.
+///
+/// 3GPP TS 38.413, Sections 9.3.1.74, 9.3.1.20 and 9.3.1.21; ITU-T Rec.
+/// X.691, Section 17.8.
+fn push_octet_string<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    desc: &'static FieldDescriptor,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    let decode = || -> Result<(&'pkt [u8], Range<usize>), PacketError> {
+        let mut r = AperReader::new(data);
+        let len = r.read_length(0, None)?;
+        let octets = read_aligned_octets(&mut r, len as usize)?;
+        ensure_consumed(&r, data)?;
+        Ok(octets)
+    };
+    let Ok((octets, range)) = decode() else {
+        return false;
+    };
+    buf.push_field(desc, FieldValue::Bytes(octets), shift(range, offset));
+    true
+}
+
+/// Fixed-size BIT STRING IEs of up to 64 bits above 16 bits (octet-aligned),
+/// e.g. MaskedIMEISV (IE 34), `BIT STRING (SIZE(64))`.
+///
+/// 3GPP TS 38.413, Section 9.3.1.54; ITU-T Rec. X.691, Section 16.10.
+fn push_fixed_bit_string_u64<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    desc: &'static FieldDescriptor,
+    bits: u32,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    let decode = || -> Result<(u64, Range<usize>), PacketError> {
+        let mut r = AperReader::new(data);
+        let v = read_bit_string_field(&mut r, bits)?;
+        ensure_consumed(&r, data)?;
+        Ok(v)
+    };
+    let Ok((value, range)) = decode() else {
+        return false;
+    };
+    buf.push_field(desc, FieldValue::U64(value), shift(range, offset));
+    true
+}
+
+/// SecurityKey (IE 94) — `BIT STRING (SIZE(256))`: 32 octet-aligned
+/// octets, kept raw.
+///
+/// 3GPP TS 38.413, Section 9.3.1.87; ITU-T Rec. X.691, Section 16.10.
+fn push_security_key<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
+    if data.len() != 32 {
+        return false;
+    }
+    buf.push_field(
+        &FD_SECURITY_KEY,
+        FieldValue::Bytes(data),
+        offset..offset + 32,
+    );
+    true
+}
+
+/// FiveG-S-TMSI (IE 26) — SEQUENCE { aMFSetID BIT STRING (SIZE(10)),
+/// aMFPointer BIT STRING (SIZE(6)), fiveG-TMSI OCTET STRING (SIZE(4)),
+/// iE-Extensions OPTIONAL, ... }.
+///
+/// 3GPP TS 38.413, Section 9.3.3.20; ITU-T Rec. X.691, Sections 16.9 and
+/// 17.7.
+fn push_five_g_s_tmsi<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    type STmsi = (
+        (u64, Range<usize>),
+        (u64, Range<usize>),
+        (u32, Range<usize>),
+    );
+    let decode = || -> Result<STmsi, PacketError> {
+        let mut r = AperReader::new(data);
+        let (extended, has_ie_extensions) = read_sequence_preamble(&mut r)?;
+        let set = read_bit_string_field(&mut r, 10)?;
+        let pointer = read_bit_string_field(&mut r, 6)?;
+        let (tmsi, tmsi_range) = read_aligned_octets(&mut r, 4)?;
+        skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+        ensure_consumed(&r, data)?;
+        let tmsi = u32::from_be_bytes([tmsi[0], tmsi[1], tmsi[2], tmsi[3]]);
+        Ok((set, pointer, (tmsi, tmsi_range)))
+    };
+    let Ok(((set, set_range), (pointer, pointer_range), (tmsi, tmsi_range))) = decode() else {
+        return false;
+    };
+    // Bit widths 10 and 6 guarantee the narrowing casts are lossless.
+    buf.push_field(
+        &FD_AMF_SET_ID,
+        FieldValue::U16(set as u16),
+        shift(set_range, offset),
+    );
+    buf.push_field(
+        &FD_AMF_POINTER,
+        FieldValue::U8(pointer as u8),
+        shift(pointer_range, offset),
+    );
+    buf.push_field(
+        &FD_FIVE_G_TMSI,
+        FieldValue::U32(tmsi),
+        shift(tmsi_range, offset),
+    );
+    true
+}
+
+/// UESecurityCapabilities (IE 119) — SEQUENCE of four `BIT STRING
+/// (SIZE(16, ...))` algorithm bitmaps and iE-Extensions OPTIONAL.
+///
+/// Each bitmap is a size-extension bit followed by a 16-bit bit-field
+/// (ITU-T Rec. X.691, Sections 16.6 and 16.9); a size extension is not
+/// decoded.
+///
+/// 3GPP TS 38.413, Section 9.3.1.86.
+fn push_ue_security_capabilities<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    type Caps = [(u16, Range<usize>); 4];
+    let decode = || -> Result<Caps, PacketError> {
+        let mut r = AperReader::new(data);
+        let (extended, has_ie_extensions) = read_sequence_preamble(&mut r)?;
+        let mut caps: Caps = Default::default();
+        for cap in &mut caps {
+            if r.read_bit()? {
+                return Err(PacketError::InvalidHeader(
+                    "security algorithm bitmap size extension",
+                ));
+            }
+            let (value, range) = read_bit_string_field(&mut r, 16)?;
+            // A 16-bit field always fits in a u16.
+            *cap = (value as u16, range);
+        }
+        skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+        ensure_consumed(&r, data)?;
+        Ok(caps)
+    };
+    let Ok(caps) = decode() else {
+        return false;
+    };
+    for (desc, (value, range)) in UE_SECURITY_CAPABILITY_FIELDS.iter().zip(caps) {
+        buf.push_field(desc, FieldValue::U16(value), shift(range, offset));
+    }
+    true
+}
+
+/// AllowedNSSAI (IE 0) — SEQUENCE (SIZE(1..maxnoofAllowedS-NSSAIs)) OF
+/// AllowedNSSAI-Item, each `SEQUENCE { s-NSSAI, iE-Extensions OPTIONAL,
+/// ... }`.
+///
+/// 3GPP TS 38.413, Section 9.3.1.31 (ASN.1 in 9.4.5).
+fn push_allowed_nssai<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    let mark = buf.fields().len();
+    let mut decode = || -> Result<(), PacketError> {
+        let mut r = AperReader::new(data);
+        let count = r.read_length(1, Some(MAX_NO_OF_ALLOWED_S_NSSAIS))?;
+        let list = buf.begin_container(
+            &FD_ALLOWED_NSSAI,
+            FieldValue::Array(0..0),
+            offset..offset + data.len(),
+        );
+        for _ in 0..count {
+            let start = r.bit_position();
+            let (extended, has_ie_extensions) = read_sequence_preamble(&mut r)?;
+            let item =
+                buf.begin_container(&FD_S_NSSAI_ITEM, FieldValue::Object(0..0), offset..offset);
+            let ((sst, sst_range), sd) = read_s_nssai(&mut r)?;
+            buf.push_field(&FD_SST, FieldValue::U8(sst), shift(sst_range, offset));
+            if let Some((sd, range)) = sd {
+                buf.push_field(&FD_SD, FieldValue::U32(sd), shift(range, offset));
+            }
+            skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+            if let Some(field) = buf.field_mut(item as usize) {
+                field.range = shift(r.byte_range_since(start), offset);
+            }
+            buf.end_container(item);
+        }
+        ensure_consumed(&r, data)?;
+        buf.end_container(list);
+        Ok(())
+    };
+    if decode().is_err() {
+        buf.truncate_fields(mark);
+        return false;
+    }
+    true
+}
+
+/// TAIListForPaging (IE 103) — SEQUENCE (SIZE(1..maxnoofTAIforPaging)) OF
+/// TAIListForPagingItem, each `SEQUENCE { tAI, iE-Extensions OPTIONAL,
+/// ... }`.
+///
+/// 3GPP TS 38.413, Section 9.3.1.72 (ASN.1 in 9.4.5).
+fn push_tai_list_for_paging<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    let mark = buf.fields().len();
+    let mut decode = || -> Result<(), PacketError> {
+        let mut r = AperReader::new(data);
+        let count = r.read_length(1, Some(MAX_NO_OF_TAI_FOR_PAGING))?;
+        let list = buf.begin_container(
+            &FD_TAI_LIST,
+            FieldValue::Array(0..0),
+            offset..offset + data.len(),
+        );
+        for _ in 0..count {
+            let start = r.bit_position();
+            let (extended, has_ie_extensions) = read_sequence_preamble(&mut r)?;
+            let item = buf.begin_container(&FD_TAI, FieldValue::Object(0..0), offset..offset);
+            let tai = read_tai(&mut r)?;
+            buf.push_field(
+                &FD_PLMN_IDENTITY,
+                FieldValue::Bytes(tai.plmn),
+                shift(tai.plmn_range, offset),
+            );
+            buf.push_field(
+                &FD_TAC,
+                FieldValue::U32(tai.tac),
+                shift(tai.tac_range, offset),
+            );
+            skip_sequence_tail(&mut r, extended, has_ie_extensions)?;
+            if let Some(field) = buf.field_mut(item as usize) {
+                field.range = shift(r.byte_range_since(start), offset);
+            }
+            buf.end_container(item);
+        }
+        ensure_consumed(&r, data)?;
+        buf.end_container(list);
+        Ok(())
+    };
+    if decode().is_err() {
+        buf.truncate_fields(mark);
+        return false;
+    }
     true
 }
 
@@ -1234,6 +1772,20 @@ fn time_to_wait_name(value: u8) -> &'static str {
     }
 }
 
+/// Returns a human-readable name for PDUSessionType.
+///
+/// 3GPP TS 38.413, Section 9.3.1.52 (ASN.1 in Section 9.4.5).
+fn pdu_session_type_name(value: u8) -> Option<&'static str> {
+    Some(match value {
+        0 => "ipv4",
+        1 => "ipv6",
+        2 => "ipv4v6",
+        3 => "ethernet",
+        4 => "unstructured",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! # 3GPP TS 38.413 IE Parser Coverage
@@ -1299,6 +1851,21 @@ mod tests {
     //! | 1     | 9.3.3.21  | AMFName trailing octet rejected     | parse_amf_name_trailing_octet          |
     //! | 38    | 9.3.3.4   | NAS-PDU trailing octet rejected     | parse_nas_pdu_trailing_octet           |
     //! | _     | —         | Unknown IE                          | parse_unknown_ie                       |
+    //! | 0     | 9.3.1.31  | AllowedNSSAI                        | parse_allowed_nssai                    |
+    //! | 26    | 9.3.3.20  | FiveG-S-TMSI                        | parse_five_g_s_tmsi                    |
+    //! | 34    | 9.3.1.54  | MaskedIMEISV                        | parse_masked_imeisv                    |
+    //! | 94    | 9.3.1.87  | SecurityKey                         | parse_security_key                     |
+    //! | 101   | 9.3.1.20  | SourceToTarget-TransparentContainer | parse_transparent_container            |
+    //! | 103   | 9.3.1.72  | TAIListForPaging                    | parse_tai_list_for_paging              |
+    //! | 110   | 9.3.1.58  | UEAggregateMaximumBitRate           | parse_ue_aggregate_maximum_bit_rate    |
+    //! | 110   | 9.3.1.58  | BitRate extension value             | parse_bit_rate_extension_value         |
+    //! | 110   | 9.3.1.58  | BitRate extension, 9 octets         | parse_bit_rate_extension_nine_octets   |
+    //! | 15    | 9.3.1.2   | choice-Extensions without container | parse_cause_choice_extensions_malformed|
+    //! | 117   | 9.3.1.74  | UERadioCapability                   | parse_ue_radio_capability              |
+    //! | 119   | 9.3.1.86  | UESecurityCapabilities              | parse_ue_security_capabilities         |
+    //! | 130   | 9.3.1.102 | PDUSessionAggregateMaximumBitRate   | parse_pdu_session_ambr                 |
+    //! | 134   | 9.3.1.52  | PDUSessionType                      | parse_pdu_session_type                 |
+    //! | many  | —         | Malformed values fall back to raw   | parse_new_ies_malformed                |
 
     use super::*;
 
@@ -1426,8 +1993,9 @@ mod tests {
 
     #[test]
     fn parse_cause_choice_extensions() {
-        // choice-Extensions (101): the group is reported, the value is not.
-        let data = [0xA0, 0x00];
+        // choice-Extensions (101): the group is reported and the
+        // ProtocolIE-SingleContainer (id 1, reject, one octet) skipped.
+        let data = [0xA0, 0x00, 0x01, 0x00, 0x01, 0xFF];
         let mut buf = DissectBuffer::new();
         push_and_get_fields(&mut buf, 15, &data, 0);
         assert_eq!(buf.fields().len(), 1);
@@ -2011,5 +2579,243 @@ mod tests {
     fn decode_plmn_short() {
         let data = [0x00, 0x01];
         assert_eq!(decode_plmn(&data), "");
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// `(name, value)` of every pushed field.
+    fn pushed<'a>(buf: &'a DissectBuffer<'a>) -> Vec<(&'static str, FieldValue<'a>)> {
+        buf.fields()
+            .iter()
+            .map(|f| (f.name(), f.value.clone()))
+            .collect()
+    }
+
+    // Vectors below were produced with pycrate `NGAP_IEs` (APER).
+
+    #[test]
+    fn parse_allowed_nssai() {
+        let data = hex("20011010000003");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 0, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("allowed_nssai", FieldValue::Array(1..6)),
+                ("s_nssai", FieldValue::Object(2..3)),
+                ("sst", FieldValue::U8(1)),
+                ("s_nssai", FieldValue::Object(4..6)),
+                ("sst", FieldValue::U8(2)),
+                ("sd", FieldValue::U32(3)),
+            ]
+        );
+        assert_eq!(buf.fields()[5].range, 4..7);
+    }
+
+    #[test]
+    fn parse_five_g_s_tmsi() {
+        let data = hex("00104012345678");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 26, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("amf_set_id", FieldValue::U16(1)),
+                ("amf_pointer", FieldValue::U8(1)),
+                ("five_g_tmsi", FieldValue::U32(0x1234_5678)),
+            ]
+        );
+        assert_eq!(buf.fields()[2].range, 3..7);
+    }
+
+    #[test]
+    fn parse_masked_imeisv() {
+        let data = hex("0123456789abcdef");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 34, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [("masked_imeisv", FieldValue::U64(0x0123_4567_89ab_cdef))]
+        );
+    }
+
+    #[test]
+    fn parse_security_key() {
+        let data = [0x11u8; 32];
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 94, &data, 0);
+        assert_eq!(pushed(&buf), [("security_key", FieldValue::Bytes(&data))]);
+    }
+
+    #[test]
+    fn parse_transparent_container() {
+        let data = hex("02dead");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 101, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [("transparent_container", FieldValue::Bytes(&[0xde, 0xad]))]
+        );
+        assert_eq!(buf.fields()[0].range, 1..3);
+    }
+
+    #[test]
+    fn parse_tai_list_for_paging() {
+        let data = hex("0000f110000001");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 103, &data, 0);
+        let plmn: &[u8] = &[0x00, 0xf1, 0x10];
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("tai_list", FieldValue::Array(1..4)),
+                ("tai", FieldValue::Object(2..4)),
+                ("plmn_identity", FieldValue::Bytes(plmn)),
+                ("tac", FieldValue::U32(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_ue_aggregate_maximum_bit_rate() {
+        let data = hex("1403a3529440000000");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 110, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("ue_ambr_dl", FieldValue::U64(4_000_000_000_000)),
+                ("ue_ambr_ul", FieldValue::U64(0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bit_rate_extension_value() {
+        // DL: extension bit set, unconstrained length 1, value 7;
+        // UL: root value 1.
+        let data = hex("20010700" /* ext | pad, len, value, UL prefix */)
+            .into_iter()
+            .chain([0x01])
+            .collect::<Vec<_>>();
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 110, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("ue_ambr_dl", FieldValue::U64(7)),
+                ("ue_ambr_ul", FieldValue::U64(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bit_rate_extension_nine_octets() {
+        // A 2^63 extension value takes a leading zero octet (two's
+        // complement); UL is a root value 1.
+        let data = hex("20090080000000000000000001");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 110, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("ue_ambr_dl", FieldValue::U64(1 << 63)),
+                ("ue_ambr_ul", FieldValue::U64(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_cause_choice_extensions_malformed() {
+        // choice-Extensions without its ProtocolIE-SingleContainer.
+        let data = [0xA0, 0x00];
+        let mut buf = DissectBuffer::new();
+        push_and_get_fields(&mut buf, 15, &data, 0);
+        assert_fallback(&buf, &data);
+    }
+
+    #[test]
+    fn parse_ue_radio_capability() {
+        let data = hex("03010203");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 117, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [("ue_radio_capability", FieldValue::Bytes(&[1, 2, 3]))]
+        );
+    }
+
+    #[test]
+    fn parse_ue_security_capabilities() {
+        let data = hex("1c000c000700030000");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 119, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("nr_encryption_algorithms", FieldValue::U16(0xe000)),
+                (
+                    "nr_integrity_protection_algorithms",
+                    FieldValue::U16(0xc000)
+                ),
+                ("eutra_encryption_algorithms", FieldValue::U16(0xe000)),
+                (
+                    "eutra_integrity_protection_algorithms",
+                    FieldValue::U16(0xc000)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_pdu_session_ambr() {
+        let data = hex("0c3b9aca00301dcd6500");
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 130, &data, 0);
+        assert_eq!(
+            pushed(&buf),
+            [
+                ("pdu_session_ambr_dl", FieldValue::U64(1_000_000_000)),
+                ("pdu_session_ambr_ul", FieldValue::U64(500_000_000)),
+            ]
+        );
+        assert_eq!(buf.fields()[0].range, 0..5);
+    }
+
+    #[test]
+    fn parse_pdu_session_type() {
+        let data = [0x20];
+        let mut buf = DissectBuffer::new();
+        push_ie_value(&mut buf, 134, &data, 0);
+        assert_eq!(pushed(&buf), [("pdu_session_type", FieldValue::U8(2))]);
+        assert_eq!(display(&buf, 0), Some("ipv4v6"));
+    }
+
+    #[test]
+    fn parse_new_ies_malformed() {
+        for (id, value) in [
+            (0, "2001"),            // second S-NSSAI missing
+            (26, "001040123456"),   // 5G-TMSI truncated
+            (34, "0123456789abcd"), // 56 bits
+            (94, "11"),             // key truncated
+            (101, "05dead"),        // length beyond value
+            (103, "0000f11000"),    // TAC truncated
+            (110, "14"),            // bit rate truncated
+            (110, "20"),            // extension length missing
+            (110, "200900"),        // extension longer than 8 octets
+            (117, "0301020304"),    // trailing octet
+            (119, "20"),            // size extension bit set
+            (130, "0c3b9aca00"),    // UL missing
+        ] {
+            let data = hex(value);
+            let mut buf = DissectBuffer::new();
+            push_ie_value(&mut buf, id, &data, 0);
+            assert_fallback(&buf, &data);
+        }
     }
 }
