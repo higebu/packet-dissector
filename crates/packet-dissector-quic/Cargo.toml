@@ -12,6 +12,17 @@ description = "QUIC (RFC 9000) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }
+aes = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
+hkdf = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+
+[features]
+decrypt = ["aes", "aes-gcm", "hkdf", "sha2"]
 
 [dev-dependencies]
+aes = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
 packet-dissector-test-alloc = { workspace = true }

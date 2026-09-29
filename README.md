@@ -63,6 +63,7 @@ Representative feature flags:
 - Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
 - 3GPP: `gtpv1u`, `gtpv2c`, `pfcp`, `nas5g`, `ngap`
 - `esp-decrypt` enables ESP payload decryption support
+- `quic-decrypt` enables QUIC client Initial decryption and frame decoding
 
 Convenience groups:
 

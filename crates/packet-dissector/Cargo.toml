@@ -65,6 +65,7 @@ default = [
   "ike",
   "rtp",
   "quic",
+  "quic-decrypt",
   "stun",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
@@ -122,6 +123,7 @@ ike = ["dep:packet-dissector-ike"]
 esp-decrypt = ["esp", "packet-dissector-esp/decrypt"]
 rtp = ["dep:packet-dissector-rtp"]
 quic = ["dep:packet-dissector-quic"]
+quic-decrypt = ["quic", "packet-dissector-quic/decrypt"]
 stun = ["dep:packet-dissector-stun"]
 
 ## Convenience feature groups

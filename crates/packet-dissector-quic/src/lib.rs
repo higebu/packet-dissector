@@ -1,16 +1,23 @@
-//! QUIC protocol dissector (header parsing only — payload is encrypted).
+//! QUIC protocol dissector.
 //!
 //! Parses QUIC Long Headers (Initial, 0-RTT, Handshake, Retry, Version
 //! Negotiation) and Short Headers. Packets coalesced into one UDP datagram
 //! (RFC 9000, Section 12.2) are split using the Length field and each packet
-//! becomes its own layer. Since QUIC payload is encrypted, the dissector
-//! terminates the chain and does not dispatch to further dissectors.
+//! becomes its own layer. The dissector terminates the chain and does not
+//! dispatch to further dissectors.
+//!
+//! With the `decrypt` feature, client Initial packets are decrypted with the
+//! keys derived from their Destination Connection ID (RFC 9001, Section 5.2)
+//! and their packet number and frames (RFC 9000, Section 19) are shown.
+//! Other packets need keys that cannot be derived from the packet alone, so
+//! only their unprotected header fields are shown.
 //!
 //! ## References
 //! - RFC 8999 (QUIC Invariants): <https://www.rfc-editor.org/rfc/rfc8999>
 //! - RFC 9000 (QUIC v1): <https://www.rfc-editor.org/rfc/rfc9000>
 //! - RFC 9001 (QUIC-TLS): <https://www.rfc-editor.org/rfc/rfc9001>
 //! - RFC 9369 (QUIC v2): <https://www.rfc-editor.org/rfc/rfc9369>
+//! - RFC 9221 (QUIC DATAGRAM frames): <https://www.rfc-editor.org/rfc/rfc9221>
 
 #![deny(missing_docs)]
 
@@ -21,6 +28,12 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::read_be_u32;
+
+mod frame;
+#[cfg(any(feature = "decrypt", test))]
+mod initial;
+#[cfg(test)]
+mod test_vectors;
 
 /// Minimum header size: a single byte is needed to determine header form.
 const MIN_HEADER_SIZE: usize = 1;
@@ -187,6 +200,15 @@ const FD_SUPPORTED_VERSIONS: usize = 11;
 const FD_RETRY_TOKEN: usize = 12;
 const FD_RETRY_INTEGRITY_TAG: usize = 13;
 const FD_SPIN_BIT: usize = 14;
+// Only pushed by the Initial decryption path.
+#[cfg_attr(not(any(feature = "decrypt", test)), allow(dead_code))]
+const FD_RESERVED_BITS: usize = 15;
+#[cfg_attr(not(any(feature = "decrypt", test)), allow(dead_code))]
+const FD_PACKET_NUMBER_LENGTH: usize = 16;
+#[cfg_attr(not(any(feature = "decrypt", test)), allow(dead_code))]
+const FD_PACKET_NUMBER: usize = 17;
+#[cfg_attr(not(any(feature = "decrypt", test)), allow(dead_code))]
+const FD_FRAMES: usize = 18;
 
 /// Field descriptors for the QUIC dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -283,6 +305,25 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // read without keys (RFC 9001, Section 5.4.1 —
     // <https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1>).
     FieldDescriptor::new("spin_bit", "Spin Bit", FieldType::U8).optional(),
+    // 15..=18: header-protected fields and frames, present only when an
+    // Initial packet was decrypted (RFC 9001, Section 5 —
+    // <https://www.rfc-editor.org/rfc/rfc9001#section-5>).
+    // 15: reserved_bits (long header byte 0, bits 0x0c)
+    FieldDescriptor::new("reserved_bits", "Reserved Bits", FieldType::U8).optional(),
+    // 16: packet_number_length (encoded length in bytes, 1..=4)
+    FieldDescriptor::new(
+        "packet_number_length",
+        "Packet Number Length",
+        FieldType::U8,
+    )
+    .optional(),
+    // 17: packet_number
+    FieldDescriptor::new("packet_number", "Packet Number", FieldType::U64).optional(),
+    // 18: frames (RFC 9000, Section 19 —
+    // <https://www.rfc-editor.org/rfc/rfc9000#section-19>)
+    FieldDescriptor::new("frames", "Frames", FieldType::Array)
+        .optional()
+        .with_children(frame::FRAME_CHILDREN),
 ];
 
 /// Dummy descriptor for version entries inside the supported_versions Array.
@@ -313,6 +354,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 9369",
         "QUIC Version 2",
         "https://www.rfc-editor.org/rfc/rfc9369",
+    ),
+    SpecReference::new(
+        "RFC 9221",
+        "An Unreliable Datagram Extension to QUIC",
+        "https://www.rfc-editor.org/rfc/rfc9221",
     ),
 ];
 
@@ -662,10 +708,12 @@ impl QuicDissector {
                     );
                 }
                 Some(PacketKind::Initial | PacketKind::ZeroRtt | PacketKind::Handshake) => {
-                    // RFC 9000, Section 17.2 — Length field is a variable-length
-                    // integer giving the combined length of Packet Number and
-                    // Packet Payload. Both are header-protected and therefore
-                    // opaque without decryption keys.
+                    // RFC 9000, Section 17.2 — <https://www.rfc-editor.org/rfc/rfc9000#section-17.2>
+                    // Length field is a variable-length integer giving the
+                    // combined length of Packet Number and Packet Payload.
+                    // Both are protected; only client Initials can be
+                    // decrypted without connection state (see
+                    // `push_decrypted_initial`).
                     if cursor >= data.len() {
                         return Err(PacketError::Truncated {
                             expected: cursor + 1,
@@ -701,6 +749,18 @@ impl QuicDissector {
                             layer.range.end = offset + end;
                         }
                         packet_end = Some(end);
+
+                        #[cfg(any(feature = "decrypt", test))]
+                        if kind == Some(PacketKind::Initial) {
+                            Self::push_decrypted_initial(
+                                buf,
+                                version,
+                                &data[..end],
+                                dcid,
+                                body_start,
+                                offset,
+                            );
+                        }
                     }
                 }
                 None => {
@@ -714,6 +774,54 @@ impl QuicDissector {
         buf.end_layer();
 
         Ok(packet_end)
+    }
+
+    /// Decrypt a client Initial packet and push its header-protected fields
+    /// and frames. Nothing is pushed when decryption fails, for example for
+    /// a server Initial.
+    ///
+    /// RFC 9001, Section 5 — <https://www.rfc-editor.org/rfc/rfc9001#section-5>
+    #[cfg(any(feature = "decrypt", test))]
+    fn push_decrypted_initial(
+        buf: &mut DissectBuffer<'_>,
+        version: u32,
+        packet: &[u8],
+        dcid: &[u8],
+        pn_offset: usize,
+        offset: usize,
+    ) {
+        initial::unprotect_client_initial(version, packet, dcid, pn_offset, |hdr, plain| {
+            // RFC 9000, Section 17.2 — <https://www.rfc-editor.org/rfc/rfc9000#section-17.2>:
+            // "Reserved Bits: Two bits (those with a mask of 0x0c) of byte 0
+            // are reserved across multiple packet types."
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_RESERVED_BITS],
+                FieldValue::U8((hdr.first_byte >> 2) & 0x03),
+                offset..offset + 1,
+            );
+            // "the least significant two bits (those with a mask of 0x03) of
+            // byte 0 contain the length of the Packet Number field, encoded
+            // as an unsigned two-bit integer that is one less than the length
+            // of the Packet Number field in bytes." The field holds the
+            // length in bytes.
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_PACKET_NUMBER_LENGTH],
+                FieldValue::U8(hdr.packet_number_length as u8),
+                offset..offset + 1,
+            );
+            let payload_start = pn_offset + hdr.packet_number_length;
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_PACKET_NUMBER],
+                FieldValue::U64(hdr.packet_number),
+                offset + pn_offset..offset + payload_start,
+            );
+            frame::push_frames(
+                buf,
+                &FIELD_DESCRIPTORS[FD_FRAMES],
+                plain,
+                offset + payload_start,
+            );
+        });
     }
 
     /// Parse a QUIC Short Header (1-RTT) packet. It has no Length field, so
@@ -792,6 +900,12 @@ mod tests {
     // | 9000 §12.2          | Second packet Length exceeds data  | test_coalesced_second_packet_length_exceeds_datagram |
     // | 9000 §12.2          | Second packet header truncated     | test_coalesced_second_header_truncated |
     // | 9000 §15            | Reserved version 0x?a?a?a?a        | test_version_name_reserved_pattern   |
+    // | 9001 §5, A.2        | v1 client Initial decrypted        | test_decrypt_rfc9001_client_initial  |
+    // | 9369 §3.3, A.2      | v2 client Initial decrypted        | test_decrypt_rfc9369_client_initial  |
+    // | 9000 §12.2, 9001 §5 | Coalesced: each packet on its own  | test_decrypt_coalesced_client_initial |
+    // | 9001 §5.2, A.3      | Server Initial: header only        | test_server_initial_not_decrypted    |
+    // | 9001 §5.3           | AEAD failure: header only          | test_tampered_initial_not_decrypted  |
+    // | 9000 §17.2          | Snaplen-cut Initial: header only   | test_snaplen_initial_not_decrypted   |
     // | 9000 §16            | Variable-Length Integer (1 byte)   | test_decode_varint_1byte             |
     // | 9000 §16            | Variable-Length Integer (2 bytes)  | test_decode_varint_2byte             |
     // | 9000 §16            | Variable-Length Integer (4 bytes)  | test_decode_varint_4byte             |
@@ -1735,6 +1849,151 @@ mod tests {
         assert_eq!(version_name(0x1a2a_3a4b), None);
     }
 
+    // --- Initial decryption (RFC 9001 §5, RFC 9369 §3.3) ---
+
+    /// Dissect an RFC Appendix A.2 client Initial and check the decrypted
+    /// header fields and frames.
+    fn check_decrypted_a2(data: &[u8]) {
+        let crypto = test_vectors::rfc9001_a2_crypto_frame();
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 1200);
+        assert_eq!(buf.layers().len(), 1);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.display_name, Some("QUIC Initial"));
+
+        assert_eq!(
+            buf.field_by_name(layer, "reserved_bits").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "packet_number_length")
+                .unwrap()
+                .value,
+            FieldValue::U8(4)
+        );
+        let pn = buf.field_by_name(layer, "packet_number").unwrap();
+        assert_eq!(pn.value, FieldValue::U64(2));
+        assert_eq!(pn.range, 18..22);
+
+        let frames = buf.field_by_name(layer, "frames").unwrap();
+        // Payload between the packet number and the 16-byte AEAD tag.
+        assert_eq!(frames.range, 22..1200 - 16);
+        let FieldValue::Array(ref range) = frames.value else {
+            panic!("expected Array");
+        };
+        let children = buf.nested_fields(range);
+        // CRYPTO frame: frame_type, offset, length, crypto_data
+        let FieldValue::Object(ref crypto_obj) = children[0].value else {
+            panic!("expected Object");
+        };
+        assert_eq!(children[0].range, 22..22 + crypto.len());
+        let fields = buf.nested_fields(crypto_obj);
+        assert_eq!(fields[0].value, FieldValue::U64(0x06));
+        assert_eq!(fields[1].value, FieldValue::U64(0)); // offset
+        assert_eq!(fields[2].value, FieldValue::U64(241)); // length
+        let FieldValue::Scratch(ref data) = fields[3].value else {
+            panic!("expected Scratch");
+        };
+        assert_eq!(
+            &buf.scratch()[data.start as usize..data.end as usize],
+            &crypto[4..]
+        );
+        // PADDING run to the end of the payload
+        let padding = &children[1 + fields.len()];
+        assert_eq!(padding.range, 22 + crypto.len()..1200 - 16);
+        let FieldValue::Object(ref padding_obj) = padding.value else {
+            panic!("expected Object");
+        };
+        let fields = buf.nested_fields(padding_obj);
+        assert_eq!(fields[0].value, FieldValue::U64(0x00));
+        assert_eq!(
+            fields[1].value,
+            FieldValue::U64((1162 - crypto.len()) as u64)
+        );
+        assert_eq!(children.len(), 1 + 4 + 1 + 2);
+    }
+
+    #[test]
+    fn test_decrypt_rfc9001_client_initial() {
+        // RFC 9001, Appendix A.2 — https://www.rfc-editor.org/rfc/rfc9001#appendix-A.2
+        check_decrypted_a2(&test_vectors::rfc9001_a2_client_initial());
+    }
+
+    #[test]
+    fn test_decrypt_rfc9369_client_initial() {
+        // RFC 9369, Appendix A.2 — https://www.rfc-editor.org/rfc/rfc9369#appendix-A.2
+        check_decrypted_a2(&test_vectors::rfc9369_a2_client_initial());
+    }
+
+    #[test]
+    fn test_decrypt_coalesced_client_initial() {
+        // RFC 9000, Section 12.2 — every coalesced packet is processed on
+        // its own; the Initial is decrypted, the 1-RTT packet is not.
+        // https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        let mut data = test_vectors::rfc9001_a2_client_initial();
+        data.extend_from_slice(&build_short_header(0, 0, &[0xcc; 30]));
+        let mut buf = DissectBuffer::new();
+        QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(buf.layers().len(), 2);
+        assert!(
+            buf.field_by_name(&buf.layers()[0], "packet_number")
+                .is_some()
+        );
+        assert!(
+            buf.field_by_name(&buf.layers()[1], "packet_number")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_server_initial_not_decrypted() {
+        // RFC 9001, Section 5.2 — server Initial keys derive from the
+        // client's original DCID, which is not in the server's packet. The
+        // header is still shown and no error is returned.
+        // https://www.rfc-editor.org/rfc/rfc9001#section-5.2
+        for data in [
+            test_vectors::rfc9001_a3_server_initial(),
+            test_vectors::rfc9369_a3_server_initial(),
+        ] {
+            let mut buf = DissectBuffer::new();
+            let result = QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(result.bytes_consumed, data.len());
+            let layer = &buf.layers()[0];
+            assert_eq!(layer.display_name, Some("QUIC Initial"));
+            assert!(buf.field_by_name(layer, "length").is_some());
+            assert!(buf.field_by_name(layer, "packet_number").is_none());
+            assert!(buf.field_by_name(layer, "frames").is_none());
+        }
+    }
+
+    #[test]
+    fn test_tampered_initial_not_decrypted() {
+        // RFC 9001, Section 5.3 — a payload whose tag does not verify is not
+        // shown as decrypted.
+        // https://www.rfc-editor.org/rfc/rfc9001#section-5.3
+        let mut data = test_vectors::rfc9001_a2_client_initial();
+        data[100] ^= 0xff;
+        let mut buf = DissectBuffer::new();
+        QuicDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "packet_number").is_none());
+        assert!(buf.field_by_name(layer, "frames").is_none());
+    }
+
+    #[test]
+    fn test_snaplen_initial_not_decrypted() {
+        // A client Initial cut short by the capture keeps its header fields
+        // and is not decrypted.
+        let data = test_vectors::rfc9001_a2_client_initial();
+        let mut buf = DissectBuffer::new();
+        let result = QuicDissector.dissect(&data[..600], &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 600);
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "length").is_some());
+        assert!(buf.field_by_name(layer, "packet_number").is_none());
+    }
+
     // --- Truncation errors ---
 
     #[test]
@@ -1797,7 +2056,7 @@ mod tests {
     #[test]
     fn test_field_descriptors() {
         let descriptors = QuicDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 15);
+        assert_eq!(descriptors.len(), 19);
         assert_eq!(descriptors[FD_HEADER_FORM].name, "header_form");
         assert_eq!(descriptors[FD_RETRY_TOKEN].name, "retry_token");
         assert_eq!(
@@ -1806,6 +2065,13 @@ mod tests {
         );
         assert_eq!(descriptors[FD_SPIN_BIT].name, "spin_bit");
         assert!(descriptors.iter().all(|d| d.name != "key_phase"));
+        assert_eq!(descriptors[FD_RESERVED_BITS].name, "reserved_bits");
+        assert_eq!(
+            descriptors[FD_PACKET_NUMBER_LENGTH].name,
+            "packet_number_length"
+        );
+        assert_eq!(descriptors[FD_PACKET_NUMBER].name, "packet_number");
+        assert_eq!(descriptors[FD_FRAMES].name, "frames");
     }
 
     #[test]
