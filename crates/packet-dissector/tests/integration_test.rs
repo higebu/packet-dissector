@@ -114,6 +114,7 @@
 //! | Ethernet → IPv4 → UDP → L2TP(L) → PPP → IPv4 → UDP      | ethernet_ipv4_udp_l2tp_length_ppp_ipv4_udp       |
 //! | Ethernet → IPv4 → UDP → L2TP (control)                   | ethernet_ipv4_udp_l2tp_control                   |
 //! | Ethernet → IPv4 → L2TPv3 (IP, data)                       | integration_ethernet_ipv4_l2tpv3_ip_data             |
+//! | Ethernet → IPv4 → L2TPv3 (IP, data) → Ethernet → IPv4     | integration_ethernet_ipv4_l2tpv3_ethernet_pw         |
 //! | Ethernet → IPv4 → L2TPv3 (IP, control SCCRQ)              | integration_ethernet_ipv4_l2tpv3_ip_control          |
 //! | Ethernet → IPv4 → UDP → L2TPv3-UDP (control SCCRP)        | integration_ethernet_ipv4_udp_l2tpv3_control         |
 //! | Ethernet → IPv4 → UDP → L2TPv3-UDP (data)                 | integration_ethernet_ipv4_udp_l2tpv3_data            |
@@ -6289,6 +6290,34 @@ fn integration_ethernet_ipv4_l2tpv3_ip_data() {
         buf.field_by_name(l2tp, "is_control").unwrap().value,
         FieldValue::U8(0)
     );
+}
+
+/// Ethernet → IPv4 → L2TPv3 (IP, data) → Ethernet → IPv4 (RFC 4719
+/// Ethernet pseudowire, no cookie, no L2-Specific Sublayer).
+/// <https://www.rfc-editor.org/rfc/rfc4719>
+#[test]
+fn integration_ethernet_ipv4_l2tpv3_ethernet_pw() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 115, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x12, 0x34]);
+    push_ethernet(&mut pkt, [0x02; 6], [0x03; 6], 0x0800);
+    let inner_ip = pkt.len();
+    push_ipv4(&mut pkt, 17, [192, 168, 0, 1], [192, 168, 0, 2]);
+    fixup_ipv4_length(&mut pkt, inner_ip);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names[..5],
+        ["Ethernet", "IPv4", "L2TPv3", "Ethernet", "IPv4"]
+    );
+    assert_layers_contiguous(&buf);
 }
 
 /// Ethernet → IPv4 → L2TPv3 (IP, control SCCRQ)
