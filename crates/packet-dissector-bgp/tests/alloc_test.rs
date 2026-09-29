@@ -231,3 +231,40 @@ fn zero_alloc_dissect_bgp_update_evpn() {
         "BGP EVPN update dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_update_flowspec() {
+    // MP_REACH_NLRI (AFI 2, SAFI 133) with an IPv6 Flow Specification rule
+    // whose destination prefix is assembled in the scratch buffer (RFC 8956,
+    // Section 3.1 — https://www.rfc-editor.org/rfc/rfc8956#section-3.1) and a
+    // port component (RFC 8955, Section 4.2.2.4 —
+    // https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2.4).
+    let nlri = [
+        0x0a, 0x01, 0x20, 0x00, 0x20, 0x01, 0x0d, 0xb8, 0x04, 0x81, 0x19,
+    ];
+    let mut mp_reach = vec![0, 2, 133, 0, 0];
+    mp_reach.extend_from_slice(&nlri);
+    let mut attrs = vec![0x90, 14];
+    attrs.extend_from_slice(&(mp_reach.len() as u16).to_be_bytes());
+    attrs.extend_from_slice(&mp_reach);
+
+    let mut raw = vec![0xFF; 16]; // Marker
+    let total_len = 19 + 2 + 2 + attrs.len();
+    raw.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+    raw.push(2); // Type = UPDATE
+    raw.extend_from_slice(&0u16.to_be_bytes()); // Withdrawn Routes Length
+    raw.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    raw.extend_from_slice(&attrs);
+
+    let mut buf = DissectBuffer::new();
+    BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP FlowSpec update dissect allocated {allocs} times"
+    );
+}

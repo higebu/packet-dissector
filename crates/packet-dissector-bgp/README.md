@@ -41,6 +41,15 @@ NVGRE / VXLAN GPE Encapsulation Extended Community
 ([RFC 8365](https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3)). Other route
 types, and routes that do not match their layout, keep a `value`.
 
+Flow Specification (SAFI 133 / 134) entries carry `nlri_length`, `rd` (SAFI
+134) and `components`, each with its `type` and either a prefix (`prefix`, or
+for an IPv6 prefix with an offset `prefix_offset`, `prefix_length` and
+`pattern`) or a list of `operators` (`operator`, `end_of_list`, `and`,
+`comparison` or `not` / `match`, `value`), per
+[RFC 8955](https://www.rfc-editor.org/rfc/rfc8955#section-4) and
+[RFC 8956](https://www.rfc-editor.org/rfc/rfc8956#section-3); malformed rules
+keep a `value`.
+
 Every `nlri` / `withdrawn_routes` array — top level and inside
 `MP_REACH_NLRI` / `MP_UNREACH_NLRI` — declares the same entry `children`: the
 union of the plain prefix fields and the
