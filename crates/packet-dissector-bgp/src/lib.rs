@@ -20,6 +20,7 @@
 //! - RFC 4456 (Route Reflection): <https://www.rfc-editor.org/rfc/rfc4456>
 //! - RFC 4486 (Cease NOTIFICATION subcodes): <https://www.rfc-editor.org/rfc/rfc4486>
 //! - RFC 4659 (BGP-MPLS IP VPN Extension for IPv6 VPN): <https://www.rfc-editor.org/rfc/rfc4659>
+//! - RFC 4684 (Constrained Route Distribution for BGP/MPLS IP VPNs): <https://www.rfc-editor.org/rfc/rfc4684>
 //! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
 //! - RFC 6368 (Internal BGP as PE-CE Protocol / ATTR_SET): <https://www.rfc-editor.org/rfc/rfc6368>
 //! - RFC 6514 (BGP Encodings for Multicast in MPLS/BGP IP VPNs / PMSI Tunnel): <https://www.rfc-editor.org/rfc/rfc6514>
@@ -286,6 +287,13 @@
 //! | §5.5 | IPv4 next hop (SAFI 71) and RD + IPv6 next hop (SAFI 72) | `parse_bgp_update_mp_reach_bgp_ls_next_hop` |
 //! | IANA BGP-LS | NLRI Type and Protocol-ID names | `bgp_ls_nlri_name_tables` |
 //!
+//! # Route Target Membership NLRI Coverage (RFC 4684)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | §4 | Default route target, origin AS, partial and full Route Target; IPv4 and IPv6 next hops; AFI 2 kept raw | `parse_bgp_update_mp_reach_rt_constraint` |
+//! | §4; RFC 7911 §3 | Lengths of 1-31 or over 96 bits and truncated prefixes kept raw; withdrawn NLRI; ADD-PATH block, including a zero Path Identifier | `parse_bgp_update_rt_constraint_malformed_withdrawn_add_path` |
+//!
 //! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
 //!
 //! | RFC Section | Description | Test |
@@ -471,6 +479,9 @@ const SAFI_MULTICAST_VPN: u8 = 129;
 const AFI_BGP_LS: u16 = 16388;
 const SAFI_BGP_LS: u8 = 71;
 const SAFI_BGP_LS_VPN: u8 = 72;
+/// SAFI for Route Target membership NLRI (RFC 4684, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc4684#section-4>).
+const SAFI_RT_CONSTRAINT: u8 = 132;
 /// Size of a Route Distinguisher (RFC 4364, Section 4.2 —
 /// <https://www.rfc-editor.org/rfc/rfc4364#section-4.2>).
 const RD_SIZE: usize = 8;
@@ -5408,6 +5419,9 @@ enum MpNlriEncoding {
     /// Link-State NLRI, with an RD when `vpn` (RFC 9552, Section 5.2 —
     /// <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>).
     BgpLs { vpn: bool },
+    /// Route Target membership NLRI (RFC 4684, Section 4 —
+    /// <https://www.rfc-editor.org/rfc/rfc4684#section-4>).
+    RtConstraint,
 }
 
 /// Shape of a labeled NLRI block.
@@ -6838,6 +6852,148 @@ fn push_bgp_ls_body<'pkt>(
     buf.end_container(array_idx);
 }
 
+/// Size of the origin AS field of a Route Target membership NLRI (RFC 4684,
+/// Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>).
+const RTC_ORIGIN_AS_SIZE: usize = 4;
+/// Shortest non-default Route Target membership prefix: "Except for the
+/// default route target, which is encoded as a zero-length prefix, the
+/// minimum prefix length is 32 bits." (RFC 4684, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc4684#section-4>).
+const RTC_MIN_PREFIX_BITS: u8 = 32;
+/// Longest Route Target membership prefix: origin AS (4) and Route Target
+/// (8) octets, "a prefix of 0 to 96 bits" (RFC 4684, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc4684#section-4>).
+const RTC_MAX_PREFIX_BITS: u8 = 96;
+
+/// Returns the number of octets of a Route Target membership prefix of
+/// `bits` bits, or `None` for a length RFC 4684, Section 4 does not allow
+/// (see [`RTC_MIN_PREFIX_BITS`] and [`RTC_MAX_PREFIX_BITS`]).
+///
+/// RFC 4684, Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>
+fn rtc_prefix_octets(bits: u8) -> Option<usize> {
+    (bits == 0 || (RTC_MIN_PREFIX_BITS..=RTC_MAX_PREFIX_BITS).contains(&bits))
+        .then(|| usize::from(bits).div_ceil(8))
+}
+
+/// Frames the leading Route Target membership NLRI of `data`, each preceded
+/// by `path_id_len` octets of Path Identifier, stopping at a length that is
+/// not 0 or 32-96 bits. Returns the number of octets framed, and whether a
+/// default route target (zero-length prefix) shares the block with other
+/// entries.
+fn rtc_block_framing(data: &[u8], path_id_len: usize) -> (usize, bool) {
+    let mut pos = 0;
+    let mut entries = 0usize;
+    let mut has_default = false;
+    while pos < data.len() {
+        let Some(octets) = data
+            .get(pos + path_id_len)
+            .copied()
+            .and_then(rtc_prefix_octets)
+        else {
+            break;
+        };
+        let end = pos + path_id_len + 1 + octets;
+        if end > data.len() {
+            break;
+        }
+        has_default |= octets == 0;
+        entries += 1;
+        pos = end;
+    }
+    (pos, has_default && entries > 1)
+}
+
+/// Returns `true` when a Route Target membership NLRI block carries RFC 7911
+/// ADD-PATH Path Identifiers. As in [`detect_add_path_prefixes`], it does
+/// when the block frames further with them than without, or frames fully
+/// with them while the plain reading contains a default route target that
+/// is not the sole entry — a Path Identifier with zero octets reads as
+/// default route targets.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_rt_constraint(data: &[u8]) -> bool {
+    let (plain, suspicious) = rtc_block_framing(data, 0);
+    if plain == data.len() && !suspicious {
+        return false;
+    }
+    let (add_path, _) = rtc_block_framing(data, PATH_ID_SIZE);
+    add_path > plain || (suspicious && add_path == data.len())
+}
+
+/// Parses a Route Target membership NLRI block (AFI 1, SAFI 132) into one
+/// object per NLRI and returns the number of octets consumed.
+///
+/// RFC 4684, Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>
+///
+/// Each NLRI is "a prefix of 0 to 96 bits, encoded as defined in Section 4
+/// of [5]" — [5] is RFC 2858 (Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc2858#section-4>), obsoleted by RFC
+/// 4760, whose Section 5 (<https://www.rfc-editor.org/rfc/rfc4760#section-5>)
+/// carries the same `<length, prefix>` encoding — structured as origin AS (4 octets) and Route Target (0-8
+/// octets, as corrected by Verified Erratum 6246 —
+/// <https://www.rfc-editor.org/errata/eid6246>). The prefix length is
+/// `prefix_length`; the covered octets are
+/// `origin_as` (for 32 bits or more) and `route_target` (the covered
+/// octets of the Route Target, if any). The framing stops at the first
+/// length that is not allowed, and the rest stays raw.
+fn parse_rt_constraint_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+) -> usize {
+    let f = &RTC_NLRI_FIELDS;
+    let id_len = if detect_add_path_rt_constraint(data) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
+    let (consumed, _) = rtc_block_framing(data, id_len);
+    let mut pos = 0;
+    while pos < consumed {
+        let bits_pos = pos + id_len;
+        let bits = data[bits_pos];
+        let octets = rtc_prefix_octets(bits).unwrap_or_default();
+        let prefix = bits_pos + 1;
+        let end = prefix + octets;
+        let abs = base_offset + pos;
+        let obj_idx = buf.begin_container(
+            &RTC_NLRI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + end,
+        );
+        if id_len != 0 {
+            buf.push_field(
+                &f[FD_RTC_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+        buf.push_field(
+            &f[FD_RTC_PREFIX_LENGTH],
+            FieldValue::U8(bits),
+            base_offset + bits_pos..base_offset + prefix,
+        );
+        if octets >= RTC_ORIGIN_AS_SIZE {
+            let rt = prefix + RTC_ORIGIN_AS_SIZE;
+            buf.push_field(
+                &f[FD_RTC_ORIGIN_AS],
+                FieldValue::U32(read_be_u32(data, prefix).unwrap_or_default()),
+                base_offset + prefix..base_offset + rt,
+            );
+            if end > rt {
+                buf.push_field(
+                    &f[FD_RTC_ROUTE_TARGET],
+                    FieldValue::Bytes(&data[rt..end]),
+                    base_offset + rt..base_offset + end,
+                );
+            }
+        }
+        buf.end_container(obj_idx);
+        pos = end;
+    }
+    consumed
+}
+
 /// Selects the NLRI encoding for an (AFI, SAFI) pair.
 ///
 /// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
@@ -6862,6 +7018,7 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
         (AFI_L2VPN, SAFI_EVPN) => Some(MpNlriEncoding::Evpn),
         (AFI_BGP_LS, SAFI_BGP_LS) => Some(MpNlriEncoding::BgpLs { vpn: false }),
         (AFI_BGP_LS, SAFI_BGP_LS_VPN) => Some(MpNlriEncoding::BgpLs { vpn: true }),
+        (AFI_IPV4, SAFI_RT_CONSTRAINT) => Some(MpNlriEncoding::RtConstraint),
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC) => Some(MpNlriEncoding::FlowSpec { ipv6, vpn: false }),
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC_VPN) => {
             Some(MpNlriEncoding::FlowSpec { ipv6, vpn: true })
@@ -6913,6 +7070,7 @@ fn parse_mp_nlri_block<'pkt>(
                 parse_flowspec_nlri(buf, data, offset, ipv6, vpn)
             }
             MpNlriEncoding::BgpLs { vpn } => parse_bgp_ls_nlri(buf, data, offset, vpn),
+            MpNlriEncoding::RtConstraint => parse_rt_constraint_nlri(buf, data, offset),
         };
         if buf.field_count() == before {
             buf.pop_field(); // remove empty array placeholder
@@ -7390,6 +7548,7 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// The element shape depends on the SAFI: SAFI 70 (EVPN) yields EVPN entries,
 /// SAFI 85 (BGP-MUP) yields MUP entries, SAFI 133 / 134 yield Flow
 /// Specification entries, SAFI 71 / 72 yield Link-State NLRI entries,
+/// SAFI 132 yields Route Target membership entries,
 /// SAFI 4 / 128 yield labeled entries (`label_stack` or `compatibility`, `rd`
 /// for SAFI 128, `prefix`), and SAFI 1 / 2 yield plain prefix entries. All
 /// fields are therefore optional.
@@ -7399,9 +7558,10 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// RFC 7432, Section 7 — <https://www.rfc-editor.org/rfc/rfc7432#section-7>
 /// RFC 8955, Section 4 — <https://www.rfc-editor.org/rfc/rfc8955#section-4>
 /// RFC 9552, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>
+/// RFC 4684, Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 35] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 38] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
@@ -7467,6 +7627,12 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 35] = [
     BGP_LS_NLRI_FIELDS[FD_LS_PROTOCOL_ID],
     BGP_LS_NLRI_FIELDS[FD_LS_IDENTIFIER],
     BGP_LS_NLRI_FIELDS[FD_LS_DESCRIPTORS],
+    // Route Target membership NLRI fields (RFC 4684, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc4684#section-4); `path_id` is listed
+    // above.
+    RTC_NLRI_FIELDS[FD_RTC_PREFIX_LENGTH],
+    RTC_NLRI_FIELDS[FD_RTC_ORIGIN_AS],
+    RTC_NLRI_FIELDS[FD_RTC_ROUTE_TARGET],
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
@@ -7678,6 +7844,30 @@ const BGP_LS_NLRI_FIELDS: [FieldDescriptor; 8] = [
 static BGP_LS_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("link_state_nlri", "Link-State NLRI", FieldType::Object)
         .with_children(&BGP_LS_NLRI_FIELDS);
+
+/// Field descriptor indices for [`RTC_NLRI_FIELDS`].
+const FD_RTC_PATH_ID: usize = 0;
+const FD_RTC_PREFIX_LENGTH: usize = 1;
+const FD_RTC_ORIGIN_AS: usize = 2;
+const FD_RTC_ROUTE_TARGET: usize = 3;
+
+/// Child field descriptors of a Route Target membership NLRI entry.
+///
+/// RFC 4684, Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>
+const RTC_NLRI_FIELDS: [FieldDescriptor; 4] = [
+    PATH_ID_FIELD,
+    FieldDescriptor::new("prefix_length", "Prefix Length", FieldType::U8).optional(),
+    FieldDescriptor::new("origin_as", "Origin AS", FieldType::U32).optional(),
+    FieldDescriptor::new("route_target", "Route Target", FieldType::Bytes).optional(),
+];
+
+/// Object descriptor for Route Target membership NLRI entries.
+static RTC_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor = FieldDescriptor::new(
+    "rt_membership_nlri",
+    "Route Target Membership NLRI",
+    FieldType::Object,
+)
+.with_children(&RTC_NLRI_FIELDS);
 
 /// Field descriptor indices for [`BGP_LS_DESCRIPTOR_FIELDS`].
 const FD_LSD_SUB_TLVS: usize = 2;
@@ -9349,6 +9539,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 4659",
         "BGP-MPLS IP Virtual Private Network (VPN) Extension for IPv6 VPN",
         "https://www.rfc-editor.org/rfc/rfc4659",
+    ),
+    SpecReference::new(
+        "RFC 4684",
+        "Constrained Route Distribution for Border Gateway Protocol/MultiProtocol Label Switching (BGP/MPLS) Internet Protocol (IP) Virtual Private Networks (VPNs)",
+        "https://www.rfc-editor.org/rfc/rfc4684",
     ),
     SpecReference::new(
         "RFC 4724",
@@ -17138,5 +17333,135 @@ mod tests {
             *nested_field_value(&buf, &mp, "next_hop"),
             FieldValue::Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
         );
+    }
+
+    /// Helper: a Route Target membership NLRI of `bits` prefix bits covering
+    /// origin AS 65000 and the Route Target 0x0002_fde8_0000_0064.
+    fn rtc_nlri(bits: u8) -> Vec<u8> {
+        let mut full = 65000u32.to_be_bytes().to_vec();
+        full.extend_from_slice(&[0x00, 0x02, 0xfd, 0xe8, 0, 0, 0, 100]);
+        let mut raw = vec![bits];
+        raw.extend_from_slice(&full[..usize::from(bits).div_ceil(8)]);
+        raw
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_rt_constraint() {
+        // RFC 4684, Section 4 (https://www.rfc-editor.org/rfc/rfc4684#section-4):
+        // the default route target (zero-length prefix), an origin AS only
+        // (32 bits), a partial Route Target (48 bits) and a full one (96 bits).
+        let mut nlri = rtc_nlri(0);
+        nlri.extend(rtc_nlri(32));
+        nlri.extend(rtc_nlri(48));
+        nlri.extend(rtc_nlri(96));
+        let data = build_single_attr_update(14, &build_mp_reach(1, 132, &[192, 0, 2, 1], &nlri));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri_raw").is_none());
+        let entries = array_objs(&buf, &mp, "nlri");
+        assert_eq!(entries.len(), 4);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "prefix_length"),
+            FieldValue::U8(0)
+        );
+        assert!(nested_field_by_name_opt(&buf, &entries[0], "origin_as").is_none());
+        assert!(nested_field_by_name_opt(&buf, &entries[0], "route_target").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &entries[1], "origin_as"),
+            FieldValue::U32(65000)
+        );
+        assert!(nested_field_by_name_opt(&buf, &entries[1], "route_target").is_none());
+        assert_eq!(
+            *nested_field_value(&buf, &entries[2], "prefix_length"),
+            FieldValue::U8(48)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[2], "route_target"),
+            FieldValue::Bytes(&[0x00, 0x02])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[3], "route_target"),
+            FieldValue::Bytes(&[0x00, 0x02, 0xfd, 0xe8, 0, 0, 0, 100])
+        );
+        // "as a IPv6 address whenever the length of the NextHop address is
+        // 16 octets".
+        let nh = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let data = build_single_attr_update(14, &build_mp_reach(1, 132, &nh, &rtc_nlri(0)));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv6Addr(nh)
+        );
+        assert_eq!(array_objs(&buf, &mp, "nlri").len(), 1);
+        // Only AFI 1 is defined for SAFI 132: AFI 2 stays raw.
+        with_mp_reach_nlri(2, 132, &rtc_nlri(96), |buf, mp, entries| {
+            assert!(entries.is_empty());
+            assert!(nested_field_by_name_opt(buf, mp, "nlri_raw").is_some());
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_rt_constraint_malformed_withdrawn_add_path() {
+        // RFC 4684, Section 4 (https://www.rfc-editor.org/rfc/rfc4684#section-4):
+        // "Except for the default route target, which is encoded as a zero-length prefix, the minimum prefix length is 32
+        // bits"; the prefix is "of 0 to 96 bits". Entries from the first
+        // invalid length on stay raw.
+        for bad in [vec![16, 0, 0], vec![97], rtc_nlri(96)[..5].to_vec()] {
+            let mut nlri = rtc_nlri(96);
+            nlri.extend(&bad);
+            with_mp_reach_nlri(1, 132, &nlri, |buf, mp, entries| {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(
+                    *nested_field_value(buf, mp, "nlri_raw"),
+                    FieldValue::Bytes(&bad)
+                );
+            });
+        }
+
+        // Withdrawn membership NLRI.
+        let data = build_single_attr_update(15, &build_mp_unreach(1, 132, &rtc_nlri(64)));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let withdrawn = array_objs(&buf, &mp, "withdrawn_routes");
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &withdrawn[0], "route_target"),
+            FieldValue::Bytes(&[0x00, 0x02, 0xfd, 0xe8])
+        );
+
+        // RFC 7911, Section 3 (https://www.rfc-editor.org/rfc/rfc7911#section-3):
+        // a Path Identifier reads as default route targets followed by an
+        // invalid length without ADD-PATH.
+        let mut add_path = 1u32.to_be_bytes().to_vec();
+        add_path.extend(rtc_nlri(96));
+        assert!(detect_add_path_rt_constraint(&add_path));
+        assert!(!detect_add_path_rt_constraint(&rtc_nlri(96)));
+        // A zero Path Identifier reads as default route targets sharing the
+        // block with other entries: ADD-PATH.
+        let mut zero_id = vec![0u8; 4];
+        zero_id.extend(rtc_nlri(96));
+        assert!(detect_add_path_rt_constraint(&zero_id));
+        assert!(detect_add_path_rt_constraint(&[0, 0, 0, 0, 0]));
+        // A lone default route target is plain.
+        assert!(!detect_add_path_rt_constraint(&[0]));
+        with_mp_reach_nlri(1, 132, &add_path, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(1)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "origin_as"),
+                FieldValue::U32(65000)
+            );
+        });
     }
 }
