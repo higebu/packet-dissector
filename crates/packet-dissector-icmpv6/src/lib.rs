@@ -5,6 +5,7 @@
 //! - RFC 4861 (Neighbor Discovery — defines types 133-137): <https://www.rfc-editor.org/rfc/rfc4861>
 //! - RFC 2710 (MLDv1 — defines types 130-132): <https://www.rfc-editor.org/rfc/rfc2710>
 //! - RFC 3810 (MLDv2 — defines type 143 and extended query): <https://www.rfc-editor.org/rfc/rfc3810>
+//! - RFC 9777 (MLDv2, obsoletes RFC 3810 — Maximum Response Code / QQIC encoding): <https://www.rfc-editor.org/rfc/rfc9777>
 //! - RFC 4286 (Multicast Router Discovery — types 151-153): <https://www.rfc-editor.org/rfc/rfc4286>
 //! - RFC 6275 (Mobile IPv6 — types 144-145): <https://www.rfc-editor.org/rfc/rfc6275>
 //! - RFC 4191 (Default Router Preferences — Route Information option): <https://www.rfc-editor.org/rfc/rfc4191>
@@ -13,14 +14,29 @@
 //! - RFC 8335 (Extended Echo — types 160-161): <https://www.rfc-editor.org/rfc/rfc8335>
 //! - RFC 4884 (Extended ICMP Multi-Part Messages — updates RFC 4443, adds Length field
 //!   to Types 1 and 3): <https://www.rfc-editor.org/rfc/rfc4884>
+//! - RFC 2894 (Router Renumbering — type 138): <https://www.rfc-editor.org/rfc/rfc2894>
+//! - RFC 4620 (Node Information — types 139-140): <https://www.rfc-editor.org/rfc/rfc4620>
+//! - RFC 3122 (Inverse ND — types 141-142, options 9-10): <https://www.rfc-editor.org/rfc/rfc3122>
+//! - RFC 3971 (SEND — types 148-149, options 11-16): <https://www.rfc-editor.org/rfc/rfc3971>
+//! - RFC 6550 (RPL Control Message — type 155): <https://www.rfc-editor.org/rfc/rfc6550>
+//! - RFC 6775 (6LoWPAN ND — types 157-158, options 33-35): <https://www.rfc-editor.org/rfc/rfc6775>
+//! - RFC 8505 (EARO / EDAR / EDAC): <https://www.rfc-editor.org/rfc/rfc8505>
+//! - RFC 8801 (PvD ID option 21): <https://www.rfc-editor.org/rfc/rfc8801>
+//! - RFC 5175 (RA Flags Extension option 26): <https://www.rfc-editor.org/rfc/rfc5175>
+//! - RFC 8910 (Captive-Portal option 37): <https://www.rfc-editor.org/rfc/rfc8910>
+//! - RFC 4950 (MPLS Label Stack extension object): <https://www.rfc-editor.org/rfc/rfc4950>
+//! - RFC 5837 (Interface Information extension object): <https://www.rfc-editor.org/rfc/rfc5837>
 
 #![deny(missing_docs)]
+
+mod rpl;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_fqdn_labels};
+use packet_dissector_core::icmp_extension;
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32, read_ipv6_addr};
 
@@ -46,6 +62,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 3810",
         "Multicast Listener Discovery Version 2 (MLDv2) for IPv6",
         "https://www.rfc-editor.org/rfc/rfc3810",
+    ),
+    SpecReference::new(
+        "RFC 9777",
+        "Multicast Listener Discovery Version 2 (MLDv2) for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc9777",
     ),
     SpecReference::new(
         "RFC 4286",
@@ -82,12 +103,72 @@ static REFERENCES: &[SpecReference] = &[
         "Extended ICMP to Support Multi-Part Messages",
         "https://www.rfc-editor.org/rfc/rfc4884",
     ),
+    SpecReference::new(
+        "RFC 2894",
+        "Router Renumbering for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc2894",
+    ),
+    SpecReference::new(
+        "RFC 4620",
+        "IPv6 Node Information Queries",
+        "https://www.rfc-editor.org/rfc/rfc4620",
+    ),
+    SpecReference::new(
+        "RFC 3122",
+        "Extensions to IPv6 Neighbor Discovery for Inverse Discovery Specification",
+        "https://www.rfc-editor.org/rfc/rfc3122",
+    ),
+    SpecReference::new(
+        "RFC 3971",
+        "SEcure Neighbor Discovery (SEND)",
+        "https://www.rfc-editor.org/rfc/rfc3971",
+    ),
+    SpecReference::new(
+        "RFC 6550",
+        "RPL: IPv6 Routing Protocol for Low-Power and Lossy Networks",
+        "https://www.rfc-editor.org/rfc/rfc6550",
+    ),
+    SpecReference::new(
+        "RFC 6775",
+        "Neighbor Discovery Optimization for IPv6 over Low-Power Wireless Personal Area Networks (6LoWPANs)",
+        "https://www.rfc-editor.org/rfc/rfc6775",
+    ),
+    SpecReference::new(
+        "RFC 8505",
+        "Registration Extensions for IPv6 over Low-Power Wireless Personal Area Network (6LoWPAN) Neighbor Discovery",
+        "https://www.rfc-editor.org/rfc/rfc8505",
+    ),
+    SpecReference::new(
+        "RFC 8801",
+        "Discovering Provisioning Domain Names and Data",
+        "https://www.rfc-editor.org/rfc/rfc8801",
+    ),
+    SpecReference::new(
+        "RFC 5175",
+        "IPv6 Router Advertisement Flags Option",
+        "https://www.rfc-editor.org/rfc/rfc5175",
+    ),
+    SpecReference::new(
+        "RFC 8910",
+        "Captive-Portal Identification in DHCP and Router Advertisements (RAs)",
+        "https://www.rfc-editor.org/rfc/rfc8910",
+    ),
+    SpecReference::new(
+        "RFC 4950",
+        "ICMP Extensions for Multiprotocol Label Switching",
+        "https://www.rfc-editor.org/rfc/rfc4950",
+    ),
+    SpecReference::new(
+        "RFC 5837",
+        "Extending ICMP for Interface and Next-Hop Identification",
+        "https://www.rfc-editor.org/rfc/rfc5837",
+    ),
 ];
 
-/// Returns a human-readable name for well-known ICMPv6 type values.
-///
-/// RFC 4443 defines error types (1-4, 128-129); RFC 4861 defines NDP types (133-137).
+/// Returns a human-readable name for ICMPv6 type values.
 fn icmpv6_type_name(v: u8) -> Option<&'static str> {
+    // IANA "ICMPv6 'type' Numbers" registry
+    // <https://www.iana.org/assignments/icmpv6-parameters>
     match v {
         1 => Some("Destination Unreachable"),
         2 => Some("Packet Too Big"),
@@ -95,16 +176,45 @@ fn icmpv6_type_name(v: u8) -> Option<&'static str> {
         4 => Some("Parameter Problem"),
         128 => Some("Echo Request"),
         129 => Some("Echo Reply"),
+        130 => Some("Multicast Listener Query"),
+        131 => Some("Multicast Listener Report"),
+        132 => Some("Multicast Listener Done"),
         133 => Some("Router Solicitation"),
         134 => Some("Router Advertisement"),
         135 => Some("Neighbor Solicitation"),
         136 => Some("Neighbor Advertisement"),
         137 => Some("Redirect"),
+        138 => Some("Router Renumbering"),
+        139 => Some("ICMP Node Information Query"),
+        140 => Some("ICMP Node Information Response"),
+        141 => Some("Inverse Neighbor Discovery Solicitation Message"),
+        142 => Some("Inverse Neighbor Discovery Advertisement Message"),
+        143 => Some("Version 2 Multicast Listener Report"),
+        144 => Some("Home Agent Address Discovery Request Message"),
+        145 => Some("Home Agent Address Discovery Reply Message"),
+        146 => Some("Mobile Prefix Solicitation"),
+        147 => Some("Mobile Prefix Advertisement"),
+        148 => Some("Certification Path Solicitation Message"),
+        149 => Some("Certification Path Advertisement Message"),
+        150 => Some("ICMP messages utilized by experimental mobility protocols such as Seamoby"),
+        151 => Some("Multicast Router Advertisement"),
+        152 => Some("Multicast Router Solicitation"),
+        153 => Some("Multicast Router Termination"),
+        154 => Some("FMIPv6 Messages"),
+        155 => Some("RPL Control Message"),
+        156 => Some("ILNPv6 Locator Update Message"),
+        157 => Some("Duplicate Address Request"),
+        158 => Some("Duplicate Address Confirmation"),
+        159 => Some("MPL Control Message"),
+        160 => Some("Extended Echo Request"),
+        161 => Some("Extended Echo Reply"),
         _ => None,
     }
 }
 
 fn ndp_option_type_name(v: u8) -> Option<&'static str> {
+    // IANA "IPv6 Neighbor Discovery Option Formats" registry
+    // <https://www.iana.org/assignments/icmpv6-parameters>
     match v {
         // RFC 4861, Section 4.6
         1 => Some("Source Link-Layer Address"),
@@ -112,11 +222,43 @@ fn ndp_option_type_name(v: u8) -> Option<&'static str> {
         3 => Some("Prefix Information"),
         4 => Some("Redirected Header"),
         5 => Some("MTU"),
+        // RFC 6275, Sections 7.3 and 7.4
+        // <https://www.rfc-editor.org/rfc/rfc6275#section-7.3>
+        7 => Some("Advertisement Interval"),
+        8 => Some("Home Agent Information"),
+        // RFC 3122, Section 3.1
+        // <https://www.rfc-editor.org/rfc/rfc3122#section-3.1>
+        9 => Some("Source Address List"),
+        10 => Some("Target Address List"),
+        // RFC 3971, Sections 5.1-5.3 and 6.4
+        // <https://www.rfc-editor.org/rfc/rfc3971#section-5>
+        11 => Some("CGA"),
+        12 => Some("RSA Signature"),
+        13 => Some("Timestamp"),
+        14 => Some("Nonce"),
+        15 => Some("Trust Anchor"),
+        16 => Some("Certificate"),
+        // RFC 8801, Section 3.1
+        // <https://www.rfc-editor.org/rfc/rfc8801#section-3.1>
+        21 => Some("PvD ID Router Advertisement"),
         // RFC 4191, Section 2.3
         24 => Some("Route Information"),
         // RFC 8106
         25 => Some("Recursive DNS Server"),
+        // RFC 5175, Section 4
+        // <https://www.rfc-editor.org/rfc/rfc5175#section-4>
+        26 => Some("RA Flags Extension"),
+        // RFC 8106
         31 => Some("DNS Search List"),
+        // RFC 6775, Sections 4.1-4.3 (Address Registration extended by
+        // RFC 8505, Section 4.1)
+        // <https://www.rfc-editor.org/rfc/rfc6775#section-4>
+        33 => Some("Address Registration"),
+        34 => Some("6LoWPAN Context"),
+        35 => Some("Authoritative Border Router"),
+        // RFC 8910, Section 2.3
+        // <https://www.rfc-editor.org/rfc/rfc8910#section-2.3>
+        37 => Some("Captive-Portal"),
         // RFC 8781
         38 => Some("PREF64"),
         _ => None,
@@ -126,6 +268,14 @@ fn ndp_option_type_name(v: u8) -> Option<&'static str> {
 /// Minimum ICMPv6 header size (Type + Code + Checksum + 4 bytes type-specific).
 /// RFC 4443, Section 2.1.
 const HEADER_SIZE: usize = 8;
+
+/// Type, Code and Checksum (RFC 4443, Section 2.1).
+/// <https://www.rfc-editor.org/rfc/rfc4443#section-2.1>
+const COMMON_HEADER_SIZE: usize = 4;
+
+/// RFC 6550, Section 6 — ICMPv6 Type 155, RPL Control Message.
+/// <https://www.rfc-editor.org/rfc/rfc6550#section-6>
+const RPL_CONTROL_MESSAGE: u8 = 155;
 
 /// Minimum header size for Router Advertisement (RFC 4861, Section 4.2).
 const RA_HEADER_SIZE: usize = 16;
@@ -174,6 +324,34 @@ const FD_INVOKING_PACKET: usize = 29;
 /// RFC 8335, Section 2 — the Sequence Number in Extended Echo messages is
 /// an 8-bit field, unlike the 16-bit field in classic Echo (RFC 4443, §4.1).
 const FD_SEQUENCE_NUMBER_U8: usize = 30;
+const FD_EXTENSIONS: usize = 31;
+const FD_MAX_RESPONSE_DELAY_MS: usize = 32;
+const FD_QQI: usize = 33;
+const FD_RR_SEQUENCE_NUMBER: usize = 34;
+const FD_SEGMENT_NUMBER: usize = 35;
+const FD_MAX_DELAY: usize = 36;
+const FD_QTYPE: usize = 37;
+const FD_NI_FLAGS: usize = 38;
+const FD_NONCE: usize = 39;
+const FD_COMPONENT: usize = 40;
+const FD_ALL_COMPONENTS: usize = 41;
+const FD_STATUS: usize = 42;
+const FD_TID: usize = 43;
+const FD_REGISTRATION_LIFETIME: usize = 44;
+const FD_ROVR: usize = 45;
+const FD_REGISTERED_ADDRESS: usize = 46;
+pub(crate) const FD_RPL_INSTANCE_ID: usize = 47;
+pub(crate) const FD_VERSION_NUMBER: usize = 48;
+pub(crate) const FD_RANK: usize = 49;
+pub(crate) const FD_GROUNDED: usize = 50;
+pub(crate) const FD_MOP: usize = 51;
+pub(crate) const FD_PRF: usize = 52;
+pub(crate) const FD_DTSN: usize = 53;
+pub(crate) const FD_RPL_FLAGS: usize = 54;
+pub(crate) const FD_DODAG_ID: usize = 55;
+pub(crate) const FD_DAO_SEQUENCE: usize = 56;
+pub(crate) const FD_RPL_OPTIONS: usize = 57;
+pub(crate) const FD_RPL_STATUS: usize = FD_STATUS;
 
 /// Minimum IPv6 header size (RFC 8200, Section 3).
 const IPV6_MIN_HEADER: usize = 40;
@@ -183,6 +361,9 @@ const IPC_VERSION: usize = 0;
 const IPC_NEXT_HEADER: usize = 1;
 const IPC_SRC: usize = 2;
 const IPC_DST: usize = 3;
+const IPC_SRC_PORT: usize = 4;
+const IPC_DST_PORT: usize = 5;
+const IPC_TRANSPORT_DATA: usize = 6;
 
 /// Child field descriptor indices for [`NDP_OPTION_CHILDREN`].
 const NOC_TYPE: usize = 0;
@@ -201,6 +382,39 @@ const NOC_SCALED_LIFETIME: usize = 12;
 const NOC_PLC: usize = 13;
 const NOC_VALUE: usize = 14;
 const NOC_MTU: usize = 15;
+const NOC_ADVERTISEMENT_INTERVAL: usize = 16;
+const NOC_HOME_AGENT_PREFERENCE: usize = 17;
+const NOC_HOME_AGENT_LIFETIME: usize = 18;
+const NOC_PAD_LENGTH: usize = 19;
+const NOC_CGA_PARAMETERS: usize = 20;
+const NOC_KEY_HASH: usize = 21;
+const NOC_DIGITAL_SIGNATURE: usize = 22;
+const NOC_TIMESTAMP: usize = 23;
+const NOC_NONCE: usize = 24;
+const NOC_NAME_TYPE: usize = 25;
+const NOC_NAME: usize = 26;
+const NOC_CERT_TYPE: usize = 27;
+const NOC_CERTIFICATE: usize = 28;
+const NOC_PVD_FLAGS: usize = 29;
+const NOC_DELAY: usize = 30;
+const NOC_SEQUENCE_NUMBER: usize = 31;
+const NOC_PVD_ID: usize = 32;
+const NOC_RA_FLAGS: usize = 33;
+const NOC_STATUS: usize = 34;
+const NOC_OPAQUE: usize = 35;
+const NOC_ARO_FLAGS: usize = 36;
+const NOC_TID: usize = 37;
+const NOC_REGISTRATION_LIFETIME: usize = 38;
+const NOC_ROVR: usize = 39;
+const NOC_CONTEXT_LENGTH: usize = 40;
+const NOC_COMPRESSION_FLAG: usize = 41;
+const NOC_CID: usize = 42;
+const NOC_VALID_LIFETIME_MINUTES: usize = 43;
+const NOC_CONTEXT_PREFIX: usize = 44;
+const NOC_VERSION_LOW: usize = 45;
+const NOC_VERSION_HIGH: usize = 46;
+const NOC_BORDER_ROUTER_ADDRESS: usize = 47;
+const NOC_URI: usize = 48;
 
 /// Container descriptor for an NDP option entry.
 ///
@@ -240,6 +454,95 @@ static NDP_OPTION_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("plc", "Prefix Length Code", FieldType::U8).optional(),
     FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
     FieldDescriptor::new("mtu", "MTU", FieldType::U32).optional(),
+    // RFC 6275, Section 7.3 — Advertisement Interval (milliseconds)
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-7.3>
+    FieldDescriptor::new(
+        "advertisement_interval",
+        "Advertisement Interval",
+        FieldType::U32,
+    )
+    .optional(),
+    // RFC 6275, Section 7.4 — Home Agent Preference (16-bit signed) and
+    // Home Agent Lifetime (seconds)
+    // <https://www.rfc-editor.org/rfc/rfc6275#section-7.4>
+    FieldDescriptor::new(
+        "home_agent_preference",
+        "Home Agent Preference",
+        FieldType::I32,
+    )
+    .optional(),
+    FieldDescriptor::new("home_agent_lifetime", "Home Agent Lifetime", FieldType::U16).optional(),
+    // RFC 3971, Sections 5.1 / 6.4.3 — Pad Length
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-5.1>
+    FieldDescriptor::new("pad_length", "Pad Length", FieldType::U8).optional(),
+    // RFC 3971, Section 5.1 — CGA Parameters
+    FieldDescriptor::new("cga_parameters", "CGA Parameters", FieldType::Bytes).optional(),
+    // RFC 3971, Section 5.2 — Key Hash and Digital Signature (with padding)
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-5.2>
+    FieldDescriptor::new("key_hash", "Key Hash", FieldType::Bytes).optional(),
+    FieldDescriptor::new("digital_signature", "Digital Signature", FieldType::Bytes).optional(),
+    // RFC 3971, Section 5.3.1 — Timestamp (64 bits)
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-5.3.1>
+    FieldDescriptor::new("timestamp", "Timestamp", FieldType::U64).optional(),
+    // RFC 3971, Section 5.3.2 — Nonce
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-5.3.2>
+    FieldDescriptor::new("nonce", "Nonce", FieldType::Bytes).optional(),
+    // RFC 3971, Section 6.4.3 — Trust Anchor Name Type and Name
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.3>
+    FieldDescriptor::new("name_type", "Name Type", FieldType::U8).optional(),
+    FieldDescriptor::new("name", "Name", FieldType::Bytes).optional(),
+    // RFC 3971, Section 6.4.4 — Cert Type and Certificate (with padding)
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.4>
+    FieldDescriptor::new("cert_type", "Cert Type", FieldType::U8).optional(),
+    FieldDescriptor::new("certificate", "Certificate", FieldType::Bytes).optional(),
+    // RFC 8801, Section 3.1 — H|L|R|Reserved|Delay, Sequence Number, PvD ID
+    // FQDN
+    // <https://www.rfc-editor.org/rfc/rfc8801#section-3.1>
+    FieldDescriptor::new("pvd_flags", "PvD Flags", FieldType::U16).optional(),
+    FieldDescriptor::new("delay", "Delay", FieldType::U8).optional(),
+    FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U16).optional(),
+    FieldDescriptor::new("pvd_id", "PvD ID FQDN", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_fqdn_labels),
+    // RFC 5175, Section 4 — Router Advertisement flag bits (48 bits)
+    // <https://www.rfc-editor.org/rfc/rfc5175#section-4>
+    FieldDescriptor::new("ra_flags", "RA Flags", FieldType::Bytes).optional(),
+    // RFC 8505, Section 4.1 — (Extended) Address Registration Option:
+    // Status, Opaque, Rsvd|I|R|T, TID, Registration Lifetime, ROVR (EUI-64
+    // in the RFC 6775 ARO)
+    // <https://www.rfc-editor.org/rfc/rfc8505#section-4.1>
+    FieldDescriptor::new("status", "Status", FieldType::U8).optional(),
+    FieldDescriptor::new("opaque", "Opaque", FieldType::U8).optional(),
+    FieldDescriptor::new("aro_flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("tid", "Transaction ID", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "registration_lifetime",
+        "Registration Lifetime",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new("rovr", "Registration Ownership Verifier", FieldType::Bytes).optional(),
+    // RFC 6775, Section 4.2 — 6LoWPAN Context Option
+    // <https://www.rfc-editor.org/rfc/rfc6775#section-4.2>
+    FieldDescriptor::new("context_length", "Context Length", FieldType::U8).optional(),
+    FieldDescriptor::new("compression_flag", "Compression Flag", FieldType::U8).optional(),
+    FieldDescriptor::new("cid", "Context Identifier", FieldType::U8).optional(),
+    // RFC 6775, Sections 4.2 / 4.3 — Valid Lifetime in units of 60 seconds
+    FieldDescriptor::new(
+        "valid_lifetime_minutes",
+        "Valid Lifetime (minutes)",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new("context_prefix", "Context Prefix", FieldType::Ipv6Addr).optional(),
+    // RFC 6775, Section 4.3 — Authoritative Border Router Option
+    // <https://www.rfc-editor.org/rfc/rfc6775#section-4.3>
+    FieldDescriptor::new("version_low", "Version Low", FieldType::U16).optional(),
+    FieldDescriptor::new("version_high", "Version High", FieldType::U16).optional(),
+    FieldDescriptor::new("border_router_address", "6LBR Address", FieldType::Ipv6Addr).optional(),
+    // RFC 8910, Section 2.3 — Captive-Portal URI
+    // <https://www.rfc-editor.org/rfc/rfc8910#section-2.3>
+    FieldDescriptor::new("uri", "URI", FieldType::Str).optional(),
 ];
 
 /// Child field descriptor indices for [`MLDV2_RECORD_CHILDREN`].
@@ -256,6 +559,9 @@ static INVOKING_PACKET_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("next_header", "Next Header", FieldType::U8),
     FieldDescriptor::new("src", "Source Address", FieldType::Ipv6Addr),
     FieldDescriptor::new("dst", "Destination Address", FieldType::Ipv6Addr),
+    FieldDescriptor::new("src_port", "Source Port", FieldType::U16).optional(),
+    FieldDescriptor::new("dst_port", "Destination Port", FieldType::U16).optional(),
+    FieldDescriptor::new("transport_data", "Transport Data", FieldType::Bytes).optional(),
 ];
 
 /// Child field descriptors for MLDv2 multicast address record entries.
@@ -271,7 +577,7 @@ static MLDV2_RECORD_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("sources", "Source Addresses", FieldType::Array).optional(),
 ];
 
-static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
+pub(crate) static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor {
         name: "type",
         display_name: "Type",
@@ -349,10 +655,192 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // A separate descriptor is needed because the classic Echo (RFC 4443, §4.1)
     // uses a 16-bit Sequence Number (see FD_SEQUENCE_NUMBER above).
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U8).optional(),
+    // RFC 4884, Section 7 — ICMP Extension Structure (Types 1 and 3 after the
+    // original datagram; Type 160 right after the header per RFC 8335,
+    // Section 2).
+    // <https://www.rfc-editor.org/rfc/rfc4884#section-7>
+    FieldDescriptor::new("extensions", "ICMP Extension Structure", FieldType::Object)
+        .optional()
+        .with_children(icmp_extension::EXTENSION_CHILDREN),
+    // RFC 9777, Section 5.1.3 — Maximum Response Delay (milliseconds) derived
+    // from the Maximum Response Code of an MLDv2 Query.
+    // <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.3>
+    FieldDescriptor::new(
+        "max_response_delay_ms",
+        "Maximum Response Delay (ms)",
+        FieldType::U32,
+    )
+    .optional(),
+    // RFC 9777, Section 5.1.9 — Querier's Query Interval (seconds) derived
+    // from QQIC.
+    // <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.9>
+    FieldDescriptor::new("qqi", "Querier's Query Interval", FieldType::U16).optional(),
+    // RFC 2894, Section 3.1 — Router Renumbering SequenceNumber (32 bits),
+    // SegmentNumber and MaxDelay (milliseconds)
+    // <https://www.rfc-editor.org/rfc/rfc2894#section-3.1>
+    FieldDescriptor::new("rr_sequence_number", "Sequence Number", FieldType::U32).optional(),
+    FieldDescriptor::new("segment_number", "Segment Number", FieldType::U8).optional(),
+    FieldDescriptor::new("max_delay", "Maximum Delay", FieldType::U16).optional(),
+    // RFC 4620, Section 4 — Node Information Qtype, Flags and Nonce
+    // <https://www.rfc-editor.org/rfc/rfc4620#section-4>
+    FieldDescriptor::new("qtype", "Qtype", FieldType::U16).optional(),
+    FieldDescriptor::new("ni_flags", "Flags", FieldType::U16).optional(),
+    FieldDescriptor::new("nonce", "Nonce", FieldType::Bytes).optional(),
+    // RFC 3971, Sections 6.4.1 / 6.4.2 — Certification Path Component and
+    // All Components
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.1>
+    FieldDescriptor::new("component", "Component", FieldType::U16).optional(),
+    FieldDescriptor::new("all_components", "All Components", FieldType::U16).optional(),
+    // RFC 6775, Section 4.4 / RFC 8505, Section 4.2 — Duplicate Address
+    // Request / Confirmation fields; `status` is also the RPL DAO-ACK Status
+    // (RFC 6550, Section 6.5.1)
+    // <https://www.rfc-editor.org/rfc/rfc8505#section-4.2>
+    FieldDescriptor::new("status", "Status", FieldType::U8).optional(),
+    FieldDescriptor::new("tid", "Transaction ID", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "registration_lifetime",
+        "Registration Lifetime",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new("rovr", "Registration Ownership Verifier", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "registered_address",
+        "Registered Address",
+        FieldType::Ipv6Addr,
+    )
+    .optional(),
+    // RFC 6550, Sections 6.2-6.5 — RPL control message base objects
+    // <https://www.rfc-editor.org/rfc/rfc6550#section-6>
+    FieldDescriptor::new("rpl_instance_id", "RPLInstanceID", FieldType::U8).optional(),
+    FieldDescriptor::new("version_number", "Version Number", FieldType::U8).optional(),
+    FieldDescriptor::new("rank", "Rank", FieldType::U16).optional(),
+    FieldDescriptor::new("grounded", "Grounded", FieldType::U8).optional(),
+    FieldDescriptor::new("mop", "Mode of Operation", FieldType::U8).optional(),
+    FieldDescriptor::new("prf", "DODAG Preference", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "dtsn",
+        "Destination Advertisement Trigger Sequence Number",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("rpl_flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("dodag_id", "DODAGID", FieldType::Ipv6Addr).optional(),
+    FieldDescriptor::new("dao_sequence", "DAOSequence", FieldType::U8).optional(),
+    // RFC 6550, Section 6.7 — RPL Control Message Options
+    // <https://www.rfc-editor.org/rfc/rfc6550#section-6.7>
+    FieldDescriptor::new("rpl_options", "RPL Options", FieldType::Array)
+        .optional()
+        .with_children(rpl::RPL_OPTION_CHILDREN),
 ];
 
 /// ICMPv6 dissector.
 pub struct Icmpv6Dissector;
+
+/// Router Renumbering header size (RFC 2894, Section 3.1).
+/// <https://www.rfc-editor.org/rfc/rfc2894#section-3.1>
+const RR_HEADER_SIZE: usize = 16;
+/// Node Information header size (RFC 4620, Section 4).
+/// <https://www.rfc-editor.org/rfc/rfc4620#section-4>
+const NI_HEADER_SIZE: usize = 16;
+/// Certification Path Advertisement header size (RFC 3971, Section 6.4.2).
+/// <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.2>
+const CPA_HEADER_SIZE: usize = 12;
+
+pub(crate) fn push_u8(
+    buf: &mut DissectBuffer<'_>,
+    fd: usize,
+    data: &[u8],
+    at: usize,
+    offset: usize,
+) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd],
+        FieldValue::U8(data[at]),
+        offset + at..offset + at + 1,
+    );
+}
+
+pub(crate) fn push_u16(
+    buf: &mut DissectBuffer<'_>,
+    fd: usize,
+    data: &[u8],
+    at: usize,
+    offset: usize,
+) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd],
+        FieldValue::U16(u16::from_be_bytes([data[at], data[at + 1]])),
+        offset + at..offset + at + 2,
+    );
+}
+
+fn push_u32(buf: &mut DissectBuffer<'_>, fd: usize, data: &[u8], at: usize, offset: usize) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd],
+        FieldValue::U32(u32::from_be_bytes([
+            data[at],
+            data[at + 1],
+            data[at + 2],
+            data[at + 3],
+        ])),
+        offset + at..offset + at + 4,
+    );
+}
+
+/// Push `data[from..]` as `fd` when it is not empty.
+pub(crate) fn push_bytes_from<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    fd: usize,
+    data: &'pkt [u8],
+    from: usize,
+    offset: usize,
+) {
+    if data.len() > from {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[fd],
+            FieldValue::Bytes(&data[from..]),
+            offset + from..offset + data.len(),
+        );
+    }
+}
+
+/// Keep a message body that is shorter than its fixed fields (or has an
+/// undecoded layout) as raw `data` after the 4-octet common header.
+pub(crate) fn push_raw_body<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    push_bytes_from(buf, FD_DATA, data, 4, offset);
+}
+
+/// Decode an MLDv2 Maximum Response Code into milliseconds.
+///
+/// RFC 9777, Section 5.1.3 — "If Maximum Response Code < 32768, Maximum
+/// Response Delay = Maximum Response Code." Otherwise it "represents a
+/// floating-point value" `|1| exp | mant |` and "Maximum Response Delay =
+/// (mant | 0x1000) << (exp+3)".
+/// <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.3>
+fn mldv2_max_response_delay(code: u16) -> u32 {
+    if code < 0x8000 {
+        return u32::from(code);
+    }
+    let exp = u32::from((code >> 12) & 0x07);
+    let mant = u32::from(code & 0x0FFF);
+    (mant | 0x1000) << (exp + 3)
+}
+
+/// Decode an MLDv2 QQIC into seconds.
+///
+/// RFC 9777, Section 5.1.9 — "If QQIC < 128, QQI = QQIC". Otherwise it
+/// "represents a floating-point value" `|1| exp | mant |` and "QQI = (mant |
+/// 0x10) << (exp + 3)".
+/// <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.9>
+fn mldv2_qqi(qqic: u8) -> u16 {
+    if qqic < 0x80 {
+        return u16::from(qqic);
+    }
+    let exp = u16::from((qqic >> 4) & 0x07);
+    let mant = u16::from(qqic & 0x0F);
+    (mant | 0x10) << (exp + 3)
+}
 
 /// Push invoking packet fields as an Object container into buf.
 ///
@@ -392,6 +880,36 @@ fn push_invoking_packet<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], o
             FieldValue::Ipv6Addr(dst),
             offset + 24..offset + 40,
         );
+
+        // The octets after the IPv6 header. For TCP and UDP the first four
+        // are the Source and Destination Ports (RFC 9293, Section 3.1;
+        // RFC 768).
+        // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
+        // <https://www.rfc-editor.org/rfc/rfc768>
+        let transport = &data[IPV6_MIN_HEADER..];
+        let t_off = offset + IPV6_MIN_HEADER;
+        match next_header {
+            6 | 17 if transport.len() >= 4 => {
+                buf.push_field(
+                    &INVOKING_PACKET_CHILDREN[IPC_SRC_PORT],
+                    FieldValue::U16(u16::from_be_bytes([transport[0], transport[1]])),
+                    t_off..t_off + 2,
+                );
+                buf.push_field(
+                    &INVOKING_PACKET_CHILDREN[IPC_DST_PORT],
+                    FieldValue::U16(u16::from_be_bytes([transport[2], transport[3]])),
+                    t_off + 2..t_off + 4,
+                );
+            }
+            _ if !transport.is_empty() => {
+                buf.push_field(
+                    &INVOKING_PACKET_CHILDREN[IPC_TRANSPORT_DATA],
+                    FieldValue::Bytes(transport),
+                    t_off..t_off + transport.len(),
+                );
+            }
+            _ => {}
+        }
         buf.end_container(obj_idx);
     } else {
         buf.push_field(
@@ -399,6 +917,27 @@ fn push_invoking_packet<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], o
             FieldValue::Bytes(data),
             offset..offset + data.len(),
         );
+    }
+}
+
+/// Length of an uncompressed DNS name in wire format (RFC 1035, Section
+/// 3.1), including the terminating zero-length label. Returns `None` when
+/// the labels run past `data` or no terminating label is found.
+/// <https://www.rfc-editor.org/rfc/rfc1035#section-3.1>
+fn dns_name_len(data: &[u8]) -> Option<usize> {
+    let mut pos = 0;
+    loop {
+        let len = *data.get(pos)? as usize;
+        pos += 1;
+        if len == 0 {
+            return Some(pos);
+        }
+        // RFC 1035, Section 4.1.4 — a label length with the top two bits set
+        // is a compression pointer, which RFC 8801 forbids here.
+        if len & 0xC0 != 0 {
+            return None;
+        }
+        pos += len;
     }
 }
 
@@ -695,6 +1234,341 @@ fn parse_ndp_options<'pkt>(
                 );
             }
 
+            // RFC 6275, Section 7.3 — Advertisement Interval: Reserved (16),
+            // Advertisement Interval (32, milliseconds).
+            // <https://www.rfc-editor.org/rfc/rfc6275#section-7.3>
+            7 if value_data.len() >= 6 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_ADVERTISEMENT_INTERVAL],
+                    FieldValue::U32(read_be_u32(value_data, 2)?),
+                    opt_start + 4..opt_start + 8,
+                );
+            }
+
+            // RFC 6275, Section 7.4 — Home Agent Information: Reserved
+            // (16), Home Agent Preference (16, signed), Home Agent Lifetime
+            // (16).
+            // <https://www.rfc-editor.org/rfc/rfc6275#section-7.4>
+            8 if value_data.len() >= 6 => {
+                let preference = read_be_u16(value_data, 2)? as i16;
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_HOME_AGENT_PREFERENCE],
+                    FieldValue::I32(i32::from(preference)),
+                    opt_start + 4..opt_start + 6,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_HOME_AGENT_LIFETIME],
+                    FieldValue::U16(read_be_u16(value_data, 4)?),
+                    opt_start + 6..opt_start + 8,
+                );
+            }
+
+            // RFC 3122, Section 3.1 — Source / Target Address List:
+            // Reserved (48 bits), then IPv6 addresses.
+            // <https://www.rfc-editor.org/rfc/rfc3122#section-3.1>
+            9 | 10 if value_data.len() >= 6 => {
+                let array_idx = buf.begin_container(
+                    &NDP_OPTION_CHILDREN[NOC_ADDRESSES],
+                    FieldValue::Array(0..0),
+                    opt_start + 8..opt_end,
+                );
+                for (i, a) in value_data[6..].chunks_exact(16).enumerate() {
+                    let start = opt_start + 8 + i * 16;
+                    buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_ADDRESSES],
+                        FieldValue::Ipv6Addr(read_ipv6_addr(a, 0)?),
+                        start..start + 16,
+                    );
+                }
+                buf.end_container(array_idx);
+            }
+
+            // RFC 3971, Section 5.1 — CGA: Pad Length, Reserved, CGA
+            // Parameters, Padding ("Pad Length ... The number of padding
+            // octets beyond the end of the CGA Parameters field").
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-5.1>
+            11 if value_data.len() >= 2 => {
+                let pad_len = value_data[0];
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_PAD_LENGTH],
+                    FieldValue::U8(pad_len),
+                    opt_start + 2..opt_start + 3,
+                );
+                let params = &value_data[2..];
+                let params = &params[..params.len().saturating_sub(pad_len as usize)];
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_CGA_PARAMETERS],
+                    FieldValue::Bytes(params),
+                    opt_start + 4..opt_start + 4 + params.len(),
+                );
+            }
+
+            // RFC 3971, Section 5.2 — RSA Signature: Reserved (16), Key Hash
+            // (128), Digital Signature, Padding. The option has no pad
+            // length, so the signature is pushed together with the padding.
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-5.2>
+            12 if value_data.len() >= 18 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_KEY_HASH],
+                    FieldValue::Bytes(&value_data[2..18]),
+                    opt_start + 4..opt_start + 20,
+                );
+                if value_data.len() > 18 {
+                    buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_DIGITAL_SIGNATURE],
+                        FieldValue::Bytes(&value_data[18..]),
+                        opt_start + 20..opt_end,
+                    );
+                }
+            }
+
+            // RFC 3971, Section 5.3.1 — Timestamp: Reserved (48), Timestamp
+            // (64).
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-5.3.1>
+            13 if value_data.len() >= 14 => {
+                let hi = u64::from(read_be_u32(value_data, 6)?);
+                let lo = u64::from(read_be_u32(value_data, 10)?);
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_TIMESTAMP],
+                    FieldValue::U64((hi << 32) | lo),
+                    opt_start + 8..opt_start + 16,
+                );
+            }
+
+            // RFC 3971, Section 5.3.2 — Nonce: "A field containing a random
+            // number selected by the sender of the solicitation message".
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-5.3.2>
+            14 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_NONCE],
+                    FieldValue::Bytes(value_data),
+                    opt_start + 2..opt_end,
+                );
+            }
+
+            // RFC 3971, Section 6.4.3 — Trust Anchor: Name Type, Pad
+            // Length, Name, Padding.
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.3>
+            15 if value_data.len() >= 2 => {
+                let pad_len = value_data[1];
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_NAME_TYPE],
+                    FieldValue::U8(value_data[0]),
+                    opt_start + 2..opt_start + 3,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_PAD_LENGTH],
+                    FieldValue::U8(pad_len),
+                    opt_start + 3..opt_start + 4,
+                );
+                let name = &value_data[2..];
+                let name = &name[..name.len().saturating_sub(pad_len as usize)];
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_NAME],
+                    FieldValue::Bytes(name),
+                    opt_start + 4..opt_start + 4 + name.len(),
+                );
+            }
+
+            // RFC 3971, Section 6.4.4 — Certificate: Cert Type, Reserved,
+            // Certificate, Padding (no pad length, so pushed together).
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.4>
+            16 if value_data.len() >= 2 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_CERT_TYPE],
+                    FieldValue::U8(value_data[0]),
+                    opt_start + 2..opt_start + 3,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_CERTIFICATE],
+                    FieldValue::Bytes(&value_data[2..]),
+                    opt_start + 4..opt_end,
+                );
+            }
+
+            // RFC 8801, Section 3.1 — PvD ID: H|L|R|Reserved(9)|Delay(4),
+            // Sequence Number, PvD ID FQDN (DNS wire format, no
+            // compression), Padding, then an optional RA header and RA
+            // options, which stay raw in `value`.
+            // <https://www.rfc-editor.org/rfc/rfc8801#section-3.1>
+            21 if value_data.len() >= 4 => {
+                let flags = read_be_u16(value_data, 0)?;
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_PVD_FLAGS],
+                    FieldValue::U16(flags),
+                    opt_start + 2..opt_start + 4,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_DELAY],
+                    FieldValue::U8((flags & 0x0F) as u8),
+                    opt_start + 3..opt_start + 4,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_SEQUENCE_NUMBER],
+                    FieldValue::U16(read_be_u16(value_data, 2)?),
+                    opt_start + 4..opt_start + 6,
+                );
+                let name_area = &value_data[4..];
+                if let Some(name_len) = dns_name_len(name_area) {
+                    buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_PVD_ID],
+                        FieldValue::Bytes(&name_area[..name_len]),
+                        opt_start + 6..opt_start + 6 + name_len,
+                    );
+                    // Padding "to the next 8-octet boundary", measured from
+                    // the start of the option.
+                    let rest_start = (6 + name_len).div_ceil(8) * 8;
+                    if rest_start < opt_len {
+                        buf.push_field(
+                            &NDP_OPTION_CHILDREN[NOC_VALUE],
+                            FieldValue::Bytes(&data[cursor + rest_start..cursor + opt_len]),
+                            opt_start + rest_start..opt_end,
+                        );
+                    }
+                } else {
+                    buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_VALUE],
+                        FieldValue::Bytes(name_area),
+                        opt_start + 6..opt_end,
+                    );
+                }
+            }
+
+            // RFC 5175, Section 4 — RA Flags Extension: "Bit fields
+            // available for assignment" (48 bits with Length 1).
+            // <https://www.rfc-editor.org/rfc/rfc5175#section-4>
+            26 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_RA_FLAGS],
+                    FieldValue::Bytes(value_data),
+                    opt_start + 2..opt_end,
+                );
+            }
+
+            // RFC 8505, Section 4.1 — EARO (the RFC 6775 ARO with Opaque,
+            // I/R/T flags and TID in formerly reserved octets, and the
+            // EUI-64 renamed ROVR): Status, Opaque, Rsvd|I|R|T, TID,
+            // Registration Lifetime, ROVR.
+            // <https://www.rfc-editor.org/rfc/rfc8505#section-4.1>
+            33 if value_data.len() >= 6 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_STATUS],
+                    FieldValue::U8(value_data[0]),
+                    opt_start + 2..opt_start + 3,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_OPAQUE],
+                    FieldValue::U8(value_data[1]),
+                    opt_start + 3..opt_start + 4,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_ARO_FLAGS],
+                    FieldValue::U8(value_data[2]),
+                    opt_start + 4..opt_start + 5,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_TID],
+                    FieldValue::U8(value_data[3]),
+                    opt_start + 5..opt_start + 6,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_REGISTRATION_LIFETIME],
+                    FieldValue::U16(read_be_u16(value_data, 4)?),
+                    opt_start + 6..opt_start + 8,
+                );
+                if value_data.len() > 6 {
+                    buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_ROVR],
+                        FieldValue::Bytes(&value_data[6..]),
+                        opt_start + 8..opt_end,
+                    );
+                }
+            }
+
+            // RFC 6775, Section 4.2 — 6LoWPAN Context: Context Length,
+            // Res|C|CID, Reserved (16), Valid Lifetime (16, units of 60 s),
+            // Context Prefix (8 or 16 octets for Length 2 or 3).
+            // <https://www.rfc-editor.org/rfc/rfc6775#section-4.2>
+            34 if value_data.len() >= 14 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_CONTEXT_LENGTH],
+                    FieldValue::U8(value_data[0]),
+                    opt_start + 2..opt_start + 3,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_COMPRESSION_FLAG],
+                    FieldValue::U8((value_data[1] >> 4) & 0x01),
+                    opt_start + 3..opt_start + 4,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_CID],
+                    FieldValue::U8(value_data[1] & 0x0F),
+                    opt_start + 3..opt_start + 4,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_VALID_LIFETIME_MINUTES],
+                    FieldValue::U16(read_be_u16(value_data, 4)?),
+                    opt_start + 6..opt_start + 8,
+                );
+                let prefix_bytes = &value_data[6..value_data.len().min(22)];
+                let mut prefix = [0u8; 16];
+                prefix[..prefix_bytes.len()].copy_from_slice(prefix_bytes);
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_CONTEXT_PREFIX],
+                    FieldValue::Ipv6Addr(prefix),
+                    opt_start + 8..opt_start + 8 + prefix_bytes.len(),
+                );
+            }
+
+            // RFC 6775, Section 4.3 — Authoritative Border Router: Version
+            // Low, Version High, Valid Lifetime (units of 60 s), 6LBR
+            // Address.
+            // <https://www.rfc-editor.org/rfc/rfc6775#section-4.3>
+            35 if value_data.len() >= 22 => {
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_VERSION_LOW],
+                    FieldValue::U16(read_be_u16(value_data, 0)?),
+                    opt_start + 2..opt_start + 4,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_VERSION_HIGH],
+                    FieldValue::U16(read_be_u16(value_data, 2)?),
+                    opt_start + 4..opt_start + 6,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_VALID_LIFETIME_MINUTES],
+                    FieldValue::U16(read_be_u16(value_data, 4)?),
+                    opt_start + 6..opt_start + 8,
+                );
+                buf.push_field(
+                    &NDP_OPTION_CHILDREN[NOC_BORDER_ROUTER_ADDRESS],
+                    FieldValue::Ipv6Addr(read_ipv6_addr(value_data, 6)?),
+                    opt_start + 8..opt_start + 24,
+                );
+            }
+
+            // RFC 8910, Section 2.3 — Captive-Portal: the URI, "padded with
+            // NUL (0x00)". A URI that is not UTF-8 stays raw in `value`.
+            // <https://www.rfc-editor.org/rfc/rfc8910#section-2.3>
+            37 => {
+                let uri_len = value_data
+                    .iter()
+                    .rposition(|&b| b != 0)
+                    .map_or(0, |p| p + 1);
+                match core::str::from_utf8(&value_data[..uri_len]) {
+                    Ok(uri) => buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_URI],
+                        FieldValue::Str(uri),
+                        opt_start + 2..opt_start + 2 + uri_len,
+                    ),
+                    Err(_) => buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_VALUE],
+                        FieldValue::Bytes(value_data),
+                        opt_start + 2..opt_end,
+                    ),
+                }
+            }
+
             // Unknown or insufficient data — store raw value
             _ => {
                 buf.push_field(
@@ -852,7 +1726,21 @@ impl Dissector for Icmpv6Dissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        if data.len() < HEADER_SIZE {
+        // RFC 4443, Section 2.1 — Type, Code and Checksum are common to all
+        // messages; the message body follows.
+        // <https://www.rfc-editor.org/rfc/rfc4443#section-2.1>
+        if data.len() < COMMON_HEADER_SIZE {
+            return Err(PacketError::Truncated {
+                expected: COMMON_HEADER_SIZE,
+                actual: data.len(),
+            });
+        }
+        // Every message decoded here has at least 4 octets after the common
+        // header, except RPL Control Messages: a DIS without options is 6
+        // octets (RFC 6550, Section 6.2.1), so RPL bodies are length-checked
+        // in the `rpl` module instead.
+        // <https://www.rfc-editor.org/rfc/rfc6550#section-6.2.1>
+        if data.len() < HEADER_SIZE && data[0] != RPL_CONTROL_MESSAGE {
             return Err(PacketError::Truncated {
                 expected: HEADER_SIZE,
                 actual: data.len(),
@@ -905,9 +1793,32 @@ impl Dissector for Icmpv6Dissector {
                         offset + 4..offset + 5,
                     );
                 }
+                // RFC 4884, Section 4 — "For ICMPv6 messages, the length
+                // attribute represents 64-bit words." When it is set and an
+                // Extension Structure fits, the invoking packet ends where
+                // the structure starts.
+                // <https://www.rfc-editor.org/rfc/rfc4884#section-4>
+                let ext_start = icmp_extension::extension_structure_start(
+                    HEADER_SIZE,
+                    length as usize * 8,
+                    data.len(),
+                );
+                let invoking_end = ext_start.unwrap_or(data.len());
                 // RFC 4443 — invoking packet follows the 8-byte header
-                if data.len() > HEADER_SIZE {
-                    push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
+                if invoking_end > HEADER_SIZE {
+                    push_invoking_packet(
+                        buf,
+                        &data[HEADER_SIZE..invoking_end],
+                        offset + HEADER_SIZE,
+                    );
+                }
+                if let Some(start) = ext_start {
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[start..],
+                        offset + start,
+                    );
                 }
             }
 
@@ -1019,8 +1930,18 @@ impl Dissector for Icmpv6Dissector {
                         offset + 24..offset + 25,
                     );
                     buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_MAX_RESPONSE_DELAY_MS],
+                        FieldValue::U32(mldv2_max_response_delay(max_response_delay)),
+                        offset + 4..offset + 6,
+                    );
+                    buf.push_field(
                         &FIELD_DESCRIPTORS[FD_QQIC],
                         FieldValue::U8(qqic),
+                        offset + 25..offset + 26,
+                    );
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_QQI],
+                        FieldValue::U16(mldv2_qqi(qqic)),
                         offset + 25..offset + 26,
                     );
                     buf.push_field(
@@ -1297,6 +2218,136 @@ impl Dissector for Icmpv6Dissector {
                     FieldValue::U8(flags),
                     offset + 7..offset + 8,
                 );
+                // RFC 8335, Section 2 — the Extended Echo Request carries an
+                // ICMP Extension Structure right after the header, which
+                // "MUST contain exactly one instance of the Interface
+                // Identification Object".
+                if icmpv6_type == 160 && data.len() > HEADER_SIZE {
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[HEADER_SIZE..],
+                        offset + HEADER_SIZE,
+                    );
+                }
+            }
+
+            // RFC 2894, Section 3.1 — Router Renumbering header:
+            // SequenceNumber (32), SegmentNumber, Flags, MaxDelay, reserved
+            // (32), then the message body.
+            // <https://www.rfc-editor.org/rfc/rfc2894#section-3.1>
+            138 => {
+                if data.len() < RR_HEADER_SIZE {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u32(buf, FD_RR_SEQUENCE_NUMBER, data, 4, offset);
+                    push_u8(buf, FD_SEGMENT_NUMBER, data, 8, offset);
+                    push_u8(buf, FD_FLAGS, data, 9, offset);
+                    push_u16(buf, FD_MAX_DELAY, data, 10, offset);
+                    push_bytes_from(buf, FD_DATA, data, RR_HEADER_SIZE, offset);
+                }
+            }
+
+            // RFC 4620, Section 4 — Node Information Query / Reply: Qtype,
+            // Flags, Nonce (64 bits), Data.
+            // <https://www.rfc-editor.org/rfc/rfc4620#section-4>
+            139 | 140 => {
+                if data.len() < NI_HEADER_SIZE {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u16(buf, FD_QTYPE, data, 4, offset);
+                    push_u16(buf, FD_NI_FLAGS, data, 6, offset);
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_NONCE],
+                        FieldValue::Bytes(&data[8..16]),
+                        offset + 8..offset + 16,
+                    );
+                    push_bytes_from(buf, FD_DATA, data, NI_HEADER_SIZE, offset);
+                }
+            }
+
+            // RFC 3122, Sections 2.1 / 2.2 — Inverse Neighbor Discovery
+            // Solicitation / Advertisement: Reserved (32 bits), Options.
+            // <https://www.rfc-editor.org/rfc/rfc3122#section-2.1>
+            141 | 142 => {
+                append_ndp_options(buf, data, offset, HEADER_SIZE)?;
+            }
+
+            // RFC 6275, Section 6.7 — Mobile Prefix Solicitation:
+            // Identifier, Reserved.
+            // <https://www.rfc-editor.org/rfc/rfc6275#section-6.7>
+            146 => {
+                push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+            }
+
+            // RFC 6275, Section 6.8 — Mobile Prefix Advertisement:
+            // Identifier, M|O|Reserved (the M and O flags are the top bits
+            // of the first octet), Options.
+            // <https://www.rfc-editor.org/rfc/rfc6275#section-6.8>
+            147 => {
+                push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+                push_u8(buf, FD_FLAGS, data, 6, offset);
+                append_ndp_options(buf, data, offset, HEADER_SIZE)?;
+            }
+
+            // RFC 3971, Section 6.4.1 — Certification Path Solicitation:
+            // Identifier, Component, Options.
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.1>
+            148 => {
+                push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+                push_u16(buf, FD_COMPONENT, data, 6, offset);
+                append_ndp_options(buf, data, offset, HEADER_SIZE)?;
+            }
+
+            // RFC 3971, Section 6.4.2 — Certification Path Advertisement:
+            // Identifier, All Components, Component, Reserved, Options.
+            // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.2>
+            149 => {
+                if data.len() < CPA_HEADER_SIZE {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u16(buf, FD_IDENTIFIER, data, 4, offset);
+                    push_u16(buf, FD_ALL_COMPONENTS, data, 6, offset);
+                    push_u16(buf, FD_COMPONENT, data, 8, offset);
+                    append_ndp_options(buf, data, offset, CPA_HEADER_SIZE)?;
+                }
+            }
+
+            // RFC 6550, Section 6 — RPL Control Message.
+            // <https://www.rfc-editor.org/rfc/rfc6550#section-6>
+            RPL_CONTROL_MESSAGE => rpl::push_rpl_message(buf, code, data, offset),
+
+            // RFC 6775, Section 4.4 — Duplicate Address Request /
+            // Confirmation: Status, Reserved, Registration Lifetime, EUI-64,
+            // Registered Address.
+            // RFC 8505, Section 4.2 — with a non-zero Code Suffix the
+            // Reserved octet is the TID and "The size of the ROVR is known
+            // from the ICMP Code Suffix" (1-4 for 64-256 bits).
+            // <https://www.rfc-editor.org/rfc/rfc6775#section-4.4>
+            // <https://www.rfc-editor.org/rfc/rfc8505#section-4.2>
+            157 | 158 => {
+                let code_suffix = (code & 0x0F) as usize;
+                let rovr_len = code_suffix.max(1) * 8;
+                if code_suffix > 4 || data.len() < 8 + rovr_len + 16 {
+                    push_raw_body(buf, data, offset);
+                } else {
+                    push_u8(buf, FD_STATUS, data, 4, offset);
+                    if code_suffix != 0 {
+                        push_u8(buf, FD_TID, data, 5, offset);
+                    }
+                    push_u16(buf, FD_REGISTRATION_LIFETIME, data, 6, offset);
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_ROVR],
+                        FieldValue::Bytes(&data[8..8 + rovr_len]),
+                        offset + 8..offset + 8 + rovr_len,
+                    );
+                    let addr_at = 8 + rovr_len;
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_REGISTERED_ADDRESS],
+                        FieldValue::Ipv6Addr(read_ipv6_addr(data, addr_at)?),
+                        offset + addr_at..offset + addr_at + 16,
+                    );
+                }
             }
 
             // All other types: no type-specific parsing

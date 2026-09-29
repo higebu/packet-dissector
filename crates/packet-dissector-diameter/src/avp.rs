@@ -4,10 +4,10 @@
 //! - RFC 6733, Section 4: <https://www.rfc-editor.org/rfc/rfc6733#section-4>
 
 /// Diameter AVP data type (RFC 6733, Section 4.2–4.4).
+/// <https://www.rfc-editor.org/rfc/rfc6733#section-4.2>
 ///
-/// Not all variants are used by the base RFC 6733 AVP table; the remaining ones
-/// (e.g., `Integer32`, `Float32`) are reserved for vendor-specific extensions
-/// such as 3GPP (vendor_id=10415).
+/// `Float32` and `Float64` have no variant: no AVP in the dictionaries uses
+/// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AvpType {
     /// RFC 6733, Section 4.2 — arbitrary data of variable length.
@@ -32,6 +32,14 @@ pub enum AvpType {
     Enumerated,
     /// RFC 6733, Section 4.4 — sequence of AVPs.
     Grouped,
+    /// RFC 6733, Section 4.2 — 64-bit signed value. `FieldValue` has no
+    /// signed 64-bit variant, so the value is emitted as raw bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc6733#section-4.2>
+    Integer64,
+    /// OctetString carrying a 4-octet IPv4 address, e.g. Framed-IP-Address
+    /// (RFC 7155, Section 4.4.10.5.1).
+    /// <https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.1>
+    Ipv4OctetString,
 }
 
 /// Static definition of an AVP: its human-readable name and data type.
@@ -55,6 +63,20 @@ pub fn lookup_avp(vendor_id: u32, avp_code: u32) -> Option<&'static AvpDef> {
         .binary_search_by_key(&avp_code, |(code, _)| *code)
         .ok()
         .map(|i| &table[i].1)
+}
+
+/// Look up the name of an Enumerated AVP value.
+///
+/// Returns `None` for AVPs without a value table or unknown values.
+pub fn enum_value_name(vendor_id: u32, avp_code: u32, value: i32) -> Option<&'static str> {
+    let i = ENUM_VALUES
+        .binary_search_by_key(&(vendor_id, avp_code), |(k, _)| *k)
+        .ok()?;
+    ENUM_VALUES[i]
+        .1
+        .iter()
+        .find(|(v, _)| *v == value)
+        .map(|(_, n)| *n)
 }
 
 /// Look up a command name by command code and request flag.
@@ -101,6 +123,9 @@ pub fn command_name(code: u32, is_request: bool) -> &'static str {
         // RFC 7155, Section 3.1 — https://www.rfc-editor.org/rfc/rfc7155#section-3.1
         (265, true) => "AA-Request",
         (265, false) => "AA-Answer",
+        // RFC 4072, Sections 3.1 and 3.2 — https://www.rfc-editor.org/rfc/rfc4072#section-3
+        (268, true) => "Diameter-EAP-Request",
+        (268, false) => "Diameter-EAP-Answer",
         // 3GPP TS 29.229, Section 6.1, Table 6.1/1 — Cx/Dx Command Codes
         (300, true) => "User-Authorization-Request",
         (300, false) => "User-Authorization-Answer",
@@ -134,9 +159,13 @@ pub fn command_name(code: u32, is_request: bool) -> &'static str {
 pub fn application_name(app_id: u32) -> &'static str {
     match app_id {
         0 => "Diameter Common Messages",
+        // RFC 7155, Section 1.5 — https://www.rfc-editor.org/rfc/rfc7155#section-1.5
+        1 => "NASREQ",
         3 => "Diameter Base Accounting",
         // RFC 4006, Section 1.2 — https://www.rfc-editor.org/rfc/rfc4006#section-1.2
         4 => "Diameter Credit-Control",
+        // RFC 4072, Section 2.1 — https://www.rfc-editor.org/rfc/rfc4072#section-2.1
+        5 => "Diameter EAP",
         // 3GPP TS 29.229, Section 6.2 — Cx/Dx Application Identifier
         16777216 => "3GPP Cx",
         // 3GPP TS 29.329, Section 6.2 — Sh Application Identifier
@@ -150,6 +179,8 @@ pub fn application_name(app_id: u32) -> &'static str {
         // 3GPP TS 29.272, Section 7.1.8
         16777251 => "3GPP S6a/S6d",
         16777252 => "3GPP S13/S13'",
+        // 3GPP TS 29.273 v19.2.0, clause 5.2.1 — STa (also used by SWa, clause 4.2.1)
+        16777250 => "3GPP STa",
         // 3GPP TS 29.273, Section 9 — SWm Application Identifier
         16777264 => "3GPP SWm",
         // 3GPP TS 29.273, Section 8 — SWx Application Identifier
@@ -260,6 +291,150 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::UTF8String,
         },
     ),
+    // RFC 7155, Section 4.3.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.1
+    (
+        2,
+        AvpDef {
+            name: "User-Password",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.2.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.2
+    (
+        5,
+        AvpDef {
+            name: "NAS-Port",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.4.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.1
+    (
+        6,
+        AvpDef {
+            name: "Service-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.1
+    (
+        7,
+        AvpDef {
+            name: "Framed-Protocol",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.1
+    (
+        8,
+        AvpDef {
+            name: "Framed-IP-Address",
+            avp_type: AvpType::Ipv4OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.2
+    (
+        9,
+        AvpDef {
+            name: "Framed-IP-Netmask",
+            avp_type: AvpType::Ipv4OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.2
+    (
+        10,
+        AvpDef {
+            name: "Framed-Routing",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.4.7 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.7
+    (
+        11,
+        AvpDef {
+            name: "Filter-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.3
+    (
+        12,
+        AvpDef {
+            name: "Framed-MTU",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.4
+    (
+        13,
+        AvpDef {
+            name: "Framed-Compression",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.1
+    (
+        14,
+        AvpDef {
+            name: "Login-IP-Host",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.3
+    (
+        15,
+        AvpDef {
+            name: "Login-Service",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.4.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.4.1
+    (
+        16,
+        AvpDef {
+            name: "Login-TCP-Port",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.2.9 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.9
+    (
+        18,
+        AvpDef {
+            name: "Reply-Message",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.2
+    (
+        19,
+        AvpDef {
+            name: "Callback-Number",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.3
+    (
+        20,
+        AvpDef {
+            name: "Callback-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.3
+    (
+        22,
+        AvpDef {
+            name: "Framed-Route",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.6.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.6.1
+    (
+        23,
+        AvpDef {
+            name: "Framed-IPX-Network",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
     (
         25,
         AvpDef {
@@ -274,11 +449,91 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Unsigned32,
         },
     ),
+    // RFC 7155, Section 4.4.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.4
+    (
+        28,
+        AvpDef {
+            name: "Idle-Timeout",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.2.5 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.5
+    (
+        30,
+        AvpDef {
+            name: "Called-Station-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.2.6 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.6
+    (
+        31,
+        AvpDef {
+            name: "Calling-Station-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
     (
         33,
         AvpDef {
             name: "Proxy-State",
             avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.5.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.5.1
+    (
+        34,
+        AvpDef {
+            name: "Login-LAT-Service",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.5.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.5.2
+    (
+        35,
+        AvpDef {
+            name: "Login-LAT-Node",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.5.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.5.3
+    (
+        36,
+        AvpDef {
+            name: "Login-LAT-Group",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.7.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.7.1
+    (
+        37,
+        AvpDef {
+            name: "Framed-Appletalk-Link",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.7.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.7.2
+    (
+        38,
+        AvpDef {
+            name: "Framed-Appletalk-Network",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.7.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.7.3
+    (
+        39,
+        AvpDef {
+            name: "Framed-Appletalk-Zone",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.6.8 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.8
+    (
+        41,
+        AvpDef {
+            name: "Acct-Delay-Time",
+            avp_type: AvpType::Unsigned32,
         },
     ),
     (
@@ -288,11 +543,35 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::OctetString,
         },
     ),
+    // RFC 7155, Section 4.6.6 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.6
+    (
+        45,
+        AvpDef {
+            name: "Acct-Authentic",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.6.5 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.5
+    (
+        46,
+        AvpDef {
+            name: "Acct-Session-Time",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
     (
         50,
         AvpDef {
             name: "Acct-Multi-Session-Id",
             avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.6.9 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.9
+    (
+        51,
+        AvpDef {
+            name: "Acct-Link-Count",
+            avp_type: AvpType::Unsigned32,
         },
     ),
     (
@@ -302,11 +581,291 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Time,
         },
     ),
+    // RFC 7155, Section 4.3.8 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.8
+    (
+        60,
+        AvpDef {
+            name: "CHAP-Challenge",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.2.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.4
+    (
+        61,
+        AvpDef {
+            name: "NAS-Port-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.4.5 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.5
+    (
+        62,
+        AvpDef {
+            name: "Port-Limit",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.5.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.5.4
+    (
+        63,
+        AvpDef {
+            name: "Login-LAT-Port",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.5.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.2
+    (
+        64,
+        AvpDef {
+            name: "Tunnel-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.5.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.3
+    (
+        65,
+        AvpDef {
+            name: "Tunnel-Medium-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.5.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.4
+    (
+        66,
+        AvpDef {
+            name: "Tunnel-Client-Endpoint",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.5.5 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.5
+    (
+        67,
+        AvpDef {
+            name: "Tunnel-Server-Endpoint",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.6.10 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.10
+    (
+        68,
+        AvpDef {
+            name: "Acct-Tunnel-Connection",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.5.6 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.6
+    (
+        69,
+        AvpDef {
+            name: "Tunnel-Password",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.3.9 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.9
+    (
+        70,
+        AvpDef {
+            name: "ARAP-Password",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.8.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.8.1
+    (
+        71,
+        AvpDef {
+            name: "ARAP-Features",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.8.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.8.2
+    (
+        72,
+        AvpDef {
+            name: "ARAP-Zone-Access",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.3.11 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.11
+    (
+        73,
+        AvpDef {
+            name: "ARAP-Security",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.3.12 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.12
+    (
+        74,
+        AvpDef {
+            name: "ARAP-Security-Data",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.3.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.2
+    (
+        75,
+        AvpDef {
+            name: "Password-Retry",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.3.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.3
+    (
+        76,
+        AvpDef {
+            name: "Prompt",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.2.7 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.7
+    (
+        77,
+        AvpDef {
+            name: "Connect-Info",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.8 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.8
+    (
+        78,
+        AvpDef {
+            name: "Configuration-Token",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.5.7 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.7
+    (
+        81,
+        AvpDef {
+            name: "Tunnel-Private-Group-Id",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.5.8 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.8
+    (
+        82,
+        AvpDef {
+            name: "Tunnel-Assignment-Id",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.5.9 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.9
+    (
+        83,
+        AvpDef {
+            name: "Tunnel-Preference",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.3.10 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.10
+    (
+        84,
+        AvpDef {
+            name: "ARAP-Challenge-Response",
+            avp_type: AvpType::OctetString,
+        },
+    ),
     (
         85,
         AvpDef {
             name: "Acct-Interim-Interval",
             avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.6.11 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.11
+    (
+        86,
+        AvpDef {
+            name: "Acct-Tunnel-Packets-Lost",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 7155, Section 4.2.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.3
+    (
+        87,
+        AvpDef {
+            name: "NAS-Port-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.4
+    (
+        88,
+        AvpDef {
+            name: "Framed-Pool",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.5.10 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.10
+    (
+        90,
+        AvpDef {
+            name: "Tunnel-Client-Auth-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.5.11 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.11
+    (
+        91,
+        AvpDef {
+            name: "Tunnel-Server-Auth-Id",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.2.8 — https://www.rfc-editor.org/rfc/rfc7155#section-4.2.8
+    (
+        94,
+        AvpDef {
+            name: "Originating-Line-Info",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.5 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.5
+    (
+        96,
+        AvpDef {
+            name: "Framed-Interface-Id",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.6 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.6
+    (
+        97,
+        AvpDef {
+            name: "Framed-IPv6-Prefix",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.11.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.11.2
+    (
+        98,
+        AvpDef {
+            name: "Login-IPv6-Host",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.7 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.7
+    (
+        99,
+        AvpDef {
+            name: "Framed-IPv6-Route",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 7155, Section 4.4.10.5.8 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.8
+    (
+        100,
+        AvpDef {
+            name: "Framed-IPv6-Pool",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 4072, Section 4.1.4 — https://www.rfc-editor.org/rfc/rfc4072#section-4.1.4
+    (
+        102,
+        AvpDef {
+            name: "EAP-Key-Name",
+            avp_type: AvpType::OctetString,
         },
     ),
     (
@@ -599,12 +1158,125 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Grouped,
         },
     ),
-    // RFC 4006, Section 8 — Credit-Control AVPs
+    // RFC 7155, Section 4.6.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.1
+    (
+        363,
+        AvpDef {
+            name: "Accounting-Input-Octets",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    // RFC 7155, Section 4.6.2 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.2
+    (
+        364,
+        AvpDef {
+            name: "Accounting-Output-Octets",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    // RFC 7155, Section 4.6.3 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.3
+    (
+        365,
+        AvpDef {
+            name: "Accounting-Input-Packets",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    // RFC 7155, Section 4.6.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.4
+    (
+        366,
+        AvpDef {
+            name: "Accounting-Output-Packets",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    // RFC 7155, Section 4.4.6 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.6
+    (
+        400,
+        AvpDef {
+            name: "NAS-Filter-Rule",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.5.1 — https://www.rfc-editor.org/rfc/rfc7155#section-4.5.1
+    (
+        401,
+        AvpDef {
+            name: "Tunneling",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 7155, Section 4.3.4 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.4
+    (
+        402,
+        AvpDef {
+            name: "CHAP-Auth",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 7155, Section 4.3.5 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.5
+    (
+        403,
+        AvpDef {
+            name: "CHAP-Algorithm",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.3.6 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.6
+    (
+        404,
+        AvpDef {
+            name: "CHAP-Ident",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.3.7 — https://www.rfc-editor.org/rfc/rfc7155#section-4.3.7
+    (
+        405,
+        AvpDef {
+            name: "CHAP-Response",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 7155, Section 4.6.7 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.7
+    (
+        406,
+        AvpDef {
+            name: "Accounting-Auth-Method",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 7155, Section 4.4.9 — https://www.rfc-editor.org/rfc/rfc7155#section-4.4.9
+    (
+        407,
+        AvpDef {
+            name: "QoS-Filter-Rule",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 8506, Section 8.1 — https://www.rfc-editor.org/rfc/rfc8506#section-8.1
+    (
+        411,
+        AvpDef {
+            name: "CC-Correlation-Id",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 4006, Section 8 — Credit-Control AVPs (now RFC 8506, Section 8)
+    // <https://www.rfc-editor.org/rfc/rfc8506#section-8>
     (
         412,
         AvpDef {
             name: "CC-Input-Octets",
             avp_type: AvpType::Unsigned64,
+        },
+    ),
+    // RFC 8506, Section 8.22 — https://www.rfc-editor.org/rfc/rfc8506#section-8.22
+    (
+        413,
+        AvpDef {
+            name: "CC-Money",
+            avp_type: AvpType::Grouped,
         },
     ),
     (
@@ -628,6 +1300,30 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Enumerated,
         },
     ),
+    // RFC 8506, Section 8.26 — https://www.rfc-editor.org/rfc/rfc8506#section-8.26
+    (
+        417,
+        AvpDef {
+            name: "CC-Service-Specific-Units",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
+    // RFC 8506, Section 8.4 — https://www.rfc-editor.org/rfc/rfc8506#section-8.4
+    (
+        418,
+        AvpDef {
+            name: "CC-Session-Failover",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.5 — https://www.rfc-editor.org/rfc/rfc8506#section-8.5
+    (
+        419,
+        AvpDef {
+            name: "CC-Sub-Session-Id",
+            avp_type: AvpType::Unsigned64,
+        },
+    ),
     (
         420,
         AvpDef {
@@ -642,11 +1338,123 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Unsigned64,
         },
     ),
+    // RFC 8506, Section 8.6 — https://www.rfc-editor.org/rfc/rfc8506#section-8.6
+    (
+        422,
+        AvpDef {
+            name: "Check-Balance-Result",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.7 — https://www.rfc-editor.org/rfc/rfc8506#section-8.7
+    (
+        423,
+        AvpDef {
+            name: "Cost-Information",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.12 — https://www.rfc-editor.org/rfc/rfc8506#section-8.12
+    (
+        424,
+        AvpDef {
+            name: "Cost-Unit",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.11 — https://www.rfc-editor.org/rfc/rfc8506#section-8.11
+    (
+        425,
+        AvpDef {
+            name: "Currency-Code",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 8506, Section 8.13 — https://www.rfc-editor.org/rfc/rfc8506#section-8.13
+    (
+        426,
+        AvpDef {
+            name: "Credit-Control",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.14 — https://www.rfc-editor.org/rfc/rfc8506#section-8.14
+    (
+        427,
+        AvpDef {
+            name: "Credit-Control-Failure-Handling",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.15 — https://www.rfc-editor.org/rfc/rfc8506#section-8.15
+    (
+        428,
+        AvpDef {
+            name: "Direct-Debiting-Failure-Handling",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.9 — https://www.rfc-editor.org/rfc/rfc8506#section-8.9
+    (
+        429,
+        AvpDef {
+            name: "Exponent",
+            avp_type: AvpType::Integer32,
+        },
+    ),
+    // RFC 8506, Section 8.34 — https://www.rfc-editor.org/rfc/rfc8506#section-8.34
+    (
+        430,
+        AvpDef {
+            name: "Final-Unit-Indication",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.17 — https://www.rfc-editor.org/rfc/rfc8506#section-8.17
+    (
+        431,
+        AvpDef {
+            name: "Granted-Service-Unit",
+            avp_type: AvpType::Grouped,
+        },
+    ),
     (
         432,
         AvpDef {
             name: "Rating-Group",
             avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 8506, Section 8.38 — https://www.rfc-editor.org/rfc/rfc8506#section-8.38
+    (
+        433,
+        AvpDef {
+            name: "Redirect-Address-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.37 — https://www.rfc-editor.org/rfc/rfc8506#section-8.37
+    (
+        434,
+        AvpDef {
+            name: "Redirect-Server",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.39 — https://www.rfc-editor.org/rfc/rfc8506#section-8.39
+    (
+        435,
+        AvpDef {
+            name: "Redirect-Server-Address",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.41 — https://www.rfc-editor.org/rfc/rfc8506#section-8.41
+    (
+        436,
+        AvpDef {
+            name: "Requested-Action",
+            avp_type: AvpType::Enumerated,
         },
     ),
     (
@@ -656,11 +1464,43 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Grouped,
         },
     ),
+    // RFC 8506, Section 8.36 — https://www.rfc-editor.org/rfc/rfc8506#section-8.36
+    (
+        438,
+        AvpDef {
+            name: "Restriction-Filter-Rule",
+            avp_type: AvpType::OctetString,
+        },
+    ),
     (
         439,
         AvpDef {
             name: "Service-Identifier",
             avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 8506, Section 8.43 — https://www.rfc-editor.org/rfc/rfc8506#section-8.43
+    (
+        440,
+        AvpDef {
+            name: "Service-Parameter-Info",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.44 — https://www.rfc-editor.org/rfc/rfc8506#section-8.44
+    (
+        441,
+        AvpDef {
+            name: "Service-Parameter-Type",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 8506, Section 8.45 — https://www.rfc-editor.org/rfc/rfc8506#section-8.45
+    (
+        442,
+        AvpDef {
+            name: "Service-Parameter-Value",
+            avp_type: AvpType::OctetString,
         },
     ),
     (
@@ -677,11 +1517,59 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::UTF8String,
         },
     ),
+    // RFC 8506, Section 8.8 — https://www.rfc-editor.org/rfc/rfc8506#section-8.8
+    (
+        445,
+        AvpDef {
+            name: "Unit-Value",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.19 — https://www.rfc-editor.org/rfc/rfc8506#section-8.19
+    (
+        446,
+        AvpDef {
+            name: "Used-Service-Unit",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.10 — https://www.rfc-editor.org/rfc/rfc8506#section-8.10
+    (
+        447,
+        AvpDef {
+            name: "Value-Digits",
+            avp_type: AvpType::Integer64,
+        },
+    ),
+    // RFC 8506, Section 8.33 — https://www.rfc-editor.org/rfc/rfc8506#section-8.33
+    (
+        448,
+        AvpDef {
+            name: "Validity-Time",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
+    // RFC 8506, Section 8.35 — https://www.rfc-editor.org/rfc/rfc8506#section-8.35
+    (
+        449,
+        AvpDef {
+            name: "Final-Unit-Action",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
     (
         450,
         AvpDef {
             name: "Subscription-Id-Type",
             avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.20 — https://www.rfc-editor.org/rfc/rfc8506#section-8.20
+    (
+        451,
+        AvpDef {
+            name: "Tariff-Time-Change",
+            avp_type: AvpType::Time,
         },
     ),
     (
@@ -691,18 +1579,66 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::Enumerated,
         },
     ),
+    // RFC 8506, Section 8.31 — https://www.rfc-editor.org/rfc/rfc8506#section-8.31
+    (
+        453,
+        AvpDef {
+            name: "G-S-U-Pool-Identifier",
+            avp_type: AvpType::Unsigned32,
+        },
+    ),
     (
         454,
         AvpDef {
-            name: "CC-Sub-Session-Id",
-            avp_type: AvpType::Unsigned64,
+            name: "CC-Unit-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.40 — https://www.rfc-editor.org/rfc/rfc8506#section-8.40
+    (
+        455,
+        AvpDef {
+            name: "Multiple-Services-Indicator",
+            avp_type: AvpType::Enumerated,
         },
     ),
     (
         456,
         AvpDef {
-            name: "Used-Service-Unit",
+            name: "Multiple-Services-Credit-Control",
             avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.30 — https://www.rfc-editor.org/rfc/rfc8506#section-8.30
+    (
+        457,
+        AvpDef {
+            name: "G-S-U-Pool-Reference",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.49 — https://www.rfc-editor.org/rfc/rfc8506#section-8.49
+    (
+        458,
+        AvpDef {
+            name: "User-Equipment-Info",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.50 — https://www.rfc-editor.org/rfc/rfc8506#section-8.50
+    (
+        459,
+        AvpDef {
+            name: "User-Equipment-Info-Type",
+            avp_type: AvpType::Enumerated,
+        },
+    ),
+    // RFC 8506, Section 8.51 — https://www.rfc-editor.org/rfc/rfc8506#section-8.51
+    (
+        460,
+        AvpDef {
+            name: "User-Equipment-Info-Value",
+            avp_type: AvpType::OctetString,
         },
     ),
     (
@@ -710,6 +1646,38 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
         AvpDef {
             name: "Service-Context-Id",
             avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 4072, Section 4.1.1 — https://www.rfc-editor.org/rfc/rfc4072#section-4.1.1
+    (
+        462,
+        AvpDef {
+            name: "EAP-Payload",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 4072, Section 4.1.2 — https://www.rfc-editor.org/rfc/rfc4072#section-4.1.2
+    (
+        463,
+        AvpDef {
+            name: "EAP-Reissued-Payload",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 4072, Section 4.1.3 — https://www.rfc-editor.org/rfc/rfc4072#section-4.1.3
+    (
+        464,
+        AvpDef {
+            name: "EAP-Master-Session-Key",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 4072, Section 4.1.5 — https://www.rfc-editor.org/rfc/rfc4072#section-4.1.5
+    (
+        465,
+        AvpDef {
+            name: "Accounting-EAP-Auth-Method",
+            avp_type: AvpType::Unsigned64,
         },
     ),
     (
@@ -749,6 +1717,142 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
             avp_type: AvpType::UTF8String,
         },
     ),
+    // RFC 8506, Section 8.52 — https://www.rfc-editor.org/rfc/rfc8506#section-8.52
+    (
+        653,
+        AvpDef {
+            name: "User-Equipment-Info-Extension",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.53 — https://www.rfc-editor.org/rfc/rfc8506#section-8.53
+    (
+        654,
+        AvpDef {
+            name: "User-Equipment-Info-IMEISV",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 8506, Section 8.54 — https://www.rfc-editor.org/rfc/rfc8506#section-8.54
+    (
+        655,
+        AvpDef {
+            name: "User-Equipment-Info-MAC",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 8506, Section 8.55 — https://www.rfc-editor.org/rfc/rfc8506#section-8.55
+    (
+        656,
+        AvpDef {
+            name: "User-Equipment-Info-EUI64",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 8506, Section 8.56 — https://www.rfc-editor.org/rfc/rfc8506#section-8.56
+    (
+        657,
+        AvpDef {
+            name: "User-Equipment-Info-ModifiedEUI64",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 8506, Section 8.57 — https://www.rfc-editor.org/rfc/rfc8506#section-8.57
+    (
+        658,
+        AvpDef {
+            name: "User-Equipment-Info-IMEI",
+            avp_type: AvpType::OctetString,
+        },
+    ),
+    // RFC 8506, Section 8.58 — https://www.rfc-editor.org/rfc/rfc8506#section-8.58
+    (
+        659,
+        AvpDef {
+            name: "Subscription-Id-Extension",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.59 — https://www.rfc-editor.org/rfc/rfc8506#section-8.59
+    (
+        660,
+        AvpDef {
+            name: "Subscription-Id-E164",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.60 — https://www.rfc-editor.org/rfc/rfc8506#section-8.60
+    (
+        661,
+        AvpDef {
+            name: "Subscription-Id-IMSI",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.61 — https://www.rfc-editor.org/rfc/rfc8506#section-8.61
+    (
+        662,
+        AvpDef {
+            name: "Subscription-Id-SIP-URI",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.62 — https://www.rfc-editor.org/rfc/rfc8506#section-8.62
+    (
+        663,
+        AvpDef {
+            name: "Subscription-Id-NAI",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.63 — https://www.rfc-editor.org/rfc/rfc8506#section-8.63
+    (
+        664,
+        AvpDef {
+            name: "Subscription-Id-Private",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.64 — https://www.rfc-editor.org/rfc/rfc8506#section-8.64
+    (
+        665,
+        AvpDef {
+            name: "Redirect-Server-Extension",
+            avp_type: AvpType::Grouped,
+        },
+    ),
+    // RFC 8506, Section 8.65 — https://www.rfc-editor.org/rfc/rfc8506#section-8.65
+    (
+        666,
+        AvpDef {
+            name: "Redirect-Address-IPAddress",
+            avp_type: AvpType::Address,
+        },
+    ),
+    // RFC 8506, Section 8.66 — https://www.rfc-editor.org/rfc/rfc8506#section-8.66
+    (
+        667,
+        AvpDef {
+            name: "Redirect-Address-URL",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.67 — https://www.rfc-editor.org/rfc/rfc8506#section-8.67
+    (
+        668,
+        AvpDef {
+            name: "Redirect-Address-SIP-URI",
+            avp_type: AvpType::UTF8String,
+        },
+    ),
+    // RFC 8506, Section 8.68 — https://www.rfc-editor.org/rfc/rfc8506#section-8.68
+    (
+        669,
+        AvpDef {
+            name: "QoS-Final-Unit-Indication",
+            avp_type: AvpType::Grouped,
+        },
+    ),
 ];
 
 /// 3GPP vendor-specific AVPs (vendor_id=10415), sorted by AVP code for binary search.
@@ -761,8 +1865,41 @@ static BASE_AVPS: &[(u32, AvpDef)] = &[
 /// - 3GPP TS 32.299, Table 7.1 — Charging AVPs
 #[rustfmt::skip]
 static TGPP_AVPS: &[(u32, AvpDef)] = &[
+    // 3GPP TS 29.061 v19.1.0, clause 16a.5, Table 9a
+    (1,    AvpDef { name: "3GPP-IMSI", avp_type: AvpType::UTF8String }),
+    (2,    AvpDef { name: "3GPP-Charging-Id", avp_type: AvpType::OctetString }),
+    (3,    AvpDef { name: "3GPP-PDP-Type", avp_type: AvpType::Enumerated }),
+    (4,    AvpDef { name: "3GPP-CG-Address", avp_type: AvpType::OctetString }),
+    (5,    AvpDef { name: "3GPP-GPRS-Negotiated-QoS-Profile", avp_type: AvpType::UTF8String }),
+    (6,    AvpDef { name: "3GPP-SGSN-Address", avp_type: AvpType::OctetString }),
+    (7,    AvpDef { name: "3GPP-GGSN-Address", avp_type: AvpType::OctetString }),
+    (8,    AvpDef { name: "3GPP-IMSI-MCC-MNC", avp_type: AvpType::UTF8String }),
+    (9,    AvpDef { name: "3GPP-GGSN-MCC-MNC", avp_type: AvpType::UTF8String }),
+    (10,   AvpDef { name: "3GPP-NSAPI", avp_type: AvpType::OctetString }),
+    (12,   AvpDef { name: "3GPP-Selection-Mode", avp_type: AvpType::UTF8String }),
     // 3GPP TS 29.061 — Interworking (re-used by TS 29.272, Table 7.3.1/2)
     (13,   AvpDef { name: "3GPP-Charging-Characteristics", avp_type: AvpType::UTF8String }),
+    // 3GPP TS 29.061 v19.1.0, clause 16a.5, Table 9a
+    (14,   AvpDef { name: "3GPP-CG-IPv6-Address", avp_type: AvpType::OctetString }),
+    (15,   AvpDef { name: "3GPP-SGSN-IPv6-Address", avp_type: AvpType::OctetString }),
+    (16,   AvpDef { name: "3GPP-GGSN-IPv6-Address", avp_type: AvpType::OctetString }),
+    (17,   AvpDef { name: "3GPP-IPv6-DNS-Servers", avp_type: AvpType::OctetString }),
+    (18,   AvpDef { name: "3GPP-SGSN-MCC-MNC", avp_type: AvpType::UTF8String }),
+    (20,   AvpDef { name: "3GPP-IMEISV", avp_type: AvpType::OctetString }),
+    (21,   AvpDef { name: "3GPP-RAT-Type", avp_type: AvpType::OctetString }),
+    (22,   AvpDef { name: "3GPP-User-Location-Info", avp_type: AvpType::OctetString }),
+    (23,   AvpDef { name: "3GPP-MS-TimeZone", avp_type: AvpType::OctetString }),
+    (24,   AvpDef { name: "3GPP-CAMEL-Charging-Info", avp_type: AvpType::OctetString }),
+    (25,   AvpDef { name: "3GPP-Packet-Filter", avp_type: AvpType::OctetString }),
+    (26,   AvpDef { name: "3GPP-Negotiated-DSCP", avp_type: AvpType::OctetString }),
+    (27,   AvpDef { name: "3GPP-Allocate-IP-Type", avp_type: AvpType::OctetString }),
+    (29,   AvpDef { name: "TWAN-Identifier", avp_type: AvpType::OctetString }),
+    (30,   AvpDef { name: "3GPP-User-Location-Info-Time", avp_type: AvpType::OctetString }),
+    (31,   AvpDef { name: "3GPP-Secondary-RAT-Usage", avp_type: AvpType::OctetString }),
+    (32,   AvpDef { name: "3GPP-UE-Local-IP-Address", avp_type: AvpType::OctetString }),
+    (33,   AvpDef { name: "3GPP-UE-Source-Port", avp_type: AvpType::OctetString }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.24
+    (318,  AvpDef { name: "3GPP-AAA-Server-Name", avp_type: AvpType::DiameterIdentity }),
     // 3GPP TS 29.214, Table 5.3.0.1 — Rx AVPs
     (504,  AvpDef { name: "AF-Application-Identifier", avp_type: AvpType::OctetString }),
     (505,  AvpDef { name: "AF-Charging-Identifier", avp_type: AvpType::OctetString }),
@@ -981,8 +2118,88 @@ static TGPP_AVPS: &[(u32, AvpDef)] = &[
     (1497, AvpDef { name: "MME-User-State", avp_type: AvpType::Grouped }),
     (1498, AvpDef { name: "SGSN-User-State", avp_type: AvpType::Grouped }),
     (1499, AvpDef { name: "User-State", avp_type: AvpType::Enumerated }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.1
+    (1500, AvpDef { name: "Non-3GPP-User-Data", avp_type: AvpType::Grouped }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.3
+    (1501, AvpDef { name: "Non-3GPP-IP-Access", avp_type: AvpType::Enumerated }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.4
+    (1502, AvpDef { name: "Non-3GPP-IP-Access-APN", avp_type: AvpType::Enumerated }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.9
+    (1503, AvpDef { name: "AN-Trusted", avp_type: AvpType::Enumerated }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.7
+    (1504, AvpDef { name: "ANID", avp_type: AvpType::UTF8String }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.13
+    (1505, AvpDef { name: "Trace-Info", avp_type: AvpType::Grouped }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.12
+    (1506, AvpDef { name: "MIP-FA-RK", avp_type: AvpType::OctetString }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.13
+    (1507, AvpDef { name: "MIP-FA-RK-SPI", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.17
+    (1508, AvpDef { name: "PPR-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.18
+    (1509, AvpDef { name: "WLAN-Identifier", avp_type: AvpType::Grouped }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.19
+    (1510, AvpDef { name: "TWAN-Access-Info", avp_type: AvpType::Grouped }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.20
+    (1511, AvpDef { name: "Access-Authorization-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.18
+    (1512, AvpDef { name: "TWAN-Default-APN-Context-Id", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 9.2.3.1.4
+    (1515, AvpDef { name: "Trust-Relationship-Update", avp_type: AvpType::Enumerated }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.14
+    (1516, AvpDef { name: "Full-Network-Name", avp_type: AvpType::OctetString }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.15
+    (1517, AvpDef { name: "Short-Network-Name", avp_type: AvpType::OctetString }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.21
+    (1518, AvpDef { name: "AAA-Failure-Indication", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.19
+    (1519, AvpDef { name: "Transport-Access-Type", avp_type: AvpType::Enumerated }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.20
+    (1520, AvpDef { name: "DER-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.21
+    (1521, AvpDef { name: "DEA-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 9.2.3.1.5
+    (1522, AvpDef { name: "RAR-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 9.2.3.7
+    (1523, AvpDef { name: "DER-S6b-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.22
+    (1524, AvpDef { name: "SSID", avp_type: AvpType::UTF8String }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.23
+    (1525, AvpDef { name: "HESSID", avp_type: AvpType::UTF8String }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.24
+    (1526, AvpDef { name: "Access-Network-Info", avp_type: AvpType::Grouped }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.25
+    (1527, AvpDef { name: "TWAN-Connection-Mode", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.26
+    (1528, AvpDef { name: "TWAN-Connectivity-Parameters", avp_type: AvpType::Grouped }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.27
+    (1529, AvpDef { name: "Connectivity-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.28
+    (1530, AvpDef { name: "TWAN-PCO", avp_type: AvpType::OctetString }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.29
+    (1531, AvpDef { name: "TWAG-CP-Address", avp_type: AvpType::Address }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.30
+    (1532, AvpDef { name: "TWAG-UP-Address", avp_type: AvpType::UTF8String }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.31
+    (1533, AvpDef { name: "TWAN-S2a-Failure-Cause", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.32
+    (1534, AvpDef { name: "SM-Back-Off-Timer", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.33
+    (1535, AvpDef { name: "WLCP-Key", avp_type: AvpType::OctetString }),
+    // 3GPP TS 29.273 v19.2.0, clause 9.2.3.2.6
+    (1536, AvpDef { name: "Origination-Time-Stamp", avp_type: AvpType::Unsigned64 }),
+    // 3GPP TS 29.273 v19.2.0, clause 9.2.3.2.7
+    (1537, AvpDef { name: "Maximum-Wait-Time", avp_type: AvpType::Unsigned32 }),
     // 3GPP TS 29.273 — SWx/STa/SWm (re-used by TS 29.272, Table 7.3.1/2)
     (1538, AvpDef { name: "Emergency-Services", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 7.2.3.5
+    (1539, AvpDef { name: "AAR-Flags", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.35
+    (1540, AvpDef { name: "IMEI-Check-In-VPLMN-Result", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 8.2.3.27
+    (1541, AvpDef { name: "ERP-Authorization", avp_type: AvpType::Unsigned32 }),
+    // 3GPP TS 29.273 v19.2.0, clause 5.2.3.36
+    (1542, AvpDef { name: "High-Priority-Access-Info", avp_type: AvpType::Unsigned32 }),
     // 3GPP TS 29.272 — S6a/S6d (Table 7.3.1/1, continued)
     (1600, AvpDef { name: "MME-Location-Information", avp_type: AvpType::Grouped }),
     (1601, AvpDef { name: "SGSN-Location-Information", avp_type: AvpType::Grouped }),
@@ -1155,9 +2372,558 @@ static TGPP_AVPS: &[(u32, AvpDef)] = &[
     (4325, AvpDef { name: "Reachability-Cause", avp_type: AvpType::Unsigned32 }),
 ];
 
+/// `(value, name)` pairs of one Enumerated AVP.
+type EnumTable = &'static [(i32, &'static str)];
+
+/// Enumerated AVP values, sorted by `(vendor_id, avp_code)` for binary search.
+///
+/// Base and RFC 8506 values follow the IANA "AAA Parameters" registries
+/// (<https://www.iana.org/assignments/aaa-parameters/aaa-parameters.xhtml>);
+/// the defining clause is noted per entry.
+static ENUM_VALUES: &[((u32, u32), EnumTable)] = &[
+    // RFC 6733, Section 6.13 — https://www.rfc-editor.org/rfc/rfc6733#section-6.13
+    (
+        (0, 261),
+        &[
+            (0, "DONT_CACHE"),
+            (1, "ALL_SESSION"),
+            (2, "ALL_REALM"),
+            (3, "REALM_AND_APPLICATION"),
+            (4, "ALL_APPLICATION"),
+            (5, "ALL_HOST"),
+            (6, "ALL_USER"),
+        ],
+    ),
+    // RFC 6733, Section 8.18 — https://www.rfc-editor.org/rfc/rfc6733#section-8.18
+    (
+        (0, 271),
+        &[
+            (0, "REFUSE_SERVICE"),
+            (1, "TRY_AGAIN"),
+            (2, "ALLOW_SERVICE"),
+            (3, "TRY_AGAIN_ALLOW_SERVICE"),
+        ],
+    ),
+    // RFC 6733, Section 5.4.3 — https://www.rfc-editor.org/rfc/rfc6733#section-5.4.3
+    (
+        (0, 273),
+        &[
+            (0, "REBOOTING"),
+            (1, "BUSY"),
+            (2, "DO_NOT_WANT_TO_TALK_TO_YOU"),
+        ],
+    ),
+    // RFC 6733, Section 8.7 — https://www.rfc-editor.org/rfc/rfc6733#section-8.7
+    (
+        (0, 274),
+        &[
+            (1, "AUTHENTICATE_ONLY"),
+            (2, "AUTHORIZE_ONLY"),
+            (3, "AUTHORIZE_AUTHENTICATE"),
+        ],
+    ),
+    // RFC 6733, Section 8.11 — https://www.rfc-editor.org/rfc/rfc6733#section-8.11
+    (
+        (0, 277),
+        &[(0, "STATE_MAINTAINED"), (1, "NO_STATE_MAINTAINED")],
+    ),
+    // RFC 6733, Section 8.12 — https://www.rfc-editor.org/rfc/rfc6733#section-8.12
+    (
+        (0, 285),
+        &[(0, "AUTHORIZE_ONLY"), (1, "AUTHORIZE_AUTHENTICATE")],
+    ),
+    // RFC 6733, Section 8.15 — https://www.rfc-editor.org/rfc/rfc6733#section-8.15
+    (
+        (0, 295),
+        &[
+            (1, "DIAMETER_LOGOUT"),
+            (2, "DIAMETER_SERVICE_NOT_PROVIDED"),
+            (3, "DIAMETER_BAD_ANSWER"),
+            (4, "DIAMETER_ADMINISTRATIVE"),
+            (5, "DIAMETER_LINK_BROKEN"),
+            (6, "DIAMETER_AUTH_EXPIRED"),
+            (7, "DIAMETER_USER_MOVED"),
+            (8, "DIAMETER_SESSION_TIMEOUT"),
+            (11, "User Request"),
+            (12, "Lost Carrier"),
+            (13, "Lost Service"),
+            (14, "Idle Timeout"),
+            (15, "Session Timeout"),
+            (16, "Admin Reset"),
+            (17, "Admin Reboot"),
+            (18, "Port Error"),
+            (19, "NAS Error"),
+            (20, "NAS Request"),
+            (21, "NAS Reboot"),
+            (22, "Port Unneeded"),
+            (23, "Port Preempted"),
+            (24, "Port Suspended"),
+            (25, "Service Unavailable"),
+            (26, "Callback"),
+            (27, "User Error"),
+            (28, "Host Request"),
+            (29, "Supplicant Restart"),
+            (30, "Reauthentication Failure"),
+            (31, "Port Reinitialized"),
+            (32, "Port Administratively Disabled"),
+        ],
+    ),
+    // RFC 7155, Section 4.6.7 — https://www.rfc-editor.org/rfc/rfc7155#section-4.6.7
+    (
+        (0, 406),
+        &[
+            (1, "PAP"),
+            (2, "CHAP"),
+            (3, "MS-CHAP-1"),
+            (4, "MS-CHAP-2"),
+            (5, "EAP"),
+            (7, "None"),
+        ],
+    ),
+    // RFC 8506, Section 8.3 — https://www.rfc-editor.org/rfc/rfc8506#section-8.3
+    (
+        (0, 416),
+        &[
+            (1, "INITIAL_REQUEST"),
+            (2, "UPDATE_REQUEST"),
+            (3, "TERMINATION_REQUEST"),
+            (4, "EVENT_REQUEST"),
+        ],
+    ),
+    // RFC 8506, Section 8.4 — https://www.rfc-editor.org/rfc/rfc8506#section-8.4
+    (
+        (0, 418),
+        &[(0, "FAILOVER_NOT_SUPPORTED"), (1, "FAILOVER_SUPPORTED")],
+    ),
+    // RFC 8506, Section 8.6 — https://www.rfc-editor.org/rfc/rfc8506#section-8.6
+    ((0, 422), &[(0, "ENOUGH_CREDIT"), (1, "NO_CREDIT")]),
+    // RFC 8506, Section 8.13 — https://www.rfc-editor.org/rfc/rfc8506#section-8.13
+    (
+        (0, 426),
+        &[(0, "CREDIT_AUTHORIZATION"), (1, "RE_AUTHORIZATION")],
+    ),
+    // RFC 8506, Section 8.14 — https://www.rfc-editor.org/rfc/rfc8506#section-8.14
+    (
+        (0, 427),
+        &[
+            (0, "TERMINATE"),
+            (1, "CONTINUE"),
+            (2, "RETRY_AND_TERMINATE"),
+        ],
+    ),
+    // RFC 8506, Section 8.15 — https://www.rfc-editor.org/rfc/rfc8506#section-8.15
+    ((0, 428), &[(0, "TERMINATE_OR_BUFFER"), (1, "CONTINUE")]),
+    // RFC 8506, Section 8.38 — https://www.rfc-editor.org/rfc/rfc8506#section-8.38
+    (
+        (0, 433),
+        &[
+            (0, "IPv4 Address"),
+            (1, "IPv6 Address"),
+            (2, "URL"),
+            (3, "SIP URI"),
+        ],
+    ),
+    // RFC 8506, Section 8.41 — https://www.rfc-editor.org/rfc/rfc8506#section-8.41
+    (
+        (0, 436),
+        &[
+            (0, "DIRECT_DEBITING"),
+            (1, "REFUND_ACCOUNT"),
+            (2, "CHECK_BALANCE"),
+            (3, "PRICE_ENQUIRY"),
+        ],
+    ),
+    // RFC 8506, Section 8.35 — https://www.rfc-editor.org/rfc/rfc8506#section-8.35
+    (
+        (0, 449),
+        &[(0, "TERMINATE"), (1, "REDIRECT"), (2, "RESTRICT_ACCESS")],
+    ),
+    // RFC 8506, Section 8.47 — https://www.rfc-editor.org/rfc/rfc8506#section-8.47
+    (
+        (0, 450),
+        &[
+            (0, "END_USER_E164"),
+            (1, "END_USER_IMSI"),
+            (2, "END_USER_SIP_URI"),
+            (3, "END_USER_NAI"),
+            (4, "END_USER_PRIVATE"),
+        ],
+    ),
+    // RFC 8506, Section 8.27 — https://www.rfc-editor.org/rfc/rfc8506#section-8.27
+    (
+        (0, 452),
+        &[
+            (0, "UNIT_BEFORE_TARIFF_CHANGE"),
+            (1, "UNIT_AFTER_TARIFF_CHANGE"),
+            (2, "UNIT_INDETERMINATE"),
+        ],
+    ),
+    // RFC 8506, Section 8.32 — https://www.rfc-editor.org/rfc/rfc8506#section-8.32
+    (
+        (0, 454),
+        &[
+            (0, "TIME"),
+            (1, "MONEY"),
+            (2, "TOTAL-OCTETS"),
+            (3, "INPUT-OCTETS"),
+            (4, "OUTPUT-OCTETS"),
+            (5, "SERVICE-SPECIFIC-UNITS"),
+        ],
+    ),
+    // RFC 8506, Section 8.40 — https://www.rfc-editor.org/rfc/rfc8506#section-8.40
+    (
+        (0, 455),
+        &[
+            (0, "MULTIPLE_SERVICES_NOT_SUPPORTED"),
+            (1, "MULTIPLE_SERVICES_SUPPORTED"),
+        ],
+    ),
+    // RFC 8506, Section 8.50 — https://www.rfc-editor.org/rfc/rfc8506#section-8.50
+    (
+        (0, 459),
+        &[
+            (0, "IMEISV"),
+            (1, "MAC"),
+            (2, "EUI64"),
+            (3, "MODIFIED_EUI64"),
+        ],
+    ),
+    // RFC 6733, Section 9.8.1 — https://www.rfc-editor.org/rfc/rfc6733#section-9.8.1
+    (
+        (0, 480),
+        &[
+            (1, "EVENT_RECORD"),
+            (2, "START_RECORD"),
+            (3, "INTERIM_RECORD"),
+            (4, "STOP_RECORD"),
+        ],
+    ),
+    // RFC 6733, Section 9.8.7 — https://www.rfc-editor.org/rfc/rfc6733#section-9.8.7
+    (
+        (0, 483),
+        &[
+            (1, "DELIVER_AND_GRANT"),
+            (2, "GRANT_AND_STORE"),
+            (3, "GRANT_AND_LOSE"),
+        ],
+    ),
+    // 3GPP TS 29.061 v19.1.0, clause 16.4.7.2 (3GPP-PDP-Type)
+    (
+        (10415, 3),
+        &[
+            (0, "IPv4"),
+            (1, "PPP"),
+            (2, "IPv6"),
+            (3, "IPv4v6"),
+            (4, "Non-IP"),
+            (5, "Unstructured"),
+            (6, "Ethernet"),
+        ],
+    ),
+    // 3GPP TS 29.229 v19.1.0, clause 6.3.15
+    (
+        (10415, 614),
+        &[
+            (0, "NO_ASSIGNMENT"),
+            (1, "REGISTRATION"),
+            (2, "RE_REGISTRATION"),
+            (3, "UNREGISTERED_USER"),
+            (4, "TIMEOUT_DEREGISTRATION"),
+            (5, "USER_DEREGISTRATION"),
+            (6, "TIMEOUT_DEREGISTRATION_STORE_SERVER_NAME"),
+            (7, "USER_DEREGISTRATION_STORE_SERVER_NAME"),
+            (8, "ADMINISTRATIVE_DEREGISTRATION"),
+            (9, "AUTHENTICATION_FAILURE"),
+            (10, "AUTHENTICATION_TIMEOUT"),
+            (11, "DEREGISTRATION_TOO_MUCH_DATA"),
+            (12, "AAA_USER_DATA_REQUEST"),
+            (13, "PGW_UPDATE"),
+            (14, "RESTORATION"),
+        ],
+    ),
+    // 3GPP TS 29.229 v19.1.0, clause 6.3.17
+    (
+        (10415, 616),
+        &[
+            (0, "PERMANENT_TERMINATION"),
+            (1, "NEW_SERVER_ASSIGNED"),
+            (2, "SERVER_CHANGE"),
+            (3, "REMOVE_S-CSCF"),
+        ],
+    ),
+    // 3GPP TS 29.229 v19.1.0, clause 6.3.24
+    (
+        (10415, 623),
+        &[
+            (0, "REGISTRATION"),
+            (1, "DE_REGISTRATION"),
+            (2, "REGISTRATION_AND_CAPABILITIES"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.8
+    (
+        (10415, 1007),
+        &[
+            (0, "DURATION"),
+            (1, "VOLUME"),
+            (2, "DURATION_VOLUME"),
+            (3, "EVENT"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.9
+    (
+        (10415, 1008),
+        &[(0, "DISABLE_OFFLINE"), (1, "ENABLE_OFFLINE")],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.10
+    (
+        (10415, 1009),
+        &[(0, "DISABLE_ONLINE"), (1, "ENABLE_ONLINE")],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.12
+    (
+        (10415, 1011),
+        &[
+            (0, "SERVICE_IDENTIFIER_LEVEL"),
+            (1, "RATING_GROUP_LEVEL"),
+            (2, "SPONSORED_CONNECTIVITY_LEVEL"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.19
+    (
+        (10415, 1019),
+        &[(0, "ACTIVE"), (1, "INACTIVE"), (2, "TEMPORARILY INACTIVE")],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.21
+    (
+        (10415, 1021),
+        &[
+            (0, "TERMINATION"),
+            (1, "ESTABLISHMENT"),
+            (2, "MODIFICATION"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.23
+    (
+        (10415, 1023),
+        &[(0, "UE_ONLY"), (1, "RESERVED"), (2, "UE_NW")],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.24
+    (
+        (10415, 1024),
+        &[
+            (0, "NETWORK_REQUEST NOT SUPPORTED"),
+            (1, "NETWORK_REQUEST SUPPORTED"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.27
+    (
+        (10415, 1027),
+        &[
+            (0, "3GPP-GPRS"),
+            (1, "DOCSIS"),
+            (2, "xDSL"),
+            (3, "WiMAX"),
+            (4, "3GPP2"),
+            (5, "3GPP-EPS"),
+            (6, "Non-3GPP-EPS"),
+            (7, "FBA"),
+            (8, "3GPP-5GS"),
+            (9, "Non-3GPP-5GS"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.17
+    (
+        (10415, 1028),
+        &[
+            (1, "QCI_1"),
+            (2, "QCI_2"),
+            (3, "QCI_3"),
+            (4, "QCI_4"),
+            (5, "QCI_5"),
+            (6, "QCI_6"),
+            (7, "QCI_7"),
+            (8, "QCI_8"),
+            (9, "QCI_9"),
+            (65, "QCI_65"),
+            (66, "QCI_66"),
+            (67, "QCI_67"),
+            (69, "QCI_69"),
+            (70, "QCI_70"),
+            (71, "QCI_71"),
+            (72, "QCI_72"),
+            (73, "QCI_73"),
+            (74, "QCI_74"),
+            (75, "QCI_75"),
+            (76, "QCI_76"),
+            (79, "QCI_79"),
+            (80, "QCI_80"),
+            (82, "QCI_82"),
+            (83, "QCI_83"),
+            (84, "QCI_84"),
+            (85, "QCI_85"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.31
+    (
+        (10415, 1032),
+        &[
+            (0, "WLAN"),
+            (1, "VIRTUAL"),
+            (2, "TRUSTED-N3GA"),
+            (3, "WIRELINE"),
+            (4, "WIRELINE-CABLE"),
+            (5, "WIRELINE-BBF"),
+            (1000, "UTRAN"),
+            (1001, "GERAN"),
+            (1002, "GAN"),
+            (1003, "HSPA_EVOLUTION"),
+            (1004, "EUTRAN"),
+            (1005, "EUTRAN-NB-IoT"),
+            (1006, "NR"),
+            (1007, "LTE-M"),
+            (1008, "NR-U"),
+            (1011, "EUTRAN(LEO)"),
+            (1012, "EUTRAN(MEO)"),
+            (1013, "EUTRAN(GEO)"),
+            (1014, "EUTRAN(OTHERSAT)"),
+            (1021, "EUTRAN-NB-IoT(LEO)"),
+            (1022, "EUTRAN-NB-IoT(MEO)"),
+            (1023, "EUTRAN-NB-IoT(GEO)"),
+            (1024, "EUTRAN-NB-IoT(OTHERSAT)"),
+            (1031, "LTE-M(LEO)"),
+            (1032, "LTE-M(MEO)"),
+            (1033, "LTE-M(GEO)"),
+            (1034, "LTE-M(OTHERSAT)"),
+            (1035, "NR(LEO)"),
+            (1036, "NR(MEO)"),
+            (1037, "NR(GEO)"),
+            (1038, "NR(OTHERSAT)"),
+            (1039, "NR-REDCAP"),
+            (1040, "NR-EREDCAP"),
+            (2000, "CDMA2000_1X"),
+            (2001, "HRPD"),
+            (2002, "UMB"),
+            (2003, "EHRPD"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.46
+    (
+        (10415, 1047),
+        &[
+            (0, "PRE-EMPTION_CAPABILITY_ENABLED"),
+            (1, "PRE-EMPTION_CAPABILITY_DISABLED"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.47
+    (
+        (10415, 1048),
+        &[
+            (0, "PRE-EMPTION_VULNERABILITY_ENABLED"),
+            (1, "PRE-EMPTION_VULNERABILITY_DISABLED"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.61
+    (
+        (10415, 1068),
+        &[
+            (0, "SESSION_LEVEL"),
+            (1, "PCC_RULE_LEVEL"),
+            (2, "ADC_RULE_LEVEL"),
+        ],
+    ),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.62
+    ((10415, 1069), &[(0, "USAGE_MONITORING_REPORT_REQUIRED")]),
+    // 3GPP TS 29.212 v19.1.0, clause 5.3.63
+    ((10415, 1070), &[(0, "USAGE_MONITORING_DISABLED")]),
+    // 3GPP TS 29.272 v19.5.0, clause 7.3.21
+    (
+        (10415, 1417),
+        &[(0, "PACKET_AND_CIRCUIT"), (2, "ONLY_PACKET")],
+    ),
+    // 3GPP TS 29.272 v19.5.0, clause 7.3.24
+    (
+        (10415, 1420),
+        &[
+            (0, "MME_UPDATE_PROCEDURE"),
+            (1, "SGSN_UPDATE_PROCEDURE"),
+            (2, "SUBSCRIPTION_WITHDRAWAL"),
+            (3, "UPDATE_PROCEDURE_IWF"),
+            (4, "INITIAL_ATTACH_PROCEDURE"),
+            (5, "DISASTER_CONDITION_TERMINATED"),
+        ],
+    ),
+    // 3GPP TS 29.272 v19.5.0, clause 7.3.29
+    (
+        (10415, 1424),
+        &[(0, "SERVICE_GRANTED"), (1, "OPERATOR_DETERMINED_BARRING")],
+    ),
+    // 3GPP TS 29.272 v19.5.0, clause 7.3.33
+    (
+        (10415, 1428),
+        &[
+            (0, "All_APN_CONFIGURATIONS_INCLUDED"),
+            (1, "MODIFIED_ADDED_APN_CONFIGURATIONS_INCLUDED"),
+        ],
+    ),
+    // 3GPP TS 29.272 v19.5.0, clause 7.3.83
+    (
+        (10415, 1434),
+        &[(0, "UE_PRESENT"), (1, "UE_MEMORY_AVAILABLE")],
+    ),
+    // 3GPP TS 29.272 v19.5.0, clause 7.3.62
+    (
+        (10415, 1456),
+        &[(0, "IPv4"), (1, "IPv6"), (2, "IPv4v6"), (3, "IPv4_OR_IPv6")],
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_values_sorted_and_typed() {
+        for window in ENUM_VALUES.windows(2) {
+            assert!(window[0].0 < window[1].0, "ENUM_VALUES not sorted");
+        }
+        // Every table belongs to an AVP that is Enumerated in the dictionary.
+        for ((vendor, code), _) in ENUM_VALUES {
+            let def = lookup_avp(*vendor, *code).unwrap_or_else(|| panic!("{vendor}/{code}"));
+            assert_eq!(def.avp_type, AvpType::Enumerated, "{}", def.name);
+        }
+    }
+
+    #[test]
+    fn enum_value_name_lookup() {
+        assert_eq!(enum_value_name(0, 295, 1), Some("DIAMETER_LOGOUT"));
+        assert_eq!(enum_value_name(0, 454, 2), Some("TOTAL-OCTETS"));
+        assert_eq!(enum_value_name(10415, 1456, 3), Some("IPv4_OR_IPv6"));
+        assert_eq!(enum_value_name(10415, 3, 3), Some("IPv4v6"));
+        assert_eq!(enum_value_name(10415, 1028, 9), Some("QCI_9"));
+        assert_eq!(enum_value_name(10415, 1417, 1), None);
+        assert_eq!(enum_value_name(0, 264, 0), None);
+        assert_eq!(enum_value_name(9, 1, 0), None);
+    }
+
+    #[test]
+    fn corrected_rfc8506_codes() {
+        // RFC 8506, Section 8 — 446 is Used-Service-Unit, 454 CC-Unit-Type,
+        // 456 Multiple-Services-Credit-Control and 419 CC-Sub-Session-Id.
+        assert_eq!(lookup_avp(0, 446).unwrap().name, "Used-Service-Unit");
+        assert_eq!(lookup_avp(0, 454).unwrap().name, "CC-Unit-Type");
+        assert_eq!(
+            lookup_avp(0, 456).unwrap().name,
+            "Multiple-Services-Credit-Control"
+        );
+        assert_eq!(lookup_avp(0, 419).unwrap().name, "CC-Sub-Session-Id");
+        assert_eq!(lookup_avp(0, 447).unwrap().avp_type, AvpType::Integer64);
+        assert_eq!(
+            lookup_avp(10415, 1518).unwrap().name,
+            "AAA-Failure-Indication"
+        );
+        assert_eq!(lookup_avp(10415, 318).unwrap().name, "3GPP-AAA-Server-Name");
+    }
 
     #[test]
     fn base_avps_sorted() {

@@ -6,6 +6,8 @@ use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, forma
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr};
 
+use crate::ie_decoders;
+
 static FD_INLINE_CAUSE_VALUE: FieldDescriptor = FieldDescriptor {
     name: "cause_value",
     display_name: "Cause Value",
@@ -97,8 +99,8 @@ static FD_INLINE_DESTINATION_INTERFACE_VALUE: FieldDescriptor = FieldDescriptor 
     format_fn: None,
 };
 
-// Scalar IDs — 3GPP TS 29.244, Sections 8.2.49 (PDR ID), 8.2.54 (URR ID),
-// 8.2.73 (FAR ID), 8.2.75 (QER ID), 8.2.77 (BAR ID).
+// Scalar IDs — 3GPP TS 29.244, Sections 8.2.36 (PDR ID), 8.2.54 (URR ID),
+// 8.2.74 (FAR ID), 8.2.75 (QER ID), 8.2.57 (BAR ID).
 
 static FD_INLINE_PDR_ID: FieldDescriptor =
     FieldDescriptor::new("rule_id", "Rule ID", FieldType::U16);
@@ -206,30 +208,6 @@ static FD_INLINE_REPORT_TMIR: FieldDescriptor = FieldDescriptor::new("tmir", "TM
 static FD_INLINE_REPORT_SESR: FieldDescriptor = FieldDescriptor::new("sesr", "SESR", FieldType::U8);
 static FD_INLINE_REPORT_UISR: FieldDescriptor = FieldDescriptor::new("uisr", "UISR", FieldType::U8);
 
-// UP Function Features — 3GPP TS 29.244, Section 8.2.25.
-//
-// The IE is a variable-length bitmask (octet pairs). The full set of bits is
-// large and grows with each release, so we expose each octet as a raw `U8`
-// rather than expanding every flag. Consumers can interpret bits per
-// 3GPP TS 29.244 Table 8.2.25-1.
-
-static FD_INLINE_UPFF_OCTET_5: FieldDescriptor = FieldDescriptor::new(
-    "supported_features_octet_5",
-    "Supported-Features (Octet 5)",
-    FieldType::U8,
-);
-static FD_INLINE_UPFF_OCTET_6: FieldDescriptor = FieldDescriptor::new(
-    "supported_features_octet_6",
-    "Supported-Features (Octet 6)",
-    FieldType::U8,
-);
-static FD_INLINE_UPFF_ADDITIONAL: FieldDescriptor = FieldDescriptor::new(
-    "additional_supported_features",
-    "Additional Supported-Features",
-    FieldType::Bytes,
-)
-.optional();
-
 /// Parse the value portion of a PFCP IE into a structured [`FieldValue`],
 /// pushing fields directly into `buf` for Object and grouped IE values.
 ///
@@ -258,15 +236,15 @@ pub fn parse_ie_value<'pkt>(
         42 if !data.is_empty() => parse_interface(data, offset, buf, false),
         // 3GPP TS 29.244, Section 8.2.26 — Apply Action
         44 if !data.is_empty() => parse_apply_action(data, offset, buf),
-        // 3GPP TS 29.244, Section 8.2.49 — PDR ID
+        // 3GPP TS 29.244, Section 8.2.36 — PDR ID
         56 if data.len() >= 2 => parse_pdr_id(data, offset, buf),
         // 3GPP TS 29.244, Section 8.2.54 — URR ID
         81 if data.len() >= 4 => parse_scalar_u32_ie(data, offset, buf, &FD_INLINE_URR_ID),
-        // 3GPP TS 29.244, Section 8.2.77 — BAR ID
+        // 3GPP TS 29.244, Section 8.2.57 — BAR ID
         88 if !data.is_empty() => parse_bar_id(data, offset, buf),
         // 3GPP TS 29.244, Section 8.2.64 — Outer Header Removal
         95 if !data.is_empty() => parse_outer_header_removal(data, offset, buf),
-        // 3GPP TS 29.244, Section 8.2.73 — FAR ID
+        // 3GPP TS 29.244, Section 8.2.74 — FAR ID
         108 if data.len() >= 4 => parse_scalar_u32_ie(data, offset, buf, &FD_INLINE_FAR_ID),
         // 3GPP TS 29.244, Section 8.2.75 — QER ID
         109 if data.len() >= 4 => parse_scalar_u32_ie(data, offset, buf, &FD_INLINE_QER_ID),
@@ -294,7 +272,43 @@ pub fn parse_ie_value<'pkt>(
         // 3GPP TS 29.244, Section 8.2.21 — Report Type
         39 if !data.is_empty() => parse_report_type(data, offset, buf),
         // 3GPP TS 29.244, Section 8.2.25 — UP Function Features
-        43 if data.len() >= 2 => parse_up_function_features(data, offset, buf),
+        43 => ie_decoders::up_function_features(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.58 — CP Function Features
+        89 => ie_decoders::cp_function_features(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.5 — SDF Filter
+        23 => ie_decoders::sdf_filter(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.7 — Gate Status
+        25 => ie_decoders::gate_status(data, offset, buf),
+        // 3GPP TS 29.244, Sections 8.2.8 / 8.2.9 — MBR / GBR
+        26 | 27 => ie_decoders::bit_rates(ie_type, data, offset, buf),
+        // 3GPP TS 29.244, Sections 8.2.13 / 8.2.44 — Volume Threshold /
+        // Volume Measurement
+        31 | 66 => ie_decoders::volumes(ie_type, data, offset, buf),
+        // 3GPP TS 29.244, Sections 8.2.14 / 8.2.45 — Time Threshold /
+        // Duration Measurement
+        32 | 67 => ie_decoders::seconds(ie_type, data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.19 — Reporting Triggers
+        37 => ie_decoders::reporting_triggers(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.20 — Redirect Information
+        38 => ie_decoders::redirect_information(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.22 — Offending IE
+        40 => ie_decoders::offending_ie(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.40 — Measurement Method
+        62 => ie_decoders::measurement_method(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.41 — Usage Report Trigger
+        63 => ie_decoders::usage_report_trigger(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.43 — FQ-CSID
+        65 => ie_decoders::fq_csid(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.56 — Outer Header Creation
+        84 => ie_decoders::outer_header_creation(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.79 — PDN Type
+        113 => ie_decoders::pdn_type(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.89 — QFI
+        124 => ie_decoders::qfi(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.101 — User ID
+        141 => ie_decoders::user_id(data, offset, buf),
+        // 3GPP TS 29.244, Section 8.2.118 — 3GPP Interface Type
+        160 => ie_decoders::interface_type(data, offset, buf),
         // 3GPP TS 29.244, Section 8.2.62 — UE IP Address
         93 if !data.is_empty() => parse_ue_ip_address(data, offset, buf),
         // 3GPP TS 29.244, Section 8.2.70 — Remote GTP-U Peer
@@ -666,7 +680,7 @@ fn parse_precedence<'pkt>(
 
 /// Parse a PDR ID IE value (16-bit Rule ID).
 ///
-/// 3GPP TS 29.244, Section 8.2.49.
+/// 3GPP TS 29.244, Section 8.2.36.
 fn parse_pdr_id<'pkt>(
     data: &'pkt [u8],
     offset: usize,
@@ -689,7 +703,7 @@ fn parse_pdr_id<'pkt>(
 
 /// Parse a 32-bit scalar ID IE (URR ID, FAR ID, QER ID).
 ///
-/// 3GPP TS 29.244, Sections 8.2.54, 8.2.73, 8.2.75.
+/// 3GPP TS 29.244, Sections 8.2.54, 8.2.74, 8.2.75.
 fn parse_scalar_u32_ie<'pkt>(
     data: &'pkt [u8],
     offset: usize,
@@ -709,7 +723,7 @@ fn parse_scalar_u32_ie<'pkt>(
 
 /// Parse a BAR ID IE value (8-bit).
 ///
-/// 3GPP TS 29.244, Section 8.2.77.
+/// 3GPP TS 29.244, Section 8.2.57.
 fn parse_bar_id<'pkt>(
     data: &'pkt [u8],
     offset: usize,
@@ -1247,45 +1261,6 @@ fn parse_report_type<'pkt>(
         FieldValue::U8((o5 >> 6) & 0x01),
         offset..offset + 1,
     );
-    buf.end_container(obj_idx);
-    FieldValue::Object(0..0)
-}
-
-/// Parse a UP Function Features IE value.
-///
-/// 3GPP TS 29.244, Section 8.2.25 — variable-length bitmask. The first two
-/// octets ("Supported-Features") are mandatory; subsequent pairs
-/// ("Additional Supported-Features 1..N") are present when explicitly
-/// specified. Each octet is exposed as a raw `U8`; bit-level interpretation
-/// is left to consumers since the flag list grows with each release.
-fn parse_up_function_features<'pkt>(
-    data: &'pkt [u8],
-    offset: usize,
-    buf: &mut DissectBuffer<'pkt>,
-) -> FieldValue<'pkt> {
-    // Caller guarantees data.len() >= 2 via match guard.
-    let obj_idx = buf.begin_container(
-        &crate::ie::IE_CHILD_FIELDS[2],
-        FieldValue::Object(0..0),
-        offset..offset + data.len(),
-    );
-    buf.push_field(
-        &FD_INLINE_UPFF_OCTET_5,
-        FieldValue::U8(data[0]),
-        offset..offset + 1,
-    );
-    buf.push_field(
-        &FD_INLINE_UPFF_OCTET_6,
-        FieldValue::U8(data[1]),
-        offset + 1..offset + 2,
-    );
-    if data.len() > 2 {
-        buf.push_field(
-            &FD_INLINE_UPFF_ADDITIONAL,
-            FieldValue::Bytes(&data[2..]),
-            offset + 2..offset + data.len(),
-        );
-    }
     buf.end_container(obj_idx);
     FieldValue::Object(0..0)
 }
@@ -2490,7 +2465,8 @@ mod tests {
     // --- UP Function Features (type 43) tests ---
 
     #[test]
-    fn parse_up_function_features_minimal() {
+    fn parse_up_function_features_flags() {
+        // 3GPP TS 29.244, Table 8.2.25-1: 5/1 BUCP, 6/8 EPFAR
         let data = [0x01, 0x80];
         let (_val, buf) = parse_and_buf(43, &data, 0);
         let obj = &buf.fields()[0];
@@ -2498,30 +2474,14 @@ mod tests {
             panic!("expected Object")
         };
         assert_eq!(
-            obj_field_buf(&buf, r, "supported_features_octet_5")
-                .unwrap()
-                .value,
-            FieldValue::U8(0x01)
+            obj_field_buf(&buf, r, "bucp").unwrap().value,
+            FieldValue::U8(1)
         );
         assert_eq!(
-            obj_field_buf(&buf, r, "supported_features_octet_6")
-                .unwrap()
-                .value,
-            FieldValue::U8(0x80)
+            obj_field_buf(&buf, r, "epfar").unwrap().value,
+            FieldValue::U8(1)
         );
-        assert!(obj_field_buf(&buf, r, "additional_supported_features").is_none());
-    }
-
-    #[test]
-    fn parse_up_function_features_with_additional() {
-        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-        let (_val, buf) = parse_and_buf(43, &data, 0);
-        let obj = &buf.fields()[0];
-        let FieldValue::Object(ref r) = obj.value else {
-            panic!("expected Object")
-        };
-        let add = obj_field_buf(&buf, r, "additional_supported_features").unwrap();
-        assert_eq!(add.value, FieldValue::Bytes(&[0x03, 0x04, 0x05, 0x06]));
+        assert!(obj_field_buf(&buf, r, "additional_octets").is_none());
     }
 
     #[test]

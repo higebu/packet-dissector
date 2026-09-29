@@ -2,6 +2,9 @@
 //!
 //! Supports both IKEv1 (ISAKMP) and IKEv2 headers. They share the same
 //! 28-byte header layout and are distinguished by the Major Version field.
+//! Cleartext payload bodies (SA, KE, ID, CERT, AUTH, Nonce, Notify, Delete,
+//! Vendor ID, TS, CP, SKF and the IKEv1 equivalents) are decoded by the
+//! `body` module; SK / encrypted payloads stay opaque.
 //!
 //! ## References
 //! - RFC 2408: Internet Security Association and Key Management Protocol (ISAKMP):
@@ -27,8 +30,17 @@
 //!   <https://www.rfc-editor.org/rfc/rfc9242>
 //! - RFC 9370: Multiple Key Exchanges in the Internet Key Exchange Protocol Version 2 (IKEv2):
 //!   <https://www.rfc-editor.org/rfc/rfc9370>
+//! - RFC 2407: The Internet IP Security Domain of Interpretation for ISAKMP:
+//!   <https://www.rfc-editor.org/rfc/rfc2407>
+//! - RFC 2409: The Internet Key Exchange (IKE):
+//!   <https://www.rfc-editor.org/rfc/rfc2409>
+//! - RFC 7427: Signature Authentication in the Internet Key Exchange Version 2 (IKEv2):
+//!   <https://www.rfc-editor.org/rfc/rfc7427>
 
 #![deny(missing_docs)]
+
+mod body;
+mod names;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -37,6 +49,10 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+
+use body::{
+    PAYLOAD_CHILDREN, PFD_CRITICAL, PFD_PAYLOAD_DATA, PFD_PAYLOAD_LENGTH, PFD_PAYLOAD_TYPE,
+};
 
 /// Specification references for the IKE dissector.
 static REFERENCES: &[SpecReference] = &[
@@ -49,6 +65,26 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 7296",
         "Internet Key Exchange Protocol Version 2 (IKEv2)",
         "https://www.rfc-editor.org/rfc/rfc7296",
+    ),
+    SpecReference::new(
+        "RFC 2407",
+        "The Internet IP Security Domain of Interpretation for ISAKMP",
+        "https://www.rfc-editor.org/rfc/rfc2407",
+    ),
+    SpecReference::new(
+        "RFC 2409",
+        "The Internet Key Exchange (IKE)",
+        "https://www.rfc-editor.org/rfc/rfc2409",
+    ),
+    SpecReference::new(
+        "RFC 7383",
+        "Internet Key Exchange Protocol Version 2 (IKEv2) Message Fragmentation",
+        "https://www.rfc-editor.org/rfc/rfc7383",
+    ),
+    SpecReference::new(
+        "RFC 7427",
+        "Signature Authentication in the Internet Key Exchange Version 2 (IKEv2)",
+        "https://www.rfc-editor.org/rfc/rfc7427",
     ),
     SpecReference::new(
         "RFC 3948",
@@ -212,12 +248,6 @@ const FD_LENGTH: usize = 14;
 const FD_PAYLOADS: usize = 15;
 const FD_ENCRYPTED_PAYLOADS: usize = 16;
 
-/// Child field descriptor indices for [`PAYLOAD_CHILDREN`].
-const PFD_PAYLOAD_TYPE: usize = 0;
-const PFD_CRITICAL: usize = 1;
-const PFD_PAYLOAD_LENGTH: usize = 2;
-const PFD_PAYLOAD_DATA: usize = 3;
-
 /// Container descriptor for a payload Object.
 ///
 /// The outer label resolves to the payload name (e.g. `SA`) by looking up
@@ -238,30 +268,6 @@ static FD_PAYLOAD: FieldDescriptor = FieldDescriptor {
     }),
     format_fn: None,
 };
-
-/// Payload child field descriptors.
-///
-/// IKEv2 generic payload header has a Critical bit followed by 7 RESERVED bits
-/// (RFC 7296, Section 3.2). IKEv1's generic payload header has the entire second
-/// octet as RESERVED with no Critical bit (RFC 2408, Section 3.2); the
-/// `critical` sub-field is therefore only populated for IKEv2 messages.
-static PAYLOAD_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor {
-        name: "payload_type",
-        display_name: "Payload Type",
-        field_type: FieldType::U8,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(t) => payload_type_name(*t),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("critical", "Critical", FieldType::U8).optional(),
-    FieldDescriptor::new("payload_length", "Payload Length", FieldType::U16),
-    FieldDescriptor::new("payload_data", "Payload Data", FieldType::Bytes).optional(),
-];
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // RFC 7296, Section 3.1 — Initiator SPI
@@ -689,6 +695,14 @@ fn parse_payload_chain<'pkt>(
             );
         }
 
+        body::decode_body(
+            buf,
+            major_version,
+            current_type,
+            &data[pos + GENERIC_PAYLOAD_HEADER_SIZE..end],
+            payload_offset + GENERIC_PAYLOAD_HEADER_SIZE,
+        );
+
         buf.end_container(obj_idx);
 
         current_type = data[pos]; // next payload type from the current header
@@ -728,6 +742,7 @@ mod tests {
     //! | 2.5 (7383)         | Payload type 53 (SKF)                | payload_type_name_later_registrations       |
     //! | 8.2 (8019)         | Payload type 54 (PS)                 | payload_type_name_later_registrations       |
     //! | 2.2 (3948)         | NAT-T Non-ESP marker                 | parse_nat_t_with_marker                     |
+    //! | 3.3-3.15 (7296)    | Payload bodies                       | see `body::tests` coverage table            |
     //! | —                  | Truncated header                     | truncated_header                            |
     //! | —                  | Invalid length                       | invalid_length                              |
     //! | —                  | Header only (no payload)             | parse_header_only                           |

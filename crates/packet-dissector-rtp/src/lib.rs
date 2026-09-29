@@ -5,6 +5,11 @@
 //!   <https://www.rfc-editor.org/rfc/rfc3550#section-5.1>
 //! - RFC 3550, Section 5.3.1 — RTP Header Extension:
 //!   <https://www.rfc-editor.org/rfc/rfc3550#section-5.3.1>
+//! - RFC 8285 (Obsoletes RFC 5285) — A General Mechanism for RTP Header
+//!   Extensions, Sections 4.2 and 4.3:
+//!   <https://www.rfc-editor.org/rfc/rfc8285#section-4>
+//! - RFC 3551, Section 6 — static payload types:
+//!   <https://www.rfc-editor.org/rfc/rfc3551#section-6>
 
 #![deny(missing_docs)]
 
@@ -42,6 +47,82 @@ const FD_PADDING_LENGTH: usize = 11;
 const FD_EXT_PROFILE: usize = 12;
 const FD_EXT_LENGTH: usize = 13;
 const FD_EXT_DATA: usize = 14;
+const FD_EXT_APPBITS: usize = 15;
+const FD_EXT_ELEMENTS: usize = 16;
+
+/// Field descriptor indices for [`EXT_ELEMENT_FIELDS`].
+const EFD_ID: usize = 0;
+const EFD_LENGTH: usize = 1;
+const EFD_DATA: usize = 2;
+
+/// "defined by profile" value of the one-byte header form.
+///
+/// RFC 8285, Section 4.2 — "MUST have the fixed bit pattern 0xBEDE".
+/// <https://www.rfc-editor.org/rfc/rfc8285#section-4.2>
+const EXT_PROFILE_ONE_BYTE: u16 = 0xBEDE;
+
+/// "defined by profile" value of the two-byte header form, without the
+/// 4-bit appbits.
+///
+/// RFC 8285, Section 4.3 — "In the two-byte header form, the 16-bit value
+/// defined by the RTP specification for a header extension, labeled in the
+/// RTP specification as "defined by profile", is defined as shown below."
+/// (0x100 in the upper 12 bits, appbits in the lower 4 bits).
+/// <https://www.rfc-editor.org/rfc/rfc8285#section-4.3>
+const EXT_PROFILE_TWO_BYTE: u16 = 0x1000;
+
+/// One-byte form ID that terminates processing.
+///
+/// RFC 8285, Section 4.2 — "If the ID value 15 is encountered, its length
+/// field MUST be ignored, processing of the entire extension MUST terminate
+/// at that point".
+/// <https://www.rfc-editor.org/rfc/rfc8285#section-4.2>
+const ONE_BYTE_ID_TERMINATE: u8 = 15;
+
+/// Returns the encoding name of a static RTP/AVP payload type.
+///
+/// RFC 3551, Section 6, Tables 4 and 5; "payload type values in the range
+/// 96-127 MAY be defined dynamically".
+/// <https://www.rfc-editor.org/rfc/rfc3551#section-6>
+fn payload_type_name(pt: u8) -> Option<&'static str> {
+    match pt {
+        0 => Some("PCMU"),
+        3 => Some("GSM"),
+        4 => Some("G723"),
+        5 | 6 | 16 | 17 => Some("DVI4"),
+        7 => Some("LPC"),
+        8 => Some("PCMA"),
+        9 => Some("G722"),
+        10 | 11 => Some("L16"),
+        12 => Some("QCELP"),
+        13 => Some("CN"),
+        14 => Some("MPA"),
+        15 => Some("G728"),
+        18 => Some("G729"),
+        25 => Some("CelB"),
+        26 => Some("JPEG"),
+        28 => Some("nv"),
+        31 => Some("H261"),
+        32 => Some("MPV"),
+        33 => Some("MP2T"),
+        34 => Some("H263"),
+        96..=127 => Some("dynamic"),
+        _ => None,
+    }
+}
+
+/// Child descriptors of an RFC 8285 extension element.
+static EXT_ELEMENT_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor::new("id", "ID", FieldType::U8),
+    // Number of data bytes (the one-byte form's encoded value plus one).
+    FieldDescriptor::new("length", "Length", FieldType::U8),
+    FieldDescriptor::new("data", "Data", FieldType::Bytes),
+];
+
+/// Container descriptor for one element of `ext_elements`; its children are
+/// listed on the array descriptor.
+static FD_EXT_ELEMENT: FieldDescriptor =
+    FieldDescriptor::new("ext_element", "Extension Element", FieldType::Object);
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
@@ -49,7 +130,12 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("extension", "Extension", FieldType::U8),
     FieldDescriptor::new("csrc_count", "CSRC Count", FieldType::U8),
     FieldDescriptor::new("marker", "Marker", FieldType::U8),
-    FieldDescriptor::new("payload_type", "Payload Type", FieldType::U8),
+    FieldDescriptor::new("payload_type", "Payload Type", FieldType::U8).with_display_fn(|v, _| {
+        match v {
+            FieldValue::U8(pt) => payload_type_name(*pt),
+            _ => None,
+        }
+    }),
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U16),
     FieldDescriptor::new("timestamp", "Timestamp", FieldType::U32),
     FieldDescriptor::new("ssrc", "SSRC", FieldType::U32),
@@ -59,14 +145,119 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("ext_profile", "Extension Profile", FieldType::U16).optional(),
     FieldDescriptor::new("ext_length", "Extension Length", FieldType::U16).optional(),
     FieldDescriptor::new("ext_data", "Extension Data", FieldType::Bytes).optional(),
+    // RFC 8285, Section 4.3 — https://www.rfc-editor.org/rfc/rfc8285#section-4.3
+    FieldDescriptor::new("ext_appbits", "Extension Appbits", FieldType::U8).optional(),
+    // RFC 8285, Sections 4.2, 4.3 — https://www.rfc-editor.org/rfc/rfc8285#section-4.2
+    FieldDescriptor::new("ext_elements", "Extension Elements", FieldType::Array)
+        .optional()
+        .with_children(EXT_ELEMENT_FIELDS),
 ];
 
+/// RFC 8285 header extension form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtForm {
+    /// One-byte header (RFC 8285, Section 4.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc8285#section-4.2>).
+    OneByte,
+    /// Two-byte header (RFC 8285, Section 4.3 —
+    /// <https://www.rfc-editor.org/rfc/rfc8285#section-4.3>).
+    TwoByte,
+}
+
+impl ExtForm {
+    fn from_profile(profile: u16) -> Option<Self> {
+        if profile == EXT_PROFILE_ONE_BYTE {
+            Some(Self::OneByte)
+        } else if profile & 0xFFF0 == EXT_PROFILE_TWO_BYTE {
+            Some(Self::TwoByte)
+        } else {
+            None
+        }
+    }
+}
+
+/// Iterate the RFC 8285 extension elements of `body`, calling `visit` with
+/// `(offset, header_len, id, data)` for each one.
+///
+/// Iteration stops at the end of the extension, at a terminating ID in the
+/// one-byte form, or at the first malformed element (a two-byte header
+/// without its length octet, or element data that overruns the extension).
+/// Elements before a malformed one are still visited; the raw extension
+/// bytes remain available as `ext_data`.
+///
+/// RFC 8285, Section 4.1.2 — "The entire extension is parsed byte by byte to
+/// find each extension element (no alignment is needed), and parsing stops
+/// (1) at the end of the entire header extension or (2) in the "one-byte
+/// headers only" case, on encountering an identifier with the reserved value
+/// of 15 -- whichever happens earlier." and "When a padding byte is found, it
+/// is ignored, and the parser moves on to interpreting the next byte."
+/// <https://www.rfc-editor.org/rfc/rfc8285#section-4.1.2>
+fn walk_ext_elements<'a>(
+    form: ExtForm,
+    body: &'a [u8],
+    mut visit: impl FnMut(usize, usize, u8, &'a [u8]),
+) {
+    let mut pos = 0;
+    while let Some(&first) = body.get(pos) {
+        // Padding byte.
+        if first == 0 {
+            pos += 1;
+            continue;
+        }
+        let (id, header_len, data_len) = match form {
+            ExtForm::OneByte => {
+                let id = first >> 4;
+                // RFC 8285, Section 4.2 — ID 15 terminates processing.
+                // https://www.rfc-editor.org/rfc/rfc8285#section-4.2
+                // RFC 8285, Section 4.1.2 — "An extension element with an ID
+                // value equal to 0 MUST NOT have an associated length field
+                // greater than 0.  If such an extension element is
+                // encountered, its length field MUST be ignored, processing
+                // of the entire extension MUST terminate at that point".
+                // https://www.rfc-editor.org/rfc/rfc8285#section-4.1.2
+                if id == ONE_BYTE_ID_TERMINATE || id == 0 {
+                    return;
+                }
+                // RFC 8285, Section 4.2 — "The 4-bit length is the number,
+                // minus one, of data bytes".
+                (id, 1, usize::from(first & 0x0F) + 1)
+            }
+            ExtForm::TwoByte => {
+                // RFC 8285, Section 4.3 — "The 8-bit length field is the
+                // length of extension data in bytes".
+                let Some(&len) = body.get(pos + 1) else {
+                    return;
+                };
+                (first, 2, usize::from(len))
+            }
+        };
+        let data_start = pos + header_len;
+        let Some(data) = body.get(data_start..data_start + data_len) else {
+            return;
+        };
+        visit(pos, header_len, id, data);
+        pos = data_start + data_len;
+    }
+}
+
 /// Specification references for the RTP dissector.
-static REFERENCES: &[SpecReference] = &[SpecReference::new(
-    "RFC 3550",
-    "RTP: A Transport Protocol for Real-Time Applications",
-    "https://www.rfc-editor.org/rfc/rfc3550",
-)];
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 3550",
+        "RTP: A Transport Protocol for Real-Time Applications",
+        "https://www.rfc-editor.org/rfc/rfc3550",
+    ),
+    SpecReference::new(
+        "RFC 8285",
+        "A General Mechanism for RTP Header Extensions",
+        "https://www.rfc-editor.org/rfc/rfc8285",
+    ),
+    SpecReference::new(
+        "RFC 3551",
+        "RTP Profile for Audio and Video Conferences with Minimal Control",
+        "https://www.rfc-editor.org/rfc/rfc3551#section-6",
+    ),
+];
 
 /// RTP dissector.
 pub struct RtpDissector;
@@ -297,18 +488,78 @@ impl Dissector for RtpDissector {
                 (offset + ext_header_start)..(offset + ext_header_start + 2),
             );
 
+            let form = ExtForm::from_profile(ext_profile);
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_EXT_LENGTH],
                 FieldValue::U16(ext_length),
                 (offset + ext_header_start + 2)..(offset + ext_header_start + 4),
             );
 
+            let body_start = ext_header_start + 4;
+            let body = &data[body_start..ext_header_start + ext_total];
             if ext_data_bytes > 0 {
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_EXT_DATA],
-                    FieldValue::Bytes(&data[ext_header_start + 4..ext_header_start + ext_total]),
-                    (offset + ext_header_start + 4)..(offset + ext_header_start + ext_total),
+                    FieldValue::Bytes(body),
+                    (offset + body_start)..(offset + ext_header_start + ext_total),
                 );
+            }
+
+            if form == Some(ExtForm::TwoByte) {
+                // RFC 8285, Section 4.3 — "The appbits field is 4 bits that are
+                // application dependent".
+                // https://www.rfc-editor.org/rfc/rfc8285#section-4.3
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_EXT_APPBITS],
+                    FieldValue::U8((ext_profile & 0x000F) as u8),
+                    (offset + ext_header_start + 1)..(offset + ext_header_start + 2),
+                );
+            }
+
+            // RFC 8285, Sections 4.2, 4.3 — split the extension into
+            // elements. A malformed trailing element ends the list; the raw
+            // bytes stay in `ext_data`. The array is only emitted when at
+            // least one element is found.
+            // https://www.rfc-editor.org/rfc/rfc8285#section-4
+            if let Some(form) = form {
+                let base = offset + body_start;
+                let mut array_idx = None;
+                walk_ext_elements(form, body, |pos, header_len, id, element| {
+                    if array_idx.is_none() {
+                        array_idx = Some(buf.begin_container(
+                            &FIELD_DESCRIPTORS[FD_EXT_ELEMENTS],
+                            FieldValue::Array(0..0),
+                            base..base + body.len(),
+                        ));
+                    }
+                    let start = base + pos;
+                    let data_start = start + header_len;
+                    let data_end = data_start + element.len();
+                    let obj_idx = buf.begin_container(
+                        &FD_EXT_ELEMENT,
+                        FieldValue::Object(0..0),
+                        start..data_end,
+                    );
+                    buf.push_field(
+                        &EXT_ELEMENT_FIELDS[EFD_ID],
+                        FieldValue::U8(id),
+                        start..start + 1,
+                    );
+                    buf.push_field(
+                        &EXT_ELEMENT_FIELDS[EFD_LENGTH],
+                        FieldValue::U8(element.len() as u8),
+                        data_start - 1..data_start,
+                    );
+                    buf.push_field(
+                        &EXT_ELEMENT_FIELDS[EFD_DATA],
+                        FieldValue::Bytes(element),
+                        data_start..data_end,
+                    );
+                    buf.end_container(obj_idx);
+                });
+                if let Some(array_idx) = array_idx {
+                    buf.end_container(array_idx);
+                }
             }
         }
 
@@ -367,6 +618,27 @@ mod tests {
     // | 5.1 + 5.3.1 | CSRC + Extension           | parse_rtp_with_csrc_and_extension      |
     // | 5.3.1       | Truncated extension header | parse_rtp_truncated_extension_header   |
     // | 5.3.1       | Truncated extension data   | parse_rtp_truncated_extension_data     |
+    //
+    // # RFC 8285 (RTP Header Extensions) Coverage
+    //
+    // | RFC Section | Description                            | Test                                      |
+    // |-------------|----------------------------------------|-------------------------------------------|
+    // | 4.2         | One-byte form, element ID/len/data     | rfc8285_one_byte_single_element           |
+    // | 4.1.2, 4.2  | Padding between and after elements     | rfc8285_one_byte_two_elements_with_padding|
+    // | 4.2         | ID 15 terminates processing            | rfc8285_one_byte_id15_terminates          |
+    // | 4.1.2       | ID 0 with length > 0 terminates        | rfc8285_one_byte_id0_nonzero_len_terminates |
+    // | 4.3         | Two-byte form, appbits                 | rfc8285_two_byte_elements                 |
+    // | 4.3         | Two-byte zero-length element           | rfc8285_two_byte_elements                 |
+    // | 4.1.2       | Element overrunning extension → raw    | rfc8285_element_overrun_keeps_raw         |
+    // | 4.3         | Two-byte form has no ID 15 terminator  | rfc8285_two_byte_id15_is_an_element       |
+    // | 4.1         | Other profiles keep raw ext_data only  | parse_rtp_with_csrc_and_extension         |
+    //
+    // # RFC 3551 (RTP/AVP) Coverage
+    //
+    // | RFC Section | Description                            | Test                                      |
+    // |-------------|----------------------------------------|-------------------------------------------|
+    // | 6           | Static payload type names (Tables 4/5) | payload_type_names                        |
+    // | 6           | Dynamic range 96-127                   | payload_type_names                        |
 
     /// Build a minimal RTP header (12 bytes): V=2, P=0, X=0, CC=0, M=0, PT=0.
     fn minimal_rtp_header(pt: u8, seq: u16, ts: u32, ssrc: u32) -> Vec<u8> {
@@ -638,6 +910,11 @@ mod tests {
             buf.field_by_name(layer, "ext_data").unwrap().value,
             FieldValue::Bytes(&[0x01, 0x02, 0x03, 0x04])
         );
+        // RFC 8285, Section 4.1.2 — the first byte is ID 0 with a non-zero
+        // length, so processing stops before any element and no
+        // `ext_elements` array is emitted.
+        // https://www.rfc-editor.org/rfc/rfc8285#section-4.1.2
+        assert!(buf.field_by_name(layer, "ext_elements").is_none());
     }
 
     #[test]
@@ -710,6 +987,224 @@ mod tests {
         assert_eq!(
             buf.field_by_name(layer, "ext_data").unwrap().value,
             FieldValue::Bytes(&[0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80])
+        );
+        // Profile 0xABCD is not an RFC 8285 form: no elements are decoded.
+        assert!(buf.field_by_name(layer, "ext_elements").is_none());
+    }
+
+    /// Build an RTP packet with X=1 and the given extension profile and body.
+    fn rtp_with_extension(profile: u16, body: &[u8]) -> Vec<u8> {
+        assert_eq!(body.len() % 4, 0);
+        let mut data = minimal_rtp_header(96, 1, 0, 0x1234_5678);
+        data[0] |= 0x10;
+        data.extend_from_slice(&profile.to_be_bytes());
+        data.extend_from_slice(&((body.len() / 4) as u16).to_be_bytes());
+        data.extend_from_slice(body);
+        data.extend_from_slice(&[0xAA, 0xBB]); // payload
+        data
+    }
+
+    /// `(id, length, data)` for each element of `ext_elements`.
+    fn ext_elements<'a>(buf: &'a DissectBuffer<'a>) -> Vec<(u8, u8, &'a [u8])> {
+        let layer = &buf.layers()[0];
+        let FieldValue::Array(ref r) = buf.field_by_name(layer, "ext_elements").unwrap().value
+        else {
+            panic!("expected Array");
+        };
+        buf.nested_fields(r)
+            .iter()
+            .filter_map(|f| match &f.value {
+                FieldValue::Object(o) => Some(o.clone()),
+                _ => None,
+            })
+            .map(|o| {
+                let fields = buf.nested_fields(&o);
+                let get = |n: &str| fields.iter().find(|f| f.name() == n).unwrap().value.clone();
+                let (FieldValue::U8(id), FieldValue::U8(len), FieldValue::Bytes(d)) =
+                    (get("id"), get("length"), get("data"))
+                else {
+                    panic!("unexpected element field types");
+                };
+                (id, len, d)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rfc8285_one_byte_single_element() {
+        // Issue example: ID 1, L=0 (1 byte) data 0x7f, 2 padding bytes.
+        let data = rtp_with_extension(0xBEDE, &[0x10, 0x7F, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(ext_elements(&buf), [(1, 1, &[0x7F][..])]);
+        let layer = &buf.layers()[0];
+        // ext_data is kept for existing filters.
+        assert_eq!(
+            buf.field_by_name(layer, "ext_data").unwrap().value,
+            FieldValue::Bytes(&[0x10, 0x7F, 0x00, 0x00])
+        );
+        assert!(buf.field_by_name(layer, "ext_appbits").is_none());
+        // Element ranges: object covers header + data, data covers 1 byte.
+        let FieldValue::Array(ref r) = buf.field_by_name(layer, "ext_elements").unwrap().value
+        else {
+            panic!("expected Array");
+        };
+        let obj = buf
+            .nested_fields(r)
+            .iter()
+            .find(|f| matches!(f.value, FieldValue::Object(_)))
+            .unwrap();
+        assert_eq!(obj.range, 16..18);
+    }
+
+    #[test]
+    fn rfc8285_one_byte_two_elements_with_padding() {
+        // ID 1 (2 bytes), padding byte, ID 2 (4 bytes), trailing padding.
+        let data = rtp_with_extension(
+            0xBEDE,
+            &[
+                0x11, 0xAA, 0xBB, 0x00, 0x23, 0x01, 0x02, 0x03, 0x04, 0x00, 0x00, 0x00,
+            ],
+        );
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(
+            ext_elements(&buf),
+            [
+                (1, 2, &[0xAA, 0xBB][..]),
+                (2, 4, &[0x01, 0x02, 0x03, 0x04][..])
+            ]
+        );
+    }
+
+    #[test]
+    fn rfc8285_one_byte_id15_terminates() {
+        // ID 1, then ID 15 (length ignored), then bytes that must not be parsed.
+        let data = rtp_with_extension(0xBEDE, &[0x10, 0x01, 0xFF, 0x35, 0x99, 0x00, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(ext_elements(&buf), [(1, 1, &[0x01][..])]);
+    }
+
+    #[test]
+    fn rfc8285_one_byte_id0_nonzero_len_terminates() {
+        let data = rtp_with_extension(0xBEDE, &[0x10, 0x01, 0x03, 0x20, 0x99, 0x00, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(ext_elements(&buf), [(1, 1, &[0x01][..])]);
+    }
+
+    #[test]
+    fn rfc8285_two_byte_elements() {
+        // appbits = 0x5; ID 1 L=0, ID 2 L=1 data 0x42, padding, ID 3 L=4 data.
+        let data = rtp_with_extension(
+            0x1005,
+            &[
+                0x01, 0x00, 0x02, 0x01, 0x42, 0x00, 0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF,
+            ],
+        );
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(
+            ext_elements(&buf),
+            [
+                (1, 0, &[][..]),
+                (2, 1, &[0x42][..]),
+                (3, 4, &[0xDE, 0xAD, 0xBE, 0xEF][..])
+            ]
+        );
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "ext_appbits").unwrap().value,
+            FieldValue::U8(5)
+        );
+        // Fields follow the descriptor order: ... ext_data, ext_appbits,
+        // ext_elements.
+        let names: Vec<_> = buf.layer_fields(layer).iter().map(|f| f.name()).collect();
+        let pos = |n: &str| names.iter().position(|x| *x == n).unwrap();
+        assert!(pos("ext_length") < pos("ext_data"));
+        assert!(pos("ext_data") < pos("ext_appbits"));
+        assert!(pos("ext_appbits") < pos("ext_elements"));
+    }
+
+    #[test]
+    fn rfc8285_element_overrun_keeps_raw() {
+        // One-byte: ID 1 claims 16 bytes but only 3 remain. No error; the
+        // raw bytes stay in ext_data.
+        let data = rtp_with_extension(0xBEDE, &[0x1F, 0x01, 0x02, 0x03]);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "ext_elements").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "ext_data").unwrap().value,
+            FieldValue::Bytes(&[0x1F, 0x01, 0x02, 0x03])
+        );
+        // Elements before the malformed one are kept.
+        let data = rtp_with_extension(0xBEDE, &[0x10, 0x7F, 0x2F, 0x01]);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(ext_elements(&buf), [(1, 1, &[0x7F][..])]);
+        // Two-byte: length octet missing at the end.
+        let data = rtp_with_extension(0x1000, &[0x01, 0x01, 0xAA, 0x02]);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(ext_elements(&buf), [(1, 1, &[0xAA][..])]);
+    }
+
+    #[test]
+    fn rfc8285_two_byte_id15_is_an_element() {
+        // ID 15 terminates only the one-byte form (RFC 8285, Section 4.3 —
+        // https://www.rfc-editor.org/rfc/rfc8285#section-4.3 allows IDs
+        // 1-255).
+        let data = rtp_with_extension(0x1000, &[0x0F, 0x01, 0x55, 0x00]);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(ext_elements(&buf), [(15, 1, &[0x55][..])]);
+    }
+
+    #[test]
+    fn payload_type_names() {
+        for (pt, name) in [
+            (0, "PCMU"),
+            (3, "GSM"),
+            (4, "G723"),
+            (5, "DVI4"),
+            (6, "DVI4"),
+            (7, "LPC"),
+            (8, "PCMA"),
+            (9, "G722"),
+            (10, "L16"),
+            (11, "L16"),
+            (12, "QCELP"),
+            (13, "CN"),
+            (14, "MPA"),
+            (15, "G728"),
+            (16, "DVI4"),
+            (17, "DVI4"),
+            (18, "G729"),
+            (25, "CelB"),
+            (26, "JPEG"),
+            (28, "nv"),
+            (31, "H261"),
+            (32, "MPV"),
+            (33, "MP2T"),
+            (34, "H263"),
+            (96, "dynamic"),
+            (127, "dynamic"),
+        ] {
+            assert_eq!(payload_type_name(pt), Some(name), "PT {pt}");
+        }
+        for pt in [1, 2, 19, 20, 24, 35, 72, 76, 95] {
+            assert_eq!(payload_type_name(pt), None, "PT {pt}");
+        }
+
+        let data = minimal_rtp_header(0, 1, 0, 1);
+        let mut buf = DissectBuffer::new();
+        RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(
+            buf.resolve_display_name(&buf.layers()[0], "payload_type_name"),
+            Some("PCMU")
         );
     }
 
@@ -850,7 +1345,20 @@ mod tests {
     #[test]
     fn field_descriptors_complete() {
         let descriptors = RtpDissector.field_descriptors();
-        assert_eq!(descriptors.len(), 15);
+        assert_eq!(descriptors.len(), 17);
+        assert_eq!(descriptors[15].name, "ext_appbits");
+        assert!(descriptors[15].optional);
+        assert_eq!(descriptors[16].name, "ext_elements");
+        assert!(descriptors[16].optional);
+        // Array children list the element fields directly, like other
+        // dissectors' arrays of objects.
+        let children: Vec<_> = descriptors[16]
+            .children
+            .unwrap()
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(children, ["id", "length", "data"]);
         assert_eq!(descriptors[0].name, "version");
         assert_eq!(descriptors[9].name, "csrc_list");
         assert!(descriptors[9].optional);
