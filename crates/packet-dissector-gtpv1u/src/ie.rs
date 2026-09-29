@@ -5,7 +5,7 @@
 
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u16, read_be_u32};
+use packet_dissector_core::util::{read_be_u16, read_be_u32, read_ipv4_addr, read_ipv6_addr};
 
 use crate::ext_header::gtpv1u_ext_header_type_name;
 
@@ -155,15 +155,10 @@ pub(crate) fn parse_ies<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], b
         } else {
             // TLV format. The Extension Header Type List has a one-octet
             // Length (TS 29.281, Figure 8.5-1); all others have two octets.
-            let len_size = if ie_type == IE_EXT_HEADER_TYPE_LIST {
-                1
+            let (len_size, len) = if ie_type == IE_EXT_HEADER_TYPE_LIST {
+                (1, data.get(pos + 1).map(|l| usize::from(*l)))
             } else {
-                2
-            };
-            let len = if len_size == 1 {
-                data.get(pos + 1).map(|l| usize::from(*l))
-            } else {
-                read_be_u16(data, pos + 1).ok().map(usize::from)
+                (2, read_be_u16(data, pos + 1).ok().map(usize::from))
             };
             match len {
                 Some(len) if pos + 1 + len_size + len <= data.len() => {
@@ -227,22 +222,22 @@ fn push_ie_value<'pkt>(buf: &mut DissectBuffer<'pkt>, ie_type: u8, value: &'pkt 
         // Section 8.4 — "The Length field may have only two values (4 or 16)
         // that determine if the Value field contains IPv4 or IPv6 address."
         (IE_GTPU_PEER_ADDRESS, 4) => {
-            let mut a = [0u8; 4];
-            a.copy_from_slice(value);
-            buf.push_field(
-                &IE_FIELD_DESCRIPTORS[FD_PEER_ADDRESS],
-                FieldValue::Ipv4Addr(a),
-                range,
-            );
+            if let Ok(a) = read_ipv4_addr(value, 0) {
+                buf.push_field(
+                    &IE_FIELD_DESCRIPTORS[FD_PEER_ADDRESS],
+                    FieldValue::Ipv4Addr(a),
+                    range,
+                );
+            }
         }
         (IE_GTPU_PEER_ADDRESS, 16) => {
-            let mut a = [0u8; 16];
-            a.copy_from_slice(value);
-            buf.push_field(
-                &IE_FIELD_DESCRIPTORS[FD_PEER_ADDRESS],
-                FieldValue::Ipv6Addr(a),
-                range,
-            );
+            if let Ok(a) = read_ipv6_addr(value, 0) {
+                buf.push_field(
+                    &IE_FIELD_DESCRIPTORS[FD_PEER_ADDRESS],
+                    FieldValue::Ipv6Addr(a),
+                    range,
+                );
+            }
         }
         // Section 8.5 — list of 'n' Extension Header Types
         (IE_EXT_HEADER_TYPE_LIST, _) => {

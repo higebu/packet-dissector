@@ -123,8 +123,12 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::U8,
     )
     .optional(),
-    FieldDescriptor::new("extension_headers", "Extension Headers", FieldType::Array).optional(),
-    FieldDescriptor::new("ies", "Information Elements", FieldType::Array).optional(),
+    FieldDescriptor::new("extension_headers", "Extension Headers", FieldType::Array)
+        .optional()
+        .with_children(EXT_HEADER_FIELD_DESCRIPTORS),
+    FieldDescriptor::new("ies", "Information Elements", FieldType::Array)
+        .optional()
+        .with_children(ie::IE_FIELD_DESCRIPTORS),
 ];
 
 /// Container descriptor for a GTPv1-U extension header entry.
@@ -355,32 +359,38 @@ impl Dissector for Gtpv1uDissector {
             }
         }
 
-        let (consumed, next) = if message_type == MSG_TYPE_G_PDU {
-            // 3GPP TS 29.281, Section 6.1 — "In G-PDU message, GTP-U header
-            // is followed by a T-PDU."
-            (header_end, t_pdu_dispatch(&data[header_end..]))
-        } else {
-            // 3GPP TS 29.281, Sections 7 and 8 — signalling messages carry
-            // TV / TLV Information Elements after the header.
-            if header_end < data.len() {
-                let ies_start = offset + header_end;
-                let arr = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_IES],
-                    FieldValue::Array(0..0),
-                    ies_start..offset + data.len(),
-                );
-                ie::parse_ies(buf, &data[header_end..], ies_start);
-                buf.end_container(arr);
+        if message_type == MSG_TYPE_G_PDU {
+            if let Some(layer) = buf.last_layer_mut() {
+                layer.range = offset..offset + header_end;
             }
-            (data.len(), DispatchHint::End)
-        };
+            buf.end_layer();
+            // 3GPP TS 29.281, Section 6.1 — "In G-PDU message, GTP-U header
+            // is followed by a T-PDU." The T-PDU ends where the GTP-PDU does.
+            let t_pdu = &data[header_end..];
+            return Ok(
+                DissectResult::new(header_end, t_pdu_dispatch(t_pdu)).with_payload_len(t_pdu.len())
+            );
+        }
+
+        // 3GPP TS 29.281, Sections 7 and 8 — signalling messages carry
+        // TV / TLV Information Elements after the header.
+        if header_end < data.len() {
+            let ies_start = offset + header_end;
+            let arr = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_IES],
+                FieldValue::Array(0..0),
+                ies_start..offset + data.len(),
+            );
+            ie::parse_ies(buf, &data[header_end..], ies_start);
+            buf.end_container(arr);
+        }
 
         if let Some(layer) = buf.last_layer_mut() {
-            layer.range = offset..offset + consumed;
+            layer.range = offset..offset + data.len();
         }
         buf.end_layer();
 
-        Ok(DissectResult::new(consumed, next))
+        Ok(DissectResult::new(data.len(), DispatchHint::End))
     }
 }
 
@@ -507,8 +517,13 @@ fn t_pdu_dispatch(t_pdu: &[u8]) -> DispatchHint {
         // RFC 8200, Section 3 — Payload Length is the length of the payload
         // following the 40-octet fixed header.
         // <https://www.rfc-editor.org/rfc/rfc8200#section-3>
+        // RFC 2675, Section 3 — a jumbogram carries Payload Length 0 and a
+        // Hop-by-Hop Options header (Next Header 0).
+        // <https://www.rfc-editor.org/rfc/rfc2675#section-3>
         6 if t_pdu.len() >= 40
-            && read_be_u16(t_pdu, 4).is_ok_and(|len| usize::from(len) + 40 == t_pdu.len()) =>
+            && read_be_u16(t_pdu, 4).is_ok_and(|len| {
+                usize::from(len) + 40 == t_pdu.len() || (len == 0 && t_pdu[6] == 0)
+            }) =>
         {
             DispatchHint::ByEtherType(0x86DD)
         }
@@ -561,12 +576,14 @@ mod tests {
     // | TS 38.415 5.5/6.5           | Short contents fall back to raw      | test_short_extension_contents_fall_back_to_raw             |
     // | TS 29.281 6.1               | G-PDU with IPv6 payload              | test_gpdu_ipv6_payload                                     |
     // | TS 29.281 6.1               | Non-IP T-PDU not sent to IP          | test_gpdu_ethernet_tpdu_not_sent_to_ip                     |
+    // | TS 29.281 6.1               | T-PDU bounded by the GTP Length      | test_gpdu_payload_len_bounds_t_pdu                         |
+    // | RFC 2675 3                  | IPv6 jumbogram T-PDU                 | test_gpdu_ipv6_jumbogram_dispatches                        |
     // | TS 29.281 6.1               | End Marker (type 254)                | test_end_marker                                            |
     // | TS 29.281 6.1               | Message Type Name lookup             | test_message_type_name                                     |
-    // | TS 29.281 7.3.1 / 8.3 / 8.4 | Error Indication IEs                 | test_error_indication_ies                                  |
-    // | TS 29.281 7.2.2 / 8.2       | Echo Response Recovery               | test_echo_response_recovery                                |
-    // | TS 29.281 7.2.3 / 8.5       | Extension Header Type List           | test_supported_extension_headers_notification              |
-    // | TS 29.281 7.3.2 / 8.7 / 8.8 | Tunnel Status IEs                    | test_tunnel_status_ies                                     |
+    // | TS 29.281 8.3 / 8.4         | Error Indication IEs                 | test_error_indication_ies                                  |
+    // | TS 29.281 8.2               | Echo Response Recovery               | test_echo_response_recovery                                |
+    // | TS 29.281 8.5               | Extension Header Type List           | test_supported_extension_headers_notification              |
+    // | TS 29.281 6.1 / 8.7 / 8.8   | Tunnel Status IEs                    | test_tunnel_status_ies                                     |
     // | TS 29.281 8.4 / 8.6         | IPv6 peer, Private Extension         | test_peer_address_ipv6_and_private_extension               |
     // | TS 29.281 8.1               | Malformed IE values kept raw         | test_ie_malformed_values_are_raw                           |
     // | TS 29.281 8.1               | Unknown TV / truncated IEs           | test_ie_unknown_tv_and_truncated_tlv_stop_parsing          |
@@ -878,7 +895,7 @@ mod tests {
         assert_eq!(pdu_type.value, FieldValue::U8(0));
         let qfi = ext.iter().find(|f| f.name() == "qfi").unwrap();
         assert_eq!(qfi.value, FieldValue::U8(9));
-        assert!(ext.iter().all(|f| f.name() != "content"));
+        assert_eq!(*get(ext, "content"), FieldValue::Bytes(&[0x00, 0x09]));
     }
 
     #[test]
@@ -896,7 +913,7 @@ mod tests {
 
         // Extension header: type carried via next-field above
         pkt.push(0x01); // Length = 1 (4 bytes)
-        pkt.extend_from_slice(&[0x09, 0x00]); // content
+        pkt.extend_from_slice(&[0x00, 0x09]); // DL PDU SESSION INFORMATION, QFI 9
         pkt.push(0x00); // Next Extension Header Type = 0
 
         // Payload: IPv4 stub
@@ -1227,7 +1244,7 @@ mod tests {
         assert_eq!(*get(ext, "n3n9_delay_ind"), FieldValue::U8(0));
         assert_eq!(*get(ext, "new_ie_flag"), FieldValue::U8(0));
         assert_eq!(*get(ext, "qfi"), FieldValue::U8(9));
-        assert!(!has(ext, "content"));
+        assert_eq!(*get(ext, "content"), FieldValue::Bytes(&[0x10, 0x09]));
 
         let layer = &buf.layers()[0];
         let arr = buf.field_by_name(layer, "extension_headers").unwrap();
@@ -1359,7 +1376,7 @@ mod tests {
         let pkt = make_gpdu_with_ext(0x85, 1, &[0x10, 0x41], &[]);
         let mut buf = DissectBuffer::new();
         Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        assert!(has(ext_header(&buf, 0), "content"));
+        assert!(!has(ext_header(&buf, 0), "qfi"));
 
         // UL whose New IE Flags demand octets that are absent.
         let pkt = make_gpdu_with_ext(0x85, 1, &[0x10, 0x41], &[]);
@@ -1371,7 +1388,7 @@ mod tests {
         pkt2[2..4].copy_from_slice(&len.to_be_bytes());
         let mut buf = DissectBuffer::new();
         Gtpv1uDissector.dissect(&pkt2, &mut buf, 0).unwrap();
-        assert!(has(ext_header(&buf, 0), "content"));
+        assert!(!has(ext_header(&buf, 0), "qfi"));
     }
 
     #[test]
@@ -1381,6 +1398,7 @@ mod tests {
         Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
         let ext = ext_header(&buf, 0);
         assert_eq!(*get(ext, "content"), FieldValue::Bytes(&[0x20, 0x01]));
+        assert!(!has(ext, "pdu_type"));
     }
 
     #[test]
@@ -1410,7 +1428,7 @@ mod tests {
         let pkt = make_gpdu_with_ext(0x03, 1, &[0x01, 0x02], &[]);
         let mut buf = DissectBuffer::new();
         Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        assert!(has(ext_header(&buf, 0), "content"));
+        assert!(!has(ext_header(&buf, 0), "long_pdcp_pdu_number"));
     }
 
     #[test]
@@ -1449,7 +1467,7 @@ mod tests {
         let pkt = make_gpdu_with_ext(0x04, 2, &content, &[]);
         let mut buf = DissectBuffer::new();
         Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        assert!(has(ext_header(&buf, 0), "content"));
+        assert!(!has(ext_header(&buf, 0), "pdu_type"));
     }
 
     #[test]
@@ -1559,6 +1577,29 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let result = Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
         assert_eq!(result.next, DispatchHint::End);
+    }
+
+    #[test]
+    fn test_gpdu_payload_len_bounds_t_pdu() {
+        // G-PDU followed by bytes that are not part of the GTP-PDU.
+        let mut pkt = make_pdu(0x30, 0xFF, &IPV4_STUB);
+        pkt.extend_from_slice(&[0xDE, 0xAD]);
+        let mut buf = DissectBuffer::new();
+        let result = Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 8);
+        assert_eq!(result.payload_len, Some(20));
+        assert_eq!(result.next, DispatchHint::ByEtherType(0x0800));
+    }
+
+    #[test]
+    fn test_gpdu_ipv6_jumbogram_dispatches() {
+        // RFC 2675 — Payload Length 0 with a Hop-by-Hop Options header.
+        let mut tpdu = vec![0x60, 0, 0, 0, 0x00, 0x00, 0x00, 64];
+        tpdu.resize(48, 0);
+        let pkt = make_pdu(0x30, 0xFF, &tpdu);
+        let mut buf = DissectBuffer::new();
+        let result = Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.next, DispatchHint::ByEtherType(0x86DD));
     }
 
     // -----------------------------------------------------------------------
@@ -1906,7 +1947,7 @@ mod tests {
         let pkt = make_gpdu_with_ext(0x85, 1, &[0x00, 0x81], &[]);
         let mut buf = DissectBuffer::new();
         Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        assert!(has(ext_header(&buf, 0), "content"));
+        assert!(!has(ext_header(&buf, 0), "qfi"));
 
         // PDU Set Information Container shorter than its fixed part, and
         // with a reserved PDU Type.
@@ -1914,7 +1955,7 @@ mod tests {
             let pkt = make_gpdu_with_ext(0x04, 1, &content, &[]);
             let mut buf = DissectBuffer::new();
             Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
-            assert!(has(ext_header(&buf, 0), "content"));
+            assert!(!has(ext_header(&buf, 0), "pdu_type"));
         }
     }
 }
