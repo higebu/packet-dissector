@@ -118,6 +118,7 @@ pub trait DissectorPlugin {
 /// The registry uses this information to drive centralized TCP stream
 /// reassembly, buffering segments until enough contiguous data is
 /// available for the upper-layer dissector.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpStreamContext {
     /// Directional stream key identifying the TCP flow (src_ip, dst_ip, src_port, dst_port).
@@ -125,10 +126,68 @@ pub struct TcpStreamContext {
     /// (dst→src) maintains a separate reassembly buffer and sequence space.
     /// IP addresses are encoded as 16 bytes (IPv4-mapped for IPv4).
     pub stream_key: ([u8; 16], [u8; 16], u16, u16),
-    /// TCP sequence number of this segment's payload.
+    /// TCP sequence number of this segment's first payload octet.
+    ///
+    /// For a SYN segment this is ISN+1, not the header's Sequence Number:
+    /// RFC 9293, Section 3.1 — "If SYN is set, the sequence number is the
+    /// initial sequence number (ISN) and the first data octet is ISN+1."
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
     pub seq: u32,
     /// Length of the TCP payload in this segment.
     pub payload_len: usize,
+    /// TCP control bits of this segment (the header's 8-bit flags field).
+    ///
+    /// The registry uses SYN, FIN and RST to start and release per-stream
+    /// reassembly state (RFC 9293, Sections 3.5 and 3.6 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>).
+    pub flags: u8,
+}
+
+impl TcpStreamContext {
+    /// FIN control bit — RFC 9293, Section 3.1 — "No more data from sender."
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
+    pub const FLAG_FIN: u8 = 0x01;
+    /// SYN control bit — RFC 9293, Section 3.1 — "Synchronize sequence numbers."
+    pub const FLAG_SYN: u8 = 0x02;
+    /// RST control bit — RFC 9293, Section 3.1 — "Reset the connection."
+    pub const FLAG_RST: u8 = 0x04;
+
+    /// Create a stream context. `seq` is the sequence number of the first
+    /// payload octet (see [`TcpStreamContext::seq`]).
+    pub fn new(
+        stream_key: ([u8; 16], [u8; 16], u16, u16),
+        seq: u32,
+        payload_len: usize,
+        flags: u8,
+    ) -> Self {
+        Self {
+            stream_key,
+            seq,
+            payload_len,
+            flags,
+        }
+    }
+
+    /// Whether the SYN control bit is set.
+    pub fn is_syn(&self) -> bool {
+        self.flags & Self::FLAG_SYN != 0
+    }
+
+    /// Whether the FIN control bit is set.
+    pub fn is_fin(&self) -> bool {
+        self.flags & Self::FLAG_FIN != 0
+    }
+
+    /// Whether the RST control bit is set.
+    pub fn is_rst(&self) -> bool {
+        self.flags & Self::FLAG_RST != 0
+    }
+
+    /// Stream key of the opposite direction of the same connection.
+    pub fn reverse_key(&self) -> ([u8; 16], [u8; 16], u16, u16) {
+        let (src, dst, sport, dport) = self.stream_key;
+        (dst, src, dport, sport)
+    }
 }
 
 /// Decrypted payload produced by a protocol dissector (e.g. ESP).

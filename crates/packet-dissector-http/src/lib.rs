@@ -212,10 +212,15 @@ impl Dissector for HttpDissector {
                         layer.range = offset..offset + header_len;
                     }
                     buf.end_layer();
+                    // The body ends after body_len bytes; anything after it
+                    // is the next message on a stream transport.
+                    // RFC 9112, Section 6.2 — Content-Length gives the body length
+                    // <https://www.rfc-editor.org/rfc/rfc9112#section-6.2>.
                     return Ok(DissectResult::new(
                         header_len,
                         DispatchHint::ByContentType(interned),
-                    ));
+                    )
+                    .with_payload_len(body_len));
                 }
             }
         }
@@ -795,6 +800,8 @@ mod tests {
 
         assert_eq!(result.next, DispatchHint::ByContentType("application/json"));
         assert_eq!(result.bytes_consumed, header.len());
+        // RFC 9112, Section 6.2 — the body is Content-Length bytes long.
+        assert_eq!(result.payload_len, Some(body.len()));
 
         let layer = buf.layer_by_name("HTTP").unwrap();
         assert_eq!(layer.range, 0..header.len());

@@ -248,10 +248,15 @@ impl Dissector for SipDissector {
                         layer.range = offset..offset + header_len;
                     }
                     buf.end_layer();
+                    // The body ends after body_len bytes; anything after it
+                    // is the next message on a stream transport.
+                    // RFC 3261, Section 18.3 — "the Content-Length header field indicates the size
+                    // of the body" <https://www.rfc-editor.org/rfc/rfc3261#section-18.3>.
                     return Ok(DissectResult::new(
                         header_len,
                         DispatchHint::ByContentType(interned),
-                    ));
+                    )
+                    .with_payload_len(body_len));
                 }
             }
         }
@@ -830,6 +835,8 @@ mod tests {
         let result = dissector.dissect(&data, &mut buf, 0).unwrap();
 
         assert_eq!(result.next, DispatchHint::ByContentType("application/sdp"));
+        // RFC 3261, Section 18.3 — the body is Content-Length bytes long.
+        assert_eq!(result.payload_len, Some(cl));
     }
 
     #[test]

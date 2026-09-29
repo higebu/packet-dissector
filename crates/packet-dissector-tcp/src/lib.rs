@@ -43,6 +43,12 @@ pub const FD_REASSEMBLY_IN_PROGRESS: usize = 12;
 /// Used by the registry's TCP reassembly middleware to emit this field via
 /// `FIELD_DESCRIPTORS[FD_SEGMENT_COUNT].to_field(...)`.
 pub const FD_SEGMENT_COUNT: usize = 13;
+/// Index of the `reassembly_evicted` field in [`FIELD_DESCRIPTORS`].
+///
+/// Emitted by the registry's TCP reassembly middleware on the TCP layer of
+/// a segment whose processing evicted buffered streams to stay within its
+/// memory limits. The value is the number of streams evicted.
+pub const FD_REASSEMBLY_EVICTED: usize = 14;
 
 /// Field descriptors for the TCP dissector.
 ///
@@ -83,6 +89,12 @@ pub static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     )
     .optional(),
     FieldDescriptor::new("segment_count", "Segment Count", FieldType::U32).optional(),
+    FieldDescriptor::new(
+        "reassembly_evicted",
+        "Reassembly Streams Evicted",
+        FieldType::U32,
+    )
+    .optional(),
 ];
 
 /// Bit-to-name table for TCP control bits.
@@ -249,21 +261,32 @@ fn ipv4_mapped(addr: &[u8; 4]) -> [u8; 16] {
 /// preserving active connections' stream IDs.
 const MAX_TRACKED_STREAMS: usize = 65_536;
 
-/// State for the stream ID mapping, protected by a Mutex.
-struct StreamIdState {
-    map: HashMap<StreamKey, u32>,
-    /// Insertion order for eviction. The front is the oldest (coldest) entry.
-    order: VecDeque<StreamKey>,
+/// ACK control bit — RFC 9293, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>. SYN, FIN and RST
+/// are [`TcpStreamContext::FLAG_SYN`] and friends.
+const FLAG_ACK: u8 = 0x10;
+const FLAG_SYN: u8 = TcpStreamContext::FLAG_SYN;
+
+/// Connection tracked under a canonical 4-tuple.
+#[derive(Clone, Copy)]
+struct Connection {
+    /// Assigned stream ID.
+    id: u32,
+    /// The connection's initial SYN (without ACK): whether it was sent by the
+    /// canonical-first endpoint, and its ISN. Used to tell a retransmitted
+    /// SYN from a new connection that reuses the 4-tuple.
+    syn: Option<(bool, u32)>,
+    /// Whether a FIN or RST has been seen on the connection.
+    closed: bool,
 }
 
-impl StreamIdState {
-    /// Remove stale entries from `order` when it has grown significantly
-    /// larger than `map`, preventing unbounded growth from removed streams.
-    fn compact_order(&mut self) {
-        if self.order.len() > self.map.len() * 2 + 64 {
-            self.order.retain(|k| self.map.contains_key(k));
-        }
-    }
+/// State for the stream ID mapping, protected by a Mutex.
+struct StreamIdState {
+    map: HashMap<StreamKey, Connection>,
+    /// Insertion order for eviction. The front is the oldest (coldest) entry.
+    /// Entries leave `map` only through eviction, so `order` holds exactly
+    /// the keys of `map`.
+    order: VecDeque<StreamKey>,
 }
 
 /// TCP dissector with sequential stream ID assignment.
@@ -271,7 +294,8 @@ impl StreamIdState {
 /// Maintains a mapping from TCP 4-tuples to sequential stream IDs,
 /// similar to Wireshark's `tcp.stream` field. The stream ID is assigned
 /// when a 4-tuple is first seen and reused for subsequent packets on the
-/// same connection.
+/// same connection. A SYN (without ACK) carrying a different ISN than the
+/// connection's recorded SYN starts a new connection and a new stream ID.
 pub struct TcpDissector {
     /// Mapping from 4-tuple to assigned stream ID with eviction order.
     streams: Mutex<StreamIdState>,
@@ -442,35 +466,65 @@ impl Dissector for TcpDissector {
 
         // Assign a sequential stream_id based on the canonicalized TCP 4-tuple
         // so both directions of a connection share the same ID.
+        //
+        // RFC 9293, Section 3.5 — a connection starts with a SYN carrying a
+        // new ISN <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>. A SYN
+        // without ACK opens a new connection (4-tuple reuse) and gets a new
+        // ID when the connection has been closed (FIN/RST), when no initial
+        // SYN was recorded, or when it comes from the same endpoint as the
+        // recorded SYN with a different ISN. A retransmitted SYN, and the
+        // peer's SYN of a simultaneous open (Section 3.5, Figure 8), keep the
+        // ID. A RST or FIN does not end the mapping, so late packets of a
+        // closed connection keep their ID.
         if let Some(key) = extract_stream_key(buf, src_port, dst_port) {
             let canonical = canonicalize_key(key);
+            let initial_syn =
+                (flags & (FLAG_SYN | FLAG_ACK) == FLAG_SYN).then_some((canonical == key, seq));
             let mut state = self.streams.lock().unwrap_or_else(|e| e.into_inner());
 
-            let is_new = !state.map.contains_key(&canonical);
-            if is_new {
-                while state.map.len() >= MAX_TRACKED_STREAMS {
-                    if let Some(old_key) = state.order.pop_front() {
-                        state.map.remove(&old_key);
-                    } else {
-                        break;
+            let sid = match state.map.get_mut(&canonical) {
+                Some(conn) => {
+                    if let Some(syn) = initial_syn {
+                        let new_connection = match conn.syn {
+                            None => true,
+                            Some(recorded) => {
+                                conn.closed || (recorded.0 == syn.0 && recorded != syn)
+                            }
+                        };
+                        if new_connection {
+                            conn.id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
+                            conn.syn = Some(syn);
+                            conn.closed = false;
+                        }
                     }
+                    if flags & (TcpStreamContext::FLAG_FIN | TcpStreamContext::FLAG_RST) != 0 {
+                        conn.closed = true;
+                    }
+                    conn.id
                 }
-            }
-
-            let next = &self.next_stream_id;
-            let sid = *state
-                .map
-                .entry(canonical)
-                .or_insert_with(|| next.fetch_add(1, Ordering::Relaxed));
-
-            if is_new {
-                state.order.push_back(canonical);
-            }
-
-            if flags & 0x04 != 0 {
-                state.map.remove(&canonical);
-                state.compact_order();
-            }
+                None => {
+                    while state.map.len() >= MAX_TRACKED_STREAMS {
+                        if let Some(old_key) = state.order.pop_front() {
+                            state.map.remove(&old_key);
+                        } else {
+                            break;
+                        }
+                    }
+                    let id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
+                    state.map.insert(
+                        canonical,
+                        Connection {
+                            id,
+                            syn: initial_syn,
+                            closed: flags
+                                & (TcpStreamContext::FLAG_FIN | TcpStreamContext::FLAG_RST)
+                                != 0,
+                        },
+                    );
+                    state.order.push_back(canonical);
+                    id
+                }
+            };
 
             drop(state);
 
@@ -491,11 +545,15 @@ impl Dissector for TcpDissector {
             Some(key) => Ok(DissectResult::with_tcp_context(
                 header_len,
                 DispatchHint::ByTcpPort(src_port, dst_port),
-                TcpStreamContext {
-                    stream_key: key,
-                    seq,
+                // RFC 9293, Section 3.1 — the first data octet of a SYN
+                // segment is ISN+1
+                // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>.
+                TcpStreamContext::new(
+                    key,
+                    seq.wrapping_add(u32::from(flags & FLAG_SYN != 0)),
                     payload_len,
-                },
+                    flags,
+                ),
             )),
             None => Ok(DissectResult::new(
                 header_len,
