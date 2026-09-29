@@ -1742,8 +1742,8 @@ fn scan_aggregate(data: &[u8], mut f: impl FnMut(u8, usize, u8)) {
 /// option".
 ///
 /// Option Overload (52) is excluded: it selects which fields form the
-/// aggregate option buffer, so it is taken from its first instance. Only two
-/// small bit sets are used, so ordinary messages pay a single extra pass.
+/// aggregate option buffer, so it is never concatenated. Only two small bit
+/// sets are used, so ordinary messages pay a single extra pass.
 fn split_codes(data: &[u8]) -> CodeSet {
     let mut seen = CodeSet::default();
     let mut split = CodeSet::default();
@@ -1759,31 +1759,31 @@ fn split_codes(data: &[u8]) -> CodeSet {
     split
 }
 
-/// The instances of the split codes, in aggregate option buffer order.
+/// The instances of the split codes, grouped by code.
 ///
-/// Built only when a message has split options.
-struct OptionInstances {
-    items: Vec<OptionInstance>,
-}
-
-impl OptionInstances {
-    fn collect(data: &[u8], split: &CodeSet) -> Self {
-        let mut items = Vec::new();
-        scan_aggregate(data, |code, pos, len| {
-            if split.contains(code) {
-                items.push(OptionInstance {
-                    code,
-                    pos: pos as u32,
-                    len,
-                });
+/// Built only when a message has split options. Each group keeps aggregate
+/// option buffer order, and groups are ordered by their code's first
+/// instance.
+fn collect_split_instances(data: &[u8], split: &CodeSet) -> Vec<OptionInstance> {
+    let mut items = Vec::new();
+    // Aggregate index of each code's first instance.
+    let mut first_seen = [u32::MAX; 256];
+    scan_aggregate(data, |code, pos, len| {
+        if split.contains(code) {
+            let slot = &mut first_seen[code as usize];
+            if *slot == u32::MAX {
+                *slot = items.len() as u32;
             }
-        });
-        Self { items }
-    }
-
-    fn as_slice(&self) -> &[OptionInstance] {
-        &self.items
-    }
+            items.push(OptionInstance {
+                code,
+                pos: pos as u32,
+                len,
+            });
+        }
+    });
+    // Stable, so each group stays in aggregate order.
+    items.sort_by_key(|i| first_seen[i.code as usize]);
+    items
 }
 
 /// Option Overload option code (RFC 2132, Section 9.3 —
@@ -1813,18 +1813,15 @@ fn push_split_options<'pkt>(
     if split.is_empty() {
         return;
     }
-    let instances = &OptionInstances::collect(data, split);
-    let mut done = CodeSet::default();
+    let instances = collect_split_instances(data, split);
     // Scratch space reused for every split code.
     let mut value: Vec<u8> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
     let mut tmp_store = DissectBuffer::new();
-    for first in instances.as_slice() {
+    for group in instances.chunk_by(|a, b| a.code == b.code) {
+        let first = &group[0];
         let code = first.code;
-        if !split.contains(code) || done.contains(code) {
-            continue;
-        }
-        done.insert(code);
-        let parts = || instances.as_slice().iter().filter(move |i| i.code == code);
+        let parts = || group.iter();
 
         let lo = parts().map(|i| i.pos as usize).min().unwrap_or_default();
         let hi = parts()
@@ -1870,15 +1867,17 @@ fn push_split_options<'pkt>(
         buf.end_container(obj);
 
         value.clear();
+        starts.clear();
         for part in parts() {
             let p = part.pos as usize + 2;
+            starts.push(value.len());
             value.extend_from_slice(&data[p..p + part.len as usize]);
         }
         let map = SplitMap {
             data,
             offset,
-            instances,
-            code,
+            parts: group,
+            starts: &starts,
         };
         // The value is decoded as if its code octet were at virtual offset 0.
         let tmp = tmp_store.clear_into();
@@ -1924,45 +1923,36 @@ fn is_generic(tmp: &DissectBuffer<'_>) -> bool {
 struct SplitMap<'a, 'pkt> {
     data: &'pkt [u8],
     offset: usize,
-    instances: &'a OptionInstances,
-    code: u8,
+    /// The split portions of the option, in aggregate order.
+    parts: &'a [OptionInstance],
+    /// Offset of each portion's data within the concatenated value.
+    starts: &'a [usize],
 }
 
 impl<'pkt> SplitMap<'_, 'pkt> {
-    /// The split portions of the option, in aggregate order.
-    fn parts(&self) -> impl Iterator<Item = &OptionInstance> {
-        let code = self.code;
-        self.instances
-            .as_slice()
-            .iter()
-            .filter(move |i| i.code == code)
-    }
-
     /// Locate value octet `i`: the message offset of its split portion's
     /// data and the index of `i` within that portion.
     fn locate(&self, i: usize) -> Option<(usize, usize, usize)> {
-        let mut base = 0;
-        for part in self.parts() {
-            let len = part.len as usize;
-            if i < base + len {
-                return Some((part.pos as usize + 2, i - base, len));
-            }
-            base += len;
-        }
-        None
+        // The last portion starting at or before `i`; empty portions share
+        // their start with the next one, which is the one found.
+        let idx = self.starts.partition_point(|&s| s <= i).checked_sub(1)?;
+        let part = &self.parts[idx];
+        let at = i - self.starts[idx];
+        let len = part.len as usize;
+        (at < len).then_some((part.pos as usize + 2, at, len))
     }
 
     /// Message offset of virtual position `v` (the code octet is at 0, the
     /// length octet at 1 and value octet `i` at `2 + i`).
     fn position(&self, v: usize) -> usize {
         if v < 2 {
-            let first = self.parts().next().map_or(0, |p| p.pos as usize);
+            let first = self.parts.first().map_or(0, |p| p.pos as usize);
             return first + v;
         }
         match self.locate(v - 2) {
             Some((data_pos, i, _)) => data_pos + i,
             None => self
-                .parts()
+                .parts
                 .last()
                 .map_or(0, |p| p.pos as usize + 1 + p.len as usize),
         }
@@ -6233,6 +6223,32 @@ mod tests {
             panic!("expected scratch");
         };
         assert_eq!(r.end - r.start, 300);
+    }
+
+    #[test]
+    fn rfc3396_every_octet_split_maps_ranges_to_its_portion() {
+        // 20000 one-octet portions of the Parameter Request List, close to
+        // the largest UDP payload. Every list element must map back to its
+        // own portion; looking portions up by a linear scan per field made
+        // this quadratic.
+        const N: usize = 20_000;
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let first = pkt.len();
+        for i in 0..N {
+            push_option(&mut pkt, 55, &[(i % 250 + 1) as u8]);
+        }
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let list = top_fields(&buf, "parameter_request_list");
+        assert_eq!(list.len(), 1);
+        let items = direct_children_of(&buf, list[0]);
+        assert_eq!(items.len(), N);
+        for (i, item) in [(0, items[0]), (N - 1, items[N - 1])] {
+            let at = first + 3 * i + 2;
+            assert_eq!(item.range, at..at + 1);
+            assert_eq!(item.value, FieldValue::U8((i % 250 + 1) as u8));
+        }
     }
 
     #[test]
