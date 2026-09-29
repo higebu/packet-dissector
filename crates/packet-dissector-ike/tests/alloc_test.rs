@@ -33,3 +33,41 @@ fn zero_alloc_dissect_ike() {
     assert_eq!(buf.layers().len(), 1);
     assert_eq!(buf.layers()[0].name, "IKE");
 }
+
+#[test]
+fn zero_alloc_dissect_ikev2_payload_bodies() {
+    // IKE_SA_INIT with SA (1 proposal, 2 transforms + attribute), KE, Nonce
+    // and a NAT_DETECTION_SOURCE_IP Notify.
+    let mut sa = vec![0, 0, 0, 28, 1, 1, 0, 2];
+    sa.extend_from_slice(&[3, 0, 0, 12, 1, 0, 0, 12, 0x80, 14, 1, 0]);
+    sa.extend_from_slice(&[0, 0, 0, 8, 4, 0, 0, 31]);
+    let mut ke = vec![0, 31, 0, 0];
+    ke.extend_from_slice(&[0xab; 32]);
+    let nonce = vec![7u8; 16];
+    let mut notify = vec![0, 0, 0x40, 0x04];
+    notify.extend_from_slice(&[0x5a; 20]);
+    let payloads = [(33u8, sa), (34, ke), (40, nonce), (41, notify)];
+    let mut body = Vec::new();
+    for (i, (_, b)) in payloads.iter().enumerate() {
+        body.push(payloads.get(i + 1).map(|p| p.0).unwrap_or(0));
+        body.push(0);
+        body.extend_from_slice(&((b.len() + 4) as u16).to_be_bytes());
+        body.extend_from_slice(b);
+    }
+    let mut raw = vec![0x11; 8];
+    raw.extend_from_slice(&[0; 8]);
+    raw.extend_from_slice(&[33, 0x20, 34, 0x08, 0, 0, 0, 0]);
+    raw.extend_from_slice(&((28 + body.len()) as u32).to_be_bytes());
+    raw.extend_from_slice(&body);
+
+    let mut buf = DissectBuffer::new();
+    IkeDissector.dissect(&raw, &mut buf, 0).unwrap();
+    let allocs = count_allocs(|| {
+        buf.clear();
+        IkeDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "IKEv2 payload body dissect allocated {allocs} times"
+    );
+}

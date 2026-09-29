@@ -1,9 +1,29 @@
 //! ESP decryption support.
 //!
 //! Provides decryption for ESP payloads using pre-shared Security Association
-//! (SA) parameters. Supports CBC and GCM modes.
+//! (SA) parameters. Supports AES-CBC, 3DES-CBC, AES-CTR, AES-GCM (8/12/16
+//! octet ICV), AES-CCM, ChaCha20-Poly1305 and ENCR_NULL_AUTH_AES_GMAC, with
+//! optional Extended Sequence Numbers for the AEAD AAD. Integrity check values
+//! of the HMAC transforms are located but not verified.
 //!
 //! ## References
+//! - RFC 4303, Section 2.2.1 (Extended Sequence Numbers):
+//!   <https://www.rfc-editor.org/rfc/rfc4303#section-2.2.1>
+//! - RFC 8221: Cryptographic Algorithm Implementation Requirements for ESP and AH:
+//!   <https://www.rfc-editor.org/rfc/rfc8221>
+//! - RFC 2451: The ESP CBC-Mode Cipher Algorithms (3DES-CBC):
+//!   <https://www.rfc-editor.org/rfc/rfc2451>
+//! - RFC 3686: Using AES Counter Mode With IPsec ESP:
+//!   <https://www.rfc-editor.org/rfc/rfc3686>
+//! - RFC 4309: Using AES CCM Mode with IPsec ESP:
+//!   <https://www.rfc-editor.org/rfc/rfc4309>
+//! - RFC 4543: The Use of GMAC in IPsec ESP and AH:
+//!   <https://www.rfc-editor.org/rfc/rfc4543>
+//! - RFC 7634: ChaCha20, Poly1305, and Their Use in IKE and IPsec:
+//!   <https://www.rfc-editor.org/rfc/rfc7634>
+//! - RFC 2403 (HMAC-MD5-96): <https://www.rfc-editor.org/rfc/rfc2403>
+//! - RFC 2404 (HMAC-SHA-1-96): <https://www.rfc-editor.org/rfc/rfc2404>
+//! - RFC 4868 (HMAC-SHA-256/384/512): <https://www.rfc-editor.org/rfc/rfc4868>
 //! - RFC 3602: The AES-CBC Cipher Algorithm and Its Use with IPsec:
 //!   <https://www.rfc-editor.org/rfc/rfc3602>
 //! - RFC 4106: The Use of Galois/Counter Mode (GCM) in IPsec ESP:
@@ -15,18 +35,22 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::lookup::ip_protocol_name;
 
 /// IP protocol number for HOPOPT (IPv6 Hop-by-Hop Options, RFC 8200).
+/// <https://www.rfc-editor.org/rfc/rfc8200>
 const IP_PROTO_HOPOPT: u8 = 0;
 
 /// IP protocol number for IPv4 (RFC 2003, IP-in-IP encapsulation).
+/// <https://www.rfc-editor.org/rfc/rfc2003>
 const IP_PROTO_IPV4: u8 = 4;
 
 /// IP protocol number for TCP (RFC 9293).
+/// <https://www.rfc-editor.org/rfc/rfc9293>
 const IP_PROTO_TCP: u8 = 6;
 
 /// IP protocol number for UDP (RFC 768).
 const IP_PROTO_UDP: u8 = 17;
 
 /// IP protocol number for IPv6 encapsulation (RFC 2473).
+/// <https://www.rfc-editor.org/rfc/rfc2473>
 const IP_PROTO_IPV6: u8 = 41;
 
 /// IP protocol number for "no next header" (RFC 8200, Section 4.7).
@@ -36,33 +60,156 @@ const IP_PROTO_IPV6: u8 = 41;
 /// value 59 (which means 'no next header') MUST be used to designate a
 /// 'dummy' packet."
 /// <https://www.rfc-editor.org/rfc/rfc4303#section-2.6>
+/// <https://www.rfc-editor.org/rfc/rfc8200#section-4.7>
 const IP_PROTO_IPV6_NONXT: u8 = 59;
 
+/// ICV length of an AEAD transform.
+///
+/// RFC 4106, Section 6 — "Implementations MUST support a full-length
+/// 16-octet ICV, and MAY support 8 or 12 octet ICVs, and MUST NOT support
+/// other ICV lengths." RFC 4309, Section 3 allows the same three lengths
+/// for AES-CCM.
+/// <https://www.rfc-editor.org/rfc/rfc4106#section-6>
+/// <https://www.rfc-editor.org/rfc/rfc4309#section-3>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AeadIcvLen {
+    /// 8-octet ICV (64 bits).
+    Octets8,
+    /// 12-octet ICV (96 bits).
+    Octets12,
+    /// 16-octet ICV (128 bits).
+    Octets16,
+}
+
+impl AeadIcvLen {
+    /// Returns the ICV length in bytes.
+    pub fn octets(self) -> usize {
+        match self {
+            Self::Octets8 => 8,
+            Self::Octets12 => 12,
+            Self::Octets16 => 16,
+        }
+    }
+}
+
 /// Encryption algorithm for an ESP Security Association.
+///
+/// RFC 8221, Section 5 lists the ESP encryption algorithm requirements:
+/// <https://www.rfc-editor.org/rfc/rfc8221#section-5>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncryptionAlgorithm {
     /// No encryption (RFC 2410). Payload is plaintext.
+    /// <https://www.rfc-editor.org/rfc/rfc2410>
     Null,
     /// AES-128-CBC (RFC 3602). IV = 16 bytes, key = 16 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc3602>
     Aes128Cbc,
     /// AES-192-CBC (RFC 3602). IV = 16 bytes, key = 24 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc3602>
     Aes192Cbc,
     /// AES-256-CBC (RFC 3602). IV = 16 bytes, key = 32 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc3602>
     Aes256Cbc,
     /// AES-128-GCM (RFC 4106). IV = 8 bytes in packet, salt = 4 bytes, key = 16 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc4106>
     Aes128Gcm {
         /// 4-byte salt prepended to the 8-byte IV from the packet to form a 12-byte nonce.
         salt: [u8; 4],
+        /// ICV (authentication tag) length.
+        icv_len: AeadIcvLen,
     },
     /// AES-192-GCM (RFC 4106, Section 8.1). IV = 8 bytes in packet,
     /// salt = 4 bytes, key = 24 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc4106#section-8.1>
     Aes192Gcm {
         /// 4-byte salt prepended to the 8-byte IV from the packet to form a 12-byte nonce.
         salt: [u8; 4],
+        /// ICV (authentication tag) length.
+        icv_len: AeadIcvLen,
     },
     /// AES-256-GCM (RFC 4106). IV = 8 bytes in packet, salt = 4 bytes, key = 32 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc4106>
     Aes256Gcm {
         /// 4-byte salt prepended to the 8-byte IV from the packet to form a 12-byte nonce.
+        salt: [u8; 4],
+        /// ICV (authentication tag) length.
+        icv_len: AeadIcvLen,
+    },
+    /// 3DES-CBC (RFC 2451). IV = 8 bytes, key = 24 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc2451>
+    TripleDesCbc,
+    /// AES-128-CTR (RFC 3686). IV = 8 bytes in packet, nonce = 4 bytes, key = 16 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc3686>
+    Aes128Ctr {
+        /// 4-byte nonce from the keying material (RFC 3686, Section 4).
+        /// <https://www.rfc-editor.org/rfc/rfc3686>
+        nonce: [u8; 4],
+    },
+    /// AES-192-CTR (RFC 3686). IV = 8 bytes in packet, nonce = 4 bytes, key = 24 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc3686>
+    Aes192Ctr {
+        /// 4-byte nonce from the keying material (RFC 3686, Section 4).
+        /// <https://www.rfc-editor.org/rfc/rfc3686>
+        nonce: [u8; 4],
+    },
+    /// AES-256-CTR (RFC 3686). IV = 8 bytes in packet, nonce = 4 bytes, key = 32 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc3686>
+    Aes256Ctr {
+        /// 4-byte nonce from the keying material (RFC 3686, Section 4).
+        /// <https://www.rfc-editor.org/rfc/rfc3686>
+        nonce: [u8; 4],
+    },
+    /// AES-128-CCM (RFC 4309). IV = 8 bytes in packet, salt = 3 bytes, key = 16 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc4309>
+    Aes128Ccm {
+        /// 3-byte salt prepended to the 8-byte IV to form the 11-byte nonce.
+        salt: [u8; 3],
+        /// ICV length.
+        icv_len: AeadIcvLen,
+    },
+    /// AES-192-CCM (RFC 4309). IV = 8 bytes in packet, salt = 3 bytes, key = 24 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc4309>
+    Aes192Ccm {
+        /// 3-byte salt prepended to the 8-byte IV to form the 11-byte nonce.
+        salt: [u8; 3],
+        /// ICV length.
+        icv_len: AeadIcvLen,
+    },
+    /// AES-256-CCM (RFC 4309). IV = 8 bytes in packet, salt = 3 bytes, key = 32 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc4309>
+    Aes256Ccm {
+        /// 3-byte salt prepended to the 8-byte IV to form the 11-byte nonce.
+        salt: [u8; 3],
+        /// ICV length.
+        icv_len: AeadIcvLen,
+    },
+    /// ChaCha20-Poly1305 (RFC 7634). IV = 8 bytes in packet, salt = 4 bytes,
+    /// key = 32 bytes, ICV = 16 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc7634>
+    ChaCha20Poly1305 {
+        /// 4-byte salt prepended to the 8-byte IV to form the 12-byte nonce.
+        salt: [u8; 4],
+    },
+    /// ENCR_NULL_AUTH_AES_GMAC with a 128-bit key (RFC 4543). The payload is
+    /// not encrypted; IV = 8 bytes, ICV = 16 bytes.
+    /// <https://www.rfc-editor.org/rfc/rfc4543>
+    Aes128Gmac {
+        /// 4-byte salt (RFC 4543, Section 3.2).
+        /// <https://www.rfc-editor.org/rfc/rfc4543#section-3.2>
+        salt: [u8; 4],
+    },
+    /// ENCR_NULL_AUTH_AES_GMAC with a 192-bit key (RFC 4543).
+    /// <https://www.rfc-editor.org/rfc/rfc4543>
+    Aes192Gmac {
+        /// 4-byte salt (RFC 4543, Section 3.2).
+        /// <https://www.rfc-editor.org/rfc/rfc4543#section-3.2>
+        salt: [u8; 4],
+    },
+    /// ENCR_NULL_AUTH_AES_GMAC with a 256-bit key (RFC 4543).
+    /// <https://www.rfc-editor.org/rfc/rfc4543>
+    Aes256Gmac {
+        /// 4-byte salt (RFC 4543, Section 3.2).
+        /// <https://www.rfc-editor.org/rfc/rfc4543#section-3.2>
         salt: [u8; 4],
     },
 }
@@ -78,10 +225,21 @@ pub enum EncryptionAlgorithm {
 pub enum AuthenticationAlgorithm {
     /// No authentication.
     None,
+    /// HMAC-MD5 with 96-bit ICV (RFC 2403).
+    /// <https://www.rfc-editor.org/rfc/rfc2403>
+    HmacMd5_96,
     /// HMAC-SHA-1 with 96-bit ICV (RFC 2404).
+    /// <https://www.rfc-editor.org/rfc/rfc2404>
     HmacSha1_96,
     /// HMAC-SHA-256 with 128-bit ICV (RFC 4868).
+    /// <https://www.rfc-editor.org/rfc/rfc4868>
     HmacSha256_128,
+    /// HMAC-SHA-384 with 192-bit ICV (RFC 4868).
+    /// <https://www.rfc-editor.org/rfc/rfc4868>
+    HmacSha384_192,
+    /// HMAC-SHA-512 with 256-bit ICV (RFC 4868).
+    /// <https://www.rfc-editor.org/rfc/rfc4868>
+    HmacSha512_256,
 }
 
 /// Security Association parameters for ESP decryption.
@@ -95,6 +253,18 @@ pub struct EspSa {
     pub authentication: AuthenticationAlgorithm,
     /// Authentication key bytes (ignored for AEAD ciphers).
     pub auth_key: Vec<u8>,
+    /// Extended Sequence Numbers: `Some(high)` when ESN is negotiated, where
+    /// `high` is the high-order 32 bits of the 64-bit sequence number
+    /// (usually 0 early in the SA's life); `None` for 32-bit sequence
+    /// numbers.
+    ///
+    /// RFC 4303, Section 2.2.1 — "Only the low-order 32 bits of the sequence
+    /// number are transmitted in the plaintext ESP header of each packet". A stateless dissector
+    /// cannot track the high-order bits, so they are configured here. Only
+    /// the AEAD transforms use them (in the AAD, RFC 4106, Section 5).
+    /// <https://www.rfc-editor.org/rfc/rfc4303#section-2.2.1>
+    /// <https://www.rfc-editor.org/rfc/rfc4106>
+    pub esn: Option<u32>,
 }
 
 impl EncryptionAlgorithm {
@@ -103,18 +273,97 @@ impl EncryptionAlgorithm {
         match self {
             Self::Null => 0,
             Self::Aes128Cbc | Self::Aes192Cbc | Self::Aes256Cbc => 16,
-            // RFC 4106, Section 3.1: "The AES-GCM-ESP IV field MUST be eight octets."
+            // RFC 2451, Section 2 — 64-bit IV for 3DES-CBC.
+            // <https://www.rfc-editor.org/rfc/rfc2451#section-2>
+            // RFC 3686, Section 3.1 — 8-octet IV for AES-CTR.
+            // <https://www.rfc-editor.org/rfc/rfc3686#section-3.1>
+            // RFC 4106, Section 3.1 — 8-octet IV for AES-GCM.
             // <https://www.rfc-editor.org/rfc/rfc4106#section-3.1>
-            Self::Aes128Gcm { .. } | Self::Aes192Gcm { .. } | Self::Aes256Gcm { .. } => 8,
+            // RFC 4309, Section 3.1 — 8-octet IV for AES-CCM.
+            // <https://www.rfc-editor.org/rfc/rfc4309#section-3.1>
+            // RFC 7634, Section 2 — 8-octet IV for ChaCha20-Poly1305.
+            // <https://www.rfc-editor.org/rfc/rfc7634#section-2>
+            // RFC 4543, Section 3.1 — "The IV MUST be eight octets long."
+            // <https://www.rfc-editor.org/rfc/rfc4543#section-3.1>
+            Self::TripleDesCbc
+            | Self::Aes128Ctr { .. }
+            | Self::Aes192Ctr { .. }
+            | Self::Aes256Ctr { .. }
+            | Self::Aes128Gcm { .. }
+            | Self::Aes192Gcm { .. }
+            | Self::Aes256Gcm { .. }
+            | Self::Aes128Ccm { .. }
+            | Self::Aes192Ccm { .. }
+            | Self::Aes256Ccm { .. }
+            | Self::ChaCha20Poly1305 { .. }
+            | Self::Aes128Gmac { .. }
+            | Self::Aes192Gmac { .. }
+            | Self::Aes256Gmac { .. } => 8,
         }
     }
 
     /// Returns true if this is an AEAD cipher (combined encryption + authentication).
+    ///
+    /// ENCR_NULL_AUTH_AES_GMAC is a combined-mode transform (RFC 4543) even
+    /// though it does not encrypt.
+    /// <https://www.rfc-editor.org/rfc/rfc4543>
     pub fn is_aead(&self) -> bool {
-        matches!(
-            self,
-            Self::Aes128Gcm { .. } | Self::Aes192Gcm { .. } | Self::Aes256Gcm { .. }
-        )
+        self.aead_icv_len().is_some()
+    }
+
+    /// Returns the ICV length of an AEAD transform, or `None` for
+    /// non-AEAD transforms (whose ICV comes from the authentication
+    /// algorithm).
+    pub fn aead_icv_len(&self) -> Option<usize> {
+        match self {
+            Self::Aes128Gcm { icv_len, .. }
+            | Self::Aes192Gcm { icv_len, .. }
+            | Self::Aes256Gcm { icv_len, .. }
+            | Self::Aes128Ccm { icv_len, .. }
+            | Self::Aes192Ccm { icv_len, .. }
+            | Self::Aes256Ccm { icv_len, .. } => Some(icv_len.octets()),
+            // RFC 7634, Section 2 — 16-octet tag.
+            // <https://www.rfc-editor.org/rfc/rfc7634#section-2>
+            // RFC 4543, Section 3.4 — "the length of the ICV is 16 octets".
+            // <https://www.rfc-editor.org/rfc/rfc4543#section-3.4>
+            Self::ChaCha20Poly1305 { .. }
+            | Self::Aes128Gmac { .. }
+            | Self::Aes192Gmac { .. }
+            | Self::Aes256Gmac { .. } => Some(16),
+            Self::Null
+            | Self::Aes128Cbc
+            | Self::Aes192Cbc
+            | Self::Aes256Cbc
+            | Self::TripleDesCbc
+            | Self::Aes128Ctr { .. }
+            | Self::Aes192Ctr { .. }
+            | Self::Aes256Ctr { .. } => None,
+        }
+    }
+
+    /// Returns the encryption key length in bytes required by this
+    /// algorithm (excluding any salt / nonce), or `None` for NULL.
+    pub fn key_len(&self) -> Option<usize> {
+        match self {
+            Self::Null => None,
+            Self::Aes128Cbc
+            | Self::Aes128Gcm { .. }
+            | Self::Aes128Ctr { .. }
+            | Self::Aes128Ccm { .. }
+            | Self::Aes128Gmac { .. } => Some(16),
+            Self::Aes192Cbc
+            | Self::Aes192Gcm { .. }
+            | Self::Aes192Ctr { .. }
+            | Self::Aes192Ccm { .. }
+            | Self::Aes192Gmac { .. }
+            | Self::TripleDesCbc => Some(24),
+            Self::Aes256Cbc
+            | Self::Aes256Gcm { .. }
+            | Self::Aes256Ctr { .. }
+            | Self::Aes256Ccm { .. }
+            | Self::Aes256Gmac { .. }
+            | Self::ChaCha20Poly1305 { .. } => Some(32),
+        }
     }
 }
 
@@ -123,8 +372,15 @@ impl AuthenticationAlgorithm {
     pub fn icv_len(&self) -> usize {
         match self {
             Self::None => 0,
-            Self::HmacSha1_96 => 12,
+            // RFC 2403, Section 2 / RFC 2404, Section 2 — 96-bit truncation.
+            // <https://www.rfc-editor.org/rfc/rfc2403#section-2>
+            // <https://www.rfc-editor.org/rfc/rfc2404>
+            Self::HmacMd5_96 | Self::HmacSha1_96 => 12,
+            // RFC 4868, Section 2.3 — truncation to half the output length.
+            // <https://www.rfc-editor.org/rfc/rfc4868#section-2.3>
             Self::HmacSha256_128 => 16,
+            Self::HmacSha384_192 => 24,
+            Self::HmacSha512_256 => 32,
         }
     }
 }
@@ -151,8 +407,9 @@ pub struct DecryptedEsp {
 ///
 /// # Arguments
 /// * `sa` — Security Association parameters
-/// * `spi` — Security Parameters Index (for GCM AAD)
-/// * `seq` — Sequence number (for GCM AAD)
+/// * `spi` — Security Parameters Index (for the AEAD AAD)
+/// * `seq` — Sequence number as carried in the packet (the low-order 32
+///   bits when ESN is in use; the high-order bits come from [`EspSa::esn`])
 /// * `encrypted_data` — Data after the 8-byte ESP header: `[IV | ciphertext | ICV]`
 ///
 /// # Returns
@@ -163,23 +420,124 @@ pub fn decrypt_esp(
     seq: u32,
     encrypted_data: &[u8],
 ) -> Result<DecryptedEsp, PacketError> {
+    // The key size is part of the algorithm; a mismatching key is a
+    // misconfigured SA rather than a different AES variant. GMAC does not
+    // decrypt and so does not use the key.
+    if let Some(key_len) = sa.encryption.key_len() {
+        if sa.enc_key.len() != key_len && !is_gmac(&sa.encryption) {
+            return Err(PacketError::InvalidHeader(
+                "ESP: encryption key length does not match the algorithm",
+            ));
+        }
+    }
     match &sa.encryption {
         EncryptionAlgorithm::Null => decrypt_null(sa, encrypted_data),
+        EncryptionAlgorithm::Aes128Gmac { .. }
+        | EncryptionAlgorithm::Aes192Gmac { .. }
+        | EncryptionAlgorithm::Aes256Gmac { .. } => decrypt_gmac(encrypted_data),
         #[cfg(any(feature = "decrypt", test))]
         EncryptionAlgorithm::Aes128Cbc
         | EncryptionAlgorithm::Aes192Cbc
-        | EncryptionAlgorithm::Aes256Cbc => decrypt_cbc(sa, encrypted_data),
+        | EncryptionAlgorithm::Aes256Cbc
+        | EncryptionAlgorithm::TripleDesCbc => decrypt_cbc(sa, encrypted_data),
         #[cfg(any(feature = "decrypt", test))]
-        EncryptionAlgorithm::Aes128Gcm { salt }
-        | EncryptionAlgorithm::Aes192Gcm { salt }
-        | EncryptionAlgorithm::Aes256Gcm { salt } => {
-            decrypt_gcm(sa, spi, seq, salt, encrypted_data)
+        EncryptionAlgorithm::Aes128Ctr { nonce }
+        | EncryptionAlgorithm::Aes192Ctr { nonce }
+        | EncryptionAlgorithm::Aes256Ctr { nonce } => decrypt_ctr(sa, nonce, encrypted_data),
+        #[cfg(any(feature = "decrypt", test))]
+        EncryptionAlgorithm::Aes128Gcm { salt, icv_len }
+        | EncryptionAlgorithm::Aes192Gcm { salt, icv_len }
+        | EncryptionAlgorithm::Aes256Gcm { salt, icv_len } => {
+            let aad = build_aad(spi, seq, sa.esn);
+            decrypt_gcm(sa, aad.as_slice(), salt, *icv_len, encrypted_data)
+        }
+        #[cfg(any(feature = "decrypt", test))]
+        EncryptionAlgorithm::Aes128Ccm { salt, icv_len }
+        | EncryptionAlgorithm::Aes192Ccm { salt, icv_len }
+        | EncryptionAlgorithm::Aes256Ccm { salt, icv_len } => {
+            let aad = build_aad(spi, seq, sa.esn);
+            decrypt_ccm(sa, aad.as_slice(), salt, *icv_len, encrypted_data)
+        }
+        #[cfg(any(feature = "decrypt", test))]
+        EncryptionAlgorithm::ChaCha20Poly1305 { salt } => {
+            let aad = build_aad(spi, seq, sa.esn);
+            decrypt_chacha20_poly1305(sa, aad.as_slice(), salt, encrypted_data)
         }
         #[cfg(not(any(feature = "decrypt", test)))]
-        _ => Err(PacketError::InvalidHeader(
-            "ESP decryption requires the 'decrypt' feature",
-        )),
+        _ => {
+            // SPI and sequence number only feed the AEAD AAD.
+            let _ = (spi, seq);
+            Err(PacketError::InvalidHeader(
+                "ESP decryption requires the 'decrypt' feature",
+            ))
+        }
     }
+}
+
+fn is_gmac(alg: &EncryptionAlgorithm) -> bool {
+    matches!(
+        alg,
+        EncryptionAlgorithm::Aes128Gmac { .. }
+            | EncryptionAlgorithm::Aes192Gmac { .. }
+            | EncryptionAlgorithm::Aes256Gmac { .. }
+    )
+}
+
+/// Additional Authenticated Data of the AEAD transforms.
+///
+/// RFC 4106, Section 5 — "Two formats of the AAD are defined: one for
+/// 32-bit sequence numbers, and one for 64-bit extended sequence numbers."
+/// SPI(4) || Seq(4), or SPI(4) || ESN high(4) || ESN low(4). RFC 4309,
+/// Section 5 and RFC 7634, Section 2.1 use the same AAD.
+/// <https://www.rfc-editor.org/rfc/rfc4106#section-5>
+/// <https://www.rfc-editor.org/rfc/rfc7634#section-2.1>
+/// <https://www.rfc-editor.org/rfc/rfc4309>
+#[cfg(any(feature = "decrypt", test))]
+struct Aad {
+    bytes: [u8; 12],
+    len: usize,
+}
+
+#[cfg(any(feature = "decrypt", test))]
+impl Aad {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+#[cfg(any(feature = "decrypt", test))]
+fn build_aad(spi: u32, seq: u32, esn_high: Option<u32>) -> Aad {
+    let mut bytes = [0u8; 12];
+    bytes[..4].copy_from_slice(&spi.to_be_bytes());
+    match esn_high {
+        Some(high) => {
+            bytes[4..8].copy_from_slice(&high.to_be_bytes());
+            bytes[8..12].copy_from_slice(&seq.to_be_bytes());
+            Aad { bytes, len: 12 }
+        }
+        None => {
+            bytes[4..8].copy_from_slice(&seq.to_be_bytes());
+            Aad { bytes, len: 8 }
+        }
+    }
+}
+
+/// ENCR_NULL_AUTH_AES_GMAC — the payload is not encrypted.
+///
+/// RFC 4543, Section 3.5 — "the AES-GCM plaintext is zero-length": the ESP
+/// payload between the 8-octet IV and the 16-octet ICV is plaintext. Like
+/// the HMAC transforms, the ICV is located but not verified.
+/// <https://www.rfc-editor.org/rfc/rfc4543#section-3.5>
+fn decrypt_gmac(data: &[u8]) -> Result<DecryptedEsp, PacketError> {
+    const GMAC_IV_LEN: usize = 8;
+    const GMAC_ICV_LEN: usize = 16;
+    if data.len() < GMAC_IV_LEN + 2 + GMAC_ICV_LEN {
+        return Err(PacketError::InvalidHeader(
+            "ESP GMAC: data too short for IV + trailer + ICV",
+        ));
+    }
+    let plaintext = data[GMAC_IV_LEN..data.len() - GMAC_ICV_LEN].to_vec();
+    extract_trailer(plaintext, GMAC_ICV_LEN)
 }
 
 /// NULL encryption — payload is plaintext, just strip ICV and extract trailer.
@@ -203,6 +561,11 @@ fn decrypt_null(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
 ///   (RFC 2404), AES-XCBC-MAC-96 (RFC 3566).
 /// - 16, 24, 32 bytes — HMAC-SHA-256-128, HMAC-SHA-384-192 and
 ///   HMAC-SHA-512-256 (RFC 4868, Section 2.3).
+///
+/// <https://www.rfc-editor.org/rfc/rfc2403>
+/// <https://www.rfc-editor.org/rfc/rfc2404>
+/// <https://www.rfc-editor.org/rfc/rfc3566>
+/// <https://www.rfc-editor.org/rfc/rfc4868#section-2.3>
 const NULL_HEURISTIC_ICV_LENS: [usize; 5] = [0, 12, 16, 24, 32];
 
 /// Validate the two bytes preceding a candidate ICV as an ESP trailer.
@@ -357,6 +720,8 @@ fn inner_header_matches(next_header: u8, payload: &[u8]) -> bool {
 ///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.6>
 /// - RFC 4303, Section 2.8 (Integrity Check Value):
 ///   <https://www.rfc-editor.org/rfc/rfc4303#section-2.8>
+///
+/// <https://www.rfc-editor.org/rfc/rfc4303#section-2.4>
 pub fn try_null_decrypt(data: &[u8]) -> Option<DecryptedEsp> {
     let mut uncorroborated = None;
 
@@ -388,55 +753,72 @@ pub fn try_null_decrypt(data: &[u8]) -> Option<DecryptedEsp> {
     })
 }
 
-/// AES-CBC decryption.
+/// CBC decryption: AES-CBC (RFC 3602) and 3DES-CBC (RFC 2451).
 ///
 /// RFC 3602, Section 3: <https://www.rfc-editor.org/rfc/rfc3602#section-3>
-/// Layout: [IV(16)] [ciphertext(N*16)] [ICV(auth_icv_len)]
+/// RFC 2451, Section 2: <https://www.rfc-editor.org/rfc/rfc2451#section-2>
+/// Layout: [IV(block)] [ciphertext(N*block)] [ICV(auth_icv_len)]
 #[cfg(any(feature = "decrypt", test))]
 fn decrypt_cbc(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
     use aes::Aes128;
     use aes::Aes192;
     use aes::Aes256;
+    use cbc::cipher::block_padding::NoPadding;
     use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
+    use des::TdesEde3;
 
-    let iv_len = sa.encryption.iv_len();
+    // The block size equals the IV length for both ciphers.
+    let block = sa.encryption.iv_len();
     let icv_len = sa.authentication.icv_len();
 
-    if data.len() < iv_len + icv_len + 16 {
+    if data.len() < block + icv_len + block {
         return Err(PacketError::InvalidHeader(
             "ESP CBC: data too short for IV + ciphertext + ICV",
         ));
     }
 
-    let iv = &data[..iv_len];
-    let ciphertext = &data[iv_len..data.len() - icv_len];
+    let iv = &data[..block];
+    let ciphertext = &data[block..data.len() - icv_len];
 
-    if ciphertext.len() % 16 != 0 {
+    if ciphertext.len() % block != 0 {
         return Err(PacketError::InvalidHeader(
             "ESP CBC: ciphertext length not a multiple of block size",
         ));
     }
 
     let mut buf = ciphertext.to_vec();
+    let key_err = |_| PacketError::InvalidHeader("ESP CBC key/IV error");
+    let dec_err = |_| PacketError::InvalidHeader("ESP CBC decrypt error");
 
-    match sa.enc_key.len() {
-        16 => {
+    match (&sa.encryption, sa.enc_key.len()) {
+        (EncryptionAlgorithm::TripleDesCbc, 24) => {
+            cbc::Decryptor::<TdesEde3>::new_from_slices(&sa.enc_key, iv)
+                .map_err(key_err)?
+                .decrypt_padded::<NoPadding>(&mut buf)
+                .map_err(dec_err)?;
+        }
+        (EncryptionAlgorithm::TripleDesCbc, _) => {
+            return Err(PacketError::InvalidHeader(
+                "ESP 3DES-CBC: key must be 24 bytes",
+            ));
+        }
+        (_, 16) => {
             cbc::Decryptor::<Aes128>::new_from_slices(&sa.enc_key, iv)
-                .map_err(|_| PacketError::InvalidHeader("ESP CBC key/IV error"))?
-                .decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
-                .map_err(|_| PacketError::InvalidHeader("ESP AES-128-CBC decrypt error"))?;
+                .map_err(key_err)?
+                .decrypt_padded::<NoPadding>(&mut buf)
+                .map_err(dec_err)?;
         }
-        24 => {
+        (_, 24) => {
             cbc::Decryptor::<Aes192>::new_from_slices(&sa.enc_key, iv)
-                .map_err(|_| PacketError::InvalidHeader("ESP CBC key/IV error"))?
-                .decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
-                .map_err(|_| PacketError::InvalidHeader("ESP AES-192-CBC decrypt error"))?;
+                .map_err(key_err)?
+                .decrypt_padded::<NoPadding>(&mut buf)
+                .map_err(dec_err)?;
         }
-        32 => {
+        (_, 32) => {
             cbc::Decryptor::<Aes256>::new_from_slices(&sa.enc_key, iv)
-                .map_err(|_| PacketError::InvalidHeader("ESP CBC key/IV error"))?
-                .decrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf)
-                .map_err(|_| PacketError::InvalidHeader("ESP AES-256-CBC decrypt error"))?;
+                .map_err(key_err)?
+                .decrypt_padded::<NoPadding>(&mut buf)
+                .map_err(dec_err)?;
         }
         _ => {
             return Err(PacketError::InvalidHeader(
@@ -448,90 +830,144 @@ fn decrypt_cbc(sa: &EspSa, data: &[u8]) -> Result<DecryptedEsp, PacketError> {
     extract_trailer(buf, icv_len)
 }
 
+/// Apply the AES counter-mode keystream to `buf`, starting from the
+/// 16-octet counter block `block`.
+#[cfg(any(feature = "decrypt", test))]
+fn aes_ctr_keystream(key: &[u8], block: &[u8; 16], buf: &mut [u8]) -> Result<(), PacketError> {
+    use aes::{Aes128, Aes192, Aes256};
+    use ctr::cipher::{KeyIvInit, StreamCipher};
+
+    let key_err = |_| PacketError::InvalidHeader("ESP CTR key error");
+    match key.len() {
+        16 => ctr::Ctr32BE::<Aes128>::new_from_slices(key, block)
+            .map_err(key_err)?
+            .apply_keystream(buf),
+        24 => ctr::Ctr32BE::<Aes192>::new_from_slices(key, block)
+            .map_err(key_err)?
+            .apply_keystream(buf),
+        32 => ctr::Ctr32BE::<Aes256>::new_from_slices(key, block)
+            .map_err(key_err)?
+            .apply_keystream(buf),
+        _ => {
+            return Err(PacketError::InvalidHeader(
+                "ESP CTR: unsupported key length",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Apply AES-CTR as used by ESP to `buf` (encryption and decryption are the
+/// same operation).
+///
+/// RFC 3686, Section 4 — the counter block is Nonce(4) || IV(8) || Block
+/// Counter(4), and "The block counter begins with the value of one".
+/// <https://www.rfc-editor.org/rfc/rfc3686#section-4>
+#[cfg(any(feature = "decrypt", test))]
+fn aes_ctr_apply(
+    key: &[u8],
+    nonce: &[u8; 4],
+    iv: &[u8; 8],
+    buf: &mut [u8],
+) -> Result<(), PacketError> {
+    let mut block = [0u8; 16];
+    block[..4].copy_from_slice(nonce);
+    block[4..12].copy_from_slice(iv);
+    block[15] = 1;
+    aes_ctr_keystream(key, &block, buf)
+}
+
+/// AES-CTR decryption.
+///
+/// RFC 3686, Section 3: <https://www.rfc-editor.org/rfc/rfc3686#section-3>
+/// Layout: [IV(8)] [ciphertext(N)] [ICV(auth_icv_len)]
+#[cfg(any(feature = "decrypt", test))]
+fn decrypt_ctr(sa: &EspSa, nonce: &[u8; 4], data: &[u8]) -> Result<DecryptedEsp, PacketError> {
+    const CTR_IV_LEN: usize = 8;
+    let icv_len = sa.authentication.icv_len();
+    if data.len() < CTR_IV_LEN + 2 + icv_len {
+        return Err(PacketError::InvalidHeader(
+            "ESP CTR: data too short for IV + trailer + ICV",
+        ));
+    }
+    let mut iv = [0u8; CTR_IV_LEN];
+    iv.copy_from_slice(&data[..CTR_IV_LEN]);
+    let mut buf = data[CTR_IV_LEN..data.len() - icv_len].to_vec();
+    aes_ctr_apply(&sa.enc_key, nonce, &iv, &mut buf)?;
+    extract_trailer(buf, icv_len)
+}
+
+/// Decrypt with an AEAD cipher `C`, returning the plaintext.
+#[cfg(any(feature = "decrypt", test))]
+fn aead_open<C>(key: &[u8], nonce: &[u8], msg: &[u8], aad: &[u8]) -> Result<Vec<u8>, PacketError>
+where
+    C: aes_gcm::aead::KeyInit + aes_gcm::aead::Aead,
+{
+    use aes_gcm::aead::Payload;
+
+    let cipher =
+        C::new_from_slice(key).map_err(|_| PacketError::InvalidHeader("ESP AEAD key error"))?;
+    let nonce = aes_gcm::aead::Nonce::<C>::try_from(nonce)
+        .map_err(|_| PacketError::InvalidHeader("ESP AEAD nonce error"))?;
+    cipher
+        .decrypt(&nonce, Payload { msg, aad })
+        .map_err(|_| PacketError::InvalidHeader("ESP AEAD decrypt error"))
+}
+
+/// Split `[IV(8) | ciphertext | ICV]` and build the nonce `salt || IV`.
+///
+/// Returns the nonce buffer, its length and the `ciphertext || ICV` slice.
+#[cfg(any(feature = "decrypt", test))]
+fn aead_split<'a>(
+    salt: &[u8],
+    icv_len: usize,
+    data: &'a [u8],
+) -> Result<([u8; 12], usize, &'a [u8]), PacketError> {
+    const AEAD_IV_LEN: usize = 8;
+    if data.len() < AEAD_IV_LEN + 2 + icv_len {
+        return Err(PacketError::InvalidHeader(
+            "ESP AEAD: data too short for IV + trailer + ICV",
+        ));
+    }
+    let mut nonce = [0u8; 12];
+    nonce[..salt.len()].copy_from_slice(salt);
+    nonce[salt.len()..salt.len() + AEAD_IV_LEN].copy_from_slice(&data[..AEAD_IV_LEN]);
+    Ok((nonce, salt.len() + AEAD_IV_LEN, &data[AEAD_IV_LEN..]))
+}
+
 /// AES-GCM decryption.
 ///
 /// RFC 4106, Section 3: <https://www.rfc-editor.org/rfc/rfc4106#section-3>
-/// Layout: [IV(8)] [ciphertext(N)] [ICV(16)]
-/// Nonce = salt(4) || IV(8) = 12 bytes
-/// AAD = SPI(4) || Seq(4) = 8 bytes
+/// Layout: [IV(8)] [ciphertext(N)] [ICV(8/12/16)]
+/// Nonce = salt(4) || IV(8) = 12 bytes; AAD per [`build_aad`].
 #[cfg(any(feature = "decrypt", test))]
 fn decrypt_gcm(
     sa: &EspSa,
-    spi: u32,
-    seq: u32,
+    aad: &[u8],
     salt: &[u8; 4],
+    icv_len: AeadIcvLen,
     data: &[u8],
 ) -> Result<DecryptedEsp, PacketError> {
-    use aes_gcm::aead::Aead;
-    use aes_gcm::aead::KeyInit;
-    use aes_gcm::aead::Payload;
-    use aes_gcm::aes::Aes192;
-    use aes_gcm::aes::cipher::consts::U12;
-    use aes_gcm::{Aes128Gcm, Aes256Gcm, AesGcm, Nonce};
+    use aes_gcm::AesGcm;
+    use aes_gcm::aes::cipher::consts::{U12, U16};
+    use aes_gcm::aes::{Aes128, Aes192, Aes256};
 
     // RFC 4106, Section 8.1 explicitly defines AES-192-GCM (24-byte key +
     // 4-byte salt), but `aes-gcm` only ships type aliases for AES-128 and
-    // AES-256. AES-192-GCM is constructed from the generic `AesGcm` type,
-    // sourced from the `aes` crate re-exported by `aes-gcm` to ensure the
-    // trait bounds line up with the internally-pinned `aes` version.
+    // AES-256, so every variant is built from the generic `AesGcm` type.
     // <https://www.rfc-editor.org/rfc/rfc4106#section-8.1>
-    type Aes192Gcm = AesGcm<Aes192, U12>;
+    let (nonce, nonce_len, body) = aead_split(salt, icv_len.octets(), data)?;
+    let nonce = &nonce[..nonce_len];
+    let key = &sa.enc_key;
 
-    const GCM_IV_LEN: usize = 8;
-    // RFC 4106, Section 6 — implementations MUST support 16-octet ICV.
-    // 8- and 12-octet ICVs are optional and not supported here.
-    // <https://www.rfc-editor.org/rfc/rfc4106#section-6>
-    const GCM_TAG_LEN: usize = 16;
-
-    if data.len() < GCM_IV_LEN + GCM_TAG_LEN + 2 {
-        return Err(PacketError::InvalidHeader(
-            "ESP GCM: data too short for IV + ciphertext + tag",
-        ));
-    }
-
-    let iv = &data[..GCM_IV_LEN];
-
-    // RFC 4106, Section 3 — nonce = salt(4) || IV(8)
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[..4].copy_from_slice(salt);
-    nonce_bytes[4..12].copy_from_slice(iv);
-    let nonce = &Nonce::from(nonce_bytes);
-
-    // RFC 4106, Section 5 — AAD = SPI(4) || Seq(4)
-    let mut aad = [0u8; 8];
-    aad[..4].copy_from_slice(&spi.to_be_bytes());
-    aad[4..].copy_from_slice(&seq.to_be_bytes());
-
-    // ciphertext + tag (GCM decryption expects them concatenated)
-    let ciphertext_and_tag = &data[GCM_IV_LEN..];
-
-    let payload = Payload {
-        msg: ciphertext_and_tag,
-        aad: &aad,
-    };
-
-    let plaintext = match sa.enc_key.len() {
-        16 => {
-            let cipher = Aes128Gcm::new_from_slice(&sa.enc_key)
-                .map_err(|_| PacketError::InvalidHeader("ESP GCM key error"))?;
-            cipher
-                .decrypt(nonce, payload)
-                .map_err(|_| PacketError::InvalidHeader("ESP AES-128-GCM decrypt error"))?
-        }
-        24 => {
-            let cipher = Aes192Gcm::new_from_slice(&sa.enc_key)
-                .map_err(|_| PacketError::InvalidHeader("ESP GCM key error"))?;
-            cipher
-                .decrypt(nonce, payload)
-                .map_err(|_| PacketError::InvalidHeader("ESP AES-192-GCM decrypt error"))?
-        }
-        32 => {
-            let cipher = Aes256Gcm::new_from_slice(&sa.enc_key)
-                .map_err(|_| PacketError::InvalidHeader("ESP GCM key error"))?;
-            cipher
-                .decrypt(nonce, payload)
-                .map_err(|_| PacketError::InvalidHeader("ESP AES-256-GCM decrypt error"))?
-        }
+    let plaintext = match (key.len(), icv_len) {
+        (16, AeadIcvLen::Octets16) => aead_open::<AesGcm<Aes128, U12, U16>>(key, nonce, body, aad)?,
+        (24, AeadIcvLen::Octets16) => aead_open::<AesGcm<Aes192, U12, U16>>(key, nonce, body, aad)?,
+        (32, AeadIcvLen::Octets16) => aead_open::<AesGcm<Aes256, U12, U16>>(key, nonce, body, aad)?,
+        (16, AeadIcvLen::Octets12) => aead_open::<AesGcm<Aes128, U12, U12>>(key, nonce, body, aad)?,
+        (24, AeadIcvLen::Octets12) => aead_open::<AesGcm<Aes192, U12, U12>>(key, nonce, body, aad)?,
+        (32, AeadIcvLen::Octets12) => aead_open::<AesGcm<Aes256, U12, U12>>(key, nonce, body, aad)?,
+        (16 | 24 | 32, AeadIcvLen::Octets8) => gcm_open_icv8(key, nonce, body, aad)?,
         _ => {
             return Err(PacketError::InvalidHeader(
                 "ESP GCM: unsupported key length",
@@ -539,7 +975,126 @@ fn decrypt_gcm(
         }
     };
 
-    extract_trailer(plaintext, GCM_TAG_LEN)
+    extract_trailer(plaintext, icv_len.octets())
+}
+
+/// AES-GCM with an 8-octet ICV, which `aes-gcm` does not support.
+///
+/// A truncated GCM tag is the leftmost bits of the full tag (NIST SP
+/// 800-38D, Section 5.2.1.2), and GCM encrypts with the counter mode
+/// keystream that starts at inc32(J0) = IV || 0x00000002 for a 96-bit IV
+/// (Section 7.1). The ciphertext is therefore decrypted with AES-CTR, the
+/// full tag is recomputed by re-encrypting the plaintext with the 16-octet
+/// tag variant, and its leftmost 8 octets are compared with the ICV.
+/// <https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf>
+#[cfg(any(feature = "decrypt", test))]
+fn gcm_open_icv8(
+    key: &[u8],
+    nonce: &[u8],
+    body: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, PacketError> {
+    use aes_gcm::AesGcm;
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use aes_gcm::aes::cipher::consts::{U12, U16};
+    use aes_gcm::aes::{Aes128, Aes192, Aes256};
+
+    const TAG_LEN: usize = 8;
+    let (ciphertext, tag) = body.split_at(body.len() - TAG_LEN);
+    let mut block = [0u8; 16];
+    block[..12].copy_from_slice(nonce);
+    block[15] = 2;
+    let mut plaintext = ciphertext.to_vec();
+    aes_ctr_keystream(key, &block, &mut plaintext)?;
+
+    fn seal<C: KeyInit + Aead>(
+        key: &[u8],
+        nonce: &[u8],
+        msg: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, PacketError> {
+        let cipher =
+            C::new_from_slice(key).map_err(|_| PacketError::InvalidHeader("ESP GCM key error"))?;
+        let nonce = aes_gcm::aead::Nonce::<C>::try_from(nonce)
+            .map_err(|_| PacketError::InvalidHeader("ESP GCM nonce error"))?;
+        cipher
+            .encrypt(&nonce, Payload { msg, aad })
+            .map_err(|_| PacketError::InvalidHeader("ESP GCM tag error"))
+    }
+    let sealed = match key.len() {
+        16 => seal::<AesGcm<Aes128, U12, U16>>(key, nonce, &plaintext, aad)?,
+        24 => seal::<AesGcm<Aes192, U12, U16>>(key, nonce, &plaintext, aad)?,
+        _ => seal::<AesGcm<Aes256, U12, U16>>(key, nonce, &plaintext, aad)?,
+    };
+    let full_tag = &sealed[plaintext.len()..];
+    if full_tag[..TAG_LEN] != *tag {
+        return Err(PacketError::InvalidHeader("ESP AEAD decrypt error"));
+    }
+    Ok(plaintext)
+}
+
+/// AES-CCM decryption.
+///
+/// RFC 4309, Sections 3-5: <https://www.rfc-editor.org/rfc/rfc4309#section-4>
+/// Layout: [IV(8)] [ciphertext(N)] [ICV(8/12/16)]
+/// Nonce = salt(3) || IV(8) = 11 bytes; AAD per [`build_aad`].
+#[cfg(any(feature = "decrypt", test))]
+fn decrypt_ccm(
+    sa: &EspSa,
+    aad: &[u8],
+    salt: &[u8; 3],
+    icv_len: AeadIcvLen,
+    data: &[u8],
+) -> Result<DecryptedEsp, PacketError> {
+    use aes::{Aes128, Aes192, Aes256};
+    use ccm::Ccm;
+    use ccm::consts::{U8, U11, U12, U16};
+
+    let (nonce, nonce_len, body) = aead_split(salt, icv_len.octets(), data)?;
+    let nonce = &nonce[..nonce_len];
+    let key = &sa.enc_key;
+
+    let plaintext = match (key.len(), icv_len) {
+        (16, AeadIcvLen::Octets8) => aead_open::<Ccm<Aes128, U8, U11>>(key, nonce, body, aad)?,
+        (16, AeadIcvLen::Octets12) => aead_open::<Ccm<Aes128, U12, U11>>(key, nonce, body, aad)?,
+        (16, AeadIcvLen::Octets16) => aead_open::<Ccm<Aes128, U16, U11>>(key, nonce, body, aad)?,
+        (24, AeadIcvLen::Octets8) => aead_open::<Ccm<Aes192, U8, U11>>(key, nonce, body, aad)?,
+        (24, AeadIcvLen::Octets12) => aead_open::<Ccm<Aes192, U12, U11>>(key, nonce, body, aad)?,
+        (24, AeadIcvLen::Octets16) => aead_open::<Ccm<Aes192, U16, U11>>(key, nonce, body, aad)?,
+        (32, AeadIcvLen::Octets8) => aead_open::<Ccm<Aes256, U8, U11>>(key, nonce, body, aad)?,
+        (32, AeadIcvLen::Octets12) => aead_open::<Ccm<Aes256, U12, U11>>(key, nonce, body, aad)?,
+        (32, AeadIcvLen::Octets16) => aead_open::<Ccm<Aes256, U16, U11>>(key, nonce, body, aad)?,
+        _ => {
+            return Err(PacketError::InvalidHeader(
+                "ESP CCM: unsupported key length",
+            ));
+        }
+    };
+
+    extract_trailer(plaintext, icv_len.octets())
+}
+
+/// ChaCha20-Poly1305 decryption.
+///
+/// RFC 7634, Section 2: <https://www.rfc-editor.org/rfc/rfc7634#section-2>
+/// Layout: [IV(8)] [ciphertext(N)] [ICV(16)]
+/// Nonce = salt(4) || IV(8) = 12 bytes; AAD per [`build_aad`].
+#[cfg(any(feature = "decrypt", test))]
+fn decrypt_chacha20_poly1305(
+    sa: &EspSa,
+    aad: &[u8],
+    salt: &[u8; 4],
+    data: &[u8],
+) -> Result<DecryptedEsp, PacketError> {
+    const TAG_LEN: usize = 16;
+    let (nonce, nonce_len, body) = aead_split(salt, TAG_LEN, data)?;
+    let plaintext = aead_open::<chacha20poly1305::ChaCha20Poly1305>(
+        &sa.enc_key,
+        &nonce[..nonce_len],
+        body,
+        aad,
+    )?;
+    extract_trailer(plaintext, TAG_LEN)
 }
 
 /// Extract padding, pad_length, and next_header from decrypted plaintext.
@@ -577,109 +1132,173 @@ fn extract_trailer(mut plaintext: Vec<u8>, icv_len: usize) -> Result<DecryptedEs
     })
 }
 
+/// Split `key` into an encryption key of `key_len` bytes and an `N`-byte
+/// salt / nonce that follows it, checking the total length.
+fn split_keymat<const N: usize>(
+    name: &str,
+    key: &[u8],
+    key_len: usize,
+    what: &str,
+) -> Result<[u8; N], String> {
+    if key.len() != key_len + N {
+        return Err(format!(
+            "{name} requires {}-byte key ({key_len} enc + {N} {what}), got {}",
+            key_len + N,
+            key.len()
+        ));
+    }
+    let mut salt = [0u8; N];
+    salt.copy_from_slice(&key[key_len..]);
+    Ok(salt)
+}
+
 /// Parse an encryption algorithm name string.
 ///
 /// Returns an [`EncryptionAlgorithm`] if the name is recognized and the key length
 /// in `key` matches the requirements for that algorithm, otherwise returns an
 /// error message.
+///
+/// Recognized names:
+/// - `null`, `3des-cbc`, `aes-{128,192,256}-cbc`
+/// - `aes-{128,192,256}-gcm[-8|-12|-16]` (key + 4-byte salt, RFC 4106,
+///   Section 8.1; the default ICV is 16 octets)
+/// - `aes-{128,192,256}-ccm-{8,12,16}` (key + 3-byte salt, RFC 4309,
+///   Section 7.1)
+/// - `aes-{128,192,256}-ctr` (key + 4-byte nonce, RFC 3686, Section 5.1)
+/// - `chacha20-poly1305` (32-byte key + 4-byte salt, RFC 7634, Section 3)
+/// - `aes-{128,192,256}-gmac` (key + 4-byte salt, RFC 4543, Section 5.4)
+///
+/// <https://www.rfc-editor.org/rfc/rfc4106>
+/// <https://www.rfc-editor.org/rfc/rfc4309>
+/// <https://www.rfc-editor.org/rfc/rfc3686#section-5.1>
+/// <https://www.rfc-editor.org/rfc/rfc7634>
+/// <https://www.rfc-editor.org/rfc/rfc4543#section-5.4>
 pub fn parse_encryption_algorithm(name: &str, key: &[u8]) -> Result<EncryptionAlgorithm, String> {
+    let exact = |len: usize| {
+        if key.len() == len {
+            Ok(())
+        } else {
+            Err(format!("{name} requires {len}-byte key, got {}", key.len()))
+        }
+    };
+    let aes_key_len = |bits: &str| match bits {
+        "128" => Some(16),
+        "192" => Some(24),
+        "256" => Some(32),
+        _ => None,
+    };
     match name {
-        "null" => Ok(EncryptionAlgorithm::Null),
-        "aes-128-cbc" => {
-            if key.len() != 16 {
-                return Err(format!(
-                    "aes-128-cbc requires 16-byte key, got {}",
-                    key.len()
-                ));
-            }
-            Ok(EncryptionAlgorithm::Aes128Cbc)
+        "null" => return Ok(EncryptionAlgorithm::Null),
+        "3des-cbc" => {
+            exact(24)?;
+            return Ok(EncryptionAlgorithm::TripleDesCbc);
         }
-        "aes-192-cbc" => {
-            if key.len() != 24 {
-                return Err(format!(
-                    "aes-192-cbc requires 24-byte key, got {}",
-                    key.len()
-                ));
-            }
-            Ok(EncryptionAlgorithm::Aes192Cbc)
+        "chacha20-poly1305" => {
+            let salt = split_keymat::<4>(name, key, 32, "salt")?;
+            return Ok(EncryptionAlgorithm::ChaCha20Poly1305 { salt });
         }
-        "aes-256-cbc" => {
-            if key.len() != 32 {
-                return Err(format!(
-                    "aes-256-cbc requires 32-byte key, got {}",
-                    key.len()
-                ));
-            }
-            Ok(EncryptionAlgorithm::Aes256Cbc)
-        }
-        "aes-128-gcm" => {
-            // RFC 4106: key = 16 bytes enc_key + 4 bytes salt = 20 bytes total
-            if key.len() != 20 {
-                return Err(format!(
-                    "aes-128-gcm requires 20-byte key (16 enc + 4 salt), got {}",
-                    key.len()
-                ));
-            }
-            let mut salt = [0u8; 4];
-            salt.copy_from_slice(&key[16..20]);
-            Ok(EncryptionAlgorithm::Aes128Gcm { salt })
-        }
-        "aes-192-gcm" => {
-            // RFC 4106, Section 8.1: key = 24 bytes enc_key + 4 bytes salt = 28 bytes total.
-            // <https://www.rfc-editor.org/rfc/rfc4106#section-8.1>
-            if key.len() != 28 {
-                return Err(format!(
-                    "aes-192-gcm requires 28-byte key (24 enc + 4 salt), got {}",
-                    key.len()
-                ));
-            }
-            let mut salt = [0u8; 4];
-            salt.copy_from_slice(&key[24..28]);
-            Ok(EncryptionAlgorithm::Aes192Gcm { salt })
-        }
-        "aes-256-gcm" => {
-            // RFC 4106: key = 32 bytes enc_key + 4 bytes salt = 36 bytes total
-            if key.len() != 36 {
-                return Err(format!(
-                    "aes-256-gcm requires 36-byte key (32 enc + 4 salt), got {}",
-                    key.len()
-                ));
-            }
-            let mut salt = [0u8; 4];
-            salt.copy_from_slice(&key[32..36]);
-            Ok(EncryptionAlgorithm::Aes256Gcm { salt })
-        }
-        _ => Err(format!("unknown encryption algorithm: {name}")),
+        _ => {}
     }
+
+    // aes-<bits>-<mode>[-<icv octets>]
+    let mut parts = name.split('-');
+    let (Some("aes"), Some(bits), Some(mode)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(format!("unknown encryption algorithm: {name}"));
+    };
+    let icv = parts.next();
+    let Some(key_len) = aes_key_len(bits) else {
+        return Err(format!("unknown encryption algorithm: {name}"));
+    };
+    if parts.next().is_some() {
+        return Err(format!("unknown encryption algorithm: {name}"));
+    }
+    let icv_len = match (mode, icv) {
+        ("gcm", None) => Some(AeadIcvLen::Octets16),
+        ("gcm" | "ccm", Some("8")) => Some(AeadIcvLen::Octets8),
+        ("gcm" | "ccm", Some("12")) => Some(AeadIcvLen::Octets12),
+        ("gcm" | "ccm", Some("16")) => Some(AeadIcvLen::Octets16),
+        ("cbc" | "ctr" | "gmac", None) => None,
+        _ => return Err(format!("unknown encryption algorithm: {name}")),
+    };
+    let alg = match (mode, key_len, icv_len) {
+        ("cbc", 16, _) => {
+            exact(16)?;
+            EncryptionAlgorithm::Aes128Cbc
+        }
+        ("cbc", 24, _) => {
+            exact(24)?;
+            EncryptionAlgorithm::Aes192Cbc
+        }
+        ("cbc", _, _) => {
+            exact(32)?;
+            EncryptionAlgorithm::Aes256Cbc
+        }
+        ("gcm", _, Some(icv_len)) => {
+            let salt = split_keymat::<4>(name, key, key_len, "salt")?;
+            match key_len {
+                16 => EncryptionAlgorithm::Aes128Gcm { salt, icv_len },
+                24 => EncryptionAlgorithm::Aes192Gcm { salt, icv_len },
+                _ => EncryptionAlgorithm::Aes256Gcm { salt, icv_len },
+            }
+        }
+        ("ccm", _, Some(icv_len)) => {
+            let salt = split_keymat::<3>(name, key, key_len, "salt")?;
+            match key_len {
+                16 => EncryptionAlgorithm::Aes128Ccm { salt, icv_len },
+                24 => EncryptionAlgorithm::Aes192Ccm { salt, icv_len },
+                _ => EncryptionAlgorithm::Aes256Ccm { salt, icv_len },
+            }
+        }
+        ("ctr", _, _) => {
+            let nonce = split_keymat::<4>(name, key, key_len, "nonce")?;
+            match key_len {
+                16 => EncryptionAlgorithm::Aes128Ctr { nonce },
+                24 => EncryptionAlgorithm::Aes192Ctr { nonce },
+                _ => EncryptionAlgorithm::Aes256Ctr { nonce },
+            }
+        }
+        _ => {
+            // "gmac"
+            let salt = split_keymat::<4>(name, key, key_len, "salt")?;
+            match key_len {
+                16 => EncryptionAlgorithm::Aes128Gmac { salt },
+                24 => EncryptionAlgorithm::Aes192Gmac { salt },
+                _ => EncryptionAlgorithm::Aes256Gmac { salt },
+            }
+        }
+    };
+    Ok(alg)
 }
 
 /// Parse an authentication algorithm name string.
+///
+/// Recognized names: `none`, `hmac-md5-96` (16-byte key, RFC 2403),
+/// `hmac-sha1-96` (20, RFC 2404), `hmac-sha256-128` (32),
+/// `hmac-sha384-192` (48) and `hmac-sha512-256` (64) (RFC 4868,
+/// Section 2.1.1).
+/// <https://www.rfc-editor.org/rfc/rfc2403>
+/// <https://www.rfc-editor.org/rfc/rfc2404>
+/// <https://www.rfc-editor.org/rfc/rfc4868>
 pub fn parse_authentication_algorithm(
     name: &str,
     key: &[u8],
 ) -> Result<AuthenticationAlgorithm, String> {
-    match name {
-        "none" => Ok(AuthenticationAlgorithm::None),
-        "hmac-sha1-96" => {
-            if key.len() != 20 {
-                return Err(format!(
-                    "hmac-sha1-96 requires 20-byte key, got {}",
-                    key.len()
-                ));
-            }
-            Ok(AuthenticationAlgorithm::HmacSha1_96)
-        }
-        "hmac-sha256-128" => {
-            if key.len() != 32 {
-                return Err(format!(
-                    "hmac-sha256-128 requires 32-byte key, got {}",
-                    key.len()
-                ));
-            }
-            Ok(AuthenticationAlgorithm::HmacSha256_128)
-        }
-        _ => Err(format!("unknown authentication algorithm: {name}")),
+    let (alg, key_len) = match name {
+        "none" => return Ok(AuthenticationAlgorithm::None),
+        "hmac-md5-96" => (AuthenticationAlgorithm::HmacMd5_96, 16),
+        "hmac-sha1-96" => (AuthenticationAlgorithm::HmacSha1_96, 20),
+        "hmac-sha256-128" => (AuthenticationAlgorithm::HmacSha256_128, 32),
+        "hmac-sha384-192" => (AuthenticationAlgorithm::HmacSha384_192, 48),
+        "hmac-sha512-256" => (AuthenticationAlgorithm::HmacSha512_256, 64),
+        _ => return Err(format!("unknown authentication algorithm: {name}")),
+    };
+    if key.len() != key_len {
+        return Err(format!(
+            "{name} requires {key_len}-byte key, got {}",
+            key.len()
+        ));
     }
+    Ok(alg)
 }
 
 #[cfg(test)]
@@ -729,6 +1348,7 @@ mod tests {
             enc_key: vec![],
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
         let data = [0x45, 0x00, 0x00, 0x04]; // payload + trailer, no ICV
         let result = decrypt_esp(&sa, 1, 1, &data).unwrap();
@@ -743,6 +1363,7 @@ mod tests {
             enc_key: vec![],
             authentication: AuthenticationAlgorithm::HmacSha1_96,
             auth_key: vec![0; 20],
+            esn: None,
         };
         // payload + trailer + 12-byte ICV
         let mut data = vec![0x45, 0x00, 0x00, 0x04];
@@ -783,6 +1404,7 @@ mod tests {
             enc_key: key.to_vec(),
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let result = decrypt_esp(&sa, 1, 1, &data).unwrap();
@@ -836,10 +1458,14 @@ mod tests {
         full_key.extend_from_slice(&salt);
 
         let sa = EspSa {
-            encryption: EncryptionAlgorithm::Aes128Gcm { salt },
+            encryption: EncryptionAlgorithm::Aes128Gcm {
+                salt,
+                icv_len: AeadIcvLen::Octets16,
+            },
             enc_key: enc_key.to_vec(),
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let result = decrypt_esp(&sa, spi, seq, &data).unwrap();
@@ -960,6 +1586,7 @@ mod tests {
             enc_key: key.to_vec(),
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let result = decrypt_esp(&sa, 1, 1, &data).unwrap();
@@ -995,6 +1622,7 @@ mod tests {
             enc_key: key.to_vec(),
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let result = decrypt_esp(&sa, 1, 1, &data).unwrap();
@@ -1047,10 +1675,14 @@ mod tests {
         data.extend_from_slice(&ciphertext_and_tag);
 
         let sa = EspSa {
-            encryption: EncryptionAlgorithm::Aes192Gcm { salt },
+            encryption: EncryptionAlgorithm::Aes192Gcm {
+                salt,
+                icv_len: AeadIcvLen::Octets16,
+            },
             enc_key: enc_key.to_vec(),
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let result = decrypt_esp(&sa, spi, seq, &data).unwrap();
@@ -1096,10 +1728,14 @@ mod tests {
         data.extend_from_slice(&ciphertext_and_tag);
 
         let sa = EspSa {
-            encryption: EncryptionAlgorithm::Aes256Gcm { salt },
+            encryption: EncryptionAlgorithm::Aes256Gcm {
+                salt,
+                icv_len: AeadIcvLen::Octets16,
+            },
             enc_key: enc_key.to_vec(),
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let result = decrypt_esp(&sa, spi, seq, &data).unwrap();
@@ -1121,6 +1757,7 @@ mod tests {
             enc_key: key.to_vec(),
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let err = decrypt_esp(&sa, 1, 1, &data).unwrap_err();
@@ -1138,6 +1775,7 @@ mod tests {
             enc_key: vec![0; 10], // wrong key length
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let err = decrypt_esp(&sa, 1, 1, &data).unwrap_err();
@@ -1152,10 +1790,14 @@ mod tests {
         data.extend_from_slice(&[0xAA; 18]); // need at least 16 tag + 2 trailer
 
         let sa = EspSa {
-            encryption: EncryptionAlgorithm::Aes128Gcm { salt },
+            encryption: EncryptionAlgorithm::Aes128Gcm {
+                salt,
+                icv_len: AeadIcvLen::Octets16,
+            },
             enc_key: vec![0; 24], // wrong key length (not 16 or 32)
             authentication: AuthenticationAlgorithm::None,
             auth_key: vec![],
+            esn: None,
         };
 
         let err = decrypt_esp(&sa, 1, 1, &data).unwrap_err();
@@ -1169,6 +1811,7 @@ mod tests {
             enc_key: vec![],
             authentication: AuthenticationAlgorithm::HmacSha256_128,
             auth_key: vec![0; 32],
+            esn: None,
         };
         // payload + trailer + 16-byte ICV
         let mut data = vec![0x45, 0x00, 0x00, 0x04];
@@ -1184,18 +1827,57 @@ mod tests {
         assert_eq!(EncryptionAlgorithm::Aes128Cbc.iv_len(), 16);
         assert_eq!(EncryptionAlgorithm::Aes192Cbc.iv_len(), 16);
         assert_eq!(EncryptionAlgorithm::Aes256Cbc.iv_len(), 16);
-        assert_eq!(EncryptionAlgorithm::Aes128Gcm { salt: [0; 4] }.iv_len(), 8);
-        assert_eq!(EncryptionAlgorithm::Aes192Gcm { salt: [0; 4] }.iv_len(), 8);
-        assert_eq!(EncryptionAlgorithm::Aes256Gcm { salt: [0; 4] }.iv_len(), 8);
+        assert_eq!(
+            EncryptionAlgorithm::Aes128Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+            .iv_len(),
+            8
+        );
+        assert_eq!(
+            EncryptionAlgorithm::Aes192Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+            .iv_len(),
+            8
+        );
+        assert_eq!(
+            EncryptionAlgorithm::Aes256Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+            .iv_len(),
+            8
+        );
     }
 
     #[test]
     fn test_is_aead() {
         assert!(!EncryptionAlgorithm::Null.is_aead());
         assert!(!EncryptionAlgorithm::Aes128Cbc.is_aead());
-        assert!(EncryptionAlgorithm::Aes128Gcm { salt: [0; 4] }.is_aead());
-        assert!(EncryptionAlgorithm::Aes192Gcm { salt: [0; 4] }.is_aead());
-        assert!(EncryptionAlgorithm::Aes256Gcm { salt: [0; 4] }.is_aead());
+        assert!(
+            EncryptionAlgorithm::Aes128Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+            .is_aead()
+        );
+        assert!(
+            EncryptionAlgorithm::Aes192Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+            .is_aead()
+        );
+        assert!(
+            EncryptionAlgorithm::Aes256Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+            .is_aead()
+        );
     }
 
     #[test]
@@ -1442,5 +2124,516 @@ mod tests {
         let data = [0x45, 0x00, 0x00, 0x04];
         let result = try_null_decrypt(&data).unwrap();
         assert_eq!(result.icv_len, 0);
+    }
+
+    // ── ESN, AEAD ICV lengths and additional algorithms ────────────────────
+
+    /// Parse space-separated hex.
+    fn hex(s: &str) -> Vec<u8> {
+        s.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    fn sa(encryption: EncryptionAlgorithm, enc_key: &[u8], esn: Option<u32>) -> EspSa {
+        EspSa {
+            encryption,
+            enc_key: enc_key.to_vec(),
+            authentication: AuthenticationAlgorithm::None,
+            auth_key: vec![],
+            esn,
+        }
+    }
+
+    /// payload(4) + pad 1,2 + pad_length 2 + next_header 4 (IPv4).
+    const INNER: [u8; 8] = [0x45, 0x00, 0x00, 0x28, 0x01, 0x02, 0x02, 0x04];
+
+    /// AAD per RFC 4106, Section 5 (8 octets, or 12 with ESN).
+    fn aad(spi: u32, seq: u32, esn_high: Option<u32>) -> Vec<u8> {
+        let mut a = spi.to_be_bytes().to_vec();
+        if let Some(high) = esn_high {
+            a.extend_from_slice(&high.to_be_bytes());
+        }
+        a.extend_from_slice(&seq.to_be_bytes());
+        a
+    }
+
+    fn gcm_encrypt(key: &[u8], salt: [u8; 4], iv: [u8; 8], aad: &[u8], icv: usize) -> Vec<u8> {
+        use aes_gcm::aead::{Aead, KeyInit, Payload};
+        use aes_gcm::aes::Aes128;
+        use aes_gcm::aes::cipher::consts::{U12, U16};
+        use aes_gcm::{AesGcm, Nonce};
+        let mut n = [0u8; 12];
+        n[..4].copy_from_slice(&salt);
+        n[4..].copy_from_slice(&iv);
+        let nonce = &Nonce::from(n);
+        let p = Payload { msg: &INNER, aad };
+        let ct = match icv {
+            // aes-gcm has no 8-octet tag; a truncated GCM tag is the prefix
+            // of the full tag (NIST SP 800-38D, Section 5.2.1.2).
+            8 => {
+                let mut full = AesGcm::<Aes128, U12, U16>::new_from_slice(key)
+                    .unwrap()
+                    .encrypt(nonce, p)
+                    .unwrap();
+                full.truncate(full.len() - 8);
+                full
+            }
+            12 => AesGcm::<Aes128, U12, U12>::new_from_slice(key)
+                .unwrap()
+                .encrypt(nonce, p)
+                .unwrap(),
+            _ => AesGcm::<Aes128, U12, U16>::new_from_slice(key)
+                .unwrap()
+                .encrypt(nonce, p)
+                .unwrap(),
+        };
+        [iv.to_vec(), ct].concat()
+    }
+
+    #[test]
+    fn test_gcm_esn_aad() {
+        // RFC 4106, Section 5 — with ESN the AAD is SPI || ESN (high || low).
+        // <https://www.rfc-editor.org/rfc/rfc4106#section-5>
+        let key = [0x21u8; 16];
+        let salt = [1, 2, 3, 4];
+        for high in [0u32, 1] {
+            let data = gcm_encrypt(&key, salt, [9; 8], &aad(0x100, 7, Some(high)), 16);
+            let alg = EncryptionAlgorithm::Aes128Gcm {
+                salt,
+                icv_len: AeadIcvLen::Octets16,
+            };
+            let ok = decrypt_esp(&sa(alg.clone(), &key, Some(high)), 0x100, 7, &data).unwrap();
+            assert_eq!(ok.payload, INNER[..4].to_vec());
+            assert_eq!(ok.pad_length, 2);
+            // Without ESN (8-octet AAD) the tag check fails.
+            assert!(decrypt_esp(&sa(alg, &key, None), 0x100, 7, &data).is_err());
+        }
+    }
+
+    #[test]
+    fn test_gcm_short_icv() {
+        // RFC 4106, Section 6 — 8- and 12-octet ICVs.
+        // <https://www.rfc-editor.org/rfc/rfc4106#section-6>
+        let key = [0x22u8; 16];
+        let salt = [5, 6, 7, 8];
+        for (icv, len) in [(8, AeadIcvLen::Octets8), (12, AeadIcvLen::Octets12)] {
+            let data = gcm_encrypt(&key, salt, [3; 8], &aad(0x200, 1, None), icv);
+            let alg = EncryptionAlgorithm::Aes128Gcm { salt, icv_len: len };
+            let out = decrypt_esp(&sa(alg, &key, None), 0x200, 1, &data).unwrap();
+            assert_eq!(out.payload, INNER[..4].to_vec());
+            assert_eq!(out.icv_len, icv);
+            // A corrupted ICV is rejected.
+            let mut bad = data.clone();
+            *bad.last_mut().unwrap() ^= 1;
+            let alg = EncryptionAlgorithm::Aes128Gcm { salt, icv_len: len };
+            assert!(decrypt_esp(&sa(alg, &key, None), 0x200, 1, &bad).is_err());
+        }
+        // GCM-8 with AES-192/256 keys and a bad key length.
+        for key in [vec![0x23u8; 24], vec![0x24u8; 32]] {
+            use aes_gcm::AesGcm;
+            use aes_gcm::aead::{Aead, KeyInit, Payload};
+            use aes_gcm::aes::cipher::consts::{U12, U16};
+            use aes_gcm::aes::{Aes192, Aes256};
+            let mut n = [0u8; 12];
+            n[..4].copy_from_slice(&salt);
+            n[4..].copy_from_slice(&[3; 8]);
+            let a = aad(0x200, 1, None);
+            let p = Payload {
+                msg: &INNER,
+                aad: &a,
+            };
+            let mut ct = if key.len() == 24 {
+                AesGcm::<Aes192, U12, U16>::new_from_slice(&key)
+                    .unwrap()
+                    .encrypt(&n.into(), p)
+            } else {
+                AesGcm::<Aes256, U12, U16>::new_from_slice(&key)
+                    .unwrap()
+                    .encrypt(&n.into(), p)
+            }
+            .unwrap();
+            ct.truncate(ct.len() - 8);
+            let data = [vec![3; 8], ct].concat();
+            let alg = if key.len() == 24 {
+                EncryptionAlgorithm::Aes192Gcm {
+                    salt,
+                    icv_len: AeadIcvLen::Octets8,
+                }
+            } else {
+                EncryptionAlgorithm::Aes256Gcm {
+                    salt,
+                    icv_len: AeadIcvLen::Octets8,
+                }
+            };
+            let out = decrypt_esp(&sa(alg, &key, None), 0x200, 1, &data).unwrap();
+            assert_eq!(out.payload, INNER[..4].to_vec());
+        }
+        let alg = EncryptionAlgorithm::Aes128Gcm {
+            salt,
+            icv_len: AeadIcvLen::Octets8,
+        };
+        assert!(decrypt_esp(&sa(alg, &[0; 20], None), 1, 1, &[0; 30]).is_err());
+        let alg = EncryptionAlgorithm::Aes128Ccm {
+            salt: [0; 3],
+            icv_len: AeadIcvLen::Octets8,
+        };
+        assert!(decrypt_esp(&sa(alg, &[0; 20], None), 1, 1, &[0; 30]).is_err());
+        let alg = EncryptionAlgorithm::Aes128Ctr { nonce: [0; 4] };
+        assert!(decrypt_esp(&sa(alg.clone(), &[0; 16], None), 1, 1, &[0; 9]).is_err());
+        assert!(decrypt_esp(&sa(alg, &[0; 20], None), 1, 1, &[0; 20]).is_err());
+        // Key size must match the algorithm variant.
+        let alg = EncryptionAlgorithm::Aes128Gcm {
+            salt,
+            icv_len: AeadIcvLen::Octets16,
+        };
+        assert!(decrypt_esp(&sa(alg, &[0; 32], None), 1, 1, &[0; 40]).is_err());
+        assert_eq!(EncryptionAlgorithm::Null.key_len(), None);
+        assert_eq!(EncryptionAlgorithm::TripleDesCbc.key_len(), Some(24));
+        assert!(
+            decrypt_esp(
+                &sa(EncryptionAlgorithm::TripleDesCbc, &[0; 16], None),
+                1,
+                1,
+                &[0; 24]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_chacha20_poly1305_rfc7634_appendix_a() {
+        // RFC 7634, Appendix A — ESP example.
+        // <https://www.rfc-editor.org/rfc/rfc7634#appendix-A>
+        let keymat = hex("80 81 82 83 84 85 86 87 88 89 8a 8b 8c 8d 8e 8f \
+             90 91 92 93 94 95 96 97 98 99 9a 9b 9c 9d 9e 9f a0 a1 a2 a3");
+        let alg = parse_encryption_algorithm("chacha20-poly1305", &keymat).unwrap();
+        assert_eq!(
+            alg,
+            EncryptionAlgorithm::ChaCha20Poly1305 {
+                salt: [0xa0, 0xa1, 0xa2, 0xa3]
+            }
+        );
+        let esp_payload = hex(
+            "10 11 12 13 14 15 16 17 24 03 94 28 b9 7f 41 7e 3c 13 75 3a \
+             4f 05 08 7b 67 c3 52 e6 a7 fa b1 b9 82 d4 66 ef 40 7a e5 c6 \
+             14 ee 80 99 d5 28 44 eb 61 aa 95 df ab 4c 02 f7 2a a7 1e 7c \
+             4c 4f 64 c9 be fe 2f ac c6 38 e8 f3 cb ec 16 3f ac 46 9b 50 \
+             27 73 f6 fb 94 e6 64 da 91 65 b8 28 29 f6 41 e0 76 aa a8 26 \
+             6b 7f b0 f7 b1 1b 36 99 07 e1 ad 43",
+        );
+        let out = decrypt_esp(&sa(alg, &keymat[..32], None), 0x0102_0304, 5, &esp_payload).unwrap();
+        let source = hex(
+            "45 00 00 54 a6 f2 00 00 40 01 e7 78 c6 33 64 05 c0 00 02 05 08 00 5b 7a \
+             3a 08 00 00 55 3b ec 10 00 07 36 27 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 \
+             14 15 16 17 18 19 1a 1b 1c 1d 1e 1f 20 21 22 23 24 25 26 27 28 29 2a 2b \
+             2c 2d 2e 2f 30 31 32 33 34 35 36 37",
+        );
+        assert_eq!(out.payload, source);
+        assert_eq!(out.pad_length, 2);
+        assert_eq!(out.next_header, 4);
+        assert_eq!(out.icv_len, 16);
+    }
+
+    #[test]
+    fn test_chacha20_poly1305_esn_and_bad_key() {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+        // RFC 7634, Section 2.1 — 12-octet AAD with ESN.
+        // <https://www.rfc-editor.org/rfc/rfc7634#section-2.1>
+        let key = [0x31u8; 32];
+        let salt = [1, 1, 1, 1];
+        let mut n = [0u8; 12];
+        n[..4].copy_from_slice(&salt);
+        n[4..].copy_from_slice(&[2; 8]);
+        let ct = ChaCha20Poly1305::new_from_slice(&key)
+            .unwrap()
+            .encrypt(
+                &Nonce::from(n),
+                Payload {
+                    msg: &INNER,
+                    aad: &aad(9, 9, Some(3)),
+                },
+            )
+            .unwrap();
+        let data = [vec![2; 8], ct].concat();
+        let alg = EncryptionAlgorithm::ChaCha20Poly1305 { salt };
+        let out = decrypt_esp(&sa(alg.clone(), &key, Some(3)), 9, 9, &data).unwrap();
+        assert_eq!(out.payload, INNER[..4].to_vec());
+        assert!(decrypt_esp(&sa(alg.clone(), &key[..16], Some(3)), 9, 9, &data).is_err());
+        assert!(decrypt_esp(&sa(alg, &key, Some(3)), 9, 9, &data[..20]).is_err());
+    }
+
+    #[test]
+    fn test_ccm_all_icv_lengths_and_key_sizes() {
+        use aes::{Aes128, Aes192, Aes256};
+        use ccm::Ccm;
+        use ccm::aead::{Aead, KeyInit, Payload};
+        use ccm::consts::{U8, U11, U12, U16};
+        // RFC 4309, Sections 3-5 — nonce = salt(3) || IV(8), AAD as GCM.
+        // <https://www.rfc-editor.org/rfc/rfc4309#section-4>
+        let salt = [7, 8, 9];
+        let iv = [4u8; 8];
+        let mut n = [0u8; 11];
+        n[..3].copy_from_slice(&salt);
+        n[3..].copy_from_slice(&iv);
+        let a = aad(0x300, 2, None);
+        macro_rules! enc {
+            ($aes:ty, $tag:ty, $key:expr) => {
+                Ccm::<$aes, $tag, U11>::new_from_slice($key)
+                    .unwrap()
+                    .encrypt(
+                        &n.into(),
+                        Payload {
+                            msg: &INNER,
+                            aad: &a,
+                        },
+                    )
+                    .unwrap()
+            };
+        }
+        let cases: Vec<(Vec<u8>, Vec<u8>, &str)> = vec![
+            (vec![1; 16], enc!(Aes128, U8, &[1; 16]), "aes-128-ccm-8"),
+            (vec![1; 16], enc!(Aes128, U12, &[1; 16]), "aes-128-ccm-12"),
+            (vec![1; 16], enc!(Aes128, U16, &[1; 16]), "aes-128-ccm-16"),
+            (vec![2; 24], enc!(Aes192, U16, &[2; 24]), "aes-192-ccm-16"),
+            (vec![3; 32], enc!(Aes256, U8, &[3; 32]), "aes-256-ccm-8"),
+            (vec![3; 32], enc!(Aes256, U12, &[3; 32]), "aes-256-ccm-12"),
+        ];
+        for (key, ct, name) in cases {
+            let keymat = [key.clone(), salt.to_vec()].concat();
+            let alg = parse_encryption_algorithm(name, &keymat).unwrap();
+            let data = [iv.to_vec(), ct].concat();
+            let out = decrypt_esp(&sa(alg, &key, None), 0x300, 2, &data)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(out.payload, INNER[..4].to_vec(), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_aes_ctr_rfc3686_vectors() {
+        // RFC 3686, Section 6 — Test Vectors #1 and #7.
+        // <https://www.rfc-editor.org/rfc/rfc3686#section-6>
+        let mut buf = hex("E4 09 5D 4F B7 A7 B3 79 2D 61 75 A3 26 13 11 B8");
+        aes_ctr_apply(
+            &hex("AE 68 52 F8 12 10 67 CC 4B F7 A5 76 55 77 F3 9E"),
+            &[0, 0, 0, 0x30],
+            &[0; 8],
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(buf, b"Single block msg");
+        let mut buf = hex("14 5A D0 1D BF 82 4E C7 56 08 63 DC 71 E3 E0 C0");
+        aes_ctr_apply(
+            &hex("77 6B EF F2 85 1D B0 6F 4C 8A 05 42 C8 69 6F 6C \
+                 6A 81 AF 1E EC 96 B4 D3 7F C1 D6 89 E6 C1 C1 04"),
+            &[0, 0, 0, 0x60],
+            &hex("DB 56 72 C9 7A A8 F0 B2").try_into().unwrap(),
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(buf, b"Single block msg");
+        assert!(aes_ctr_apply(&[0; 5], &[0; 4], &[0; 8], &mut []).is_err());
+    }
+
+    #[test]
+    fn test_aes_ctr_esp_with_icv() {
+        // RFC 3686, Section 3 — IV(8) || ciphertext; the ICV follows.
+        // <https://www.rfc-editor.org/rfc/rfc3686#section-3>
+        let key = [0x41u8; 24];
+        let nonce = [0, 0, 0, 1];
+        let iv = [6u8; 8];
+        let mut ct = INNER.to_vec();
+        aes_ctr_apply(&key, &nonce, &iv, &mut ct).unwrap();
+        let mut data = [iv.to_vec(), ct].concat();
+        data.extend_from_slice(&[0xee; 24]); // HMAC-SHA-384-192 ICV
+        let keymat = [key.to_vec(), nonce.to_vec()].concat();
+        let alg = parse_encryption_algorithm("aes-192-ctr", &keymat).unwrap();
+        let mut sa = sa(alg, &key, None);
+        sa.authentication = AuthenticationAlgorithm::HmacSha384_192;
+        let out = decrypt_esp(&sa, 1, 1, &data).unwrap();
+        assert_eq!(out.payload, INNER[..4].to_vec());
+        assert_eq!(out.icv_len, 24);
+    }
+
+    #[test]
+    fn test_3des_cbc() {
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
+        use des::TdesEde3;
+        // RFC 2451, Section 2 — 8-octet IV and block.
+        // <https://www.rfc-editor.org/rfc/rfc2451#section-2>
+        let key = [0x13u8; 24];
+        let iv = [0x57u8; 8];
+        let mut buf = INNER.to_vec();
+        cbc::Encryptor::<TdesEde3>::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded::<cbc::cipher::block_padding::NoPadding>(&mut buf, INNER.len())
+            .unwrap();
+        let mut data = [iv.to_vec(), buf].concat();
+        data.extend_from_slice(&[0xaa; 12]); // HMAC-MD5-96 ICV
+        let alg = parse_encryption_algorithm("3des-cbc", &key).unwrap();
+        let mut sa = sa(alg, &key, None);
+        sa.authentication = AuthenticationAlgorithm::HmacMd5_96;
+        let out = decrypt_esp(&sa, 1, 1, &data).unwrap();
+        assert_eq!(out.payload, INNER[..4].to_vec());
+        // Not a multiple of the 8-octet block.
+        assert!(decrypt_esp(&sa, 1, 1, &data[..data.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn test_aes_gmac_plaintext_payload() {
+        // RFC 4543, Section 3 — ENCR_NULL_AUTH_AES_GMAC: IV(8), plaintext
+        // payload, 16-octet ICV.
+        // <https://www.rfc-editor.org/rfc/rfc4543#section-3>
+        let mut data = vec![0x11; 8];
+        data.extend_from_slice(&INNER);
+        data.extend_from_slice(&[0xcc; 16]);
+        let keymat = [vec![0; 32], vec![1, 2, 3, 4]].concat();
+        let alg = parse_encryption_algorithm("aes-256-gmac", &keymat).unwrap();
+        let out = decrypt_esp(&sa(alg, &keymat[..32], None), 1, 1, &data).unwrap();
+        assert_eq!(out.payload, INNER[..4].to_vec());
+        assert_eq!(out.icv_len, 16);
+        assert!(
+            decrypt_esp(
+                &sa(
+                    EncryptionAlgorithm::Aes128Gmac { salt: [0; 4] },
+                    &[0; 16],
+                    None
+                ),
+                1,
+                1,
+                &[0; 20]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_new_parse_names_and_lengths() {
+        let ok = |n: &str, len: usize| parse_encryption_algorithm(n, &vec![0; len]).unwrap();
+        assert_eq!(
+            ok("aes-128-gcm-8", 20),
+            EncryptionAlgorithm::Aes128Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets8
+            }
+        );
+        assert_eq!(
+            ok("aes-192-gcm-12", 28),
+            EncryptionAlgorithm::Aes192Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets12
+            }
+        );
+        assert_eq!(
+            ok("aes-256-gcm-16", 36),
+            EncryptionAlgorithm::Aes256Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+        );
+        assert_eq!(
+            ok("aes-128-gcm", 20),
+            EncryptionAlgorithm::Aes128Gcm {
+                salt: [0; 4],
+                icv_len: AeadIcvLen::Octets16
+            }
+        );
+        assert_eq!(
+            ok("aes-128-ctr", 20),
+            EncryptionAlgorithm::Aes128Ctr { nonce: [0; 4] }
+        );
+        assert_eq!(
+            ok("aes-256-ctr", 36),
+            EncryptionAlgorithm::Aes256Ctr { nonce: [0; 4] }
+        );
+        assert_eq!(
+            ok("aes-192-ccm-8", 27),
+            EncryptionAlgorithm::Aes192Ccm {
+                salt: [0; 3],
+                icv_len: AeadIcvLen::Octets8
+            }
+        );
+        assert_eq!(
+            ok("aes-128-gmac", 20),
+            EncryptionAlgorithm::Aes128Gmac { salt: [0; 4] }
+        );
+        assert_eq!(
+            ok("aes-192-gmac", 28),
+            EncryptionAlgorithm::Aes192Gmac { salt: [0; 4] }
+        );
+        assert_eq!(ok("3des-cbc", 24), EncryptionAlgorithm::TripleDesCbc);
+        for (name, bad) in [
+            ("aes-128-gcm-8", 16),
+            ("aes-128-ctr", 16),
+            ("aes-128-ccm-16", 16),
+            ("aes-128-gmac", 16),
+            ("3des-cbc", 16),
+            ("chacha20-poly1305", 32),
+            ("aes-128-ccm-4", 19),
+        ] {
+            assert!(
+                parse_encryption_algorithm(name, &vec![0; bad]).is_err(),
+                "{name}"
+            );
+        }
+        let auth = |n: &str, len: usize| parse_authentication_algorithm(n, &vec![0; len]);
+        assert_eq!(
+            auth("hmac-md5-96", 16).unwrap(),
+            AuthenticationAlgorithm::HmacMd5_96
+        );
+        assert_eq!(
+            auth("hmac-sha384-192", 48).unwrap(),
+            AuthenticationAlgorithm::HmacSha384_192
+        );
+        assert_eq!(
+            auth("hmac-sha512-256", 64).unwrap(),
+            AuthenticationAlgorithm::HmacSha512_256
+        );
+        assert!(auth("hmac-md5-96", 20).is_err());
+        assert!(auth("hmac-sha384-192", 32).is_err());
+        assert!(auth("hmac-sha512-256", 32).is_err());
+    }
+
+    #[test]
+    fn test_new_iv_icv_and_aead_properties() {
+        use EncryptionAlgorithm as E;
+        let s4 = [0u8; 4];
+        assert_eq!(E::TripleDesCbc.iv_len(), 8);
+        assert_eq!(E::Aes128Ctr { nonce: s4 }.iv_len(), 8);
+        assert_eq!(E::ChaCha20Poly1305 { salt: s4 }.iv_len(), 8);
+        assert_eq!(
+            E::Aes256Ccm {
+                salt: [0; 3],
+                icv_len: AeadIcvLen::Octets12
+            }
+            .iv_len(),
+            8
+        );
+        assert_eq!(E::Aes192Gmac { salt: s4 }.iv_len(), 8);
+        assert!(E::ChaCha20Poly1305 { salt: s4 }.is_aead());
+        assert!(
+            E::Aes128Ccm {
+                salt: [0; 3],
+                icv_len: AeadIcvLen::Octets8
+            }
+            .is_aead()
+        );
+        assert!(E::Aes128Gmac { salt: s4 }.is_aead());
+        assert!(!E::Aes128Ctr { nonce: s4 }.is_aead());
+        assert!(!E::TripleDesCbc.is_aead());
+        assert_eq!(E::Aes128Gmac { salt: s4 }.aead_icv_len(), Some(16));
+        assert_eq!(
+            E::Aes128Gcm {
+                salt: s4,
+                icv_len: AeadIcvLen::Octets12
+            }
+            .aead_icv_len(),
+            Some(12)
+        );
+        assert_eq!(E::Aes128Cbc.aead_icv_len(), None);
+        assert_eq!(AuthenticationAlgorithm::HmacMd5_96.icv_len(), 12);
+        assert_eq!(AuthenticationAlgorithm::HmacSha384_192.icv_len(), 24);
+        assert_eq!(AuthenticationAlgorithm::HmacSha512_256.icv_len(), 32);
     }
 }

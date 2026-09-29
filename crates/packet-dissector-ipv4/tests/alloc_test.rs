@@ -39,3 +39,34 @@ fn zero_alloc_dissect_ipv4() {
     assert_eq!(fields[11].value, FieldValue::Ipv4Addr([192, 168, 1, 100])); // src
     assert_eq!(fields[12].value, FieldValue::Ipv4Addr([8, 8, 8, 8])); // dst
 }
+
+#[test]
+fn zero_alloc_dissect_ipv4_with_options() {
+    // IHL=15: Router Alert, Record Route, Internet Timestamp (flag 1),
+    // Quick-Start, NOP padding and End of Option List (RFC 791, Section 3.1).
+    let mut raw = vec![
+        0x4F, 0x00, 0x00, 0x3C, 0x00, 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, //
+        0xc0, 0xa8, 0x01, 0x64, 0xe0, 0x00, 0x00, 0x16,
+    ];
+    raw.extend_from_slice(&[0x94, 0x04, 0x00, 0x00]); // Router Alert
+    raw.extend_from_slice(&[0x07, 0x07, 0x04, 0, 0, 0, 0]); // Record Route
+    raw.extend_from_slice(&[0x44, 0x0C, 0x05, 0x01, 10, 0, 0, 1, 0, 0, 0, 0]); // Timestamp
+    raw.extend_from_slice(&[0x19, 0x08, 0x05, 0x40, 0x12, 0x34, 0x56, 0x78]); // Quick-Start
+    raw.extend_from_slice(&[0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00]); // NOPs + EOL
+    raw.push(0x00);
+    assert_eq!(raw.len(), 60);
+    let mut buf = DissectBuffer::new();
+    // Warm up: the option objects need more field slots than the default
+    // capacity, so fill the buffer once before counting.
+    Ipv4Dissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        Ipv4Dissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "IPv4 dissect with options allocated {allocs} times"
+    );
+    assert_eq!(buf.layers().len(), 1);
+}
