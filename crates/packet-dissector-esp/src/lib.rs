@@ -7,6 +7,9 @@
 //!   <https://www.rfc-editor.org/rfc/rfc3602>
 //! - RFC 4106: The Use of Galois/Counter Mode (GCM) in IPsec ESP:
 //!   <https://www.rfc-editor.org/rfc/rfc4106>
+//!
+//! Further transforms supported by the [`crypto`] module are listed there
+//! (RFC 2451, RFC 3686, RFC 4309, RFC 4543, RFC 7634, RFC 2403, RFC 4868).
 
 #![deny(missing_docs)]
 
@@ -65,7 +68,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 ];
 
 pub use crypto::{
-    AuthenticationAlgorithm, DecryptedEsp, EncryptionAlgorithm, EspSa,
+    AeadIcvLen, AuthenticationAlgorithm, DecryptedEsp, EncryptionAlgorithm, EspSa,
     parse_authentication_algorithm, parse_encryption_algorithm,
 };
 
@@ -185,6 +188,36 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 4106",
         "The Use of Galois/Counter Mode (GCM) in IPsec Encapsulating Security Payload (ESP)",
         "https://www.rfc-editor.org/rfc/rfc4106",
+    ),
+    SpecReference::new(
+        "RFC 2451",
+        "The ESP CBC-Mode Cipher Algorithms",
+        "https://www.rfc-editor.org/rfc/rfc2451",
+    ),
+    SpecReference::new(
+        "RFC 3686",
+        "Using Advanced Encryption Standard (AES) Counter Mode With IPsec Encapsulating Security Payload (ESP)",
+        "https://www.rfc-editor.org/rfc/rfc3686",
+    ),
+    SpecReference::new(
+        "RFC 4309",
+        "Using Advanced Encryption Standard (AES) CCM Mode with IPsec Encapsulating Security Payload (ESP)",
+        "https://www.rfc-editor.org/rfc/rfc4309",
+    ),
+    SpecReference::new(
+        "RFC 4543",
+        "The Use of Galois Message Authentication Code (GMAC) in IPsec ESP and AH",
+        "https://www.rfc-editor.org/rfc/rfc4543",
+    ),
+    SpecReference::new(
+        "RFC 7634",
+        "ChaCha20, Poly1305, and Their Use in the Internet Key Exchange Protocol (IKE) and IPsec",
+        "https://www.rfc-editor.org/rfc/rfc7634",
+    ),
+    SpecReference::new(
+        "RFC 4868",
+        "Using HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512 with IPsec",
+        "https://www.rfc-editor.org/rfc/rfc4868",
     ),
 ];
 
@@ -354,6 +387,16 @@ mod tests {
     //! | 2.8         | NULL heuristic detects ICV        | null_heuristic_decrypts_with_icv |
     //! | 2.8         | Trailer ranges exclude the ICV    | trailer_ranges_exclude_icv      |
     //! | 2.8         | AEAD trailer ranges exclude tag   | gcm_trailer_ranges_exclude_tag  |
+    //! | 2.2.1 / 4106 §5 | ESN in the AEAD AAD           | crypto::test_gcm_esn_aad        |
+    //! | 4106 §6     | GCM 8/12-octet ICV                | crypto::test_gcm_short_icv      |
+    //! | 7634 App. A | ChaCha20-Poly1305 ESP example     | crypto::test_chacha20_poly1305_rfc7634_appendix_a |
+    //! | 7634 §2.1   | ChaCha20-Poly1305 with ESN        | crypto::test_chacha20_poly1305_esn_and_bad_key |
+    //! | 4309 §3-5   | AES-CCM 8/12/16, all key sizes    | crypto::test_ccm_all_icv_lengths_and_key_sizes |
+    //! | 3686 §6     | AES-CTR test vectors #1, #7       | crypto::test_aes_ctr_rfc3686_vectors |
+    //! | 3686 §3     | AES-CTR ESP payload               | crypto::test_aes_ctr_esp_with_icv |
+    //! | 2451 §2     | 3DES-CBC                          | crypto::test_3des_cbc           |
+    //! | 4543 §3     | ENCR_NULL_AUTH_AES_GMAC           | crypto::test_aes_gmac_plaintext_payload |
+    //! | 2403 / 4868 | HMAC-MD5-96, SHA-384/512 ICVs     | crypto::test_new_iv_icv_and_aead_properties |
 
     use super::*;
 
@@ -478,6 +521,7 @@ mod tests {
                 enc_key: vec![],
                 authentication: AuthenticationAlgorithm::None,
                 auth_key: vec![],
+                esn: None,
             },
         );
 
@@ -544,6 +588,7 @@ mod tests {
                 enc_key: key.to_vec(),
                 authentication: AuthenticationAlgorithm::None,
                 auth_key: vec![],
+                esn: None,
             },
         );
 
@@ -667,6 +712,7 @@ mod tests {
                 enc_key: vec![],
                 authentication: AuthenticationAlgorithm::HmacSha1_96,
                 auth_key: vec![0; 20],
+                esn: None,
             },
         );
 
@@ -831,10 +877,14 @@ mod tests {
         dissector.add_sa(
             spi,
             EspSa {
-                encryption: EncryptionAlgorithm::Aes128Gcm { salt },
+                encryption: EncryptionAlgorithm::Aes128Gcm {
+                    salt,
+                    icv_len: AeadIcvLen::Octets16,
+                },
                 enc_key: enc_key.to_vec(),
                 authentication: AuthenticationAlgorithm::None,
                 auth_key: vec![],
+                esn: None,
             },
         );
 
