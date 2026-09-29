@@ -50,6 +50,12 @@ for an IPv6 prefix with an offset `prefix_offset`, `prefix_length` and
 [RFC 8956](https://www.rfc-editor.org/rfc/rfc8956#section-3); malformed rules
 keep a `value`.
 
+BGP-LS (AFI 16388 / SAFI 71, 72) entries carry `nlri_type`,
+`total_nlri_length`, `rd` (SAFI 72), and for NLRI Types 1-6 `protocol_id`,
+`identifier` and `descriptors` (TLVs; Node Descriptors with `sub_tlvs`), per
+[RFC 9552](https://www.rfc-editor.org/rfc/rfc9552#section-5.2); other NLRI
+Types keep a `value`.
+
 Every `nlri` / `withdrawn_routes` array — top level and inside
 `MP_REACH_NLRI` / `MP_UNREACH_NLRI` — declares the same entry `children`: the
 union of the plain prefix fields and the
