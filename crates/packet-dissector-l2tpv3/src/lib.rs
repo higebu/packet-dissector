@@ -52,6 +52,105 @@ fn l2tpv3_message_type_name(code: u16) -> Option<&'static str> {
     if name == "Unknown" { None } else { Some(name) }
 }
 
+/// EtherType of Transparent Ethernet Bridging, used to dispatch an
+/// Ethernet pseudowire payload to the Ethernet dissector.
+const ETHERTYPE_TEB: u16 = 0x6558;
+
+/// Whether `payload` starts with a plausible Ethernet II header: at least
+/// 14 octets with a well-known EtherType at octets 12-13.
+///
+/// RFC 4719, Section 3.1 — "The entire Ethernet frame, without the preamble
+/// or frame check sequence (FCS), is encapsulated in L2TPv3".
+/// <https://www.rfc-editor.org/rfc/rfc4719#section-3.1>
+///
+/// The Cookie length and the L2-Specific Sublayer are negotiated in control
+/// messages (RFC 3931, Sections 4.1 and 5.4.4) and the pseudowire type is
+/// not carried in data messages, so a stateless dissector assumes no cookie
+/// and no sublayer and dispatches only when the frame looks like Ethernet.
+/// <https://www.rfc-editor.org/rfc/rfc3931#section-4.1>
+fn looks_like_ethernet(payload: &[u8]) -> bool {
+    const ETH_HEADER_LEN: usize = 14;
+    if payload.len() < ETH_HEADER_LEN {
+        return false;
+    }
+    matches!(
+        u16::from_be_bytes([payload[12], payload[13]]),
+        // IPv4, ARP, 802.1Q, IPv6, MPLS unicast / multicast, PPPoE
+        // Discovery / Session, Slow Protocols, 802.1ad, LLDP
+        0x0800
+            | 0x0806
+            | 0x8100
+            | 0x86DD
+            | 0x8847
+            | 0x8848
+            | 0x8863
+            | 0x8864
+            | 0x8809
+            | 0x88A8
+            | 0x88CC
+    )
+}
+
+/// How the remainder of a data message after its session header is handled.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DataPayload {
+    /// Nothing follows the session header.
+    Empty,
+    /// An Ethernet frame: dispatched to the Ethernet dissector.
+    Ethernet,
+    /// Anything else: exposed as raw `payload` bytes.
+    Raw,
+}
+
+impl DataPayload {
+    fn classify(payload: &[u8]) -> Self {
+        if payload.is_empty() {
+            Self::Empty
+        } else if looks_like_ethernet(payload) {
+            Self::Ethernet
+        } else {
+            Self::Raw
+        }
+    }
+
+    /// Length of the layer: the header only, unless the payload is kept.
+    fn layer_len(self, data: &[u8], header_len: usize) -> usize {
+        if self == Self::Raw {
+            data.len()
+        } else {
+            header_len
+        }
+    }
+}
+
+/// Finish a data message whose session header is `header_len` octets and
+/// whose remainder was classified as `kind`. The layer must already be open.
+fn finish_data_message<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    header_len: usize,
+    kind: DataPayload,
+    payload_fd: &'static FieldDescriptor,
+) -> DissectResult {
+    let result = match kind {
+        DataPayload::Empty => DissectResult::new(header_len, DispatchHint::End),
+        DataPayload::Ethernet => {
+            DissectResult::new(header_len, DispatchHint::ByEtherType(ETHERTYPE_TEB))
+        }
+        DataPayload::Raw => {
+            buf.push_field(
+                payload_fd,
+                FieldValue::Bytes(&data[header_len..]),
+                offset + header_len..offset + data.len(),
+            );
+            DissectResult::new(data.len(), DispatchHint::End)
+        }
+    };
+    buf.end_layer();
+    result
+}
+
 // ---------------------------------------------------------------------------
 // L2tpv3Dissector — L2TPv3 over IP (protocol 115)
 // ---------------------------------------------------------------------------
@@ -88,6 +187,7 @@ const IP_FD_NS: usize = 8;
 const IP_FD_NR: usize = 9;
 const IP_FD_MESSAGE_TYPE: usize = 10;
 const IP_FD_AVPS: usize = 11;
+const IP_FD_PAYLOAD: usize = 12;
 
 static IP_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("session_id", "Session ID", FieldType::U32),
@@ -121,6 +221,10 @@ static IP_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("avps", "AVPs", FieldType::Array)
         .optional()
         .with_children(AVP_CHILD_FIELDS),
+    // RFC 3931, Section 4.1 — data message payload (Cookie, L2-Specific
+    // Sublayer and pseudowire frame) when it is not dispatched.
+    // <https://www.rfc-editor.org/rfc/rfc3931#section-4.1>
+    FieldDescriptor::new("payload", "Payload", FieldType::Bytes).optional(),
 ];
 
 /// L2TPv3 over IP dissector (IP protocol 115).
@@ -169,11 +273,12 @@ impl Dissector for L2tpv3Dissector {
             // Data message — Session ID is non-zero.
             // RFC 3931, Section 4.1.1.1 — Cookie size is negotiated
             // out-of-band and cannot be determined from the wire.
+            let kind = DataPayload::classify(&data[IP_MIN_SIZE..]);
             buf.begin_layer(
                 self.short_name(),
                 None,
                 IP_FIELD_DESCRIPTORS,
-                offset..offset + IP_MIN_SIZE,
+                offset..offset + kind.layer_len(data, IP_MIN_SIZE),
             );
             buf.push_field(
                 &IP_FIELD_DESCRIPTORS[IP_FD_SESSION_ID],
@@ -185,9 +290,14 @@ impl Dissector for L2tpv3Dissector {
                 FieldValue::U8(0),
                 offset..offset + 4,
             );
-            buf.end_layer();
-
-            return Ok(DissectResult::new(IP_MIN_SIZE, DispatchHint::End));
+            return Ok(finish_data_message(
+                buf,
+                data,
+                offset,
+                IP_MIN_SIZE,
+                kind,
+                &IP_FIELD_DESCRIPTORS[IP_FD_PAYLOAD],
+            ));
         }
 
         // Control message — Session ID == 0
@@ -380,6 +490,7 @@ const UDP_FD_NR: usize = 7;
 const UDP_FD_SESSION_ID: usize = 8;
 const UDP_FD_MESSAGE_TYPE: usize = 9;
 const UDP_FD_AVPS: usize = 10;
+const UDP_FD_PAYLOAD: usize = 11;
 
 static UDP_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("t_bit", "T Bit", FieldType::U8),
@@ -416,6 +527,10 @@ static UDP_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("avps", "AVPs", FieldType::Array)
         .optional()
         .with_children(AVP_CHILD_FIELDS),
+    // RFC 3931, Section 4.1 — data message payload (Cookie, L2-Specific
+    // Sublayer and pseudowire frame) when it is not dispatched.
+    // <https://www.rfc-editor.org/rfc/rfc3931#section-4.1>
+    FieldDescriptor::new("payload", "Payload", FieldType::Bytes).optional(),
 ];
 
 /// L2TPv3 over UDP dissector (UDP port 1701).
@@ -580,11 +695,12 @@ impl Dissector for L2tpv3UdpDissector {
 
             let session_id = read_be_u32(data, 4)?;
 
+            let kind = DataPayload::classify(&data[UDP_DATA_HEADER_SIZE..]);
             buf.begin_layer(
                 self.short_name(),
                 None,
                 UDP_FIELD_DESCRIPTORS,
-                offset..offset + UDP_DATA_HEADER_SIZE,
+                offset..offset + kind.layer_len(data, UDP_DATA_HEADER_SIZE),
             );
             buf.push_field(
                 &UDP_FIELD_DESCRIPTORS[UDP_FD_T_BIT],
@@ -601,9 +717,14 @@ impl Dissector for L2tpv3UdpDissector {
                 FieldValue::U32(session_id),
                 offset + 4..offset + 8,
             );
-            buf.end_layer();
-
-            Ok(DissectResult::new(UDP_DATA_HEADER_SIZE, DispatchHint::End))
+            Ok(finish_data_message(
+                buf,
+                data,
+                offset,
+                UDP_DATA_HEADER_SIZE,
+                kind,
+                &UDP_FIELD_DESCRIPTORS[UDP_FD_PAYLOAD],
+            ))
         }
     }
 }
@@ -624,6 +745,10 @@ mod tests {
     // | 4.1.1.2     | IP control with AVPs              | parse_l2tpv3_ip_control_with_avps     |
     // | 4.1.1.2     | IP control ZLB ACK                | parse_l2tpv3_ip_control_zlb           |
     // | 4.1.1       | IP data with offset               | parse_l2tpv3_ip_with_offset           |
+    // | 4.1.1.1 / 4719 §3.1 | IP data → Ethernet PW payload | parse_l2tpv3_ip_data_dispatches_ethernet |
+    // | 4.1.1.1     | IP data: non-Ethernet payload kept | parse_l2tpv3_ip_data_non_ethernet_payload |
+    // | 4.1.2.1     | UDP data → Ethernet / raw payload  | parse_l2tpv3_udp_data_dispatches_ethernet |
+    // | 4719 §3.1   | Ethernet frame heuristic           | looks_like_ethernet_checks            |
     // | 3.2.1       | UDP control message (T/L/S/Ver)   | parse_l2tpv3_udp_control_message      |
     // | 4.1.2.1     | UDP data message (T=0)            | parse_l2tpv3_udp_data_message         |
     // | 4.1.2.1     | UDP data omits L/S bit fields     | parse_l2tpv3_udp_data_has_no_l_s_bits |
@@ -1056,7 +1181,8 @@ mod tests {
     #[test]
     fn field_descriptors_consistent_ip() {
         let descs = L2tpv3Dissector.field_descriptors();
-        assert_eq!(descs.len(), 12);
+        assert_eq!(descs.len(), 13);
+        assert_eq!(descs[IP_FD_PAYLOAD].name, "payload");
         assert_eq!(descs[IP_FD_SESSION_ID].name, "session_id");
         assert_eq!(descs[IP_FD_IS_CONTROL].name, "is_control");
         assert_eq!(descs[IP_FD_T_BIT].name, "t_bit");
@@ -1077,7 +1203,8 @@ mod tests {
     #[test]
     fn field_descriptors_consistent_udp() {
         let descs = L2tpv3UdpDissector.field_descriptors();
-        assert_eq!(descs.len(), 11);
+        assert_eq!(descs.len(), 12);
+        assert_eq!(descs[UDP_FD_PAYLOAD].name, "payload");
         assert_eq!(descs[UDP_FD_T_BIT].name, "t_bit");
         assert_eq!(descs[UDP_FD_L_BIT].name, "l_bit");
         assert_eq!(descs[UDP_FD_S_BIT].name, "s_bit");
@@ -1092,6 +1219,80 @@ mod tests {
         assert_eq!(descs[UDP_FD_SESSION_ID].name, "session_id");
         assert_eq!(descs[UDP_FD_MESSAGE_TYPE].name, "message_type");
         assert_eq!(descs[UDP_FD_AVPS].name, "avps");
+    }
+
+    /// A minimal Ethernet II frame carrying IPv4 (EtherType 0x0800).
+    fn ethernet_frame() -> Vec<u8> {
+        let mut f = vec![0x02, 0, 0, 0, 0, 1, 0x02, 0, 0, 0, 0, 2, 0x08, 0x00];
+        f.extend_from_slice(&[0x45, 0, 0, 20]);
+        f
+    }
+
+    #[test]
+    fn parse_l2tpv3_ip_data_dispatches_ethernet() {
+        // RFC 4719, Section 3.1 — Ethernet PW payload directly after the
+        // session header (no cookie, no L2-Specific Sublayer by default).
+        // <https://www.rfc-editor.org/rfc/rfc4719#section-3.1>
+        let mut raw = vec![0x00, 0x00, 0x10, 0x01];
+        raw.extend_from_slice(&ethernet_frame());
+        let mut buf = DissectBuffer::new();
+        let result = L2tpv3Dissector.dissect(&raw, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 4);
+        assert_eq!(result.next, DispatchHint::ByEtherType(ETHERTYPE_TEB));
+        let layer = buf.layer_by_name("L2TPv3").unwrap();
+        assert!(buf.field_by_name(layer, "payload").is_none());
+    }
+
+    #[test]
+    fn parse_l2tpv3_ip_data_non_ethernet_payload() {
+        // Not an Ethernet frame (e.g. HDLC PW or a cookie is in use): the
+        // remainder is exposed as raw payload instead of being dropped.
+        let raw: &[u8] = &[0x00, 0x00, 0x10, 0x01, 0xff, 0x03, 0xc0, 0x21, 0x01];
+        let mut buf = DissectBuffer::new();
+        let result = L2tpv3Dissector.dissect(raw, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, raw.len());
+        assert_eq!(result.next, DispatchHint::End);
+        let layer = buf.layer_by_name("L2TPv3").unwrap();
+        let payload = buf.field_by_name(layer, "payload").unwrap();
+        assert_eq!(payload.value, FieldValue::Bytes(&raw[4..]));
+        assert_eq!(payload.range, 4..raw.len());
+        assert_eq!(layer.range, 0..raw.len());
+    }
+
+    #[test]
+    fn parse_l2tpv3_udp_data_dispatches_ethernet() {
+        let mut raw = vec![0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01];
+        raw.extend_from_slice(&ethernet_frame());
+        let mut buf = DissectBuffer::new();
+        let result = L2tpv3UdpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 8);
+        assert_eq!(result.next, DispatchHint::ByEtherType(ETHERTYPE_TEB));
+
+        // Non-Ethernet remainder.
+        let raw: &[u8] = &[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01, 0xaa, 0xbb];
+        let mut buf = DissectBuffer::new();
+        let result = L2tpv3UdpDissector.dissect(raw, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, raw.len());
+        let layer = buf.layer_by_name("L2TPv3-UDP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "payload").unwrap().value,
+            FieldValue::Bytes(&[0xaa, 0xbb])
+        );
+    }
+
+    #[test]
+    fn looks_like_ethernet_checks() {
+        assert!(looks_like_ethernet(&ethernet_frame()));
+        assert!(!looks_like_ethernet(&ethernet_frame()[..13]));
+        let mut f = ethernet_frame();
+        f[12] = 0x12;
+        assert!(!looks_like_ethernet(&f));
+        for et in [
+            0x86DDu16, 0x0806, 0x8100, 0x88A8, 0x8847, 0x8848, 0x8863, 0x8864, 0x8809, 0x88CC,
+        ] {
+            f[12..14].copy_from_slice(&et.to_be_bytes());
+            assert!(looks_like_ethernet(&f), "{et:#x}");
+        }
     }
 
     #[test]
