@@ -926,6 +926,7 @@ dependencies = [
  "packet-dissector-core",
  "packet-dissector-dns",
  "packet-dissector-ipv4",
+ "packet-dissector-isis",
  "packet-dissector-mdns",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
