@@ -127,40 +127,39 @@ const OFD_VENDOR_CLASS: usize = 39;
 const OFD_VENDOR_INFO: usize = 40;
 const OFD_DUID_TYPE: usize = 41;
 const OFD_HW_TYPE: usize = 42;
-const OFD_TIME: usize = 43;
-const OFD_LINK_LAYER_ADDRESS: usize = 44;
-const OFD_LINK_LAYER_ADDRESS_BYTES: usize = 45;
-const OFD_IDENTIFIER: usize = 46;
-const OFD_UUID: usize = 47;
-const OFD_RELAY_ID: usize = 48;
-const OFD_SIP_SERVER_DOMAINS: usize = 49;
-const OFD_SIP_SERVER_ADDRESSES: usize = 50;
-const OFD_SNTP_SERVERS: usize = 51;
-const OFD_INFORMATION_REFRESH_TIME: usize = 52;
-const OFD_REMOTE_ID: usize = 53;
-const OFD_SUBSCRIBER_ID: usize = 54;
-const OFD_NTP_SUBOPTIONS: usize = 55;
-const OFD_BOOT_FILE_URL: usize = 56;
-const OFD_BOOT_FILE_PARAMETERS: usize = 57;
-const OFD_CLIENT_ARCH_TYPES: usize = 58;
-const OFD_AFTR_NAME: usize = 59;
-const OFD_LINK_LAYER_TYPE: usize = 60;
-const OFD_SOL_MAX_RT: usize = 61;
-const OFD_INF_MAX_RT: usize = 62;
-const OFD_DHCPV4_MESSAGE: usize = 63;
-const OFD_DHCP4O6_SERVERS: usize = 64;
-const OFD_EA_LEN: usize = 65;
-const OFD_PREFIX4_LEN: usize = 66;
-const OFD_IPV4_PREFIX: usize = 67;
-const OFD_PREFIX6_LEN: usize = 68;
-const OFD_IPV6_PREFIX: usize = 69;
-const OFD_BR_ADDRESS: usize = 70;
-const OFD_IPV4_ADDRESS: usize = 71;
-const OFD_PSID_OFFSET: usize = 72;
-const OFD_PSID_LEN: usize = 73;
-const OFD_PSID: usize = 74;
-const OFD_CAPTIVE_PORTAL_URI: usize = 75;
-const OFD_VENDOR_OPTIONS: usize = 76;
+const OFD_LINK_LAYER_ADDRESS: usize = 43;
+const OFD_LINK_LAYER_ADDRESS_BYTES: usize = 44;
+const OFD_IDENTIFIER: usize = 45;
+const OFD_UUID: usize = 46;
+const OFD_RELAY_ID: usize = 47;
+const OFD_SIP_SERVER_DOMAINS: usize = 48;
+const OFD_SIP_SERVER_ADDRESSES: usize = 49;
+const OFD_SNTP_SERVERS: usize = 50;
+const OFD_INFORMATION_REFRESH_TIME: usize = 51;
+const OFD_REMOTE_ID: usize = 52;
+const OFD_SUBSCRIBER_ID: usize = 53;
+const OFD_NTP_SUBOPTIONS: usize = 54;
+const OFD_BOOT_FILE_URL: usize = 55;
+const OFD_BOOT_FILE_PARAMETERS: usize = 56;
+const OFD_CLIENT_ARCH_TYPES: usize = 57;
+const OFD_AFTR_NAME: usize = 58;
+const OFD_LINK_LAYER_TYPE: usize = 59;
+const OFD_SOL_MAX_RT: usize = 60;
+const OFD_INF_MAX_RT: usize = 61;
+const OFD_DHCPV4_MESSAGE: usize = 62;
+const OFD_DHCP4O6_SERVERS: usize = 63;
+const OFD_EA_LEN: usize = 64;
+const OFD_PREFIX4_LEN: usize = 65;
+const OFD_IPV4_PREFIX: usize = 66;
+const OFD_PREFIX6_LEN: usize = 67;
+const OFD_IPV6_PREFIX: usize = 68;
+const OFD_BR_ADDRESS: usize = 69;
+const OFD_IPV4_ADDRESS: usize = 70;
+const OFD_PSID_OFFSET: usize = 71;
+const OFD_PSID_LEN: usize = 72;
+const OFD_PSID: usize = 73;
+const OFD_CAPTIVE_PORTAL_URI: usize = 74;
+const OFD_VENDOR_OPTIONS: usize = 75;
 
 /// Child field descriptors for DHCPv6 option entries.
 static OPTION_CHILD_FIELDS: &[FieldDescriptor] = &[
@@ -231,7 +230,6 @@ static OPTION_CHILD_FIELDS: &[FieldDescriptor] = &[
     // <https://www.rfc-editor.org/rfc/rfc9915#section-11.1>
     FieldDescriptor::new("duid_type", "DUID Type", FieldType::U16).optional(),
     FieldDescriptor::new("hw_type", "Hardware Type", FieldType::U16).optional(),
-    FieldDescriptor::new("time", "Time", FieldType::U32).optional(),
     FieldDescriptor::new(
         "link_layer_address",
         "Link-Layer Address",
@@ -1976,19 +1974,13 @@ fn push_duid<'pkt>(buf: &mut DissectBuffer<'pkt>, duid: &'pkt [u8], abs: usize) 
         // RFC 9915, Section 11.2 — DUID-LLT: hardware type (2), time (4),
         // link-layer address.
         // <https://www.rfc-editor.org/rfc/rfc9915#section-11.2>
-        (1, &[h0, h1, s0, s1, s2, s3, ref ll @ ..]) => {
-            let hw_type = u16::from_be_bytes([h0, h1]);
-            buf.push_field(
-                &OPTION_CHILD_FIELDS[OFD_HW_TYPE],
-                FieldValue::U16(hw_type),
-                body..body + 2,
-            );
-            buf.push_field(
-                &OPTION_CHILD_FIELDS[OFD_TIME],
-                FieldValue::U32(u32::from_be_bytes([s0, s1, s2, s3])),
-                body + 2..body + 6,
-            );
-            push_link_layer_address(buf, hw_type, ll, body + 6);
+        // The time field is left in the raw DUID bytes. An Ethernet address
+        // (hardware type 0x0001, the common case) is pushed directly.
+        (1, &[0, 1, _, _, _, _, a, b, c, d, e, f]) => {
+            push_mac(buf, [a, b, c, d, e, f], body + 6);
+        }
+        (1, &[h0, h1, _, _, _, _, ref ll @ ..]) => {
+            push_duid_link_layer(buf, u16::from_be_bytes([h0, h1]), ll, body, 6);
         }
         // RFC 9915, Section 11.3 — DUID-EN: enterprise-number (4),
         // identifier.
@@ -2010,14 +2002,10 @@ fn push_duid<'pkt>(buf: &mut DissectBuffer<'pkt>, duid: &'pkt [u8], abs: usize) 
         // RFC 9915, Section 11.4 — DUID-LL: hardware type (2), link-layer
         // address.
         // <https://www.rfc-editor.org/rfc/rfc9915#section-11.4>
+        // An Ethernet address (hardware type 0x0001) is pushed directly.
+        (3, &[0, 1, a, b, c, d, e, f]) => push_mac(buf, [a, b, c, d, e, f], body + 2),
         (3, &[h0, h1, ref ll @ ..]) => {
-            let hw_type = u16::from_be_bytes([h0, h1]);
-            buf.push_field(
-                &OPTION_CHILD_FIELDS[OFD_HW_TYPE],
-                FieldValue::U16(hw_type),
-                body..body + 2,
-            );
-            push_link_layer_address(buf, hw_type, ll, body + 2);
+            push_duid_link_layer(buf, u16::from_be_bytes([h0, h1]), ll, body, 2);
         }
         // RFC 9915, Section 11.5 — "This type of DUID consists of 16 octets
         // containing a 128-bit UUID." (RFC 6355, Section 4)
@@ -2066,6 +2054,39 @@ fn push_link_layer_address<'pkt>(
             range,
         ),
     }
+}
+
+/// Push an Ethernet `link_layer_address` at absolute offset `abs`.
+fn push_mac(buf: &mut DissectBuffer<'_>, mac: [u8; 6], abs: usize) {
+    buf.push_field(
+        &OPTION_CHILD_FIELDS[OFD_LINK_LAYER_ADDRESS],
+        FieldValue::MacAddr(MacAddr(mac)),
+        abs..abs + 6,
+    );
+}
+
+/// Push the hardware type and link-layer address of a DUID-LLT or DUID-LL.
+///
+/// `hw_type` is pushed only when the address is not an Ethernet MAC: a
+/// `link_layer_address` value already says that the type is Ethernet, and
+/// keeping the common DUID to two fields keeps Solicit/Advertise dissection
+/// cheap. `body` is the absolute offset of the hardware type and the address
+/// starts `addr_at` octets after it.
+fn push_duid_link_layer<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    hw_type: u16,
+    addr: &'pkt [u8],
+    body: usize,
+    addr_at: usize,
+) {
+    if !(hw_type == HW_TYPE_ETHERNET && addr.len() == 6) {
+        buf.push_field(
+            &OPTION_CHILD_FIELDS[OFD_HW_TYPE],
+            FieldValue::U16(hw_type),
+            body..body + 2,
+        );
+    }
+    push_link_layer_address(buf, hw_type, addr, body + addr_at);
 }
 
 /// Whether `data` is a sequence of complete DNS-encoded names, each ending
@@ -4539,8 +4560,10 @@ mod tests {
         let f = top_option(&buf, 0, 1);
         assert_eq!(child(&f, "client_id").value, FieldValue::Bytes(&pkt[8..]));
         assert_eq!(child(&f, "duid_type").value, FieldValue::U16(1));
-        assert_eq!(child(&f, "hw_type").value, FieldValue::U16(1));
-        assert_eq!(child(&f, "time").value, FieldValue::U32(0x2b3c_4d5e));
+        // An Ethernet address is shown as a MAC, so the hardware type is
+        // implied; the time stays in the raw `client_id` bytes.
+        assert!(!has_child(&f, "hw_type"));
+        assert!(!has_child(&f, "time"));
         let ll = child(&f, "link_layer_address");
         assert_eq!(
             ll.value,
@@ -4579,12 +4602,11 @@ mod tests {
         Dhcpv6Dissector.dissect(&pkt, &mut buf, 0).unwrap();
         let f = top_option(&buf, 0, 1);
         assert_eq!(child(&f, "duid_type").value, FieldValue::U16(3));
-        assert_eq!(child(&f, "hw_type").value, FieldValue::U16(1));
+        assert!(!has_child(&f, "hw_type"));
         assert_eq!(
             child(&f, "link_layer_address").value,
             FieldValue::MacAddr(packet_dissector_core::field::MacAddr([2, 0, 0, 0, 0, 1]))
         );
-        assert!(!has_child(&f, "time"));
 
         let duid = [0, 3, 0, 27, 1, 2, 3, 4, 5, 6, 7, 8];
         let pkt = build_dhcpv6(1, 1, &dhcpv6_option(1, &duid));
@@ -4597,6 +4619,21 @@ mod tests {
             FieldValue::Bytes(&[1, 2, 3, 4, 5, 6, 7, 8])
         );
         assert!(!has_child(&f, "link_layer_address"));
+
+        // Hardware type 1 with an address that is not 6 octets: not a MAC,
+        // so the hardware type is shown.
+        let duid = [0, 1, 0, 1, 0x2b, 0x3c, 0x4d, 0x5e, 1, 2, 3, 4, 5, 6, 7, 8];
+        let pkt = build_dhcpv6(1, 1, &dhcpv6_option(1, &duid));
+        let mut buf = DissectBuffer::new();
+        Dhcpv6Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let f = top_option(&buf, 0, 1);
+        let hw = child(&f, "hw_type");
+        assert_eq!(hw.value, FieldValue::U16(1));
+        assert_eq!(hw.range, 10..12);
+        assert_eq!(
+            child(&f, "link_layer_address_bytes").value,
+            FieldValue::Bytes(&[1, 2, 3, 4, 5, 6, 7, 8])
+        );
     }
 
     /// RFC 9915, Section 11.5 / RFC 6355, Section 4 — DUID-UUID.
