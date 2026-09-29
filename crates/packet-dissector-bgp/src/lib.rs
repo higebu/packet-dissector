@@ -14221,10 +14221,14 @@ mod tests {
         // entry that overruns its ORF, and a BoRR (RFC 7313) with trailing
         // octets keep the bytes after the fixed part as `data`.
         // An IPv4 prefix Length above 32 is malformed too.
-        let cases: [(u8, &[u8]); 4] = [
+        // So are a body shorter than When-to-refresh + ORF Type + Length, and
+        // an entry whose prefix Length reaches past the end of its ORF.
+        let cases: [(u8, &[u8]); 6] = [
             (0, &[1, 64, 0, 9, 0]),
             (0, &[1, 64, 0, 3, 0x00, 0, 0]),
             (0, &[1, 64, 0, 13, 0, 0, 0, 0, 1, 0, 0, 33, 10, 0, 0, 0, 0]),
+            (0, &[1, 64, 0]),
+            (0, &[1, 64, 0, 8, 0x00, 0, 0, 0, 1, 0, 0, 8]),
             (1, &[1, 2, 3]),
         ];
         for (subtype, body) in cases {
@@ -14279,5 +14283,101 @@ mod tests {
         assert_eq!(when_to_refresh_name(0), None);
         assert_eq!(bgpsec_direction_name(0), Some("receive"));
         assert_eq!(bgpsec_direction_name(2), None);
+        assert_eq!(orf_match_name(0), Some("PERMIT"));
+        assert_eq!(orf_match_name(2), None);
+        assert_eq!(capability_code_name(7), Some("BGPsec Capability"));
+        assert_eq!(capability_code_name(8), Some("Multiple Labels Capability"));
+    }
+
+    #[test]
+    fn open_notification_refresh_display_fns_ignore_other_types() {
+        // Each display_fn names only the U8 it is attached to.
+        let other = FieldValue::U16(1);
+        for fd in [
+            &ORF_CAP_FIELDS[1],
+            &ORF_TYPE_FIELD,
+            &ORF_ENTRY_FIELDS[FD_ORFE_ACTION],
+            &ORF_ENTRY_FIELDS[FD_ORFE_MATCH],
+            &OPT_PARAM_CHILDREN[FD_OPT_BGPSEC_DIRECTION],
+            &FIELD_DESCRIPTORS[FD_WHEN_TO_REFRESH],
+            &ERROR_CODE_FIELD,
+            &ERROR_SUBCODE_FIELD,
+        ] {
+            assert_eq!((fd.display_fn.unwrap())(&other, &[]), None, "{}", fd.name);
+        }
+    }
+
+    #[test]
+    fn notification_subcode_names_rfc4271_and_rfc6608() {
+        // RFC 4271, Sections 6.1-6.3 and RFC 6608, Section 4.
+        for (code, sub, name) in [
+            (1u8, 2u8, "Bad Message Length"),
+            (2, 1, "Unsupported Version Number"),
+            (2, 3, "Bad BGP Identifier"),
+            (2, 4, "Unsupported Optional Parameter"),
+            (2, 6, "Unacceptable Hold Time"),
+            (3, 1, "Malformed Attribute List"),
+            (3, 2, "Unrecognized Well-known Attribute"),
+            (3, 3, "Missing Well-known Attribute"),
+            (3, 4, "Attribute Flags Error"),
+            (3, 5, "Attribute Length Error"),
+            (3, 6, "Invalid ORIGIN Attribute"),
+            (3, 8, "Invalid NEXT_HOP Attribute"),
+            (3, 9, "Optional Attribute Error"),
+            (3, 10, "Invalid Network Field"),
+            (5, 0, "Unspecified Error"),
+            (5, 1, "Receive Unexpected Message in OpenSent State"),
+            (5, 2, "Receive Unexpected Message in OpenConfirm State"),
+        ] {
+            assert_eq!(error_subcode_name(code, sub), Some(name), "{code}/{sub}");
+        }
+        // Deprecated / unassigned values stay unnamed.
+        assert_eq!(error_subcode_name(2, 5), None);
+        assert_eq!(error_subcode_name(3, 7), None);
+    }
+
+    #[test]
+    fn parse_bgp_empty_orf_capability_and_shutdown_data() {
+        // An ORF Capability without entries is not decoded.
+        let data = build_open_with_caps(&cap_tlv(3, &[]));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let range = single_capability_range(&buf);
+        assert!(nested_field_by_name_opt(&buf, &range, "afi_safis").is_none());
+
+        // RFC 9003, Section 2: a Cease / Administrative Shutdown without data
+        // carries no Shutdown Communication.
+        let raw = build_notification(6, 2, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "shutdown_communication").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_route_refresh_orf_other_afi_keeps_prefix_raw() {
+        // The prefix is formatted as CIDR only for IPv4 and IPv6; for another
+        // AFI (here L2VPN) it stays `[Length, Prefix]` (RFC 5292, Section 3).
+        let entry = [0x00, 0, 0, 0, 5, 0, 0, 8, 0xaa];
+        let mut body = vec![1, 64];
+        body.extend_from_slice(&(entry.len() as u16).to_be_bytes());
+        body.extend_from_slice(&entry);
+        let raw = build_route_refresh(25, 0, 70, &body);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let FieldValue::Array(ref orfs) = buf.field_by_name(layer, "orfs").unwrap().value else {
+            panic!("expected Array for orfs");
+        };
+        let orfs = nlri_entry_ranges(&buf, orfs);
+        let es = array_entry_ranges(&buf, &orfs[0], "entries");
+        assert_eq!(
+            *nested_field_value(&buf, &es[0], "sequence"),
+            FieldValue::U32(5)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &es[0], "prefix"),
+            FieldValue::Bytes(&[8, 0xaa])
+        );
     }
 }
