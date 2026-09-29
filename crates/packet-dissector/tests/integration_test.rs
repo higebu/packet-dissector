@@ -104,6 +104,7 @@
 //! | Ethernet → IPv4 → UDP → RTP                                  | integration_ethernet_ipv4_udp_rtp                    |
 //! | Ethernet → IPv4 → UDP → QUIC Initial                          | integration_ethernet_ipv4_udp_quic_initial            |
 //! | Ethernet → IPv4 → UDP → QUIC Short Header                     | integration_ethernet_ipv4_udp_quic_short              |
+//! | Ethernet → IPv4 → UDP → QUIC Initial + Handshake (coalesced)  | integration_ethernet_ipv4_udp_quic_coalesced          |
 //! | Ethernet → IPv4 → TCP → HTTP/2 (h2c)                        | integration_ethernet_ipv4_tcp_http2_settings         |
 //! | Ethernet → IPv4 → TCP → HTTP/1.1 (via HttpDispatcher)       | integration_ethernet_ipv4_tcp_http_dispatcher_http11 |
 //! | Ethernet → IPv4 → TCP → HTTP 301 (Content-Type dispatch)   | integration_ethernet_ipv4_tcp_http_response_content_type |
@@ -6944,7 +6945,7 @@ fn integration_ethernet_ipv4_udp_quic_short() {
     let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
     let udp_start = push_udp(&mut pkt, 443, 54321);
 
-    // QUIC Short Header: header_form=0, fixed_bit=1, spin_bit=1, key_phase=0
+    // QUIC Short Header: header_form=0, fixed_bit=1, spin_bit=1
     pkt.push(0x60); // 0b01100000
     pkt.extend_from_slice(&[0xBB; 20]); // DCID + encrypted payload
 
@@ -6967,10 +6968,55 @@ fn integration_ethernet_ipv4_udp_quic_short() {
         buf.field_by_name(quic, "spin_bit").unwrap().value,
         FieldValue::U8(1)
     );
-    assert_eq!(
-        buf.field_by_name(quic, "key_phase").unwrap().value,
-        FieldValue::U8(0)
-    );
+    // Key Phase is header-protected (RFC 9001, Section 5.4.1) and not shown.
+    // https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1
+    assert!(buf.field_by_name(quic, "key_phase").is_none());
+}
+
+/// RFC 9000, Section 12.2 — Initial and Handshake packets coalesced into one
+/// UDP datagram become two QUIC layers split at the Length field.
+/// <https://www.rfc-editor.org/rfc/rfc9000#section-12.2>
+#[test]
+fn integration_ethernet_ipv4_udp_quic_coalesced() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 2], [10, 0, 0, 1]);
+    let udp_start = push_udp(&mut pkt, 443, 50000);
+
+    let dcid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    // Initial (v1): Length = 20
+    pkt.push(0xc0);
+    pkt.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(&dcid);
+    pkt.push(0); // SCID length
+    pkt.extend_from_slice(&encode_quic_varint(0)); // token length
+    pkt.extend_from_slice(&encode_quic_varint(20));
+    pkt.extend_from_slice(&[0xAA; 20]);
+    // Handshake (v1): Length = 16
+    pkt.push(0xe0);
+    pkt.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(&dcid);
+    pkt.push(0); // SCID length
+    pkt.extend_from_slice(&encode_quic_varint(16));
+    pkt.extend_from_slice(&[0xBB; 16]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 5);
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].name, "QUIC");
+    assert_eq!(buf.layers()[3].display_name, Some("QUIC Initial"));
+    assert_eq!(buf.layers()[3].range, 42..79);
+    assert_eq!(buf.layers()[4].name, "QUIC");
+    assert_eq!(buf.layers()[4].display_name, Some("QUIC Handshake"));
+    assert_eq!(buf.layers()[4].range, 79..111);
+    assert_eq!(pkt.len(), 111);
 }
 
 // ---------------------------------------------------------------------------
