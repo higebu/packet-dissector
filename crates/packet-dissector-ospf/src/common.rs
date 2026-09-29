@@ -182,3 +182,45 @@ pub(crate) mod test_util {
             .expect("field not in buffer") as u32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // # Shared helper coverage
+    //
+    // | RFC Section              | Description                    | Test                        |
+    // |--------------------------|--------------------------------|-----------------------------|
+    // | RFC 2328 A.3.1           | Message type names             | msg_type_names              |
+    // | RFC 2328 A.3.5           | # LSAs larger than the body    | lsu_stops_when_body_ends    |
+
+    #[test]
+    fn msg_type_names() {
+        let names: Vec<_> = (0..=6).map(msg_type_name).collect();
+        assert_eq!(
+            names,
+            [
+                None,
+                Some("Hello"),
+                Some("Database Description"),
+                Some("Link State Request"),
+                Some("Link State Update"),
+                Some("Link State Acknowledgment"),
+                None,
+            ]
+        );
+    }
+
+    fn noop(_: &mut DissectBuffer<'_>, _: &[u8], _: usize) {}
+
+    #[test]
+    fn lsu_stops_when_body_ends() {
+        static FD: FieldDescriptor =
+            FieldDescriptor::new("x", "X", packet_dissector_core::field::FieldType::Array);
+        let body = [0, 0, 0, 5, 0, 0, 0];
+        let mut buf = DissectBuffer::new();
+        push_lsu_lsas(&mut buf, &FD, &body, 5, 0, &FD, noop);
+        assert_eq!(buf.fields()[0].range, 4..4);
+        assert_eq!(buf.fields()[1].value, FieldValue::Bytes(&[0, 0, 0]));
+    }
+}

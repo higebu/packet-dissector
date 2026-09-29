@@ -354,14 +354,14 @@ pub(crate) fn push_lsa<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], of
         // Router Information LSA — RFC 7770, Section 2.2
         // <https://www.rfc-editor.org/rfc/rfc7770#section-2.2>
         12 => push_tlv_body(buf, body, 0, o, TlvContext::RouterInfo),
-        // E-Router-LSA — RFC 8362, Section 4.1: "0 |Nt|x|V|E|B| Options"
+        // E-Router-LSA — RFC 8362, Section 4.1: flags octet (Nt/x/V/E/B), Options
         // <https://www.rfc-editor.org/rfc/rfc8362#section-4.1>
         33 if body.len() >= 4 => {
             push_router_flags(buf, body[0], o);
             push_options(buf, body, o);
             push_tlv_body(buf, body, 4, o, TlvContext::V3ExtLsa)
         }
-        // E-Network-LSA — RFC 8362, Section 4.2: "0 | Options"
+        // E-Network-LSA — RFC 8362, Section 4.2: 0, Options
         // <https://www.rfc-editor.org/rfc/rfc8362#section-4.2>
         34 if body.len() >= 4 => {
             push_options(buf, body, o);
@@ -371,7 +371,7 @@ pub(crate) fn push_lsa<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], of
         // E-NSSA LSAs — RFC 8362, Sections 4.3-4.6: TLVs only
         // <https://www.rfc-editor.org/rfc/rfc8362#section-4.3>
         35 | 36 | 37 | 39 => push_tlv_body(buf, body, 0, o, TlvContext::V3ExtLsa),
-        // E-Link-LSA — RFC 8362, Section 4.7: "Rtr Priority | Options"
+        // E-Link-LSA — RFC 8362, Section 4.7: Rtr Priority, Options
         // <https://www.rfc-editor.org/rfc/rfc8362#section-4.7>
         40 if body.len() >= 4 => {
             push_u8(buf, FD_ROUTER_PRIORITY, body, 0, o);
@@ -426,7 +426,7 @@ fn push_options(buf: &mut DissectBuffer<'_>, v: &[u8], o: usize) {
 /// Pushes the Router-LSA flags octet and its Nt/V/E/B bits.
 ///
 /// RFC 5340, Appendix A.4.3 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.3>
-/// "0 |Nt|x|V|E|B| Options"
+/// Layout: flags octet with the Nt, x, V, E and B bits, then Options.
 fn push_router_flags(buf: &mut DissectBuffer<'_>, flags: u8, o: usize) {
     buf.push_field(&LSA_FIELDS[FD_FLAGS], FieldValue::U8(flags), o..o + 1);
     for (f, mask) in [
@@ -476,8 +476,8 @@ fn push_references(buf: &mut DissectBuffer<'_>, v: &[u8], o: usize) {
 /// Router-LSA body.
 ///
 /// RFC 5340, Appendix A.4.3 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.3>
-/// Each interface is "Type | 0 | Metric | Interface ID | Neighbor Interface
-/// ID | Neighbor Router ID" (16 octets).
+/// Each interface: Type, 0, Metric, Interface ID, Neighbor Interface ID and
+/// Neighbor Router ID (16 octets).
 fn push_router_lsa<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     body: &'pkt [u8],
@@ -563,7 +563,7 @@ fn prefix_fits(body: &[u8], prefix_length: u8, at: usize) -> Option<usize> {
 /// Inter-Area-Prefix-LSA body.
 ///
 /// RFC 5340, Appendix A.4.5 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.5>
-/// "0 | Metric | PrefixLength | PrefixOptions | 0 | Address Prefix"
+/// Layout: 0, Metric, PrefixLength, PrefixOptions, 0, Address Prefix.
 fn push_inter_area_prefix_lsa<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     body: &'pkt [u8],
@@ -580,7 +580,7 @@ fn push_inter_area_prefix_lsa<'pkt>(
 /// Inter-Area-Router-LSA body.
 ///
 /// RFC 5340, Appendix A.4.6 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.6>
-/// "0 | Options | 0 | Metric | Destination Router ID"
+/// Layout: 0, Options, 0, Metric, Destination Router ID.
 fn push_inter_area_router_lsa<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     body: &'pkt [u8],
@@ -598,9 +598,9 @@ fn push_inter_area_router_lsa<'pkt>(
 /// AS-External-LSA and NSSA-LSA body.
 ///
 /// RFC 5340, Appendix A.4.7 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.7>
-/// "|E|F|T| Metric | PrefixLength | PrefixOptions | Referenced LS Type |
-/// Address Prefix | Forwarding Address (opt.) | External Route Tag (opt.)
-/// | Referenced Link State ID (opt.)"
+/// Layout: E/F/T bits, Metric, PrefixLength, PrefixOptions, Referenced LS
+/// Type, Address Prefix, then the optional Forwarding Address, External
+/// Route Tag and Referenced Link State ID.
 /// RFC 5340, Appendix A.4.8 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.8>
 /// uses the same format for the NSSA-LSA.
 fn push_external_lsa<'pkt>(
@@ -666,8 +666,8 @@ fn push_external_lsa<'pkt>(
 
 /// Pushes a `prefixes` array of `count` entries starting at `start`.
 ///
-/// Each entry is "PrefixLength | PrefixOptions | 16-bit field | Address
-/// Prefix"; the 16-bit field is a Metric when `with_metric` is set and
+/// Each entry: PrefixLength, PrefixOptions, a 16-bit field and the Address
+/// Prefix; the 16-bit field is a Metric when `with_metric` is set and
 /// reserved otherwise. Returns the offset after the last complete entry.
 ///
 /// RFC 5340, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.1>
@@ -728,8 +728,8 @@ fn push_prefixes<'pkt>(
 /// Link-LSA body.
 ///
 /// RFC 5340, Appendix A.4.9 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.9>
-/// "Rtr Priority | Options | Link-local Interface Address | # prefixes |
-/// PrefixLength | PrefixOptions | 0 | Address Prefix ..."
+/// Layout: Rtr Priority, Options, Link-local Interface Address, # prefixes,
+/// then PrefixLength / PrefixOptions / 0 / Address Prefix entries.
 fn push_link_lsa<'pkt>(buf: &mut DissectBuffer<'pkt>, body: &'pkt [u8], o: usize) -> Option<usize> {
     if body.len() < 24 {
         return None;
@@ -749,9 +749,9 @@ fn push_link_lsa<'pkt>(buf: &mut DissectBuffer<'pkt>, body: &'pkt [u8], o: usize
 /// Intra-Area-Prefix-LSA body.
 ///
 /// RFC 5340, Appendix A.4.10 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.10>
-/// "# Prefixes | Referenced LS Type | Referenced Link State ID | Referenced
-/// Advertising Router | PrefixLength | PrefixOptions | Metric | Address
-/// Prefix ..."
+/// Layout: # Prefixes, Referenced LS Type, Referenced Link State ID,
+/// Referenced Advertising Router, then PrefixLength / PrefixOptions /
+/// Metric / Address Prefix entries.
 fn push_intra_area_prefix_lsa<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     body: &'pkt [u8],
@@ -768,4 +768,72 @@ fn push_intra_area_prefix_lsa<'pkt>(
     );
     push_references(buf, body, o);
     Some(push_prefixes(buf, body, 12, count, true, o))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // # OSPFv3 LSA helper coverage
+    //
+    // | RFC Section        | Description                         | Test                        |
+    // |--------------------|-------------------------------------|-----------------------------|
+    // | RFC 5340 A.4.3     | Router interface type names         | name_tables_and_display_fns |
+    // | RFC 5340 A.4.3-10  | Bodies shorter than the fixed part  | short_bodies_are_rejected   |
+    // | RFC 5340 A.4.1     | Prefix list stops at a bad entry    | short_bodies_are_rejected   |
+    // | RFC 5340 A.4.2.1   | Function code names, link labels    | container_labels_resolve    |
+
+    #[test]
+    fn name_tables_and_display_fns() {
+        assert_eq!(router_link_type_name(2), Some("Transit network"));
+        assert_eq!(router_link_type_name(3), None);
+        for d in [&LSA_FIELDS[FD_LS_TYPE], &LINK_FIELDS[FD_LINK_TYPE]] {
+            assert_eq!((d.display_fn.unwrap())(&FieldValue::U32(1), &[]), None);
+        }
+        for d in [&FD_LSA, &FD_LINK] {
+            assert_eq!((d.display_fn.unwrap())(&FieldValue::U8(1), &[]), None);
+        }
+    }
+
+    #[test]
+    fn short_bodies_are_rejected() {
+        let mut buf = DissectBuffer::new();
+        assert_eq!(push_router_lsa(&mut buf, &[0; 3], 0), None);
+        assert_eq!(push_network_lsa(&mut buf, &[0; 3], 0), None);
+        assert_eq!(push_inter_area_router_lsa(&mut buf, &[0; 11], 0), None);
+        assert_eq!(
+            push_external_lsa(&mut buf, &[0, 0, 0, 0, 0, 0, 0x20, 0x01], 0),
+            None
+        );
+        assert_eq!(push_link_lsa(&mut buf, &[0; 23], 0), None);
+        assert_eq!(push_intra_area_prefix_lsa(&mut buf, &[0; 11], 0), None);
+        // Link-LSA announcing 2 prefixes: one truncated, then nothing.
+        let mut link = vec![0; 20];
+        link.extend_from_slice(&[0, 0, 0, 2, 64, 0, 0, 0, 1]);
+        assert_eq!(push_link_lsa(&mut buf, &link, 0), Some(24));
+        let mut link = vec![0; 20];
+        link.extend_from_slice(&[0, 0, 0, 2]);
+        assert_eq!(push_link_lsa(&mut buf, &link, 0), Some(24));
+    }
+
+    #[test]
+    fn container_labels_resolve() {
+        assert_eq!(
+            (0..=0x1FFFu16)
+                .filter(|t| lsa_type_name(*t).is_some())
+                .count(),
+            24
+        );
+        assert_eq!(router_link_type_name(4), Some("Virtual link"));
+        let ls_type = &LSA_FIELDS[FD_LS_TYPE];
+        assert_eq!(
+            (ls_type.display_fn.unwrap())(&FieldValue::U16(0x200D), &[]),
+            Some("Inter-AS-TE-v3 LSA")
+        );
+        let children = [LINK_FIELDS[FD_LINK_TYPE].to_field(FieldValue::U8(1), 0..1)];
+        assert_eq!(
+            (FD_LINK.display_fn.unwrap())(&FieldValue::Object(0..1), &children),
+            Some("Point-to-point")
+        );
+    }
 }

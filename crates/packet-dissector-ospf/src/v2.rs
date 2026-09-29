@@ -365,7 +365,7 @@ impl Dissector for Ospfv2Dissector {
             offset + 16..offset + 24,
         );
         // RFC 2328, Appendix D.3 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-D.3>
-        // "| 0 | Key ID | Auth Data Len | Cryptographic sequence number |"
+        // Layout: 0 (2 octets), Key ID, Auth Data Len, Cryptographic sequence number.
         if auth_type == AUTH_TYPE_CRYPTOGRAPHIC {
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_KEY_ID],

@@ -313,7 +313,8 @@ pub(crate) fn push_lsa_header_fields<'pkt>(
     );
     // RFC 5250, Section 3 — <https://www.rfc-editor.org/rfc/rfc5250#section-3>
     // "The link-state ID of the Opaque LSA is divided into an Opaque type
-    // field (the first 8 bits) and an Opaque ID (the remaining 24 bits)."
+    // field (the first 8 bits) and a type-specific ID (the remaining 24
+    // bits)."
     if (9..=11).contains(&ls_type) {
         buf.push_field(
             &LSA_FIELDS[FD_OPAQUE_TYPE],
@@ -366,7 +367,8 @@ fn push_bit(buf: &mut DissectBuffer<'_>, f: usize, byte: u8, mask: u8, at: usize
 /// Router-LSA body. Returns the number of octets decoded.
 ///
 /// RFC 2328, Appendix A.4.2 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.2>
-/// "0 |V|E|B| 0 | # links", followed by one entry per link.
+/// Layout: flags octet with the V, E and B bits, 0, # links, then one
+/// entry per link.
 /// RFC 3101, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc3101#section-2.1>
 /// adds the Nt-bit (0x10).
 fn push_router_lsa<'pkt>(
@@ -507,7 +509,7 @@ fn push_network_lsa<'pkt>(
 /// Summary-LSA body (types 3 and 4).
 ///
 /// RFC 2328, Appendix A.4.4 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.4>
-/// "Network Mask | 0 | metric (24 bits)", then "TOS | TOS metric" entries.
+/// Layout: Network Mask, 0, metric (24 bits), then TOS / TOS metric entries.
 fn push_summary_lsa<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     body: &'pkt [u8],
@@ -546,8 +548,8 @@ fn push_summary_lsa<'pkt>(
 /// AS-external-LSA (type 5) and NSSA-LSA (type 7) body.
 ///
 /// RFC 2328, Appendix A.4.5 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.5>
-/// "Network Mask", then 12-octet entries "E | TOS | metric | Forwarding
-/// address | External Route Tag"; the first entry is for TOS 0.
+/// Layout: Network Mask, then 12-octet entries of E bit and TOS, metric,
+/// Forwarding address and External Route Tag; the first entry is for TOS 0.
 /// RFC 3101, Appendix C — <https://www.rfc-editor.org/rfc/rfc3101#appendix-C>
 /// uses the same format for the NSSA-LSA.
 fn push_external_lsa<'pkt>(
@@ -641,4 +643,67 @@ fn push_opaque_lsa<'pkt>(
     };
     push_tlvs(buf, body, o, ctx);
     Some(body.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // # OSPFv2 LSA helper coverage
+    //
+    // | RFC Section        | Description                         | Test                        |
+    // |--------------------|-------------------------------------|-----------------------------|
+    // | RFC 2328 A.4.2     | Router link type names              | name_tables_and_display_fns |
+    // | RFC 5250 §3, IANA  | LS type / Opaque type names         | name_tables_and_display_fns |
+    // | RFC 2328 A.4.2-5   | Bodies shorter than the fixed part  | short_bodies_are_rejected   |
+    // | RFC 2328 A.4.1-2   | LSA / link container labels         | container_labels_resolve    |
+
+    #[test]
+    fn name_tables_and_display_fns() {
+        assert_eq!(router_link_type_name(2), Some("Transit network"));
+        assert_eq!(router_link_type_name(4), Some("Virtual link"));
+        assert_eq!(router_link_type_name(5), None);
+        let count = (0..=255u8)
+            .filter(|t| opaque_type_name(*t).is_some())
+            .count();
+        assert_eq!(count, 11);
+        for d in [
+            &LSA_FIELDS[FD_LS_TYPE],
+            &LSA_FIELDS[FD_OPAQUE_TYPE],
+            &LINK_FIELDS[FD_LINK_TYPE],
+        ] {
+            assert_eq!((d.display_fn.unwrap())(&FieldValue::U16(1), &[]), None);
+        }
+        for d in [&FD_LSA, &FD_LINK] {
+            assert_eq!((d.display_fn.unwrap())(&FieldValue::U8(1), &[]), None);
+        }
+    }
+
+    #[test]
+    fn short_bodies_are_rejected() {
+        let mut buf = DissectBuffer::new();
+        assert_eq!(push_summary_lsa(&mut buf, &[0; 7], 0), None);
+        assert_eq!(push_external_lsa(&mut buf, &[0; 15], 0), None);
+        // A link whose # TOS overruns the body stops the walk.
+        let body = [0, 0, 0, 1, 10, 0, 0, 0, 255, 0, 0, 0, 3, 2, 0, 1];
+        assert_eq!(push_router_lsa(&mut buf, &body, 0), Some(4));
+    }
+
+    #[test]
+    fn container_labels_resolve() {
+        assert_eq!(
+            (1..=11u8).filter(|t| lsa_type_name(*t).is_some()).count(),
+            10
+        );
+        let ls_type = &LSA_FIELDS[FD_LS_TYPE];
+        assert_eq!(
+            (ls_type.display_fn.unwrap())(&FieldValue::U8(5), &[]),
+            Some("AS-external-LSA")
+        );
+        let children = [LINK_FIELDS[FD_LINK_TYPE].to_field(FieldValue::U8(2), 0..1)];
+        assert_eq!(
+            (FD_LINK.display_fn.unwrap())(&FieldValue::Object(0..1), &children),
+            Some("Transit network")
+        );
+    }
 }

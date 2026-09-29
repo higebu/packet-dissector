@@ -172,3 +172,30 @@ pub(crate) fn push_auth_trailer<'pkt>(
     );
     buf.end_container(idx);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // # Trailer helper coverage
+    //
+    // | RFC Section      | Description                        | Test                    |
+    // |------------------|------------------------------------|-------------------------|
+    // | RFC 7166 §4.1    | Authentication type names          | auth_type_names         |
+    // | RFC 5613 §2.2    | LLS block shorter than its header  | lls_needs_header        |
+
+    #[test]
+    fn auth_type_names() {
+        let d = &AUTH_TRAILER_FIELDS[FD_AT_AUTH_TYPE];
+        assert_eq!((d.display_fn.unwrap())(&FieldValue::U16(2), &[]), None);
+    }
+
+    #[test]
+    fn lls_needs_header() {
+        let mut buf = DissectBuffer::new();
+        assert_eq!(
+            push_lls(&mut buf, &[0, 0, 0], 0, &LLS_FIELDS[FD_LLS_CHECKSUM]),
+            0
+        );
+    }
+}

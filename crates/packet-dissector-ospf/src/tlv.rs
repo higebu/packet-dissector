@@ -34,7 +34,8 @@ const TLV_HEADER_SIZE: usize = 4;
 /// `prefix_length` bits, or `None` if the length exceeds 128 bits.
 ///
 /// RFC 5340, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc5340#appendix-A.4.1>
-/// "the Address Prefix is an even multiple of 32-bit words"
+/// "Address Prefix is an encoding of the prefix itself as an even multiple
+/// of 32-bit words, padding with zero bits as necessary."
 pub(crate) fn prefix_octets(prefix_length: u8) -> Option<usize> {
     if prefix_length > 128 {
         return None;
@@ -53,8 +54,9 @@ pub(crate) fn prefix_to_ipv6(bytes: &[u8]) -> [u8; 16] {
 /// Formats a `U32` holding IEEE 754 single-precision bits as a JSON number.
 ///
 /// RFC 3630, Section 2.5.6 — <https://www.rfc-editor.org/rfc/rfc3630#section-2.5.6>
-/// "The Maximum Bandwidth is encoded in 32 bits in IEEE floating point
-/// format. The units are bytes (not bits!) per second."
+/// "The Maximum Bandwidth sub-TLV specifies the maximum bandwidth that can
+/// be used on this link, in this direction (from the system originating
+/// the LSA to its neighbor), in IEEE floating point format."
 fn format_ieee_float(
     value: &FieldValue<'_>,
     _ctx: &FormatContext<'_>,
@@ -1631,5 +1633,132 @@ mod tests {
         assert_eq!(push_sid(&mut buf, &[0, 0, 0, 1], 0, 0), Some(4));
         assert_eq!(push_sid(&mut buf, &[0, 0], 0, 0), None);
         assert_eq!(push_sid(&mut buf, &[0], 4, 0), None);
+    }
+
+    /// Every IANA name table entry is reachable and unknown codes have none.
+    #[test]
+    fn name_tables_cover_registries() {
+        let count =
+            |f: fn(u16) -> Option<&'static str>| (0..=u16::MAX).filter(|t| f(*t).is_some()).count();
+        assert_eq!(count(te_tlv_name), 6);
+        assert_eq!(count(te_link_sub_tlv_name), 29);
+        assert_eq!(count(ri_tlv_name), 20);
+        assert_eq!(count(sid_label_sub_tlv_name), 1);
+        assert_eq!(count(no_name), 0);
+        assert_eq!(count(ext_prefix_tlv_name), 2);
+        assert_eq!(count(ext_prefix_sub_tlv_name), 12);
+        assert_eq!(count(ext_link_tlv_name), 1);
+        assert_eq!(count(ext_link_sub_tlv_name), 25);
+        assert_eq!(count(v3_ext_lsa_tlv_name), 9);
+        assert_eq!(count(v3_ext_lsa_sub_tlv_name), 39);
+        assert_eq!(count(srv6_locator_tlv_name), 1);
+        assert_eq!(count(srv6_locator_sub_tlv_name), 7);
+        assert_eq!(count(lls_tlv_name), 2);
+    }
+
+    const ALL_CONTEXTS: [TlvContext; 14] = [
+        TlvContext::Te,
+        TlvContext::TeLink,
+        TlvContext::RouterInfo,
+        TlvContext::SidLabelRange,
+        TlvContext::Opaque,
+        TlvContext::ExtPrefix,
+        TlvContext::ExtPrefixSub,
+        TlvContext::ExtLink,
+        TlvContext::ExtLinkSub,
+        TlvContext::V3ExtLsa,
+        TlvContext::V3ExtLsaSub,
+        TlvContext::Srv6Locator,
+        TlvContext::Srv6LocatorSub,
+        TlvContext::Lls,
+    ];
+
+    /// Type display functions ignore non-`U16` values, and containers that
+    /// are not objects have no label.
+    #[test]
+    fn display_fns_ignore_other_values() {
+        for ctx in ALL_CONTEXTS {
+            let d = ctx.type_descriptor();
+            assert_eq!((d.display_fn.unwrap())(&FieldValue::U8(1), &[]), None);
+        }
+        assert_eq!(tlv_container_name(&FieldValue::U8(0), &[]), None);
+    }
+
+    /// The schema builder yields the documented field order.
+    #[test]
+    fn schema_builder_layout() {
+        let fields = tlv_fields(UNPARSED_DESCRIPTOR);
+        assert_eq!(fields[F_LENGTH].name, "length");
+        assert_eq!(fields[F_VALUE].name, "value");
+        assert_eq!(fields[F_AUTH_DATA].name, "auth_data");
+        assert_eq!(TLV_FIELDS.len(), TLV_FIELD_COUNT);
+    }
+
+    fn named<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>, name: &str) -> usize {
+        buf.fields().iter().filter(|f| f.name() == name).count()
+    }
+
+    fn tlv(t: u16, value: &[u8]) -> Vec<u8> {
+        let mut out = t.to_be_bytes().to_vec();
+        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        out.extend_from_slice(value);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// Unknown types and values shorter than their fixed part stay raw in
+    /// every context.
+    #[test]
+    fn unknown_and_short_values_are_raw() {
+        for ctx in ALL_CONTEXTS {
+            let mut buf = DissectBuffer::new();
+            let data = tlv(0x7fff, &[1, 2, 3]);
+            push_tlvs(&mut buf, &data, 0, ctx);
+            assert_eq!(named(&buf, "value"), 1, "{ctx:?}");
+        }
+        // Short / malformed fixed parts.
+        let cases: [(TlvContext, Vec<u8>); 9] = [
+            (TlvContext::V3ExtLsa, tlv(3, &[0, 0, 0, 1])),
+            (TlvContext::V3ExtLsa, tlv(3, &[0, 0, 0, 1, 64, 0, 0, 0])),
+            (TlvContext::V3ExtLsa, tlv(5, &[0, 0, 0, 1, 64, 0, 0, 0])),
+            (TlvContext::V3ExtLsa, tlv(1, &[0; 8])),
+            (TlvContext::V3ExtLsaSub, tlv(31, &[0; 8])),
+            (TlvContext::V3ExtLsaSub, tlv(32, &[0; 20])),
+            (TlvContext::Srv6Locator, tlv(1, &[1, 0, 64, 0, 0, 0, 0, 1])),
+            (TlvContext::Srv6Locator, tlv(1, &[1, 0, 200, 0, 0, 0, 0, 1])),
+            (TlvContext::ExtPrefix, tlv(2, &[0; 8])),
+        ];
+        for (ctx, data) in cases {
+            let mut buf = DissectBuffer::new();
+            push_tlvs(&mut buf, &data, 0, ctx);
+            assert_eq!(named(&buf, "value"), 1, "{ctx:?} {data:?}");
+        }
+    }
+
+    /// Functional Capabilities (RFC 7770, Section 2.6), a SID/Label sub-TLV
+    /// of an Extended Prefix TLV (RFC 8665, Section 2.1) and a sub-TLV of the
+    /// SRv6 Capabilities TLV (no registered types, RFC 9513, Section 2).
+    /// <https://www.rfc-editor.org/rfc/rfc7770#section-2.6>
+    /// <https://www.rfc-editor.org/rfc/rfc8665#section-2.1>
+    /// <https://www.rfc-editor.org/rfc/rfc9513#section-2>
+    #[test]
+    fn decode_remaining_tlvs() {
+        let mut data = tlv(2, &[0x80, 0, 0, 0]);
+        let mut caps = vec![0, 0, 0, 0];
+        caps.extend(tlv(1, &[9]));
+        data.extend(tlv(20, &caps));
+        let mut buf = DissectBuffer::new();
+        push_tlvs(&mut buf, &data, 0, TlvContext::RouterInfo);
+        assert_eq!(named(&buf, "functional_capabilities"), 1);
+        assert_eq!(named(&buf, "value"), 1);
+
+        let mut prefix = vec![1, 32, 0, 0, 10, 0, 0, 1];
+        prefix.extend(tlv(1, &[0, 0, 0, 5]));
+        let data = tlv(1, &prefix);
+        let mut buf = DissectBuffer::new();
+        push_tlvs(&mut buf, &data, 0, TlvContext::ExtPrefix);
+        assert_eq!(named(&buf, "sid"), 1);
     }
 }
