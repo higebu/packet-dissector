@@ -32,6 +32,9 @@
 //! - RFC 9251 (IGMP and MLD Proxies for EVPN): <https://www.rfc-editor.org/rfc/rfc9251>
 //! - RFC 9572 (Updates to EVPN Broadcast, Unknown Unicast, or Multicast (BUM) Procedures): <https://www.rfc-editor.org/rfc/rfc9572>
 //! - IANA EVPN Route Types: <https://www.iana.org/assignments/evpn/evpn.xhtml>
+//! - RFC 8955 (Dissemination of Flow Specification Rules): <https://www.rfc-editor.org/rfc/rfc8955>
+//! - RFC 8956 (Dissemination of Flow Specification Rules for IPv6): <https://www.rfc-editor.org/rfc/rfc8956>
+//! - IANA Flow Spec Component Types: <https://www.iana.org/assignments/flow-spec/flow-spec.xhtml>
 //! - RFC 9015 (BGP Control Plane for the Network Service Header / SFP attribute): <https://www.rfc-editor.org/rfc/rfc9015>
 //! - RFC 9026 (Multicast VPN Fast Upstream Failover / BFD Discriminator): <https://www.rfc-editor.org/rfc/rfc9026>
 //! - RFC 9552 (BGP-LS): <https://www.rfc-editor.org/rfc/rfc9552>
@@ -236,7 +239,7 @@
 //! | 3/4 | UPDATE top-level afi/safi: first MP attribute in attribute order wins | `parse_bgp_update_top_level_afi_safi_first_attribute_wins` |
 //! | 3/4 | Plain IPv4 unicast UPDATE (no MP attribute) has no top-level afi/safi | `parse_bgp_update_plain_ipv4_unicast_has_no_top_level_afi_safi` |
 //! | 5 | Plain prefix NLRI for SAFI 2 (multicast) | `parse_bgp_update_mp_reach_ipv4_multicast_prefixes` |
-//! | 3 | Non-prefix SAFI of AFI 1 (FlowSpec) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw` |
+//! | 3 | Non-prefix SAFI of AFI 1 (MDT) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw` |
 //! | 4 | Non-prefix SAFI of AFI 1 (SR Policy) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw` |
 //! | 5 | Malformed tail of a prefix NLRI block kept as raw bytes | `parse_bgp_update_mp_reach_prefix_tail_is_raw` |
 //! | 5 | Prefix withdrawn routes that do not decode kept as raw bytes | `parse_bgp_update_mp_unreach_invalid_prefixes_are_raw` |
@@ -256,6 +259,19 @@
 //! | RFC 7432 §7 | EVPN routes in MP_UNREACH_NLRI | `parse_bgp_update_mp_unreach_evpn_withdrawn` |
 //! | RFC 7911 §3 | ADD-PATH EVPN block; truncated tail kept as `nlri_raw` | `parse_bgp_update_mp_reach_evpn_add_path_and_truncated_tail`, `detect_add_path_evpn_prefers_plain_encoding` |
 //! | IANA EVPN Route Types | Route Type names, ESI formatting | `evpn_name_tables` |
+//!
+//! # Flow Specification NLRI Coverage (RFC 8955 / RFC 8956)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 8955 §4.2, §4.2.1, §4.3.1-4.3.3 | IPv4 rules: prefixes, numeric and bitmask operators (examples 1-3) | `parse_bgp_update_mp_reach_flowspec_ipv4_examples` |
+//! | RFC 8956 §3.1, §3.7, §3.8.2 | IPv6 prefixes with and without offset, TCP Flags, Flow Label | `parse_bgp_update_mp_reach_flowspec_ipv6_examples` |
+//! | RFC 8955 §4.1, §8 | SAFI 134 RD; extended 2-octet length | `parse_bgp_update_mp_reach_flowspec_vpn_and_extended_length` |
+//! | RFC 8955 §4.2 | Malformed rules (unknown type, order, no end-of-list, prefix length) kept as `value`; overrun kept raw | `parse_bgp_update_mp_reach_flowspec_malformed_rules_keep_value` |
+//! | RFC 8955 §4 | Rules in MP_UNREACH_NLRI | `parse_bgp_update_mp_unreach_flowspec_withdrawn` |
+//! | RFC 8955 §4.2, §4.2.1.1 | Rule without components malformed; first operator AND bit unset | `parse_bgp_update_mp_reach_flowspec_empty_rules_and_first_and_bit` |
+//! | RFC 7911 §3 | ADD-PATH Flow Specification block | `parse_bgp_update_mp_reach_flowspec_add_path` |
+//! | IANA Flow Spec Component Types | Component and comparison names | `flowspec_name_tables` |
 //!
 //! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
 //!
@@ -5365,6 +5381,10 @@ enum MpNlriEncoding {
     /// EVPN NLRI (RFC 7432, Section 7 —
     /// <https://www.rfc-editor.org/rfc/rfc7432#section-7>).
     Evpn,
+    /// Flow Specification NLRI, with an RD when `vpn` (RFC 8955, Sections 4
+    /// and 8 — <https://www.rfc-editor.org/rfc/rfc8955#section-4>; RFC 8956 —
+    /// <https://www.rfc-editor.org/rfc/rfc8956>).
+    FlowSpec { ipv6: bool, vpn: bool },
 }
 
 /// Shape of a labeled NLRI block.
@@ -6041,14 +6061,490 @@ fn format_esi(
     }
 }
 
+/// Returns a human-readable name for an IPv4 Flow Specification component
+/// type.
+///
+/// IANA Flow Spec Component Types —
+/// <https://www.iana.org/assignments/flow-spec/flow-spec.xhtml#flow-spec-2>
+/// RFC 8955, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2>
+fn flowspec_ipv4_component_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("Destination Prefix"),
+        2 => Some("Source Prefix"),
+        3 => Some("IP Protocol"),
+        7 => Some("ICMP Type"),
+        8 => Some("ICMP Code"),
+        _ => flowspec_common_component_name(v),
+    }
+}
+
+/// Returns a human-readable name for an IPv6 Flow Specification component
+/// type.
+///
+/// IANA Flow Spec Component Types —
+/// <https://www.iana.org/assignments/flow-spec/flow-spec.xhtml#flow-spec-2>
+/// RFC 8956, Section 3 — <https://www.rfc-editor.org/rfc/rfc8956#section-3>
+fn flowspec_ipv6_component_name(v: u8) -> Option<&'static str> {
+    match v {
+        1 => Some("Destination IPv6 Prefix"),
+        2 => Some("Source IPv6 Prefix"),
+        3 => Some("Upper-Layer Protocol"),
+        7 => Some("ICMPv6 Type"),
+        8 => Some("ICMPv6 Code"),
+        FLOWSPEC_FLOW_LABEL => Some("Flow Label"),
+        _ => flowspec_common_component_name(v),
+    }
+}
+
+/// Component types with the same name for IPv4 and IPv6 (RFC 8955,
+/// Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2>).
+fn flowspec_common_component_name(v: u8) -> Option<&'static str> {
+    match v {
+        4 => Some("Port"),
+        5 => Some("Destination Port"),
+        6 => Some("Source Port"),
+        FLOWSPEC_TCP_FLAGS => Some("TCP Flags"),
+        10 => Some("Packet Length"),
+        11 => Some("DSCP"),
+        FLOWSPEC_FRAGMENT => Some("Fragment"),
+        _ => None,
+    }
+}
+
+/// Returns the relational operation of the lt / gt / eq bits of a numeric
+/// operator.
+///
+/// RFC 8955, Section 4.2.1.1, Table 1 —
+/// <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1.1>
+fn flowspec_comparison_name(v: u8) -> Option<&'static str> {
+    match v {
+        0b000 => Some("false"),
+        0b001 => Some("=="),
+        0b010 => Some(">"),
+        0b011 => Some(">="),
+        0b100 => Some("<"),
+        0b101 => Some("<="),
+        0b110 => Some("!="),
+        0b111 => Some("true"),
+        _ => None,
+    }
+}
+
+/// Flow Specification component types with a special encoding (RFC 8955,
+/// Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2>;
+/// RFC 8956, Section 3.7 — <https://www.rfc-editor.org/rfc/rfc8956#section-3.7>).
+const FLOWSPEC_DESTINATION_PREFIX: u8 = 1;
+const FLOWSPEC_SOURCE_PREFIX: u8 = 2;
+const FLOWSPEC_TCP_FLAGS: u8 = 9;
+const FLOWSPEC_FRAGMENT: u8 = 12;
+const FLOWSPEC_FLOW_LABEL: u8 = 13;
+/// SAFIs for Flow Specification rules (RFC 8955, Sections 4 and 8 —
+/// <https://www.rfc-editor.org/rfc/rfc8955#section-4>).
+const SAFI_FLOWSPEC: u8 = 133;
+const SAFI_FLOWSPEC_VPN: u8 = 134;
+/// First octet of an extended (2-octet) Flow Specification NLRI length:
+/// "If the NLRI length is smaller than 240 (0xf0 hex) octets, the length
+/// field can be encoded as a single octet" (RFC 8955, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8955#section-4.1>).
+const FLOWSPEC_EXTENDED_LENGTH: u8 = 0xf0;
+
+/// Returns `(value length, length field size)` of the Flow Specification
+/// rule at `pos`, or `None` when its length field is truncated.
+///
+/// RFC 8955, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.1>
+fn flowspec_rule_length(data: &[u8], pos: usize) -> Option<(usize, usize)> {
+    let first = *data.get(pos)?;
+    if first >= FLOWSPEC_EXTENDED_LENGTH {
+        let low = *data.get(pos + 1)?;
+        Some((usize::from(first & 0x0f) << 8 | usize::from(low), 2))
+    } else {
+        Some((usize::from(first), 1))
+    }
+}
+
+/// Returns `true` when `data` is exactly a sequence of well-formed Flow
+/// Specification rules (see [`flowspec_value_valid`]), each preceded by
+/// `path_id_len` octets of Path Identifier.
+fn flowspec_block_parses(data: &[u8], path_id_len: usize, ipv6: bool, vpn: bool) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        let rule = pos + path_id_len;
+        let Some((len, header_len)) = flowspec_rule_length(data, rule) else {
+            return false;
+        };
+        let Some(value) = data.get(rule + header_len..rule + header_len + len) else {
+            return false;
+        };
+        if !flowspec_value_valid(value, ipv6, vpn) {
+            return false;
+        }
+        pos = rule + header_len + len;
+    }
+    true
+}
+
+/// Returns `true` when a Flow Specification block carries RFC 7911 ADD-PATH
+/// Path Identifiers: it does not parse as well-formed rules without them, and
+/// does with them.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_flowspec(data: &[u8], ipv6: bool, vpn: bool) -> bool {
+    !flowspec_block_parses(data, 0, ipv6, vpn)
+        && flowspec_block_parses(data, PATH_ID_SIZE, ipv6, vpn)
+}
+
+/// Parses a Flow Specification NLRI block (SAFI 133, or 134 with an RD) into
+/// one object per rule and returns the number of octets consumed.
+///
+/// RFC 8955, Sections 4.1-4.2 and 8 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.1>
+/// RFC 8956, Section 3 — <https://www.rfc-editor.org/rfc/rfc8956#section-3>
+///
+/// Each rule is a 1- or 2-octet length (Section 4.1), the RD for SAFI 134
+/// (Section 8), and the components; with RFC 7911 ADD-PATH a Path Identifier
+/// precedes it (see [`detect_add_path_flowspec`]). A rule whose value is "not
+/// encoded as specified" keeps its value as `value`.
+fn parse_flowspec_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+    ipv6: bool,
+    vpn: bool,
+) -> usize {
+    let f = &FLOWSPEC_NLRI_FIELDS;
+    let id_len = if detect_add_path_flowspec(data, ipv6, vpn) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
+    let mut pos = 0;
+    while pos < data.len() {
+        let rule = pos + id_len;
+        let Some((len, header_len)) = flowspec_rule_length(data, rule) else {
+            break;
+        };
+        let end = rule + header_len + len;
+        if end > data.len() {
+            break;
+        }
+        let abs = base_offset + pos;
+        let rule_abs = base_offset + rule;
+        let obj_idx = buf.begin_container(
+            &FLOWSPEC_NLRI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + end,
+        );
+        if id_len != 0 {
+            buf.push_field(
+                &f[FD_FS_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+        buf.push_field(
+            &f[FD_FS_NLRI_LENGTH],
+            FieldValue::U16(len as u16),
+            rule_abs..rule_abs + header_len,
+        );
+        let value = &data[rule + header_len..end];
+        let value_abs = rule_abs + header_len;
+        if flowspec_value_valid(value, ipv6, vpn) {
+            push_flowspec_value(buf, value, value_abs, ipv6, vpn);
+        } else if !value.is_empty() {
+            buf.push_field(
+                &f[FD_FS_VALUE],
+                FieldValue::Bytes(value),
+                value_abs..value_abs + value.len(),
+            );
+        }
+        buf.end_container(obj_idx);
+        pos = end;
+    }
+    pos
+}
+
+/// Returns `true` when `data` is a well-formed Flow Specification rule value:
+/// the RD for SAFI 134 (RFC 8955, Section 8 —
+/// <https://www.rfc-editor.org/rfc/rfc8955#section-8>), then one or more
+/// components ("Encoding: <[component]+>") of known types in strictly
+/// increasing type order, each well formed (see [`flowspec_component_end`]).
+///
+/// RFC 8955, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2>:
+/// "An NLRI value not encoded as specified here, including an NLRI that
+/// contains an unknown component type, is considered malformed".
+fn flowspec_value_valid(data: &[u8], ipv6: bool, vpn: bool) -> bool {
+    let mut pos = if vpn { RD_SIZE } else { 0 };
+    if pos >= data.len() {
+        return false;
+    }
+    let mut previous_type = 0;
+    while pos < data.len() {
+        let component_type = data[pos];
+        if component_type <= previous_type {
+            return false;
+        }
+        previous_type = component_type;
+        match flowspec_component_end(data, pos, ipv6) {
+            Some(end) => pos = end,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// How a Flow Specification component's parameter is encoded.
+enum FlowSpecParameter {
+    /// IPv4 `<length, prefix>` (RFC 8955, Section 4.2.2.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2.1>).
+    Ipv4Prefix,
+    /// IPv6 `<length, offset, pattern>` (RFC 8956, Section 3.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc8956#section-3.1>).
+    Ipv6Prefix,
+    /// `[numeric_op, value]+` (RFC 8955, Section 4.2.1.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1.1>).
+    Numeric,
+    /// `[bitmask_op, bitmask]+` (RFC 8955, Section 4.2.1.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1.2>).
+    Bitmask,
+}
+
+/// Returns the parameter encoding of a component type, or `None` for a type
+/// that is not defined for the address family.
+///
+/// RFC 8955, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2>
+/// RFC 8956, Section 3 — <https://www.rfc-editor.org/rfc/rfc8956#section-3>
+fn flowspec_parameter(component_type: u8, ipv6: bool) -> Option<FlowSpecParameter> {
+    match component_type {
+        FLOWSPEC_DESTINATION_PREFIX | FLOWSPEC_SOURCE_PREFIX if ipv6 => {
+            Some(FlowSpecParameter::Ipv6Prefix)
+        }
+        FLOWSPEC_DESTINATION_PREFIX | FLOWSPEC_SOURCE_PREFIX => Some(FlowSpecParameter::Ipv4Prefix),
+        FLOWSPEC_TCP_FLAGS | FLOWSPEC_FRAGMENT => Some(FlowSpecParameter::Bitmask),
+        FLOWSPEC_FLOW_LABEL if ipv6 => Some(FlowSpecParameter::Numeric),
+        3..=8 | 10 | 11 => Some(FlowSpecParameter::Numeric),
+        _ => None,
+    }
+}
+
+/// Returns the offset just past the component at `pos`, or `None` when it is
+/// malformed: an unknown type, a truncated parameter, an IPv4 prefix longer
+/// than 32 bits, an IPv6 prefix outside "offset < length < 129" (RFC 8956,
+/// Section 3.1 — <https://www.rfc-editor.org/rfc/rfc8956#section-3.1>), or an
+/// operator list without the end-of-list bit.
+fn flowspec_component_end(data: &[u8], pos: usize, ipv6: bool) -> Option<usize> {
+    let end = match flowspec_parameter(data[pos], ipv6)? {
+        FlowSpecParameter::Ipv4Prefix => {
+            let bits = *data.get(pos + 1)?;
+            if bits > 32 {
+                return None;
+            }
+            pos + 2 + usize::from(bits).div_ceil(8)
+        }
+        FlowSpecParameter::Ipv6Prefix => {
+            let (bits, bit_offset) = (*data.get(pos + 1)?, *data.get(pos + 2)?);
+            // "If length = 0 and offset = 0, this component matches every
+            // address; otherwise, length MUST be in the range offset < length
+            // < 129 or the component is malformed."
+            if !(bits == 0 && bit_offset == 0 || bit_offset < bits && bits < 129) {
+                return None;
+            }
+            pos + 3 + usize::from(bits - bit_offset).div_ceil(8)
+        }
+        FlowSpecParameter::Numeric | FlowSpecParameter::Bitmask => {
+            let mut p = pos + 1;
+            loop {
+                let op = *data.get(p)?;
+                p += 1 + (1usize << ((op >> 4) & 0x03));
+                // "e (end-of-list bit): Set in the last {op, value} pair in
+                // the list"
+                if op & 0x80 != 0 {
+                    break p;
+                }
+            }
+        }
+    };
+    (end <= data.len()).then_some(end)
+}
+
+/// Pushes a Flow Specification rule value already validated by
+/// [`flowspec_value_valid`]: the RD for SAFI 134 and the `components`.
+fn push_flowspec_value<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    ipv6: bool,
+    vpn: bool,
+) {
+    let mut pos = 0;
+    if vpn {
+        buf.push_field(
+            &FLOWSPEC_NLRI_FIELDS[FD_FS_RD],
+            FieldValue::Bytes(&data[..RD_SIZE]),
+            offset..offset + RD_SIZE,
+        );
+        pos = RD_SIZE;
+    }
+    let array_idx = buf.begin_container(
+        &FLOWSPEC_NLRI_FIELDS[FD_FS_COMPONENTS],
+        FieldValue::Array(0..0),
+        offset + pos..offset + data.len(),
+    );
+    while let Some(end) = flowspec_component_end(data, pos, ipv6) {
+        push_flowspec_component(buf, &data[pos..end], offset + pos, ipv6);
+        pos = end;
+        if pos >= data.len() {
+            break;
+        }
+    }
+    buf.end_container(array_idx);
+}
+
+/// Pushes one validated component (`data` is exactly the component).
+///
+/// RFC 8955, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2>
+/// RFC 8956, Section 3 — <https://www.rfc-editor.org/rfc/rfc8956#section-3>
+fn push_flowspec_component<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    ipv6: bool,
+) {
+    let c = &FLOWSPEC_COMPONENT_FIELDS;
+    let component_type = data[0];
+    let obj_idx = buf.begin_container(
+        &FLOWSPEC_COMPONENT_OBJECT_DESCRIPTOR,
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    let type_fd = if ipv6 {
+        &FLOWSPEC_IPV6_COMPONENT_TYPE_FIELD
+    } else {
+        &c[FD_FSC_TYPE]
+    };
+    buf.push_field(type_fd, FieldValue::U8(component_type), offset..offset + 1);
+    match flowspec_parameter(component_type, ipv6) {
+        // "The length and prefix fields are encoded as in BGP UPDATE
+        // messages" (RFC 8955, Section 4.2.2.1 —
+        // https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2.1).
+        Some(FlowSpecParameter::Ipv4Prefix) => buf.push_field(
+            &PREFIX_ENTRY_IPV4_DESCRIPTOR,
+            FieldValue::Bytes(&data[1..]),
+            offset + 1..offset + data.len(),
+        ),
+        Some(FlowSpecParameter::Ipv6Prefix) => push_flowspec_ipv6_prefix(buf, data, offset),
+        Some(FlowSpecParameter::Numeric) => push_flowspec_operators(buf, data, offset, true),
+        Some(FlowSpecParameter::Bitmask) => push_flowspec_operators(buf, data, offset, false),
+        None => {}
+    }
+    buf.end_container(obj_idx);
+}
+
+/// Pushes a validated IPv6 prefix component (length, offset, pattern).
+///
+/// RFC 8956, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc8956#section-3.1>.
+/// With a zero offset the pattern is shown as a `prefix`; otherwise as
+/// `prefix_length` and `pattern`.
+fn push_flowspec_ipv6_prefix<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    let c = &FLOWSPEC_COMPONENT_FIELDS;
+    let (bits, bit_offset) = (data[1], data[2]);
+    let pattern = &data[3..];
+    buf.push_field(
+        &c[FD_FSC_PREFIX_OFFSET],
+        FieldValue::U8(bit_offset),
+        offset + 2..offset + 3,
+    );
+    if bit_offset == 0 {
+        // `[length, octets...]` in the scratch buffer, as for the other NLRI
+        // prefixes.
+        let scratch = buf.push_scratch(&[bits]);
+        buf.extend_scratch(pattern);
+        buf.push_field(
+            &PREFIX_ENTRY_IPV6_DESCRIPTOR,
+            FieldValue::Scratch(scratch.start..buf.scratch_len()),
+            offset + 1..offset + data.len(),
+        );
+    } else {
+        buf.push_field(
+            &c[FD_FSC_PREFIX_LENGTH],
+            FieldValue::U8(bits),
+            offset + 1..offset + 2,
+        );
+        buf.push_field(
+            &c[FD_FSC_PATTERN],
+            FieldValue::Bytes(pattern),
+            offset + 3..offset + data.len(),
+        );
+    }
+}
+
+/// Pushes the validated {operator, value} pairs of a component into
+/// `operators`.
+///
+/// RFC 8955, Section 4.2.1 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1>:
+/// the numeric operator is `e | a | len | 0 | lt | gt | eq` and the bitmask
+/// operator `e | a | len | 0 | 0 | not | m`, with a value of `1 << len`
+/// octets. The AND bit of the first operator "MUST be treated as always
+/// unset on decoding".
+fn push_flowspec_operators<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    numeric: bool,
+) {
+    let o = &FLOWSPEC_OPERATOR_FIELDS;
+    let array_idx = buf.begin_container(
+        &FLOWSPEC_COMPONENT_FIELDS[FD_FSC_OPERATORS],
+        FieldValue::Array(0..0),
+        offset + 1..offset + data.len(),
+    );
+    let mut p = 1;
+    while p < data.len() {
+        let op = data[p];
+        let value_len = 1usize << ((op >> 4) & 0x03);
+        let value = &data[p + 1..p + 1 + value_len];
+        let abs = offset + p;
+        let item_idx = buf.begin_container(
+            &FLOWSPEC_OPERATOR_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..abs + 1 + value_len,
+        );
+        let and = if p == 1 { 0 } else { (op >> 6) & 1 };
+        buf.push_field(&o[FD_FSO_OPERATOR], FieldValue::U8(op), abs..abs + 1);
+        buf.push_field(
+            &o[FD_FSO_END_OF_LIST],
+            FieldValue::U8(op >> 7),
+            abs..abs + 1,
+        );
+        buf.push_field(&o[FD_FSO_AND], FieldValue::U8(and), abs..abs + 1);
+        if numeric {
+            buf.push_field(
+                &o[FD_FSO_COMPARISON],
+                FieldValue::U8(op & 0x07),
+                abs..abs + 1,
+            );
+        } else {
+            buf.push_field(&o[FD_FSO_NOT], FieldValue::U8((op >> 1) & 1), abs..abs + 1);
+            buf.push_field(&o[FD_FSO_MATCH], FieldValue::U8(op & 1), abs..abs + 1);
+        }
+        let v = value.iter().fold(0u64, |acc, b| (acc << 8) | u64::from(*b));
+        buf.push_field(
+            &o[FD_FSO_VALUE],
+            FieldValue::U64(v),
+            abs + 1..abs + 1 + value_len,
+        );
+        buf.end_container(item_idx);
+        p += 1 + value_len;
+    }
+    buf.end_container(array_idx);
+}
+
 /// Selects the NLRI encoding for an (AFI, SAFI) pair.
 ///
 /// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
 /// Section 5 may go to [`parse_prefixes`]: other SAFIs of AFI 1/2 (labeled
-/// unicast, L3VPN, FlowSpec, SR Policy, ...) have different NLRI layouts, and
-/// the ADD-PATH heuristic would otherwise turn them into plausible looking but
-/// wrong prefixes. Returns `None` for an (AFI, SAFI) whose NLRI is not
-/// decoded.
+/// unicast, L3VPN, FlowSpec, SR Policy, ...) have different NLRI layouts —
+/// decoded by their own [`MpNlriEncoding`] where implemented — and the ADD-PATH
+/// heuristic would otherwise turn them into plausible looking but wrong
+/// prefixes. Returns `None` for an (AFI, SAFI) whose NLRI is not decoded.
 ///
 /// RFC 4760, Section 5 — <https://www.rfc-editor.org/rfc/rfc4760#section-5>
 fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
@@ -6063,6 +6559,10 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
         (AFI_IPV4 | AFI_IPV6, SAFI_MPLS_VPN) => Some(MpNlriEncoding::Labeled { ipv6, vpn: true }),
         (_, SAFI_MUP) => Some(MpNlriEncoding::Mup { ipv6 }),
         (AFI_L2VPN, SAFI_EVPN) => Some(MpNlriEncoding::Evpn),
+        (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC) => Some(MpNlriEncoding::FlowSpec { ipv6, vpn: false }),
+        (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC_VPN) => {
+            Some(MpNlriEncoding::FlowSpec { ipv6, vpn: true })
+        }
         _ => None,
     }
 }
@@ -6106,6 +6606,9 @@ fn parse_mp_nlri_block<'pkt>(
                 parse_labeled_nlri(buf, data, offset, &LabeledNlri::new(ipv6, vpn, withdraw))
             }
             MpNlriEncoding::Evpn => parse_evpn_nlri(buf, data, offset, vni_label),
+            MpNlriEncoding::FlowSpec { ipv6, vpn } => {
+                parse_flowspec_nlri(buf, data, offset, ipv6, vpn)
+            }
         };
         if buf.field_count() == before {
             buf.pop_field(); // remove empty array placeholder
@@ -6579,7 +7082,7 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// RFC 7432, Section 7 — <https://www.rfc-editor.org/rfc/rfc7432#section-7>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 28] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 30] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
@@ -6632,6 +7135,11 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 28] = [
     EVPN_NLRI_FIELDS[FD_EVPN_VNI],
     EVPN_NLRI_FIELDS[FD_EVPN_VNI1],
     EVPN_NLRI_FIELDS[FD_EVPN_VNI2],
+    // Flow Specification NLRI fields (RFC 8955, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc8955#section-4); `rd` and `value`
+    // are listed above.
+    FLOWSPEC_NLRI_FIELDS[FD_FS_NLRI_LENGTH],
+    FLOWSPEC_NLRI_FIELDS[FD_FS_COMPONENTS],
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
@@ -6698,6 +7206,110 @@ const EVPN_NLRI_FIELDS: [FieldDescriptor; 18] = [
 static EVPN_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("evpn_route", "EVPN Route", FieldType::Object)
         .with_children(&EVPN_NLRI_FIELDS);
+
+/// Field descriptor indices for [`FLOWSPEC_NLRI_FIELDS`].
+const FD_FS_NLRI_LENGTH: usize = 0;
+const FD_FS_RD: usize = 1;
+const FD_FS_COMPONENTS: usize = 2;
+const FD_FS_VALUE: usize = 3;
+const FD_FS_PATH_ID: usize = 4;
+
+/// Child field descriptors of a Flow Specification NLRI entry.
+///
+/// RFC 8955, Sections 4 and 8 — <https://www.rfc-editor.org/rfc/rfc8955#section-4>
+const FLOWSPEC_NLRI_FIELDS: [FieldDescriptor; 5] = [
+    FieldDescriptor::new("nlri_length", "NLRI Length", FieldType::U16).optional(),
+    MUP_NLRI_FIELDS[FD_MUP_RD],
+    FieldDescriptor::new("components", "Components", FieldType::Array)
+        .optional()
+        .with_children(&FLOWSPEC_COMPONENT_FIELDS),
+    MUP_NLRI_FIELDS[FD_MUP_VALUE],
+    PATH_ID_FIELD,
+];
+
+/// Object descriptor for Flow Specification NLRI entries.
+static FLOWSPEC_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("flowspec_rule", "Flow Specification", FieldType::Object)
+        .with_children(&FLOWSPEC_NLRI_FIELDS);
+
+/// Field descriptor indices for [`FLOWSPEC_COMPONENT_FIELDS`].
+const FD_FSC_TYPE: usize = 0;
+const FD_FSC_PREFIX_LENGTH: usize = 2;
+const FD_FSC_PREFIX_OFFSET: usize = 3;
+const FD_FSC_PATTERN: usize = 4;
+const FD_FSC_OPERATORS: usize = 5;
+
+/// Child field descriptors of a Flow Specification component.
+///
+/// `type` is named from the IPv4 registry column here; IPv6 rules push
+/// [`FLOWSPEC_IPV6_COMPONENT_TYPE_FIELD`], so the serialized `type_name`
+/// follows the rule's address family while the schema shows the IPv4 names.
+/// `prefix` is pushed with the address-family specific `PREFIX_ENTRY_*`
+/// descriptors.
+///
+/// RFC 8955, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.2>
+/// RFC 8956, Section 3 — <https://www.rfc-editor.org/rfc/rfc8956#section-3>
+const FLOWSPEC_COMPONENT_FIELDS: [FieldDescriptor; 6] = [
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => flowspec_ipv4_component_name(*t),
+        _ => None,
+    }),
+    NLRI_PREFIX_FIELD,
+    FieldDescriptor::new("prefix_length", "Prefix Length", FieldType::U8).optional(),
+    FieldDescriptor::new("prefix_offset", "Prefix Offset", FieldType::U8).optional(),
+    FieldDescriptor::new("pattern", "Pattern", FieldType::Bytes).optional(),
+    FieldDescriptor::new("operators", "Operators", FieldType::Array)
+        .optional()
+        .with_children(&FLOWSPEC_OPERATOR_FIELDS),
+];
+
+/// `type` of an IPv6 Flow Specification component (RFC 8956, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc8956#section-3>).
+static FLOWSPEC_IPV6_COMPONENT_TYPE_FIELD: FieldDescriptor =
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => flowspec_ipv6_component_name(*t),
+        _ => None,
+    });
+
+/// Object descriptor for Flow Specification components.
+static FLOWSPEC_COMPONENT_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("component", "Component", FieldType::Object)
+        .with_children(&FLOWSPEC_COMPONENT_FIELDS);
+
+/// Field descriptor indices for [`FLOWSPEC_OPERATOR_FIELDS`].
+const FD_FSO_OPERATOR: usize = 0;
+const FD_FSO_END_OF_LIST: usize = 1;
+const FD_FSO_AND: usize = 2;
+const FD_FSO_COMPARISON: usize = 3;
+const FD_FSO_NOT: usize = 4;
+const FD_FSO_MATCH: usize = 5;
+const FD_FSO_VALUE: usize = 6;
+
+/// Child field descriptors of a Flow Specification {operator, value} pair.
+///
+/// Numeric operators carry `comparison` (lt / gt / eq); bitmask operators
+/// `not` and `match`.
+///
+/// RFC 8955, Section 4.2.1 — <https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1>
+const FLOWSPEC_OPERATOR_FIELDS: [FieldDescriptor; 7] = [
+    FieldDescriptor::new("operator", "Operator", FieldType::U8),
+    FieldDescriptor::new("end_of_list", "End-of-List", FieldType::U8),
+    FieldDescriptor::new("and", "AND", FieldType::U8),
+    FieldDescriptor::new("comparison", "Comparison", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(c) => flowspec_comparison_name(*c),
+            _ => None,
+        }),
+    FieldDescriptor::new("not", "NOT", FieldType::U8).optional(),
+    FieldDescriptor::new("match", "Match", FieldType::U8).optional(),
+    FieldDescriptor::new("value", "Value", FieldType::U64),
+];
+
+/// Object descriptor for Flow Specification {operator, value} pairs.
+static FLOWSPEC_OPERATOR_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("operator", "Operator", FieldType::Object)
+        .with_children(&FLOWSPEC_OPERATOR_FIELDS);
 
 /// Object descriptor for AS_PATH segment entries.
 static AS_PATH_SEG_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -7166,7 +7778,8 @@ const MP_FIELDS: [FieldDescriptor; 10] = [
         .optional()
         .with_children(NLRI_ENTRY_CHILDREN),
     // Raw NLRI / Withdrawn Routes of an (AFI, SAFI) whose encoding is not
-    // decoded (e.g. EVPN, FlowSpec, SR Policy, BGP-LS).
+    // decoded (e.g. SR Policy, BGP-LS), or the tail of a block that does not
+    // parse.
     FieldDescriptor::new("nlri_raw", "NLRI (raw)", FieldType::Bytes).optional(),
     FieldDescriptor::new(
         "withdrawn_routes_raw",
@@ -8496,6 +9109,16 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 9136",
         "IP Prefix Advertisement in Ethernet VPN (EVPN)",
         "https://www.rfc-editor.org/rfc/rfc9136",
+    ),
+    SpecReference::new(
+        "RFC 8955",
+        "Dissemination of Flow Specification Rules",
+        "https://www.rfc-editor.org/rfc/rfc8955",
+    ),
+    SpecReference::new(
+        "RFC 8956",
+        "Dissemination of Flow Specification Rules for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc8956",
     ),
     SpecReference::new(
         "RFC 9135",
@@ -12182,11 +12805,11 @@ mod tests {
 
     #[test]
     fn parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw() {
-        // IPv4 FlowSpec (AFI 1, SAFI 133; RFC 8955, Section 4) has a
-        // zero-length next hop and an NLRI that is not a plain prefix list
-        // (length 5: destination prefix 10.0.0.0/8, IP protocol == 6).
+        // MDT SAFI (AFI 1, SAFI 66; RFC 6037 —
+        // https://www.rfc-editor.org/rfc/rfc6037) is not decoded:
+        // its NLRI is not a plain prefix list and is kept raw.
         let nlri = [0x05, 0x01, 0x08, 0x0a, 0x81, 0x06];
-        let val = build_mp_reach(1, 133, &[], &nlri);
+        let val = build_mp_reach(1, 66, &[], &nlri);
         let data = build_single_attr_update(14, &val);
         let mut buf = DissectBuffer::new();
         BgpDissector.dissect(&data, &mut buf, 0).unwrap();
@@ -15366,6 +15989,8 @@ mod tests {
             "vni1",
             "vni2",
             "value",
+            "nlri_length",
+            "components",
         ] {
             let child = find(nlri, name).unwrap_or_else(|| panic!("{name} missing"));
             assert!(child.optional, "{name} in a union must be optional");
@@ -15474,5 +16099,378 @@ mod tests {
         assert!(detect_add_path_evpn(&add_path));
         // Neither framing: not ADD-PATH.
         assert!(!detect_add_path_evpn(&[0, 0, 0, 1, 3]));
+    }
+
+    // ---------------------------------------------------------------------
+    // Flow Specification NLRI (SAFI 133 / 134; RFC 8955, Section 4;
+    // RFC 8956, Section 3)
+    // ---------------------------------------------------------------------
+
+    /// Helper: dissect an MP_REACH_NLRI with (AFI, SAFI) and `nlri` and run
+    /// `check` on the `nlri` entry objects.
+    fn with_mp_reach_nlri(
+        afi: u16,
+        safi: u8,
+        nlri: &[u8],
+        check: impl FnOnce(&DissectBuffer<'_>, &core::ops::Range<u32>, &[core::ops::Range<u32>]),
+    ) {
+        let data = build_single_attr_update(14, &build_mp_reach(afi, safi, &[], nlri));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let entries = match nested_field_by_name_opt(&buf, &mp, "nlri") {
+            Some(_) => array_objs(&buf, &mp, "nlri"),
+            None => Vec::new(),
+        };
+        check(&buf, &mp, &entries);
+    }
+
+    /// Helper: the (operator range, value) pairs of a component.
+    fn flowspec_operators(
+        buf: &DissectBuffer<'_>,
+        component: &core::ops::Range<u32>,
+    ) -> Vec<core::ops::Range<u32>> {
+        array_objs(buf, component, "operators")
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_flowspec_ipv4_examples() {
+        // RFC 8955, Section 4.3.1 (https://www.rfc-editor.org/rfc/rfc8955#section-4.3.1):
+        // "all packets to 192.0.2.0/24 and TCP port 25"; Section 4.3.2: "... from 203.0.113.0/24 and port {range [137,
+        // 139] or 8080}"; Section 4.3.3: "... to 192.0.2.1/32 and fragment {
+        // DF or FF }".
+        let mut nlri = vec![
+            0x0b, 0x01, 0x18, 0xc0, 0x00, 0x02, 0x03, 0x81, 0x06, 0x04, 0x81, 0x19,
+        ];
+        nlri.extend_from_slice(&[
+            0x12, 0x01, 0x18, 0xc0, 0x00, 0x02, 0x02, 0x18, 0xcb, 0x00, 0x71, 0x04, 0x03, 0x89,
+            0x45, 0x8b, 0x91, 0x1f, 0x90,
+        ]);
+        nlri.extend_from_slice(&[0x09, 0x01, 0x20, 0xc0, 0x00, 0x02, 0x01, 0x0c, 0x80, 0x05]);
+        with_mp_reach_nlri(1, 133, &nlri, |buf, mp, entries| {
+            assert!(nested_field_by_name_opt(buf, mp, "nlri_raw").is_none());
+            assert_eq!(entries.len(), 3);
+
+            let e = &entries[0];
+            assert_eq!(
+                *nested_field_value(buf, e, "nlri_length"),
+                FieldValue::U16(11)
+            );
+            let comps = array_objs(buf, e, "components");
+            assert_eq!(comps.len(), 3);
+            assert_eq!(
+                *nested_field_value(buf, &comps[0], "type"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(&comps[0], "type_name"),
+                Some("Destination Prefix")
+            );
+            let prefix = nested_field_by_name(buf, &comps[0], "prefix");
+            assert_eq!(call_format_fn_ctx(buf, prefix), "\"192.0.2.0/24\"");
+            assert_eq!(
+                buf.resolve_nested_display_name(&comps[1], "type_name"),
+                Some("IP Protocol")
+            );
+            let ops = flowspec_operators(buf, &comps[1]);
+            assert_eq!(ops.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "operator"),
+                FieldValue::U8(0x81)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "end_of_list"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(*nested_field_value(buf, &ops[0], "and"), FieldValue::U8(0));
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "comparison"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(&ops[0], "comparison_name"),
+                Some("==")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "value"),
+                FieldValue::U64(6)
+            );
+            let ops = flowspec_operators(buf, &comps[2]);
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "value"),
+                FieldValue::U64(25)
+            );
+
+            let comps = array_objs(buf, &entries[1], "components");
+            let prefix = nested_field_by_name(buf, &comps[1], "prefix");
+            assert_eq!(call_format_fn_ctx(buf, prefix), "\"203.0.113.0/24\"");
+            let ops = flowspec_operators(buf, &comps[2]);
+            assert_eq!(ops.len(), 3);
+            assert_eq!(
+                buf.resolve_nested_display_name(&ops[0], "comparison_name"),
+                Some(">=")
+            );
+            assert_eq!(*nested_field_value(buf, &ops[1], "and"), FieldValue::U8(1));
+            assert_eq!(
+                buf.resolve_nested_display_name(&ops[1], "comparison_name"),
+                Some("<=")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &ops[1], "value"),
+                FieldValue::U64(139)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &ops[2], "value"),
+                FieldValue::U64(8080)
+            );
+
+            let comps = array_objs(buf, &entries[2], "components");
+            assert_eq!(
+                buf.resolve_nested_display_name(&comps[1], "type_name"),
+                Some("Fragment")
+            );
+            let ops = flowspec_operators(buf, &comps[1]);
+            assert_eq!(*nested_field_value(buf, &ops[0], "not"), FieldValue::U8(0));
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "match"),
+                FieldValue::U8(0)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "value"),
+                FieldValue::U64(5)
+            );
+            assert!(nested_field_by_name_opt(buf, &ops[0], "comparison").is_none());
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_flowspec_ipv6_examples() {
+        // RFC 8956, Section 3.8.2 (https://www.rfc-editor.org/rfc/rfc8956#section-3.8.2):
+        // "from ::1234:5678:9a00:0/65-104 to
+        // 2001:db8::/32", plus a TCP Flags (bitmask, not + match) and a
+        // Flow Label component with a 4-octet value.
+        let mut nlri = vec![
+            0x18, 0x01, 0x20, 0x00, 0x20, 0x01, 0x0d, 0xb8, 0x02, 0x68, 0x41, 0x24, 0x68, 0xac,
+            0xf1, 0x34,
+        ];
+        nlri.extend_from_slice(&[0x09, 0x83, 0x02, 0x0d, 0xa0, 0x00, 0x01, 0x23, 0x45]);
+        with_mp_reach_nlri(2, 133, &nlri, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            let comps = array_objs(buf, &entries[0], "components");
+            assert_eq!(comps.len(), 4);
+            assert_eq!(
+                buf.resolve_nested_display_name(&comps[0], "type_name"),
+                Some("Destination IPv6 Prefix")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comps[0], "prefix_offset"),
+                FieldValue::U8(0)
+            );
+            let prefix = nested_field_by_name(buf, &comps[0], "prefix");
+            assert_eq!(call_format_fn_ctx(buf, prefix), "\"2001:db8::/32\"");
+            // Non-zero offset: length, offset and the raw pattern.
+            assert_eq!(
+                *nested_field_value(buf, &comps[1], "prefix_length"),
+                FieldValue::U8(104)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comps[1], "prefix_offset"),
+                FieldValue::U8(65)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comps[1], "pattern"),
+                FieldValue::Bytes(&[0x24, 0x68, 0xac, 0xf1, 0x34])
+            );
+            assert!(nested_field_by_name_opt(buf, &comps[1], "prefix").is_none());
+            let ops = flowspec_operators(buf, &comps[2]);
+            assert_eq!(*nested_field_value(buf, &ops[0], "not"), FieldValue::U8(1));
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "match"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "value"),
+                FieldValue::U64(2)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(&comps[3], "type_name"),
+                Some("Flow Label")
+            );
+            let ops = flowspec_operators(buf, &comps[3]);
+            assert_eq!(
+                *nested_field_value(buf, &ops[0], "value"),
+                FieldValue::U64(0x12345)
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_flowspec_vpn_and_extended_length() {
+        // RFC 8955, Section 8 (https://www.rfc-editor.org/rfc/rfc8955#section-8):
+        // SAFI 134 carries an RD before the components,
+        // counted in the length. Section 4.1: a length of 240 or more is
+        // "encoded as an extended-length 2-octet value in which the most
+        // significant nibble has the hex value 0xf".
+        let mut value = vec![
+            0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64, 0x01, 0x18, 0xc0, 0x00, 0x02,
+        ];
+        let mut vpn = vec![value.len() as u8];
+        vpn.append(&mut value);
+        // Packet Length with 116 {op, value} pairs of 2 octets, and a last
+        // one: 1 + 117 * 2 + 5 (Destination Prefix) = 240 octets.
+        let mut long = vec![0x01, 0x18, 0xc0, 0x00, 0x02, 0x0a];
+        for _ in 0..116 {
+            long.extend_from_slice(&[0x01, 0x40]);
+        }
+        long.extend_from_slice(&[0x81, 0x40]);
+        assert_eq!(long.len(), 240);
+        let mut ext = vec![0xf0, 0xf0];
+        ext.extend_from_slice(&long);
+        with_mp_reach_nlri(1, 134, &vpn, |buf, _, entries| {
+            let e = &entries[0];
+            let rd = nested_field_by_name(buf, e, "rd");
+            assert_eq!(
+                call_format_fn(rd.descriptor.format_fn.unwrap(), &rd.value),
+                "\"0:65000:100\""
+            );
+            assert_eq!(array_objs(buf, e, "components").len(), 1);
+        });
+        with_mp_reach_nlri(1, 133, &ext, |buf, _, entries| {
+            let e = &entries[0];
+            assert_eq!(
+                *nested_field_value(buf, e, "nlri_length"),
+                FieldValue::U16(240)
+            );
+            let comps = array_objs(buf, e, "components");
+            assert_eq!(flowspec_operators(buf, &comps[1]).len(), 117);
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_flowspec_malformed_rules_keep_value() {
+        // RFC 8955, Section 4.2: "An NLRI value not encoded as specified here,
+        // including an NLRI that contains an unknown component type, is
+        // considered malformed": an unknown type (0x81), components out of
+        // order, an operator list without the end-of-list bit, an IPv4 prefix
+        // longer than 32 bits, and a Flow Label (13) in IPv4 each keep the
+        // NLRI value as `value`.
+        let cases: [&[u8]; 6] = [
+            &[0x01, 0x08, 0x0a, 0x81, 0x06],
+            &[0x03, 0x81, 0x06, 0x01, 0x08, 0x0a],
+            &[0x03, 0x01, 0x06],
+            &[0x01, 0x21, 0, 0, 0, 0, 0],
+            &[0x0d, 0x81, 0x01],
+            // A valid IPv4 prefix followed by an unknown type.
+            &[0x01, 0x08, 0x0a, 0xff],
+        ];
+        for value in cases {
+            let mut nlri = vec![value.len() as u8];
+            nlri.extend_from_slice(value);
+            with_mp_reach_nlri(1, 133, &nlri, |buf, _, entries| {
+                assert_eq!(entries.len(), 1, "{value:02x?}");
+                assert!(nested_field_by_name_opt(buf, &entries[0], "components").is_none());
+                assert_eq!(
+                    *nested_field_value(buf, &entries[0], "value"),
+                    FieldValue::Bytes(value)
+                );
+            });
+        }
+        // A length that overruns the block leaves it as `nlri_raw`.
+        with_mp_reach_nlri(1, 133, &[0x09, 0x01, 0x08, 0x0a], |buf, mp, entries| {
+            assert!(entries.is_empty());
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&[0x09, 0x01, 0x08, 0x0a])
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_flowspec_withdrawn() {
+        let wr = [0x05, 0x01, 0x18, 0xc0, 0x00, 0x02];
+        let data = build_single_attr_update(15, &build_mp_unreach(1, 133, &wr));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let entries = array_objs(&buf, &mp, "withdrawn_routes");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(array_objs(&buf, &entries[0], "components").len(), 1);
+    }
+
+    #[test]
+    fn flowspec_name_tables() {
+        let v4 = (0..=u8::MAX)
+            .filter_map(flowspec_ipv4_component_name)
+            .count();
+        let v6 = (0..=u8::MAX)
+            .filter_map(flowspec_ipv6_component_name)
+            .count();
+        assert_eq!((v4, v6), (12, 13));
+        assert_eq!(flowspec_ipv4_component_name(13), None);
+        assert_eq!(
+            flowspec_ipv6_component_name(3),
+            Some("Upper-Layer Protocol")
+        );
+        let ops: Vec<_> = (0..8).filter_map(flowspec_comparison_name).collect();
+        assert_eq!(ops, ["false", "==", ">", ">=", "<", "<=", "!=", "true"]);
+        assert_eq!(flowspec_comparison_name(8), None);
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_flowspec_empty_rules_and_first_and_bit() {
+        // "Encoding: <[component]+>" (RFC 8955, Section 4.2 —
+        // https://www.rfc-editor.org/rfc/rfc8955#section-4.2): a rule without
+        // components, and a SAFI 134 rule with only an RD, are malformed.
+        with_mp_reach_nlri(1, 133, &[0x00], |buf, _, entries| {
+            assert!(nested_field_by_name_opt(buf, &entries[0], "components").is_none());
+            assert!(nested_field_by_name_opt(buf, &entries[0], "value").is_none());
+        });
+        let rd_only = [0x08, 0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64];
+        with_mp_reach_nlri(1, 134, &rd_only, |buf, _, entries| {
+            assert!(nested_field_by_name_opt(buf, &entries[0], "rd").is_none());
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "value"),
+                FieldValue::Bytes(&rd_only[1..])
+            );
+        });
+        // The AND bit of the first operator "MUST be treated as always unset
+        // on decoding" (RFC 8955, Section 4.2.1.1 —
+        // https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1.1).
+        with_mp_reach_nlri(
+            1,
+            133,
+            &[0x05, 0x03, 0x41, 0x06, 0xc1, 0x11],
+            |buf, _, entries| {
+                let comps = array_objs(buf, &entries[0], "components");
+                let ops = flowspec_operators(buf, &comps[0]);
+                assert_eq!(*nested_field_value(buf, &ops[0], "and"), FieldValue::U8(0));
+                assert_eq!(*nested_field_value(buf, &ops[1], "and"), FieldValue::U8(1));
+            },
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_flowspec_add_path() {
+        // RFC 7911, Section 3 (https://www.rfc-editor.org/rfc/rfc7911#section-3):
+        // a Path Identifier before each rule, detected because the block only
+        // parses as rules with it.
+        let mut nlri = 1u32.to_be_bytes().to_vec();
+        nlri.extend_from_slice(&[0x05, 0x01, 0x18, 0xc0, 0x00, 0x02]);
+        with_mp_reach_nlri(1, 133, &nlri, |buf, mp, entries| {
+            assert!(nested_field_by_name_opt(buf, mp, "nlri_raw").is_none());
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(1)
+            );
+            assert_eq!(array_objs(buf, &entries[0], "components").len(), 1);
+        });
+        assert!(!detect_add_path_flowspec(
+            &[0x05, 0x01, 0x18, 0xc0, 0x00, 0x02],
+            false,
+            false
+        ));
+        assert!(!detect_add_path_flowspec(&[0, 0, 0], false, false));
+        assert!(!flowspec_block_parses(&[0xf0], 0, false, false));
     }
 }
