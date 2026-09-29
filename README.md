@@ -30,7 +30,7 @@ protocols include:
 
 | Category | Protocols |
 |----------|-----------|
-| L2 | Ethernet II, Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (up to 2 VLAN tags), ARP, LACP, LLDP, STP |
+| L2 | Ethernet II, Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (up to 2 VLAN tags), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP |
 | L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, IS-IS, AH, ESP, SRv6, GRE, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN |
 | Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, TLS, PPP, RADIUS, RTP, QUIC, STUN |

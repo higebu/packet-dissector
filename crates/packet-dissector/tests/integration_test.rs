@@ -71,6 +71,10 @@
 //! | link_type=228/229 with the other IP version         | integration_link_type_ipv4_ipv6_reject_other_version |
 //! | Unregistered link type is an error, not Ethernet    | integration_unregistered_link_type_is_error          |
 //! | Ethernet → LACP                                     | integration_ethernet_lacp                            |
+//! | Ethernet → Slow Protocols Marker                    | integration_ethernet_slow_protocols_marker           |
+//! | Ethernet → Slow Protocols OAM (Information)         | integration_ethernet_slow_protocols_oam              |
+//! | Ethernet → Slow Protocols OSSP → ESMC               | integration_ethernet_slow_protocols_esmc             |
+//! | Ethernet → Slow Protocols (unknown subtype)         | integration_ethernet_slow_protocols_unknown_subtype  |
 //! | Ethernet → LLC → STP Config BPDU                    | integration_ethernet_llc_stp_config                  |
 //! | Ethernet → LLC → STP TCN BPDU                       | integration_ethernet_llc_stp_tcn                     |
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
@@ -3792,6 +3796,111 @@ fn integration_ethernet_lacp() {
             .value,
         FieldValue::U16(50)
     );
+}
+
+/// Ethernet header addressed to the Slow Protocols multicast address
+/// (IEEE 802.3-2022, Annex 57A) with EtherType 0x8809.
+fn slow_protocols_frame(pdu: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x01, 0x80, 0xC2, 0x00, 0x00, 0x02],
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        0x8809,
+    );
+    pkt.extend_from_slice(pdu);
+    pkt
+}
+
+/// Ethernet (EtherType 0x8809) → Marker PDU (subtype 0x02, IEEE 802.1AX-2020
+/// Section 6.5.3.3).
+#[test]
+fn integration_ethernet_slow_protocols_marker() {
+    let registry = DissectorRegistry::default();
+    let mut pdu = vec![0u8; 110];
+    pdu[..20].copy_from_slice(&[
+        0x02, 0x01, // Marker, version 1
+        0x01, 0x10, // Marker Information TLV, length 16
+        0x00, 0x01, // Requester Port
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // Requester System
+        0x00, 0x00, 0x00, 0x01, // Requester Transaction ID
+        0x00, 0x00, // Pad
+        0x00, 0x00, // Terminator
+    ]);
+    let pkt = slow_protocols_frame(&pdu);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 2);
+    assert_eq!(buf.layers()[1].name, "Marker");
+    assert_layers_contiguous(&buf);
+    let marker = buf.layer_by_name("Marker").unwrap();
+    assert_eq!(
+        buf.field_by_name(marker, "requester_transaction_id")
+            .unwrap()
+            .value,
+        FieldValue::U32(1)
+    );
+}
+
+/// Ethernet (EtherType 0x8809) → OAM Information OAMPDU (subtype 0x03,
+/// IEEE 802.3-2022 Clause 57).
+#[test]
+fn integration_ethernet_slow_protocols_oam() {
+    let registry = DissectorRegistry::default();
+    let mut pdu = vec![0x03, 0x00, 0x08, 0x00]; // OAM, Local Evaluating, Information
+    pdu.extend_from_slice(&[
+        0x01, 0x10, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0xEE, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ]);
+    pdu.resize(46, 0);
+    let pkt = slow_protocols_frame(&pdu);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 2);
+    assert_eq!(buf.layers()[1].name, "OAM");
+    assert_layers_contiguous(&buf);
+    let oam = buf.layer_by_name("OAM").unwrap();
+    assert_eq!(buf.field_u8(oam, "flags_local_evaluating"), Some(1));
+    assert_eq!(buf.field_u8(oam, "code"), Some(0));
+}
+
+/// Ethernet (EtherType 0x8809) → OSSP with ITU-T OUI → ESMC (ITU-T G.8264
+/// Section 11.3.1.1).
+#[test]
+fn integration_ethernet_slow_protocols_esmc() {
+    let registry = DissectorRegistry::default();
+    let mut pdu = vec![0x0A, 0x00, 0x19, 0xA7, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00];
+    pdu.extend_from_slice(&[0x01, 0x00, 0x04, 0x02]); // QL TLV, SSM code 0x2
+    pdu.resize(46, 0);
+    let pkt = slow_protocols_frame(&pdu);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 2);
+    assert_eq!(buf.layers()[1].name, "ESMC");
+    assert_layers_contiguous(&buf);
+    let esmc = buf.layer_by_name("ESMC").unwrap();
+    assert_eq!(buf.field_u16(esmc, "itu_subtype"), Some(1));
+}
+
+/// Ethernet (EtherType 0x8809) with a subtype that has no dissector yields a
+/// generic Slow Protocols layer instead of an error.
+#[test]
+fn integration_ethernet_slow_protocols_unknown_subtype() {
+    let registry = DissectorRegistry::default();
+    let mut pdu = vec![0x0B, 0x01];
+    pdu.resize(46, 0);
+    let pkt = slow_protocols_frame(&pdu);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 2);
+    assert_eq!(buf.layers()[1].name, "SlowProtocols");
+    assert_layers_contiguous(&buf);
+    let slow = buf.layer_by_name("SlowProtocols").unwrap();
+    assert_eq!(buf.field_u8(slow, "subtype"), Some(0x0B));
 }
 
 // ---------------------------------------------------------------------------
