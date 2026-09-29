@@ -1965,6 +1965,15 @@ impl Default for DissectorRegistry {
         #[cfg(feature = "stp")]
         assert_builtin(reg.register_by_llc_sap(0x42, Box::new(packet_dissector_stp::StpDissector)));
 
+        // SNAP follows an IEEE 802.2 LLC header with SAP 0xAA
+        // (RFC 1042 — https://www.rfc-editor.org/rfc/rfc1042). Ethernet and
+        // Linux cooked captures (protocol type 0x0004) both carry LLC.
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        assert_builtin(reg.register_by_llc_sap(
+            packet_dissector_ethernet::llc::SAP_SNAP,
+            Box::new(packet_dissector_ethernet::SnapDissector),
+        ));
+
         // IS-IS runs over IEEE 802.2 LLC with SAP 0xFE (ISO 10589)
         #[cfg(feature = "isis")]
         assert_builtin(

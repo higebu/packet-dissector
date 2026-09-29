@@ -88,6 +88,10 @@
 //! | Ethernet → LLC → STP Config BPDU                    | integration_ethernet_llc_stp_config                  |
 //! | Ethernet → LLC → STP TCN BPDU                       | integration_ethernet_llc_stp_tcn                     |
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
+//! | Ethernet → LLC → SNAP (RFC 1042) → IPv4 → ICMP      | integration_ethernet_llc_snap_ipv4_icmp              |
+//! | Ethernet → LLC → SNAP (non-zero OUI) ends the chain | integration_ethernet_llc_snap_other_oui              |
+//! | SLL (protocol 0x0004) → LLC → STP                   | integration_sll_llc_stp                              |
+//! | SLL2 (protocol 0x0004) → LLC → SNAP → IPv4          | integration_sll2_llc_snap_ipv4                       |
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
 //! | Ethernet → MPLS (2 labels) → IPv4 → UDP              | integration_ethernet_mpls_two_labels_ipv4_udp        |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
@@ -8289,6 +8293,103 @@ fn integration_ethernet_802_3_llc_payload_bounded_by_length() {
 
     let probe = buf.layer_by_name("Probe").unwrap();
     assert_eq!(probe.range, 17..llc_pdu_end);
+}
+
+/// IPv4 (total length 28, ICMP) + ICMP Echo Request (8 octets).
+fn ipv4_icmp_echo_bytes() -> Vec<u8> {
+    vec![
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x00,
+        0x01, 0x0a, 0x00, 0x00, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+    ]
+}
+
+/// Ethernet (802.3 Length) → LLC (0xAA, UI) → SNAP OUI 00-00-00 → IPv4 → ICMP.
+///
+/// RFC 1042, "Frame Format and MAC Level Issues".
+#[test]
+fn integration_ethernet_llc_snap_ipv4_icmp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let mut llc = vec![0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00];
+    llc.extend_from_slice(&ipv4_icmp_echo_bytes());
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP", "IPv4", "ICMP"]);
+    assert_layers_contiguous(&buf);
+    let snap = buf.layer_by_name("SNAP").unwrap();
+    assert_eq!(snap.range, 17..22);
+    assert_eq!(buf.field_u16(snap, "pid"), Some(0x0800));
+}
+
+/// Ethernet → LLC → SNAP with Cisco OUI 00-00-0C (CDP): the SNAP layer is
+/// shown and the chain ends.
+#[test]
+fn integration_ethernet_llc_snap_other_oui() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let llc = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x00, 0x02, 0xB4];
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP"]);
+}
+
+/// SLL header (LINKTYPE_LINUX_SLL) with the given protocol type.
+fn sll_header(protocol_type: u16) -> Vec<u8> {
+    let mut pkt = vec![0x00, 0x02, 0x00, 0x01, 0x00, 0x06];
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00]);
+    pkt.extend_from_slice(&protocol_type.to_be_bytes());
+    pkt
+}
+
+/// SLL with protocol type 0x0004 → LLC (0x42) → STP Configuration BPDU.
+///
+/// LINKTYPE_LINUX_SLL: 0x0004 "if the payload begins with an 802.2 LLC header".
+#[test]
+fn integration_sll_llc_stp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = sll_header(0x0004);
+    pkt.extend_from_slice(&[0x42, 0x42, 0x03]);
+    push_stp_config_bpdu(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect_with_link_type(&pkt, 113, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL", "STP"]);
+    assert_layers_contiguous(&buf);
+    let sll = buf.layer_by_name("SLL").unwrap();
+    assert_eq!(sll.range, 0..19);
+    assert_eq!(buf.field_u8(sll, "llc_dsap"), Some(0x42));
+}
+
+/// SLL2 with protocol type 0x0004 → LLC (0xAA) → SNAP → IPv4 → ICMP.
+#[test]
+fn integration_sll2_llc_snap_ipv4() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x06,
+    ];
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+    pkt.extend_from_slice(&ipv4_icmp_echo_bytes());
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect_with_link_type(&pkt, 276, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL2", "SNAP", "IPv4", "ICMP"]);
+    assert_layers_contiguous(&buf);
 }
 
 /// Ethernet → IPv4 → TCP SYN with Ethernet padding and a trailer: the TCP payload
