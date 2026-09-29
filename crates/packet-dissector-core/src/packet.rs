@@ -29,6 +29,7 @@
 
 use core::ops::Range;
 
+use crate::dissector::{DispatchHint, EmbeddedPayload};
 use crate::field::{Field, FieldDescriptor, FieldValue};
 
 #[derive(Debug)]
@@ -119,6 +120,8 @@ pub struct DissectBuffer<'pkt> {
     /// avoiding the duplicate copy that a separate `Vec<u8>` would require.
     aux_data_len: usize,
     aux_chunks: Vec<AuxChunk>,
+    /// Upper-layer payloads recorded by dissectors and not yet dispatched.
+    embedded_payloads: Vec<EmbeddedPayload>,
 }
 
 impl<'pkt> DissectBuffer<'pkt> {
@@ -130,6 +133,7 @@ impl<'pkt> DissectBuffer<'pkt> {
             scratch: Vec::with_capacity(256),
             aux_data_len: 0,
             aux_chunks: Vec::new(),
+            embedded_payloads: Vec::new(),
         }
     }
 
@@ -142,6 +146,7 @@ impl<'pkt> DissectBuffer<'pkt> {
         self.scratch.clear();
         self.aux_data_len = 0;
         self.aux_chunks.clear();
+        self.embedded_payloads.clear();
     }
 
     /// Clear all stored data and return the buffer with a fresh lifetime.
@@ -409,6 +414,31 @@ impl<'pkt> DissectBuffer<'pkt> {
         } else {
             false
         }
+    }
+
+    /// Record an upper-layer payload embedded in the current layer.
+    ///
+    /// `range` is the absolute byte range of the payload in the original
+    /// packet and `next` selects its dissector. The registry dispatches each
+    /// recorded payload separately after the recording dissector returns, and
+    /// removes the entries once they are dispatched. See
+    /// [`EmbeddedPayload`].
+    pub fn push_embedded_payload(&mut self, range: Range<usize>, next: DispatchHint) {
+        self.embedded_payloads.push(EmbeddedPayload { range, next });
+    }
+
+    /// Upper-layer payloads recorded with
+    /// [`push_embedded_payload`](Self::push_embedded_payload) and not yet
+    /// dispatched.
+    pub fn embedded_payloads(&self) -> &[EmbeddedPayload] {
+        &self.embedded_payloads
+    }
+
+    /// Truncate the recorded embedded payloads to `len` entries.
+    ///
+    /// Used by the registry to drop the payloads it has dispatched.
+    pub fn truncate_embedded_payloads(&mut self, len: usize) {
+        self.embedded_payloads.truncate(len);
     }
 
     /// Remove the last layer.
@@ -983,5 +1013,36 @@ mod tests {
 
         assert_eq!(buf.fields().len(), 1);
         assert_eq!(buf.fields()[0].value, FieldValue::Bytes(&[0x86, 0xDD]));
+    }
+
+    #[test]
+    fn embedded_payloads_push_truncate_and_clear() {
+        use crate::dissector::{DispatchHint, EmbeddedPayload};
+
+        let mut buf: DissectBuffer<'_> = DissectBuffer::new();
+        assert!(buf.embedded_payloads().is_empty());
+
+        buf.push_embedded_payload(28..48, DispatchHint::BySctpPort(49152, 3868));
+        buf.push_embedded_payload(64..84, DispatchHint::End);
+        assert_eq!(
+            buf.embedded_payloads(),
+            &[
+                EmbeddedPayload {
+                    range: 28..48,
+                    next: DispatchHint::BySctpPort(49152, 3868),
+                },
+                EmbeddedPayload {
+                    range: 64..84,
+                    next: DispatchHint::End,
+                },
+            ]
+        );
+
+        buf.truncate_embedded_payloads(1);
+        assert_eq!(buf.embedded_payloads().len(), 1);
+        assert_eq!(buf.embedded_payloads()[0].range, 28..48);
+
+        buf.clear();
+        assert!(buf.embedded_payloads().is_empty());
     }
 }

@@ -43,14 +43,16 @@ fn zero_alloc_dissect_geneve_basic() {
 
 #[test]
 fn zero_alloc_dissect_geneve_with_options() {
-    // GENEVE with OptLen=1 (4 bytes of options).
+    // GENEVE with OptLen=2: one option with 4 bytes of data (RFC 8926 §3.5 —
+    // https://www.rfc-editor.org/rfc/rfc8926#section-3.5).
     let raw: &[u8] = &[
-        0x01, // Ver=0, OptLen=1
+        0x02, // Ver=0, OptLen=2
         0x00, // O=0, C=0
         0x65, 0x58, // Protocol Type
         0x00, 0x00, 0x01, // VNI = 1
         0x00, // Reserved
-        0xAA, 0xBB, 0xCC, 0xDD, // Options (4 bytes)
+        0x01, 0x02, 0x80, 0x01, // Option: class 0x0102, type 0x80, length 1
+        0xDE, 0xAD, 0xBE, 0xEF, // Option data
     ];
 
     // Pre-allocate the buffer (this allocation is OK — happens once).
@@ -69,5 +71,6 @@ fn zero_alloc_dissect_geneve_with_options() {
     // Verify the dissected data is correct.
     assert_eq!(buf.layers().len(), 1);
     let fields = buf.layer_fields(&buf.layers()[0]);
-    assert_eq!(fields.len(), 9); // 8 fixed + 1 options
+    // 8 fixed + options + tunnel_options array + 1 option object with 6 fields
+    assert_eq!(fields.len(), 17);
 }

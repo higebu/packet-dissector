@@ -144,6 +144,25 @@ pub struct DecryptedPayload {
     pub next: DispatchHint,
 }
 
+/// An upper-layer payload embedded inside a layer, recorded with
+/// [`DissectBuffer::push_embedded_payload`].
+///
+/// A dissector records one entry per upper-layer message it carries when
+/// those messages are not contiguous with its header, or when there is more
+/// than one of them. The registry dispatches each entry independently with
+/// its own [`DispatchHint`], so every message gets its own upper-layer chain.
+///
+/// RFC 9260, Section 6.10 — several DATA chunks may be bundled into one SCTP
+/// packet, each carrying its own user message —
+/// <https://www.rfc-editor.org/rfc/rfc9260#section-6.10>.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedPayload {
+    /// Absolute byte range of the payload in the original packet buffer.
+    pub range: core::ops::Range<usize>,
+    /// Hint for the registry to find the dissector for this payload.
+    pub next: DispatchHint,
+}
+
 /// The result of a successful dissection.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,11 +179,12 @@ pub struct DissectResult {
     ///
     /// When set, the dispatch loop passes `&data[range]` to the next dissector
     /// instead of `&data[offset + bytes_consumed ..]`. This is needed for
-    /// protocols like SCTP where user data is embedded inside a chunk structure
-    /// rather than following the header contiguously.
+    /// protocols like L2TP where the payload is bounded by a length field
+    /// rather than extending to the end of the packet.
     ///
-    /// RFC 9260, Section 3.3.1 — SCTP DATA chunk embeds user data after a
-    /// 16-byte chunk header.
+    /// A layer carrying more than one upper-layer message (e.g. bundled
+    /// SCTP DATA chunks) records them with
+    /// [`DissectBuffer::push_embedded_payload`] instead.
     pub embedded_payload: Option<core::ops::Range<usize>>,
     /// Optional decrypted payload from an encrypted protocol (e.g. ESP).
     ///
