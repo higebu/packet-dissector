@@ -67,7 +67,14 @@ pub static IE_CHILD_FIELDS: &[FieldDescriptor] = &[
     },
     FieldDescriptor::new("length", "Length", FieldType::U16),
     FieldDescriptor::new("value", "Value", FieldType::Bytes),
+    FieldDescriptor::new("enterprise_id", "Enterprise ID", FieldType::U16).optional(),
 ];
+
+/// First IE type value of the vendor-specific range.
+///
+/// 3GPP TS 29.244, Section 8.1.1 — "IE type values within the range of
+/// 32768 to 65535 are used for vendor-specific IE".
+const VENDOR_SPECIFIC_IE_TYPE_MIN: u16 = 0x8000;
 
 /// IE header size: Type(2) + Length(2) = 4 bytes.
 ///
@@ -121,6 +128,25 @@ pub fn parse_ies<'pkt>(
             FieldValue::U16(ie_length as u16),
             ie_start + 2..ie_start + 4,
         );
+
+        // 3GPP TS 29.244, Section 8.1.1 — "If Bit 8 of Octet 1 is set, this
+        // indicates that the IE is defined by a vendor and the Enterprise ID
+        // is present". The vendor data itself is out of scope and kept raw.
+        if ie_type >= VENDOR_SPECIFIC_IE_TYPE_MIN && ie_length >= 2 {
+            buf.push_field(
+                &IE_CHILD_FIELDS[3],
+                FieldValue::U16(read_be_u16(ie_data, 0)?),
+                ie_offset..ie_offset + 2,
+            );
+            buf.push_field(
+                &IE_CHILD_FIELDS[2],
+                FieldValue::Bytes(&ie_data[2..]),
+                ie_offset + 2..ie_end,
+            );
+            buf.end_container(obj_idx);
+            pos += IE_HEADER_SIZE + ie_length;
+            continue;
+        }
 
         let field_count_before = buf.field_count();
         let value = ie_parsers::parse_ie_value(ie_type, ie_data, ie_offset, depth, buf);
@@ -551,6 +577,7 @@ pub fn ie_type_name(ie_type: u16) -> &'static str {
         400 => "Local N3/N9 Tunnel Information",
         401 => "Remote N3/N9 Tunnel Information",
         402 => "Binding Indication",
+        VENDOR_SPECIFIC_IE_TYPE_MIN.. => "Vendor-Specific",
         _ => "Unknown",
     }
 }
@@ -831,7 +858,8 @@ mod tests {
         assert_eq!(ie_type_name(381), "Unknown"); // Spare
         assert_eq!(ie_type_name(403), "Unknown");
         assert_eq!(ie_type_name(1000), "Unknown");
-        assert_eq!(ie_type_name(65535), "Unknown");
+        // 32767 is the last 3GPP-reserved value; 32768 and up are vendor IEs.
+        assert_eq!(ie_type_name(32767), "Unknown");
     }
 
     #[test]
@@ -922,5 +950,57 @@ mod tests {
             }
             _ => panic!("expected Object"),
         }
+    }
+
+    #[test]
+    fn vendor_specific_ie_enterprise_id() {
+        // 3GPP TS 29.244, Section 8.1.1, Figure 8.1.1-3: type 32769,
+        // Enterprise ID 123, vendor data aa bb cc dd
+        let data = [0x80, 0x01, 0x00, 0x06, 0x00, 0x7b, 0xaa, 0xbb, 0xcc, 0xdd];
+        let mut buf = DissectBuffer::new();
+        parse_ies(&data, 10, 0, &mut buf).unwrap();
+        let FieldValue::Object(ref r) = buf.fields()[0].value else {
+            panic!("expected Object")
+        };
+        assert_eq!(
+            obj_field_buf(&buf, r, "type").unwrap().value,
+            FieldValue::U32(32769)
+        );
+        let eid = obj_field_buf(&buf, r, "enterprise_id").unwrap();
+        assert_eq!(eid.value, FieldValue::U16(123));
+        assert_eq!(eid.range, 14..16);
+        let value = obj_field_buf(&buf, r, "value").unwrap();
+        assert_eq!(value.value, FieldValue::Bytes(&[0xaa, 0xbb, 0xcc, 0xdd]));
+        assert_eq!(value.range, 16..20);
+        assert_eq!(ie_type_name(32769), "Vendor-Specific");
+        assert_eq!(ie_type_name(0xFFFF), "Vendor-Specific");
+        assert_eq!(
+            buf.resolve_container_display_name(0),
+            Some("Vendor-Specific")
+        );
+
+        // A vendor IE shorter than the Enterprise ID keeps its raw value.
+        let data = [0x80, 0x02, 0x00, 0x01, 0x07];
+        let mut buf = DissectBuffer::new();
+        parse_ies(&data, 0, 0, &mut buf).unwrap();
+        let FieldValue::Object(ref r) = buf.fields()[0].value else {
+            panic!("expected Object")
+        };
+        assert!(obj_field_buf(&buf, r, "enterprise_id").is_none());
+        assert_eq!(
+            obj_field_buf(&buf, r, "value").unwrap().value,
+            FieldValue::Bytes(&[0x07])
+        );
+    }
+
+    #[test]
+    fn type_display_fns_ignore_other_values() {
+        for fd in [&FD_INLINE_TYPE, &FD_IE, &IE_CHILD_FIELDS[0]] {
+            assert_eq!((fd.display_fn.unwrap())(&FieldValue::U8(0), &[]), None);
+        }
+        assert_eq!(
+            (IE_CHILD_FIELDS[0].display_fn.unwrap())(&FieldValue::U32(32768), &[]),
+            Some("Vendor-Specific")
+        );
     }
 }
