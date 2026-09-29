@@ -21,6 +21,13 @@
 //! | §4                | Length field (Type 1, non-zero)      | parse_icmpv6_destination_unreachable_rfc4884_length         |
 //! | §4                | Length=0 not emitted (Type 1)        | parse_icmpv6_destination_unreachable_rfc4884_length_zero    |
 //! | §4                | Length field (Type 3, non-zero)      | parse_icmpv6_time_exceeded_rfc4884_length                   |
+//! | §4.5, §7, §8      | Time Exceeded + Extension Structure  | parse_icmpv6_time_exceeded_with_extensions                  |
+//! | §4.4, §7          | Dest Unreachable, Length > 128 octets| parse_icmpv6_destination_unreachable_long_original_datagram |
+//! | §4                | Length set but no room for extension | parse_icmpv6_time_exceeded_length_without_extension         |
+//! | RFC 4950 §3       | MPLS Label Stack object              | parse_icmpv6_time_exceeded_with_extensions                  |
+//! | RFC 4443 §3.1     | Invoking packet UDP ports            | parse_icmpv6_invoking_packet_udp_ports                      |
+//! | RFC 4443 §3.3     | Invoking packet TCP ports            | parse_icmpv6_invoking_packet_tcp_ports                      |
+//! | RFC 4443 §3.1     | Invoking packet other Next Header    | parse_icmpv6_invoking_packet_other_next_header              |
 //!
 //! # RFC 4861 (Neighbor Discovery) Coverage
 //!
@@ -75,6 +82,9 @@
 //! |-------------------|--------------------------------------|-------------------------------------------------  |
 //! | §2.1              | Extended Echo Request (Type 160)     | parse_icmpv6_extended_echo_request                 |
 //! | §2.2              | Extended Echo Reply (Type 161)       | parse_icmpv6_extended_echo_reply                   |
+//! | §2, §2.1          | Interface Identification by name     | parse_icmpv6_extended_echo_request_by_name         |
+//! | §2, §2.1          | Interface Identification by index    | parse_icmpv6_extended_echo_request_by_index        |
+//! | §2, §2.1          | Interface Identification by address  | parse_icmpv6_extended_echo_request_by_address      |
 //!
 //! # RFC 2710 / RFC 3810 (MLD) Coverage
 //!
@@ -83,6 +93,9 @@
 //! | RFC 2710 §3.6     | MLDv1 Query (Type 130)               | parse_icmpv6_mld_query_v1                          |
 //! | RFC 3810 §5.1     | MLDv2 Query (Type 130)               | parse_icmpv6_mld_query_v2                          |
 //! | RFC 3810 §5.1     | MLDv2 Query with sources             | parse_icmpv6_mld_query_v2_with_sources             |
+//! | RFC 9777 §5.1.3   | Max Resp Code floating point         | parse_icmpv6_mldv2_query_decoded_intervals         |
+//! | RFC 9777 §5.1.9   | QQIC floating point                  | parse_icmpv6_mldv2_query_decoded_intervals         |
+//! | RFC 9777 §5.1.3/9 | Codes below the float threshold      | parse_icmpv6_mldv2_query_linear_intervals          |
 //! | RFC 2710 §3.7     | MLDv1 Report (Type 131)              | parse_icmpv6_mld_report_v1                         |
 //! | RFC 2710 §3.8     | MLDv1 Done (Type 132)                | parse_icmpv6_mld_done                              |
 //! | —                 | MLD Query truncated                  | parse_icmpv6_mld_query_truncated                   |
@@ -109,7 +122,7 @@
 //! | §6.5              | HA Reply multiple addresses          | parse_icmpv6_home_agent_reply_multiple_addresses   |
 
 use packet_dissector::dissector::{DispatchHint, Dissector};
-use packet_dissector::field::FieldValue;
+use packet_dissector::field::{Field, FieldValue};
 use packet_dissector::packet::DissectBuffer;
 
 use packet_dissector::dissectors::icmpv6::Icmpv6Dissector;
@@ -2128,4 +2141,281 @@ fn parse_icmpv6_ndp_option_dnssl_truncated_label() {
         !has_domains,
         "no domain should be emitted for a truncated label"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for nested containers
+// ---------------------------------------------------------------------------
+
+/// Nested fields of a container field.
+fn nested<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>, field: &Field<'pkt>) -> &'a [Field<'pkt>] {
+    match &field.value {
+        FieldValue::Object(r) | FieldValue::Array(r) => buf.nested_fields(r),
+        other => panic!("expected a container, got {other:?}"),
+    }
+}
+
+fn child<'a, 'pkt>(fields: &'a [Field<'pkt>], name: &str) -> Option<&'a FieldValue<'pkt>> {
+    fields.iter().find(|f| f.name() == name).map(|f| &f.value)
+}
+
+/// Build an invoking IPv6 packet: 40-byte header plus `payload`.
+fn build_invoking_ipv6(next_header: u8, payload: &[u8]) -> Vec<u8> {
+    let mut hdr = vec![0u8; 40];
+    hdr[0] = 0x60;
+    hdr[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    hdr[6] = next_header;
+    hdr[8] = 0x20;
+    hdr[9] = 0x01;
+    hdr[24] = 0x20;
+    hdr[25] = 0x01;
+    hdr.extend_from_slice(payload);
+    hdr
+}
+
+// ---------------------------------------------------------------------------
+// RFC 4884 — Extension Structure in ICMPv6 error messages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_icmpv6_time_exceeded_with_extensions() {
+    // RFC 4884, Section 4.5 — Length 16 (64-bit words) = 128 octets of
+    // original datagram, followed by an Extension Structure (Section 7) with
+    // an MPLS Label Stack object (RFC 4950, Section 3).
+    let mut data = build_icmpv6_packet(3, 0, [16, 0, 0, 0]);
+    let mut original = build_invoking_ipv6(17, &[0x30, 0x39, 0x82, 0x9A, 0, 8, 0, 0]);
+    original.resize(128, 0);
+    data.extend_from_slice(&original);
+    data.extend_from_slice(&[
+        0x20, 0x00, 0x00, 0x00, // version 2, reserved, checksum
+        0x00, 0x08, 0x01, 0x01, // object length 8, class 1, c-type 1
+        0x12, 0x34, 0x5B, 0x40, // label 0x12345, TC 5, S 1, TTL 64
+    ]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+
+    let invoking = buf.field_by_name(layer, "invoking_packet").unwrap();
+    assert_eq!(invoking.range, 8..136);
+
+    let ext = buf.field_by_name(layer, "extensions").unwrap();
+    assert_eq!(ext.range, 136..148);
+    let ext_fields = nested(&buf, ext);
+    assert_eq!(child(ext_fields, "version"), Some(&FieldValue::U8(2)));
+    assert_eq!(child(ext_fields, "class_num"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(ext_fields, "label"), Some(&FieldValue::U32(0x12345)));
+    assert_eq!(child(ext_fields, "tc"), Some(&FieldValue::U8(5)));
+    assert_eq!(child(ext_fields, "s"), Some(&FieldValue::U8(1)));
+    assert_eq!(child(ext_fields, "ttl"), Some(&FieldValue::U8(64)));
+}
+
+#[test]
+fn parse_icmpv6_destination_unreachable_long_original_datagram() {
+    // RFC 4884, Section 4.4 — Length 18 = 144 octets of original datagram.
+    let mut data = build_icmpv6_packet(1, 4, [18, 0, 0, 0]);
+    let mut original = build_invoking_ipv6(59, &[]);
+    original.resize(144, 0);
+    data.extend_from_slice(&original);
+    data.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]); // header, no objects
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(
+        buf.field_by_name(layer, "invoking_packet").unwrap().range,
+        8..152
+    );
+    assert_eq!(
+        buf.field_by_name(layer, "extensions").unwrap().range,
+        152..156
+    );
+}
+
+#[test]
+fn parse_icmpv6_time_exceeded_length_without_extension() {
+    // A Length that leaves no room for an Extension Header: the whole
+    // remainder stays the invoking packet.
+    let mut data = build_icmpv6_packet(3, 0, [16, 0, 0, 0]);
+    data.extend_from_slice(&build_invoking_ipv6(59, &[0; 20]));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert!(buf.field_by_name(layer, "extensions").is_none());
+    assert_eq!(
+        buf.field_by_name(layer, "invoking_packet").unwrap().range,
+        8..68
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Invoking packet transport ports
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_icmpv6_invoking_packet_udp_ports() {
+    // RFC 4443, Section 3.1 — the invoking packet starts with the IPv6
+    // header; for UDP (Next Header 17) the next 4 octets are the ports.
+    let mut data = build_icmpv6_packet(1, 4, [0; 4]);
+    data.extend_from_slice(&build_invoking_ipv6(
+        17,
+        &[0x30, 0x39, 0x82, 0x9A, 0, 8, 0, 0],
+    ));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let invoking = nested(&buf, buf.field_by_name(layer, "invoking_packet").unwrap());
+    assert_eq!(child(invoking, "src_port"), Some(&FieldValue::U16(12345)));
+    assert_eq!(child(invoking, "dst_port"), Some(&FieldValue::U16(33434)));
+    let port = invoking.iter().find(|f| f.name() == "src_port").unwrap();
+    assert_eq!(port.range, 48..50);
+}
+
+#[test]
+fn parse_icmpv6_invoking_packet_tcp_ports() {
+    // RFC 4443, Section 3.3 — TCP (Next Header 6) ports.
+    let mut data = build_icmpv6_packet(3, 0, [0; 4]);
+    data.extend_from_slice(&build_invoking_ipv6(
+        6,
+        &[0xC0, 0x00, 0x01, 0xBB, 0, 0, 0, 1],
+    ));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let invoking = nested(&buf, buf.field_by_name(layer, "invoking_packet").unwrap());
+    assert_eq!(child(invoking, "src_port"), Some(&FieldValue::U16(0xC000)));
+    assert_eq!(child(invoking, "dst_port"), Some(&FieldValue::U16(443)));
+}
+
+#[test]
+fn parse_icmpv6_invoking_packet_other_next_header() {
+    // Other Next Header values keep the octets after the IPv6 header raw.
+    let mut data = build_icmpv6_packet(1, 0, [0; 4]);
+    data.extend_from_slice(&build_invoking_ipv6(58, &[128, 0, 0, 0]));
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let invoking = nested(&buf, buf.field_by_name(layer, "invoking_packet").unwrap());
+    assert_eq!(child(invoking, "src_port"), None);
+    assert_eq!(
+        child(invoking, "transport_data"),
+        Some(&FieldValue::Bytes(&[128, 0, 0, 0]))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8335 — Extended Echo Request Interface Identification Object
+// ---------------------------------------------------------------------------
+
+fn build_extended_echo_request(object: &[u8]) -> Vec<u8> {
+    let mut data = build_icmpv6_packet(160, 0, [0x12, 0x34, 0x01, 0x01]);
+    data.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]);
+    data.extend_from_slice(object);
+    data
+}
+
+#[test]
+fn parse_icmpv6_extended_echo_request_by_name() {
+    // RFC 8335, Section 2.1 — C-Type 1: interface name, NUL padded.
+    let data =
+        build_extended_echo_request(&[0x00, 0x0C, 0x03, 0x01, b'e', b't', b'h', b'0', 0, 0, 0, 0]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let ext = buf.field_by_name(layer, "extensions").unwrap();
+    assert_eq!(ext.range, 8..24);
+    let ext_fields = nested(&buf, ext);
+    assert_eq!(child(ext_fields, "class_num"), Some(&FieldValue::U8(3)));
+    assert_eq!(
+        child(ext_fields, "interface_name"),
+        Some(&FieldValue::Bytes(b"eth0\0\0\0\0"))
+    );
+}
+
+#[test]
+fn parse_icmpv6_extended_echo_request_by_index() {
+    // RFC 8335, Section 2.1 — C-Type 2: "the length is equal to 8 and the
+    // payload contains the if-index".
+    let data = build_extended_echo_request(&[0x00, 0x08, 0x03, 0x02, 0, 0, 0, 7]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let ext_fields = nested(&buf, buf.field_by_name(layer, "extensions").unwrap());
+    assert_eq!(child(ext_fields, "if_index"), Some(&FieldValue::U32(7)));
+}
+
+#[test]
+fn parse_icmpv6_extended_echo_request_by_address() {
+    // RFC 8335, Section 2.1 — C-Type 3: AFI 2 (IPv6), Address Length 16.
+    let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut object = vec![0x00, 0x18, 0x03, 0x03, 0x00, 0x02, 16, 0];
+    object.extend_from_slice(&addr);
+    let data = build_extended_echo_request(&object);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let ext_fields = nested(&buf, buf.field_by_name(layer, "extensions").unwrap());
+    assert_eq!(child(ext_fields, "afi"), Some(&FieldValue::U16(2)));
+    assert_eq!(
+        child(ext_fields, "address_length"),
+        Some(&FieldValue::U8(16))
+    );
+    assert_eq!(
+        child(ext_fields, "ipv6_address"),
+        Some(&FieldValue::Ipv6Addr(addr))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 9777 (obsoletes RFC 3810) — decoded MLDv2 Query intervals
+// ---------------------------------------------------------------------------
+
+fn build_mldv2_query(max_resp_code: u16, qqic: u8) -> Vec<u8> {
+    let mut data = build_icmpv6_packet(130, 0, [0; 4]);
+    data[4..6].copy_from_slice(&max_resp_code.to_be_bytes());
+    data.extend_from_slice(&[0u8; 16]); // multicast address (general query)
+    data.extend_from_slice(&[0x02, qqic, 0x00, 0x00]); // S=0, QRV=2, QQIC, N=0
+    data
+}
+
+#[test]
+fn parse_icmpv6_mldv2_query_decoded_intervals() {
+    // RFC 9777, Section 5.1.3 — "Maximum Response Delay = (mant | 0x1000)
+    // << (exp+3)"; 0x8010 → exp 0, mant 0x010 → 0x1010 << 3 = 32896 ms.
+    // RFC 9777, Section 5.1.9 — "QQI = (mant | 0x10) << (exp + 3)";
+    // 0x90 → exp 1, mant 0 → 0x10 << 4 = 256 s.
+    let data = build_mldv2_query(0x8010, 0x90);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u16(layer, "max_response_delay"), Some(0x8010));
+    assert_eq!(buf.field_u32(layer, "max_response_delay_ms"), Some(32896));
+    assert_eq!(buf.field_u8(layer, "qqic"), Some(0x90));
+    assert_eq!(buf.field_u16(layer, "qqi"), Some(256));
+    assert_eq!(
+        buf.field_by_name(layer, "max_response_delay_ms")
+            .unwrap()
+            .range,
+        4..6
+    );
+}
+
+#[test]
+fn parse_icmpv6_mldv2_query_linear_intervals() {
+    // RFC 9777, Sections 5.1.3 / 5.1.9 — values below 32768 / 128 are used
+    // as is. The largest float values still fit the decoded fields.
+    let data = build_mldv2_query(10000, 125);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u32(layer, "max_response_delay_ms"), Some(10000));
+    assert_eq!(buf.field_u16(layer, "qqi"), Some(125));
+
+    let data = build_mldv2_query(0xFFFF, 0xFF);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(
+        buf.field_u32(layer, "max_response_delay_ms"),
+        Some(0x1FFF << 10)
+    );
+    assert_eq!(buf.field_u16(layer, "qqi"), Some(0x1F << 10));
 }

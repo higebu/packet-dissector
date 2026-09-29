@@ -5,6 +5,7 @@
 //! - RFC 4861 (Neighbor Discovery — defines types 133-137): <https://www.rfc-editor.org/rfc/rfc4861>
 //! - RFC 2710 (MLDv1 — defines types 130-132): <https://www.rfc-editor.org/rfc/rfc2710>
 //! - RFC 3810 (MLDv2 — defines type 143 and extended query): <https://www.rfc-editor.org/rfc/rfc3810>
+//! - RFC 9777 (MLDv2, obsoletes RFC 3810 — Maximum Response Code / QQIC encoding): <https://www.rfc-editor.org/rfc/rfc9777>
 //! - RFC 4286 (Multicast Router Discovery — types 151-153): <https://www.rfc-editor.org/rfc/rfc4286>
 //! - RFC 6275 (Mobile IPv6 — types 144-145): <https://www.rfc-editor.org/rfc/rfc6275>
 //! - RFC 4191 (Default Router Preferences — Route Information option): <https://www.rfc-editor.org/rfc/rfc4191>
@@ -21,6 +22,7 @@ use packet_dissector_core::dissector::{
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::icmp_extension;
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32, read_ipv6_addr};
 
@@ -46,6 +48,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 3810",
         "Multicast Listener Discovery Version 2 (MLDv2) for IPv6",
         "https://www.rfc-editor.org/rfc/rfc3810",
+    ),
+    SpecReference::new(
+        "RFC 9777",
+        "Multicast Listener Discovery Version 2 (MLDv2) for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc9777",
     ),
     SpecReference::new(
         "RFC 4286",
@@ -174,6 +181,9 @@ const FD_INVOKING_PACKET: usize = 29;
 /// RFC 8335, Section 2 — the Sequence Number in Extended Echo messages is
 /// an 8-bit field, unlike the 16-bit field in classic Echo (RFC 4443, §4.1).
 const FD_SEQUENCE_NUMBER_U8: usize = 30;
+const FD_EXTENSIONS: usize = 31;
+const FD_MAX_RESPONSE_DELAY_MS: usize = 32;
+const FD_QQI: usize = 33;
 
 /// Minimum IPv6 header size (RFC 8200, Section 3).
 const IPV6_MIN_HEADER: usize = 40;
@@ -183,6 +193,9 @@ const IPC_VERSION: usize = 0;
 const IPC_NEXT_HEADER: usize = 1;
 const IPC_SRC: usize = 2;
 const IPC_DST: usize = 3;
+const IPC_SRC_PORT: usize = 4;
+const IPC_DST_PORT: usize = 5;
+const IPC_TRANSPORT_DATA: usize = 6;
 
 /// Child field descriptor indices for [`NDP_OPTION_CHILDREN`].
 const NOC_TYPE: usize = 0;
@@ -256,6 +269,9 @@ static INVOKING_PACKET_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("next_header", "Next Header", FieldType::U8),
     FieldDescriptor::new("src", "Source Address", FieldType::Ipv6Addr),
     FieldDescriptor::new("dst", "Destination Address", FieldType::Ipv6Addr),
+    FieldDescriptor::new("src_port", "Source Port", FieldType::U16).optional(),
+    FieldDescriptor::new("dst_port", "Destination Port", FieldType::U16).optional(),
+    FieldDescriptor::new("transport_data", "Transport Data", FieldType::Bytes).optional(),
 ];
 
 /// Child field descriptors for MLDv2 multicast address record entries.
@@ -349,10 +365,61 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // A separate descriptor is needed because the classic Echo (RFC 4443, §4.1)
     // uses a 16-bit Sequence Number (see FD_SEQUENCE_NUMBER above).
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U8).optional(),
+    // RFC 4884, Section 7 — ICMP Extension Structure (Types 1 and 3 after the
+    // original datagram; Type 160 right after the header per RFC 8335,
+    // Section 2).
+    // <https://www.rfc-editor.org/rfc/rfc4884#section-7>
+    FieldDescriptor::new("extensions", "ICMP Extension Structure", FieldType::Object)
+        .optional()
+        .with_children(icmp_extension::EXTENSION_CHILDREN),
+    // RFC 9777, Section 5.1.3 — Maximum Response Delay (milliseconds) derived
+    // from the Maximum Response Code of an MLDv2 Query.
+    // <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.3>
+    FieldDescriptor::new(
+        "max_response_delay_ms",
+        "Maximum Response Delay (ms)",
+        FieldType::U32,
+    )
+    .optional(),
+    // RFC 9777, Section 5.1.9 — Querier's Query Interval (seconds) derived
+    // from QQIC.
+    // <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.9>
+    FieldDescriptor::new("qqi", "Querier's Query Interval", FieldType::U16).optional(),
 ];
 
 /// ICMPv6 dissector.
 pub struct Icmpv6Dissector;
+
+/// Decode an MLDv2 Maximum Response Code into milliseconds.
+///
+/// RFC 9777, Section 5.1.3 — "If Maximum Response Code < 32768, Maximum
+/// Response Delay = Maximum Response Code." Otherwise it "represents a
+/// floating-point value" `|1| exp | mant |` and "Maximum Response Delay =
+/// (mant | 0x1000) << (exp+3)".
+/// <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.3>
+fn mldv2_max_response_delay(code: u16) -> u32 {
+    if code < 0x8000 {
+        return u32::from(code);
+    }
+    let exp = u32::from((code >> 12) & 0x07);
+    let mant = u32::from(code & 0x0FFF);
+    (mant | 0x1000) << (exp + 3)
+}
+
+/// Decode an MLDv2 QQIC into seconds.
+///
+/// RFC 9777, Section 5.1.9 — "If QQIC < 128, QQI = QQIC". Otherwise it
+/// "represents a floating-point value" `|1| exp | mant |` and "QQI = (mant |
+/// 0x10) << (exp + 3)".
+/// <https://www.rfc-editor.org/rfc/rfc9777#section-5.1.9>
+fn mldv2_qqi(qqic: u8) -> u16 {
+    if qqic < 0x80 {
+        return u16::from(qqic);
+    }
+    let exp = u16::from((qqic >> 4) & 0x07);
+    let mant = u16::from(qqic & 0x0F);
+    (mant | 0x10) << (exp + 3)
+}
 
 /// Push invoking packet fields as an Object container into buf.
 ///
@@ -392,6 +459,36 @@ fn push_invoking_packet<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], o
             FieldValue::Ipv6Addr(dst),
             offset + 24..offset + 40,
         );
+
+        // The octets after the IPv6 header. For TCP and UDP the first four
+        // are the Source and Destination Ports (RFC 9293, Section 3.1;
+        // RFC 768).
+        // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
+        // <https://www.rfc-editor.org/rfc/rfc768>
+        let transport = &data[IPV6_MIN_HEADER..];
+        let t_off = offset + IPV6_MIN_HEADER;
+        match next_header {
+            6 | 17 if transport.len() >= 4 => {
+                buf.push_field(
+                    &INVOKING_PACKET_CHILDREN[IPC_SRC_PORT],
+                    FieldValue::U16(u16::from_be_bytes([transport[0], transport[1]])),
+                    t_off..t_off + 2,
+                );
+                buf.push_field(
+                    &INVOKING_PACKET_CHILDREN[IPC_DST_PORT],
+                    FieldValue::U16(u16::from_be_bytes([transport[2], transport[3]])),
+                    t_off + 2..t_off + 4,
+                );
+            }
+            _ if !transport.is_empty() => {
+                buf.push_field(
+                    &INVOKING_PACKET_CHILDREN[IPC_TRANSPORT_DATA],
+                    FieldValue::Bytes(transport),
+                    t_off..t_off + transport.len(),
+                );
+            }
+            _ => {}
+        }
         buf.end_container(obj_idx);
     } else {
         buf.push_field(
@@ -905,9 +1002,32 @@ impl Dissector for Icmpv6Dissector {
                         offset + 4..offset + 5,
                     );
                 }
+                // RFC 4884, Section 4 — "For ICMPv6 messages, the length
+                // attribute represents 64-bit words." When it is set and an
+                // Extension Structure fits, the invoking packet ends where
+                // the structure starts.
+                // <https://www.rfc-editor.org/rfc/rfc4884#section-4>
+                let ext_start = icmp_extension::extension_structure_start(
+                    HEADER_SIZE,
+                    length as usize * 8,
+                    data.len(),
+                );
+                let invoking_end = ext_start.unwrap_or(data.len());
                 // RFC 4443 — invoking packet follows the 8-byte header
-                if data.len() > HEADER_SIZE {
-                    push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
+                if invoking_end > HEADER_SIZE {
+                    push_invoking_packet(
+                        buf,
+                        &data[HEADER_SIZE..invoking_end],
+                        offset + HEADER_SIZE,
+                    );
+                }
+                if let Some(start) = ext_start {
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[start..],
+                        offset + start,
+                    );
                 }
             }
 
@@ -1019,8 +1139,18 @@ impl Dissector for Icmpv6Dissector {
                         offset + 24..offset + 25,
                     );
                     buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_MAX_RESPONSE_DELAY_MS],
+                        FieldValue::U32(mldv2_max_response_delay(max_response_delay)),
+                        offset + 4..offset + 6,
+                    );
+                    buf.push_field(
                         &FIELD_DESCRIPTORS[FD_QQIC],
                         FieldValue::U8(qqic),
+                        offset + 25..offset + 26,
+                    );
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_QQI],
+                        FieldValue::U16(mldv2_qqi(qqic)),
                         offset + 25..offset + 26,
                     );
                     buf.push_field(
@@ -1297,6 +1427,18 @@ impl Dissector for Icmpv6Dissector {
                     FieldValue::U8(flags),
                     offset + 7..offset + 8,
                 );
+                // RFC 8335, Section 2 — the Extended Echo Request carries an
+                // ICMP Extension Structure right after the header, which
+                // "MUST contain exactly one instance of the Interface
+                // Identification Object".
+                if icmpv6_type == 160 && data.len() > HEADER_SIZE {
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[HEADER_SIZE..],
+                        offset + HEADER_SIZE,
+                    );
+                }
             }
 
             // All other types: no type-specific parsing
