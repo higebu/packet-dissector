@@ -66,3 +66,42 @@ fn zero_alloc_dissect_lacp() {
     assert_eq!(buf.layers().len(), 1);
     assert_eq!(buf.layers()[0].name, "LACP");
 }
+
+#[test]
+fn zero_alloc_dissect_slow_protocols_subtypes() {
+    use packet_dissector_lacp::SlowProtocolsDissector;
+
+    // Marker PDU — IEEE 802.1AX-2020, Section 6.5.3.3.
+    let mut marker = [0u8; 110];
+    marker[..4].copy_from_slice(&[0x02, 0x01, 0x01, 0x10]);
+
+    // Information OAMPDU with a Local Information TLV — IEEE 802.3 Clause 57.
+    let mut oam = vec![0x03, 0x00, 0x08, 0x00, 0x01, 0x10];
+    oam.resize(46, 0);
+
+    // ESMC with QL and Extended QL TLVs — ITU-T G.8264 / G.781.
+    let mut esmc = vec![0x0A, 0x00, 0x19, 0xA7, 0x00, 0x01, 0x10, 0, 0, 0];
+    esmc.extend_from_slice(&[0x01, 0x00, 0x04, 0x0B, 0x02, 0x00, 0x14, 0x22]);
+    esmc.resize(esmc.len() + 16, 0);
+
+    // Version 2 LACPDU with a Port Algorithm TLV — IEEE 802.1AX-2020, 6.4.2.4.1.
+    let mut lacp_v2 = [0u8; 110];
+    lacp_v2[..4].copy_from_slice(&[0x01, 0x02, 0x01, 0x14]);
+    lacp_v2[58..64].copy_from_slice(&[0x04, 0x06, 0x00, 0x80, 0xC2, 0x01]);
+
+    let unknown = [0x0B, 0x01, 0x02];
+
+    let mut buf = DissectBuffer::new();
+    for pdu in [&marker[..], &oam, &esmc, &lacp_v2, &unknown] {
+        let allocs = count_allocs(|| {
+            buf.clear();
+            SlowProtocolsDissector.dissect(pdu, &mut buf, 0).unwrap();
+        });
+        assert_eq!(
+            allocs, 0,
+            "subtype {:#04x} allocated {allocs} times",
+            pdu[0]
+        );
+        assert_eq!(buf.layers().len(), 1);
+    }
+}

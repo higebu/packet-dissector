@@ -1324,6 +1324,16 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+        // The Slow Protocols dispatcher delegates by subtype; expose the
+        // schemas of the layers it produces.
+        #[cfg(feature = "lacp")]
+        {
+            push(&packet_dissector_lacp::LacpDissector);
+            push(&packet_dissector_lacp::MarkerDissector);
+            push(&packet_dissector_lacp::OamDissector);
+            push(&packet_dissector_lacp::OsspDissector);
+            push(&packet_dissector_lacp::EsmcDissector);
+        }
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
@@ -1985,11 +1995,13 @@ impl Default for DissectorRegistry {
             reg.register_by_ethertype(0x0806, Box::new(packet_dissector_arp::ArpDissector)),
         );
 
-        // EtherType 0x8809 — IEEE 802.3 Slow Protocols (LACP is subtype 0x01)
+        // EtherType 0x8809 — IEEE 802.3 Slow Protocols; the dispatcher selects
+        // LACP, Marker, OAM or OSSP/ESMC by subtype (IEEE 802.3 Annex 57A)
         #[cfg(feature = "lacp")]
-        assert_builtin(
-            reg.register_by_ethertype(0x8809, Box::new(packet_dissector_lacp::LacpDissector)),
-        );
+        assert_builtin(reg.register_by_ethertype(
+            0x8809,
+            Box::new(packet_dissector_lacp::SlowProtocolsDissector),
+        ));
 
         // LLDP uses EtherType 0x88CC (IEEE 802.1AB)
         #[cfg(feature = "lldp")]
