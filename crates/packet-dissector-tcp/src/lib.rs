@@ -2,8 +2,12 @@
 //!
 //! ## References
 //! - RFC 9293: <https://www.rfc-editor.org/rfc/rfc9293>
+//! - RFC 9768 (AccECN, AE flag): <https://www.rfc-editor.org/rfc/rfc9768>
+//! - TCP options: see the `options` module.
 
 #![deny(missing_docs)]
+
+mod options;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -27,22 +31,29 @@ const FD_SEQ: usize = 2;
 const FD_ACK: usize = 3;
 const FD_DATA_OFFSET: usize = 4;
 const FD_RESERVED: usize = 5;
-const FD_FLAGS: usize = 6;
-const FD_WINDOW: usize = 7;
-const FD_CHECKSUM: usize = 8;
-const FD_URGENT_POINTER: usize = 9;
-const FD_OPTIONS: usize = 10;
-const FD_STREAM_ID: usize = 11;
+const FD_AE: usize = 6;
+const FD_FLAGS: usize = 7;
+const FD_WINDOW: usize = 8;
+const FD_CHECKSUM: usize = 9;
+const FD_URGENT_POINTER: usize = 10;
+const FD_OPTIONS: usize = 11;
+const FD_STREAM_ID: usize = 12;
 /// Index of the `reassembly_in_progress` field in [`FIELD_DESCRIPTORS`].
 ///
 /// Used by the registry's TCP reassembly middleware to emit this field via
 /// `FIELD_DESCRIPTORS[FD_REASSEMBLY_IN_PROGRESS].to_field(...)`.
-pub const FD_REASSEMBLY_IN_PROGRESS: usize = 12;
+pub const FD_REASSEMBLY_IN_PROGRESS: usize = 13;
 /// Index of the `segment_count` field in [`FIELD_DESCRIPTORS`].
 ///
 /// Used by the registry's TCP reassembly middleware to emit this field via
 /// `FIELD_DESCRIPTORS[FD_SEGMENT_COUNT].to_field(...)`.
-pub const FD_SEGMENT_COUNT: usize = 13;
+pub const FD_SEGMENT_COUNT: usize = 14;
+/// Index of the `reassembly_evicted` field in [`FIELD_DESCRIPTORS`].
+///
+/// Emitted by the registry's TCP reassembly middleware on the TCP layer of
+/// a segment whose processing evicted buffered streams to stay within its
+/// memory limits. The value is the number of streams evicted.
+pub const FD_REASSEMBLY_EVICTED: usize = 15;
 
 /// Field descriptors for the TCP dissector.
 ///
@@ -56,15 +67,25 @@ pub static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("ack", "Acknowledgment Number", FieldType::U32),
     FieldDescriptor::new("data_offset", "Data Offset", FieldType::U8),
     FieldDescriptor::new("reserved", "Reserved", FieldType::U8),
+    FieldDescriptor::new("ae", "AE (Accurate ECN)", FieldType::U8),
     FieldDescriptor {
         name: "flags",
         display_name: "Flags",
         field_type: FieldType::U8,
         optional: false,
         children: None,
-        display_fn: Some(|v, _siblings| match v {
+        display_fn: Some(|v, siblings| match v {
             FieldValue::U8(f) => {
-                let s = tcp_flags_name(*f);
+                // The AE flag lives in byte 12 and is a separate field; fold
+                // it into the flags label when set.
+                let ae = siblings
+                    .iter()
+                    .find_map(|s| match (s.name(), &s.value) {
+                        ("ae", FieldValue::U8(a)) => Some(*a != 0),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                let s = tcp_flags_name(*f, ae);
                 if s.is_empty() { None } else { Some(s) }
             }
             _ => None,
@@ -74,7 +95,9 @@ pub static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("window", "Window", FieldType::U16),
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
     FieldDescriptor::new("urgent_pointer", "Urgent Pointer", FieldType::U16),
-    FieldDescriptor::new("options", "Options", FieldType::Bytes).optional(),
+    FieldDescriptor::new("options", "Options", FieldType::Array)
+        .optional()
+        .with_children(options::OPTION_CHILDREN),
     FieldDescriptor::new("stream_id", "Stream ID", FieldType::U32).optional(),
     FieldDescriptor::new(
         "reassembly_in_progress",
@@ -83,6 +106,12 @@ pub static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     )
     .optional(),
     FieldDescriptor::new("segment_count", "Segment Count", FieldType::U32).optional(),
+    FieldDescriptor::new(
+        "reassembly_evicted",
+        "Reassembly Streams Evicted",
+        FieldType::U32,
+    )
+    .optional(),
 ];
 
 /// Bit-to-name table for TCP control bits.
@@ -99,15 +128,16 @@ const TCP_FLAG_BITS: &[(u8, &str)] = &[
     (0x80, "CWR"),
 ];
 
-/// Static 256-entry lookup table for TCP flags → display name.
+/// Static 512-entry lookup table for TCP control bits → display name.
 ///
-/// flags 0x00 → "" (empty), flags 0x12 → "SYN, ACK", etc.
+/// Indexed by `(ae << 8) | flags`: flags 0x00 → "" (empty),
+/// flags 0x12 → "SYN, ACK", AE + 0xC2 → "SYN, ECE, CWR, AE", etc.
 /// Initialized once via `LazyLock` since const fn cannot do string concatenation.
-static TCP_FLAGS_NAMES: std::sync::LazyLock<[String; 256]> = std::sync::LazyLock::new(|| {
-    let mut table: [String; 256] = std::array::from_fn(|_| String::new());
-    for i in 0u16..256 {
-        let flags = i as u8;
-        let mut buf = String::with_capacity(32);
+static TCP_FLAGS_NAMES: std::sync::LazyLock<[String; 512]> = std::sync::LazyLock::new(|| {
+    let mut table: [String; 512] = std::array::from_fn(|_| String::new());
+    for (i, entry) in table.iter_mut().enumerate() {
+        let flags = (i & 0xFF) as u8;
+        let mut buf = String::with_capacity(36);
         for &(bit, name) in TCP_FLAG_BITS {
             if flags & bit != 0 {
                 if !buf.is_empty() {
@@ -116,16 +146,23 @@ static TCP_FLAGS_NAMES: std::sync::LazyLock<[String; 256]> = std::sync::LazyLock
                 buf.push_str(name);
             }
         }
-        table[i as usize] = buf;
+        // RFC 9768, Section 3.1.1 — AE is the header flag at bit offset 7,
+        // next to CWR — <https://www.rfc-editor.org/rfc/rfc9768#section-3.1.1>
+        if i & 0x100 != 0 {
+            if !buf.is_empty() {
+                buf.push_str(", ");
+            }
+            buf.push_str("AE");
+        }
+        *entry = buf;
     }
     table
 });
 
-/// Look up a TCP flags display name from the static table.
-/// Returns `&'static str` by leaking the lazy-initialized strings.
-fn tcp_flags_name(flags: u8) -> &'static str {
-    // LazyLock<[String; 256]> lives for 'static, so borrowing the str is safe.
-    TCP_FLAGS_NAMES[flags as usize].as_str()
+/// Look up a TCP control-bits display name from the static table.
+fn tcp_flags_name(flags: u8, ae: bool) -> &'static str {
+    // LazyLock<[String; 512]> lives for 'static, so borrowing the str is safe.
+    TCP_FLAGS_NAMES[(usize::from(ae) << 8) | flags as usize].as_str()
 }
 
 /// TCP stream key: IP addresses (encoded as 16 bytes) + ports.
@@ -249,21 +286,35 @@ fn ipv4_mapped(addr: &[u8; 4]) -> [u8; 16] {
 /// preserving active connections' stream IDs.
 const MAX_TRACKED_STREAMS: usize = 65_536;
 
-/// State for the stream ID mapping, protected by a Mutex.
-struct StreamIdState {
-    map: HashMap<StreamKey, u32>,
-    /// Insertion order for eviction. The front is the oldest (coldest) entry.
-    order: VecDeque<StreamKey>,
+/// ACK control bit — RFC 9293, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>. SYN, FIN and RST
+/// are [`TcpStreamContext::FLAG_SYN`] and friends.
+const FLAG_ACK: u8 = 0x10;
+const FLAG_SYN: u8 = TcpStreamContext::FLAG_SYN;
+
+/// Connection tracked under a canonical 4-tuple.
+#[derive(Clone, Copy)]
+struct Connection {
+    /// Assigned stream ID.
+    id: u32,
+    /// The connection's initial SYN (without ACK): whether it was sent by the
+    /// canonical-first endpoint, and its ISN. Used to tell a retransmitted
+    /// SYN from a new connection that reuses the 4-tuple.
+    syn: Option<(bool, u32)>,
+    /// Whether a FIN or RST has been seen on the connection.
+    closed: bool,
+    /// ISN of each direction, indexed by whether the sender is the
+    /// canonical-first endpoint (`[other, canonical-first]`).
+    isn: [Option<u32>; 2],
 }
 
-impl StreamIdState {
-    /// Remove stale entries from `order` when it has grown significantly
-    /// larger than `map`, preventing unbounded growth from removed streams.
-    fn compact_order(&mut self) {
-        if self.order.len() > self.map.len() * 2 + 64 {
-            self.order.retain(|k| self.map.contains_key(k));
-        }
-    }
+/// State for the stream ID mapping, protected by a Mutex.
+struct StreamIdState {
+    map: HashMap<StreamKey, Connection>,
+    /// Insertion order for eviction. The front is the oldest (coldest) entry.
+    /// Entries leave `map` only through eviction, so `order` holds exactly
+    /// the keys of `map`.
+    order: VecDeque<StreamKey>,
 }
 
 /// TCP dissector with sequential stream ID assignment.
@@ -271,7 +322,8 @@ impl StreamIdState {
 /// Maintains a mapping from TCP 4-tuples to sequential stream IDs,
 /// similar to Wireshark's `tcp.stream` field. The stream ID is assigned
 /// when a 4-tuple is first seen and reused for subsequent packets on the
-/// same connection.
+/// same connection. A SYN (without ACK) carrying a different ISN than the
+/// connection's recorded SYN starts a new connection and a new stream ID.
 pub struct TcpDissector {
     /// Mapping from 4-tuple to assigned stream ID with eviction order.
     streams: Mutex<StreamIdState>,
@@ -299,11 +351,53 @@ impl Default for TcpDissector {
 }
 
 /// Specification references for the TCP dissector.
-static REFERENCES: &[SpecReference] = &[SpecReference::new(
-    "RFC 9293",
-    "Transmission Control Protocol (TCP)",
-    "https://www.rfc-editor.org/rfc/rfc9293",
-)];
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 9293",
+        "Transmission Control Protocol (TCP)",
+        "https://www.rfc-editor.org/rfc/rfc9293",
+    ),
+    SpecReference::new(
+        "RFC 7323",
+        "TCP Extensions for High Performance",
+        "https://www.rfc-editor.org/rfc/rfc7323",
+    ),
+    SpecReference::new(
+        "RFC 2018",
+        "TCP Selective Acknowledgment Options",
+        "https://www.rfc-editor.org/rfc/rfc2018",
+    ),
+    SpecReference::new(
+        "RFC 2385",
+        "Protection of BGP Sessions via the TCP MD5 Signature Option",
+        "https://www.rfc-editor.org/rfc/rfc2385",
+    ),
+    SpecReference::new(
+        "RFC 5925",
+        "The TCP Authentication Option",
+        "https://www.rfc-editor.org/rfc/rfc5925",
+    ),
+    SpecReference::new(
+        "RFC 8684",
+        "TCP Extensions for Multipath Operation with Multiple Addresses",
+        "https://www.rfc-editor.org/rfc/rfc8684",
+    ),
+    SpecReference::new(
+        "RFC 7413",
+        "TCP Fast Open",
+        "https://www.rfc-editor.org/rfc/rfc7413",
+    ),
+    SpecReference::new(
+        "RFC 6994",
+        "Shared Use of Experimental TCP Options",
+        "https://www.rfc-editor.org/rfc/rfc6994",
+    ),
+    SpecReference::new(
+        "RFC 9768",
+        "More Accurate Explicit Congestion Notification (AccECN) Feedback in TCP",
+        "https://www.rfc-editor.org/rfc/rfc9768",
+    ),
+];
 
 impl Dissector for TcpDissector {
     fn name(&self) -> &'static str {
@@ -346,9 +440,12 @@ impl Dissector for TcpDissector {
         let seq = read_be_u32(data, 4)?;
         let ack = read_be_u32(data, 8)?;
 
-        // Data Offset (4 bits) + Reserved (4 bits)
+        // Data Offset (4 bits) + Reserved (3 bits) + AE (1 bit).
+        // RFC 9768, Section 3.1.1 — the former NS bit (bit offset 7) is the
+        // AE flag — <https://www.rfc-editor.org/rfc/rfc9768#section-3.1.1>
         let data_offset = (data[12] >> 4) as usize;
-        let reserved = data[12] & 0x0F;
+        let reserved = (data[12] >> 1) & 0x07;
+        let ae = data[12] & 0x01;
 
         if data_offset < 5 {
             return Err(PacketError::InvalidFieldValue {
@@ -410,6 +507,11 @@ impl Dissector for TcpDissector {
             offset + 12..offset + 13,
         );
         buf.push_field(
+            &FIELD_DESCRIPTORS[FD_AE],
+            FieldValue::U8(ae),
+            offset + 12..offset + 13,
+        );
+        buf.push_field(
             &FIELD_DESCRIPTORS[FD_FLAGS],
             FieldValue::U8(flags),
             offset + 13..offset + 14,
@@ -433,44 +535,93 @@ impl Dissector for TcpDissector {
         // RFC 9293, Section 3.1 — Options (variable length, if Data Offset > 5)
         // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
         if header_len > MIN_HEADER_SIZE {
-            buf.push_field(
+            let idx = buf.begin_container(
                 &FIELD_DESCRIPTORS[FD_OPTIONS],
-                FieldValue::Bytes(&data[MIN_HEADER_SIZE..header_len]),
+                FieldValue::Array(0..0),
                 offset + MIN_HEADER_SIZE..offset + header_len,
             );
+            options::parse_options(
+                buf,
+                &data[MIN_HEADER_SIZE..header_len],
+                offset + MIN_HEADER_SIZE,
+            );
+            buf.end_container(idx);
         }
 
         // Assign a sequential stream_id based on the canonicalized TCP 4-tuple
         // so both directions of a connection share the same ID.
+        //
+        // RFC 9293, Section 3.5 — a connection starts with a SYN carrying a
+        // new ISN <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>. A SYN
+        // without ACK opens a new connection (4-tuple reuse) and gets a new
+        // ID when the connection has been closed (FIN/RST), when no initial
+        // SYN was recorded, or when it comes from the same endpoint as the
+        // recorded SYN with a different ISN. A retransmitted SYN, and the
+        // peer's SYN of a simultaneous open (Section 3.5, Figure 8), keep the
+        // ID. A RST or FIN does not end the mapping, so late packets of a
+        // closed connection keep their ID.
+        let mut stream_start = None;
         if let Some(key) = extract_stream_key(buf, src_port, dst_port) {
             let canonical = canonicalize_key(key);
+            let initial_syn =
+                (flags & (FLAG_SYN | FLAG_ACK) == FLAG_SYN).then_some((canonical == key, seq));
+            let from_first = usize::from(canonical == key);
+            let is_syn = flags & FLAG_SYN != 0;
             let mut state = self.streams.lock().unwrap_or_else(|e| e.into_inner());
 
-            let is_new = !state.map.contains_key(&canonical);
-            if is_new {
-                while state.map.len() >= MAX_TRACKED_STREAMS {
-                    if let Some(old_key) = state.order.pop_front() {
-                        state.map.remove(&old_key);
-                    } else {
-                        break;
+            let (sid, isn) = match state.map.get_mut(&canonical) {
+                Some(conn) => {
+                    if let Some(syn) = initial_syn {
+                        let new_connection = match conn.syn {
+                            None => true,
+                            Some(recorded) => {
+                                conn.closed || (recorded.0 == syn.0 && recorded != syn)
+                            }
+                        };
+                        if new_connection {
+                            conn.id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
+                            conn.syn = Some(syn);
+                            conn.closed = false;
+                            conn.isn = [None; 2];
+                        }
                     }
+                    if flags & (TcpStreamContext::FLAG_FIN | TcpStreamContext::FLAG_RST) != 0 {
+                        conn.closed = true;
+                    }
+                    if is_syn {
+                        conn.isn[from_first] = Some(seq);
+                    }
+                    (conn.id, conn.isn[from_first])
                 }
-            }
-
-            let next = &self.next_stream_id;
-            let sid = *state
-                .map
-                .entry(canonical)
-                .or_insert_with(|| next.fetch_add(1, Ordering::Relaxed));
-
-            if is_new {
-                state.order.push_back(canonical);
-            }
-
-            if flags & 0x04 != 0 {
-                state.map.remove(&canonical);
-                state.compact_order();
-            }
+                None => {
+                    while state.map.len() >= MAX_TRACKED_STREAMS {
+                        if let Some(old_key) = state.order.pop_front() {
+                            state.map.remove(&old_key);
+                        } else {
+                            break;
+                        }
+                    }
+                    let id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
+                    let mut isn = [None; 2];
+                    if is_syn {
+                        isn[from_first] = Some(seq);
+                    }
+                    state.map.insert(
+                        canonical,
+                        Connection {
+                            id,
+                            syn: initial_syn,
+                            closed: flags
+                                & (TcpStreamContext::FLAG_FIN | TcpStreamContext::FLAG_RST)
+                                != 0,
+                            isn,
+                        },
+                    );
+                    state.order.push_back(canonical);
+                    (id, isn[from_first])
+                }
+            };
+            stream_start = isn.map(|isn| isn.wrapping_add(1));
 
             drop(state);
 
@@ -491,11 +642,16 @@ impl Dissector for TcpDissector {
             Some(key) => Ok(DissectResult::with_tcp_context(
                 header_len,
                 DispatchHint::ByTcpPort(src_port, dst_port),
-                TcpStreamContext {
-                    stream_key: key,
-                    seq,
+                // RFC 9293, Section 3.1 — the first data octet of a SYN
+                // segment is ISN+1
+                // <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>.
+                TcpStreamContext::new(
+                    key,
+                    seq.wrapping_add(u32::from(flags & FLAG_SYN != 0)),
                     payload_len,
-                },
+                    flags,
+                )
+                .with_stream_start(stream_start),
             )),
             None => Ok(DissectResult::new(
                 header_len,
@@ -511,29 +667,35 @@ mod tests {
 
     #[test]
     fn tcp_flags_name_single_flag() {
-        assert_eq!(tcp_flags_name(0x02), "SYN");
-        assert_eq!(tcp_flags_name(0x10), "ACK");
-        assert_eq!(tcp_flags_name(0x01), "FIN");
+        assert_eq!(tcp_flags_name(0x02, false), "SYN");
+        assert_eq!(tcp_flags_name(0x10, false), "ACK");
+        assert_eq!(tcp_flags_name(0x01, false), "FIN");
+        assert_eq!(tcp_flags_name(0x00, true), "AE");
     }
 
     #[test]
     fn tcp_flags_name_multiple_flags() {
-        assert_eq!(tcp_flags_name(0x12), "SYN, ACK");
-        assert_eq!(tcp_flags_name(0x11), "FIN, ACK");
-        assert_eq!(tcp_flags_name(0x18), "PSH, ACK");
-        assert_eq!(tcp_flags_name(0x14), "RST, ACK");
+        assert_eq!(tcp_flags_name(0x12, false), "SYN, ACK");
+        assert_eq!(tcp_flags_name(0x11, false), "FIN, ACK");
+        assert_eq!(tcp_flags_name(0x18, false), "PSH, ACK");
+        assert_eq!(tcp_flags_name(0x14, false), "RST, ACK");
+        assert_eq!(tcp_flags_name(0xC2, true), "SYN, ECE, CWR, AE");
     }
 
     #[test]
     fn tcp_flags_name_no_flags() {
-        assert_eq!(tcp_flags_name(0x00), "");
+        assert_eq!(tcp_flags_name(0x00, false), "");
     }
 
     #[test]
     fn tcp_flags_name_all_flags() {
         assert_eq!(
-            tcp_flags_name(0xFF),
+            tcp_flags_name(0xFF, false),
             "FIN, SYN, RST, PSH, ACK, URG, ECE, CWR"
+        );
+        assert_eq!(
+            tcp_flags_name(0xFF, true),
+            "FIN, SYN, RST, PSH, ACK, URG, ECE, CWR, AE"
         );
     }
 

@@ -1,6 +1,6 @@
 # packet-dissector-stp
 
-STP/RSTP (IEEE 802.1D/802.1w) dissector for packet-dissector
+STP/RSTP/MSTP (IEEE 802.1D/802.1w/802.1Q) dissector for packet-dissector
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
 ecosystem. It is used automatically when you enable the `stp` feature flag

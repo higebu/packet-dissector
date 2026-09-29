@@ -1,6 +1,6 @@
 # packet-dissector-mpls
 
-MPLS (RFC 3032) dissector for packet-dissector
+MPLS (RFC 3032), PW control word and G-ACh (RFC 4385, RFC 5586) dissector for packet-dissector
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
 ecosystem. It is used automatically when you enable the `mpls` feature flag

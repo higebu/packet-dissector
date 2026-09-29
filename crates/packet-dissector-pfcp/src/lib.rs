@@ -6,6 +6,7 @@
 #![deny(missing_docs)]
 
 pub mod ie;
+mod ie_decoders;
 pub mod ie_parsers;
 pub mod message_type;
 
@@ -301,6 +302,8 @@ mod tests {
     // | 7.2.2.1   | FO flag                           | parse_pfcp_with_fo_flag               |
     // | 7.2.2.1   | Length shorter than header         | parse_pfcp_length_too_short           |
     // | 7.2.2.1   | Length exceeds available data      | parse_pfcp_length_exceeds_data        |
+    // | 8.1.1     | Vendor-specific IE (Enterprise ID) | ie::tests::vendor_specific_ie_enterprise_id |
+    // | 8.2.x     | IE value decoders                  | see ie_decoders.rs coverage table      |
 
     /// Helper to build a PFCP header with S=1 (SEID present).
     fn make_pfcp_with_seid(msg_type: u8, seid: u64, seq: u32, ies: &[u8]) -> Vec<u8> {

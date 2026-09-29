@@ -6,9 +6,11 @@
 #![deny(missing_docs)]
 
 pub mod ie;
+mod ie_decoders;
 pub mod ie_parsers;
 pub mod message_type;
 pub mod pco;
+mod tft;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -110,192 +112,213 @@ impl Dissector for Gtpv2cDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        // 3GPP TS 29.274, Section 5.1 — minimum 8 bytes
-        if data.len() < MIN_HEADER_SIZE {
-            return Err(PacketError::Truncated {
-                expected: MIN_HEADER_SIZE,
-                actual: data.len(),
-            });
-        }
+        let (mut consumed, p_flag) = dissect_message(data, buf, offset)?;
 
-        // 3GPP TS 29.274, Section 5.1 — Octet 1: flags
-        let version = (data[0] >> 5) & 0x07;
-        let p_flag = (data[0] >> 4) & 0x01;
-        let t_flag = (data[0] >> 3) & 0x01;
-        let mp_flag = (data[0] >> 2) & 0x01;
-
-        // TS 29.274 requires Version = 2 for GTPv2-C common header
-        if version != 2 {
-            return Err(PacketError::InvalidFieldValue {
-                field: "version",
-                value: u32::from(version),
-            });
-        }
-
-        // 3GPP TS 29.274, Section 5.1 — Octet 2: Message Type
-        let msg_type = data[1];
-
-        // 3GPP TS 29.274, Section 5.1 — Octets 3-4: Message Length
-        // (everything after the first 4 mandatory octets)
-        let msg_length = read_be_u16(data, 2)? as usize;
-
-        // The Message Length field gives the length of the remainder of the message
-        // following the first 4 octets (3GPP TS 29.274, Section 5.1).
-        let expected_total_size = 4 + msg_length;
-
-        let min_header_size = if t_flag == 1 {
-            HEADER_SIZE_WITH_TEID
-        } else {
-            MIN_HEADER_SIZE
-        };
-
-        // Ensure the total size implied by Message Length is at least the header size.
-        if expected_total_size < min_header_size {
-            return Err(PacketError::InvalidHeader(
-                "GTPv2-C message length shorter than minimum header size",
-            ));
-        }
-
-        // Ensure we have all bytes claimed by Message Length.
-        if expected_total_size > data.len() {
-            return Err(PacketError::Truncated {
-                expected: expected_total_size,
-                actual: data.len(),
-            });
-        }
-
-        let header_size = if t_flag == 1 {
-            // 3GPP TS 29.274, Section 5.1 — T=1: TEID present
-            if data.len() < HEADER_SIZE_WITH_TEID {
-                return Err(PacketError::Truncated {
-                    expected: HEADER_SIZE_WITH_TEID,
-                    actual: data.len(),
-                });
-            }
-            HEADER_SIZE_WITH_TEID
-        } else {
-            MIN_HEADER_SIZE
-        };
-
-        // Parse Information Elements from the message body
-        let ie_start = header_size;
-        let msg_end = 4 + msg_length;
-        let ie_end = msg_end.min(data.len());
-        let total_consumed = msg_end.min(data.len());
-
-        // 3GPP TS 29.274, Section 5.1 — Common header fields
-        buf.begin_layer(
-            self.short_name(),
-            None,
-            FIELD_DESCRIPTORS,
-            offset..offset + total_consumed,
-        );
-
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_VERSION],
-            FieldValue::U8(version),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_PIGGYBACK],
-            FieldValue::U8(p_flag),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_TEID_FLAG],
-            FieldValue::U8(t_flag),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_MP],
-            FieldValue::U8(mp_flag),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_MESSAGE_TYPE],
-            FieldValue::U8(msg_type),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_LENGTH],
-            FieldValue::U16(msg_length as u16),
-            offset + 2..offset + 4,
-        );
-
-        if t_flag == 1 {
-            // Octets 5-8: TEID
-            let teid = read_be_u32(data, 4)?;
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_TEID],
-                FieldValue::U32(teid),
-                offset + 4..offset + 8,
-            );
-
-            // Octets 9-11: Sequence Number (24 bits)
-            let seq = read_be_u24(data, 8)?;
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_SEQUENCE_NUMBER],
-                FieldValue::U32(seq),
-                offset + 8..offset + 11,
-            );
-
-            // Octet 12: Spare or Message Priority
-            if mp_flag == 1 {
-                let priority = (data[11] >> 4) & 0x0F;
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_MESSAGE_PRIORITY],
-                    FieldValue::U8(priority),
-                    offset + 11..offset + 12,
-                );
-            }
-        } else {
-            // 3GPP TS 29.274, Section 5.1 — T=0: No TEID
-            // Octets 5-7: Sequence Number (24 bits)
-            let seq = read_be_u24(data, 4)?;
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_SEQUENCE_NUMBER],
-                FieldValue::U32(seq),
-                offset + 4..offset + 7,
-            );
-
-            // Octet 8: Spare or Message Priority when MP=1
-            if mp_flag == 1 {
-                let priority = data[7];
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_MESSAGE_PRIORITY],
-                    FieldValue::U8(priority),
-                    offset + 7..offset + 8,
-                );
-            }
-        };
-
-        // msg_length covers bytes after the first 4 mandatory octets,
-        // so IE data starts at header_size and extends for
-        // (4 + msg_length - header_size) bytes.
-        if ie_start < ie_end {
-            let ie_data = &data[ie_start..ie_end];
-            let array_idx = buf.begin_container(
-                &FIELD_DESCRIPTORS[FD_IES],
-                FieldValue::Array(0..0),
-                offset + ie_start..offset + ie_end,
-            );
-            ie::parse_ies(ie_data, offset + ie_start, buf);
-            buf.end_container(array_idx);
-
-            // If no IEs were actually parsed, remove the empty array.
-            let arr = &buf.fields()[array_idx as usize];
-            if let FieldValue::Array(ref r) = arr.value {
-                if r.start == r.end {
-                    buf.truncate_fields(array_idx as usize);
-                }
+        // 3GPP TS 29.274, Section 5.5.1 — "If the "P" flag is set to "1",
+        // then another GTPv2-C message with its own header and body shall
+        // be present at the end of the current message." and "When present,
+        // a piggybacked message shall have its "P" flag set to "0" in its
+        // own header." Only one piggybacked message is therefore decoded.
+        // `dissect_message` returns every error before it pushes anything,
+        // so a malformed piggybacked message leaves the first one intact.
+        if p_flag == 1 && consumed < data.len() {
+            if let Ok((piggybacked, _)) = dissect_message(&data[consumed..], buf, offset + consumed)
+            {
+                consumed += piggybacked;
             }
         }
-
-        buf.end_layer();
 
         // GTPv2-C is a control plane protocol — no inner payload to dispatch.
-        Ok(DissectResult::new(total_consumed, DispatchHint::End))
+        Ok(DissectResult::new(consumed, DispatchHint::End))
     }
+}
+
+/// Dissect one GTPv2-C message into its own layer.
+///
+/// Returns the number of octets it occupies (4 + Message Length) and its
+/// P flag.
+fn dissect_message<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+) -> Result<(usize, u8), PacketError> {
+    // 3GPP TS 29.274, Section 5.1 — minimum 8 bytes
+    if data.len() < MIN_HEADER_SIZE {
+        return Err(PacketError::Truncated {
+            expected: MIN_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    // 3GPP TS 29.274, Section 5.1 — Octet 1: flags
+    let version = (data[0] >> 5) & 0x07;
+    let p_flag = (data[0] >> 4) & 0x01;
+    let t_flag = (data[0] >> 3) & 0x01;
+    let mp_flag = (data[0] >> 2) & 0x01;
+
+    // TS 29.274 requires Version = 2 for GTPv2-C common header
+    if version != 2 {
+        return Err(PacketError::InvalidFieldValue {
+            field: "version",
+            value: u32::from(version),
+        });
+    }
+
+    // 3GPP TS 29.274, Section 5.1 — Octet 2: Message Type
+    let msg_type = data[1];
+
+    // 3GPP TS 29.274, Section 5.1 — Octets 3-4: Message Length
+    // (everything after the first 4 mandatory octets)
+    let msg_length = read_be_u16(data, 2)? as usize;
+
+    // The Message Length field gives the length of the remainder of the message
+    // following the first 4 octets (3GPP TS 29.274, Section 5.1).
+    let expected_total_size = 4 + msg_length;
+
+    let min_header_size = if t_flag == 1 {
+        HEADER_SIZE_WITH_TEID
+    } else {
+        MIN_HEADER_SIZE
+    };
+
+    // Ensure the total size implied by Message Length is at least the header size.
+    if expected_total_size < min_header_size {
+        return Err(PacketError::InvalidHeader(
+            "GTPv2-C message length shorter than minimum header size",
+        ));
+    }
+
+    // Ensure we have all bytes claimed by Message Length.
+    if expected_total_size > data.len() {
+        return Err(PacketError::Truncated {
+            expected: expected_total_size,
+            actual: data.len(),
+        });
+    }
+
+    let header_size = if t_flag == 1 {
+        // 3GPP TS 29.274, Section 5.1 — T=1: TEID present
+        if data.len() < HEADER_SIZE_WITH_TEID {
+            return Err(PacketError::Truncated {
+                expected: HEADER_SIZE_WITH_TEID,
+                actual: data.len(),
+            });
+        }
+        HEADER_SIZE_WITH_TEID
+    } else {
+        MIN_HEADER_SIZE
+    };
+
+    // Parse Information Elements from the message body
+    let ie_start = header_size;
+    let msg_end = 4 + msg_length;
+    let ie_end = msg_end.min(data.len());
+    let total_consumed = msg_end.min(data.len());
+
+    // 3GPP TS 29.274, Section 5.1 — Common header fields
+    buf.begin_layer(
+        Gtpv2cDissector.short_name(),
+        None,
+        FIELD_DESCRIPTORS,
+        offset..offset + total_consumed,
+    );
+
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_VERSION],
+        FieldValue::U8(version),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_PIGGYBACK],
+        FieldValue::U8(p_flag),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_TEID_FLAG],
+        FieldValue::U8(t_flag),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MP],
+        FieldValue::U8(mp_flag),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MESSAGE_TYPE],
+        FieldValue::U8(msg_type),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_LENGTH],
+        FieldValue::U16(msg_length as u16),
+        offset + 2..offset + 4,
+    );
+
+    if t_flag == 1 {
+        // Octets 5-8: TEID
+        let teid = read_be_u32(data, 4)?;
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_TEID],
+            FieldValue::U32(teid),
+            offset + 4..offset + 8,
+        );
+
+        // Octets 9-11: Sequence Number (24 bits)
+        let seq = read_be_u24(data, 8)?;
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_SEQUENCE_NUMBER],
+            FieldValue::U32(seq),
+            offset + 8..offset + 11,
+        );
+
+        // Octet 12: Spare or Message Priority
+        if mp_flag == 1 {
+            let priority = (data[11] >> 4) & 0x0F;
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_MESSAGE_PRIORITY],
+                FieldValue::U8(priority),
+                offset + 11..offset + 12,
+            );
+        }
+    } else {
+        // 3GPP TS 29.274, Section 5.1 — T=0: No TEID
+        // Octets 5-7: Sequence Number (24 bits)
+        let seq = read_be_u24(data, 4)?;
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_SEQUENCE_NUMBER],
+            FieldValue::U32(seq),
+            offset + 4..offset + 7,
+        );
+
+        // Octet 8: Spare. Section 5.5.1 places the Message Priority in
+        // octet 12, which exists only when T = 1.
+    };
+
+    // msg_length covers bytes after the first 4 mandatory octets,
+    // so IE data starts at header_size and extends for
+    // (4 + msg_length - header_size) bytes.
+    if ie_start < ie_end {
+        let ie_data = &data[ie_start..ie_end];
+        let array_idx = buf.begin_container(
+            &FIELD_DESCRIPTORS[FD_IES],
+            FieldValue::Array(0..0),
+            offset + ie_start..offset + ie_end,
+        );
+        ie::parse_ies(ie_data, offset + ie_start, buf);
+        buf.end_container(array_idx);
+
+        // If no IEs were actually parsed, remove the empty array.
+        let arr = &buf.fields()[array_idx as usize];
+        if let FieldValue::Array(ref r) = arr.value {
+            if r.start == r.end {
+                buf.truncate_fields(array_idx as usize);
+            }
+        }
+    }
+
+    buf.end_layer();
+
+    Ok((total_consumed, p_flag))
 }
 
 #[cfg(test)]
@@ -312,6 +335,10 @@ mod tests {
     // | 5.1       | Truncated header (T=1)     | parse_gtpv2c_truncated_with_teid  |
     // | 8.2.1     | IE parsing                 | parse_gtpv2c_with_ies             |
     // | 5.1       | Echo Request (no TEID)     | parse_gtpv2c_echo_request         |
+    // | 5.5.1     | Piggybacked message (P=1)  | parse_gtpv2c_piggybacked_message  |
+    // | 5.5.1     | Piggyback is one level     | parse_gtpv2c_piggyback_only_one_level |
+    // | 5.5.1     | Malformed piggyback / P=0  | parse_gtpv2c_piggyback_malformed_is_ignored |
+    // | 5.1/5.5.1 | Version, length, MP priority | parse_gtpv2c_header_errors_and_priority |
 
     /// Helper to build a GTPv2-C header with T=1 (TEID present).
     fn make_gtpv2c_with_teid(msg_type: u8, teid: u32, seq: u32, ies: &[u8]) -> Vec<u8> {
@@ -484,5 +511,123 @@ mod tests {
             assert!(r.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+    }
+
+    #[test]
+    fn parse_gtpv2c_piggybacked_message() {
+        // 3GPP TS 29.274, Section 5.5.1 — Create Session Response (P=1)
+        // followed by a piggybacked Create Bearer Request (P=0).
+        let recovery_ie = [3, 0, 1, 0, 7];
+        let mut first = make_gtpv2c_with_teid(33, 0x11, 1, &recovery_ie);
+        first[0] |= 0x10; // P flag
+        let second = make_gtpv2c_with_teid(95, 0x22, 2, &[]);
+        let mut data = first.clone();
+        data.extend_from_slice(&second);
+
+        let mut buf = DissectBuffer::new();
+        let result = Gtpv2cDissector.dissect(&data, &mut buf, 10).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        assert_eq!(result.next, DispatchHint::End);
+        assert_eq!(buf.layers().len(), 2);
+        let l0 = &buf.layers()[0];
+        let l1 = &buf.layers()[1];
+        assert_eq!(l0.range, 10..10 + first.len());
+        assert_eq!(l1.range, 10 + first.len()..10 + data.len());
+        assert_eq!(buf.field_u8(l0, "piggyback"), Some(1));
+        assert_eq!(buf.field_u8(l0, "message_type"), Some(33));
+        assert_eq!(buf.field_u8(l1, "message_type"), Some(95));
+        assert_eq!(buf.field_u32(l1, "teid"), Some(0x22));
+        assert_eq!(
+            buf.field_by_name(l1, "teid").unwrap().range,
+            14 + first.len()..18 + first.len()
+        );
+    }
+
+    #[test]
+    fn parse_gtpv2c_piggyback_only_one_level() {
+        // A piggybacked message with P=1 does not pull in a third message.
+        let mut first = make_gtpv2c_with_teid(33, 1, 1, &[]);
+        first[0] |= 0x10;
+        let mut second = make_gtpv2c_with_teid(95, 2, 2, &[]);
+        second[0] |= 0x10;
+        let third = make_gtpv2c_with_teid(34, 3, 3, &[]);
+        let mut data = first.clone();
+        data.extend_from_slice(&second);
+        data.extend_from_slice(&third);
+        let mut buf = DissectBuffer::new();
+        let result = Gtpv2cDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, first.len() + second.len());
+        assert_eq!(buf.layers().len(), 2);
+    }
+
+    #[test]
+    fn parse_gtpv2c_piggyback_malformed_is_ignored() {
+        // P=1 but the trailing bytes are not a valid GTPv2-C message: the
+        // first message is kept and the trailing bytes are not consumed.
+        let mut first = make_gtpv2c_with_teid(33, 1, 1, &[]);
+        first[0] |= 0x10;
+        let mut data = first.clone();
+        data.extend_from_slice(&[0x48, 95, 0x00, 0x40]); // length past the end
+        let mut buf = DissectBuffer::new();
+        let result = Gtpv2cDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, first.len());
+        assert_eq!(buf.layers().len(), 1);
+
+        // P=0: trailing bytes are ignored.
+        let mut data = make_gtpv2c_with_teid(33, 1, 1, &[]);
+        let len = data.len();
+        data.extend_from_slice(&make_gtpv2c_with_teid(95, 2, 2, &[]));
+        let mut buf = DissectBuffer::new();
+        let result = Gtpv2cDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, len);
+        assert_eq!(buf.layers().len(), 1);
+    }
+
+    #[test]
+    fn parse_gtpv2c_header_errors_and_priority() {
+        let d = Gtpv2cDissector;
+        assert_eq!(d.name(), "GPRS Tunnelling Protocol Control Plane v2");
+
+        // Version 1
+        let mut data = make_gtpv2c_with_teid(32, 1, 1, &[]);
+        data[0] = (data[0] & 0x1F) | 0x20;
+        let mut buf = DissectBuffer::new();
+        assert!(matches!(
+            d.dissect(&data, &mut buf, 0),
+            Err(PacketError::InvalidFieldValue {
+                field: "version",
+                ..
+            })
+        ));
+
+        // Message Length shorter than the T=1 header
+        let data = [0x48, 32, 0x00, 0x04, 0, 0, 0, 1, 0, 0, 1, 0];
+        let mut buf = DissectBuffer::new();
+        assert!(matches!(
+            d.dissect(&data, &mut buf, 0),
+            Err(PacketError::InvalidHeader(_))
+        ));
+
+        // MP = 1 with T = 1: priority in bits 8-5 of octet 12
+        let mut data = make_gtpv2c_with_teid(32, 1, 1, &[]);
+        data[0] |= 0x04;
+        data[11] = 0x50;
+        let (_, buf) = dissect_ok(&data);
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.field_u8(layer, "message_priority"), Some(5));
+
+        // MP = 1 with T = 0: Section 5.5.1 places the priority in octet 12,
+        // which a T = 0 header does not have; octet 8 is Spare (Section 5.1).
+        let mut data = make_gtpv2c_without_teid(1, 1, &[]);
+        data[0] |= 0x04;
+        data[7] = 0x03;
+        let (_, buf) = dissect_ok(&data);
+        let layer = &buf.layers()[0];
+        assert_eq!(buf.field_u8(layer, "message_priority"), None);
+
+        // Stray octets that do not form an IE leave no empty IE array.
+        let data = make_gtpv2c_with_teid(32, 1, 1, &[0x01, 0x00]);
+        let (_, buf) = dissect_ok(&data);
+        assert!(buf.field_by_name(&buf.layers()[0], "ies").is_none());
     }
 }

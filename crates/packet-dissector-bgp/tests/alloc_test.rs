@@ -116,7 +116,8 @@ fn zero_alloc_dissect_bgp_update_structured_path_attributes() {
     // 4-octet AS_PATH, a Tunnel Encapsulation attribute (RFC 9012, Section 2 —
     // https://www.rfc-editor.org/rfc/rfc9012#section-2) and a PMSI_TUNNEL
     // attribute (RFC 6514, Section 5 —
-    // https://www.rfc-editor.org/rfc/rfc6514#section-5).
+    // https://www.rfc-editor.org/rfc/rfc6514#section-5), plus Extended
+    // Communities.
     let mut attrs = vec![0xC0, 128, 17]; // ATTR_SET, length 17
     attrs.extend_from_slice(&65001u32.to_be_bytes()); // Origin AS
     attrs.extend_from_slice(&[0x40, 1, 1, 0]); // ORIGIN = IGP
@@ -127,6 +128,11 @@ fn zero_alloc_dissect_bgp_update_structured_path_attributes() {
     attrs.extend_from_slice(&[4, 8, 0x03, 0x0b, 0, 0, 0, 0, 0, 100]);
     // PMSI_TUNNEL: Ingress Replication, label 100, endpoint 192.0.2.1.
     attrs.extend_from_slice(&[0xC0, 22, 9, 0, 6, 0x00, 0x06, 0x41, 192, 0, 2, 1]);
+    // EXTENDED COMMUNITIES (RFC 4360, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc4360#section-2): Route Target and
+    // Link Bandwidth.
+    attrs.extend_from_slice(&[0xC0, 16, 16, 0x00, 0x02, 0xfd, 0xe9, 0, 0, 0, 100]);
+    attrs.extend_from_slice(&[0x40, 0x04, 0xfd, 0xe9, 0x4c, 0xee, 0x6b, 0x28]);
 
     let mut raw = vec![0xFF; 16]; // Marker
     let total_len = 19 + 2 + 2 + attrs.len();
@@ -147,5 +153,38 @@ fn zero_alloc_dissect_bgp_update_structured_path_attributes() {
     assert_eq!(
         allocs, 0,
         "BGP structured path attribute dissect allocated {allocs} times"
+    );
+}
+
+#[test]
+fn zero_alloc_dissect_bgp_route_refresh_orf_and_notification() {
+    // ROUTE-REFRESH with an Address Prefix ORF (RFC 5291, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc5291#section-4; RFC 5292, Section 3 —
+    // https://www.rfc-editor.org/rfc/rfc5292#section-3), followed by a Cease /
+    // Hard Reset NOTIFICATION carrying a Shutdown Communication (RFC 8538,
+    // Section 3.1 — https://www.rfc-editor.org/rfc/rfc8538#section-3.1;
+    // RFC 9003, Section 2 — https://www.rfc-editor.org/rfc/rfc9003#section-2).
+    let orf = [1u8, 64, 0, 10, 0x00, 0, 0, 0, 10, 9, 24, 8, 10, 0x80];
+    let mut raw = vec![0xFF; 16];
+    raw.extend_from_slice(&((23 + orf.len()) as u16).to_be_bytes());
+    raw.push(5); // Type = ROUTE-REFRESH
+    raw.extend_from_slice(&[0, 1, 0, 1]); // AFI 1, Subtype 0, SAFI 1
+    raw.extend_from_slice(&orf);
+    let notification_data = [6u8, 4, 3, b'b', b'y', b'e'];
+    raw.extend_from_slice(&[0xFF; 16]);
+    raw.extend_from_slice(&((21 + notification_data.len()) as u16).to_be_bytes());
+    raw.extend_from_slice(&[3, 6, 9]); // NOTIFICATION, Cease, Hard Reset
+    raw.extend_from_slice(&notification_data);
+
+    let mut buf = DissectBuffer::new();
+    BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP ROUTE-REFRESH / NOTIFICATION dissect allocated {allocs} times"
     );
 }

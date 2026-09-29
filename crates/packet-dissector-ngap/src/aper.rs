@@ -252,6 +252,86 @@ impl<'a> AperReader<'a> {
     }
 }
 
+/// Where the value of an octet-aligned length-prefixed field (an open type
+/// or an unconstrained OCTET STRING) lies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Extent {
+    /// A single length determinant of `len_octets` octets followed by `len`
+    /// contiguous value octets.
+    Contiguous {
+        /// Size of the length determinant (1 or 2 octets).
+        len_octets: usize,
+        /// Number of value octets.
+        len: usize,
+    },
+    /// A fragmented value: `total` value octets spread over fragments that
+    /// are separated by further length determinants, ending before `end`.
+    Fragmented {
+        /// Number of value octets, summed over all fragments.
+        total: usize,
+        /// Position just after the last octet of the encoding.
+        end: usize,
+    },
+}
+
+/// Size of one fragment unit of a fragmented length determinant.
+///
+/// ITU-T Rec. X.691, Section 11.9.3.8.
+const FRAGMENT_UNIT: usize = 16384;
+
+/// Reads the extent of an octet-aligned value whose unconstrained length
+/// determinant starts at octet `pos` of `data`.
+///
+/// ITU-T Rec. X.691, Section 11.9.3.6 (one octet, 0..127), 11.9.3.7 (two
+/// octets, up to 16K) and 11.9.3.8: a first octet `11mmmmmm` with `m` in
+/// 1..4 is followed by `m` × 16K value octets and then another length
+/// determinant; the last part uses the one- or two-octet form (possibly
+/// zero).
+pub(crate) fn read_extent(data: &[u8], pos: usize) -> Result<Extent, PacketError> {
+    let truncated = |expected: usize| PacketError::Truncated {
+        expected,
+        actual: data.len(),
+    };
+    let mut p = pos;
+    let mut total = 0usize;
+    loop {
+        let &first = data.get(p).ok_or_else(|| truncated(p + 1))?;
+        let (len_octets, len) = match first {
+            0x00..=0x7f => (1, usize::from(first)),
+            0x80..=0xbf => {
+                let &second = data.get(p + 1).ok_or_else(|| truncated(p + 2))?;
+                (2, (usize::from(first & 0x3f) << 8) | usize::from(second))
+            }
+            _ => {
+                let m = usize::from(first & 0x3f);
+                if !(1..=4).contains(&m) {
+                    return Err(PacketError::InvalidHeader(
+                        "APER fragment multiplier out of range",
+                    ));
+                }
+                let next = p + 1 + m * FRAGMENT_UNIT;
+                if next > data.len() {
+                    return Err(truncated(next));
+                }
+                total += m * FRAGMENT_UNIT;
+                p = next;
+                continue;
+            }
+        };
+        if p == pos {
+            return Ok(Extent::Contiguous { len_octets, len });
+        }
+        let end = p + len_octets + len;
+        if end > data.len() {
+            return Err(truncated(end));
+        }
+        return Ok(Extent::Fragmented {
+            total: total + len,
+            end,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! # ITU-T X.691 (ALIGNED PER) Reader Coverage
@@ -288,6 +368,12 @@ mod tests {
     //! | 16.9          | Fixed BIT STRING ≤ 16 bits               | fixed_bit_string_unaligned            |
     //! | 16.10         | Fixed BIT STRING > 16 bits               | fixed_bit_string_aligned              |
     //! | —             | Byte range of read bits                  | byte_range_since_covers_partial_octets|
+    //! | 11.9.3.6      | Open type extent, one-octet length       | extent_short                          |
+    //! | 11.9.3.7      | Open type extent, two-octet length       | extent_long                           |
+    //! | 11.9.3.8      | Open type extent, fragmented             | extent_fragmented                     |
+    //! | 11.9.3.8      | Fragmented, ends with a zero length      | extent_fragmented_zero_final          |
+    //! | 11.9.3.8      | Fragment multiplier out of range         | extent_bad_fragment_multiplier        |
+    //! | 11.9.3.8      | Truncated fragment / determinant         | extent_truncated                      |
 
     use super::*;
 
@@ -553,5 +639,93 @@ mod tests {
         let start = r.bit_position();
         r.read_bits(7).unwrap();
         assert_eq!(r.byte_range_since(start), 0..2);
+    }
+
+    #[test]
+    fn extent_short() {
+        assert_eq!(
+            read_extent(&[0xaa, 0x02, 1, 2], 1).unwrap(),
+            Extent::Contiguous {
+                len_octets: 1,
+                len: 2
+            }
+        );
+    }
+
+    #[test]
+    fn extent_long() {
+        assert_eq!(
+            read_extent(&[0x81, 0x00], 0).unwrap(),
+            Extent::Contiguous {
+                len_octets: 2,
+                len: 256
+            }
+        );
+    }
+
+    #[test]
+    fn extent_fragmented() {
+        // One 16K fragment, then a final 5-octet part.
+        let mut data = vec![0xc1];
+        data.extend(std::iter::repeat_n(0u8, 16384));
+        data.push(0x05);
+        data.extend_from_slice(&[1, 2, 3, 4, 5]);
+        assert_eq!(
+            read_extent(&data, 0).unwrap(),
+            Extent::Fragmented {
+                total: 16389,
+                end: data.len()
+            }
+        );
+    }
+
+    #[test]
+    fn extent_fragmented_zero_final() {
+        // Two 16K fragments in one determinant (m = 2), then length 0.
+        let mut data = vec![0xc2];
+        data.extend(std::iter::repeat_n(0u8, 32768));
+        data.push(0x00);
+        assert_eq!(
+            read_extent(&data, 0).unwrap(),
+            Extent::Fragmented {
+                total: 32768,
+                end: data.len()
+            }
+        );
+    }
+
+    #[test]
+    fn extent_bad_fragment_multiplier() {
+        for first in [0xc0, 0xc5] {
+            assert!(matches!(
+                read_extent(&[first], 0),
+                Err(PacketError::InvalidHeader(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn extent_truncated() {
+        for data in [&[][..], &[0x81][..], &[0xc1, 0x00][..]] {
+            assert!(matches!(
+                read_extent(data, 0),
+                Err(PacketError::Truncated { .. })
+            ));
+        }
+        // Final part longer than the data.
+        let mut data = vec![0xc1];
+        data.extend(std::iter::repeat_n(0u8, 16384));
+        data.extend_from_slice(&[0x05, 0x00]);
+        assert!(matches!(
+            read_extent(&data, 0),
+            Err(PacketError::Truncated { .. })
+        ));
+        // Fragment present but the next determinant is missing.
+        let mut data = vec![0xc1];
+        data.extend(std::iter::repeat_n(0u8, 16384));
+        assert!(matches!(
+            read_extent(&data, 0),
+            Err(PacketError::Truncated { .. })
+        ));
     }
 }
