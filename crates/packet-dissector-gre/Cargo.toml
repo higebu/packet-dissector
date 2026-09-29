@@ -8,7 +8,7 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "gre"]
 categories = ["network-programming", "parser-implementations"]
-description = "GRE (RFC 2784, RFC 2890) dissector for packet-dissector"
+description = "GRE (RFC 2784, RFC 2890, RFC 1701, PPTP Enhanced GRE RFC 2637, NVGRE RFC 7637) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }

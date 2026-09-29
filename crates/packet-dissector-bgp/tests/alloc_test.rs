@@ -108,3 +108,44 @@ fn zero_alloc_dissect_bgp_update_vpn_ipv4() {
         "BGP VPN-IPv4 update dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_update_structured_path_attributes() {
+    // UPDATE with an ATTR_SET (RFC 6368, Section 5 —
+    // https://www.rfc-editor.org/rfc/rfc6368#section-5) nesting ORIGIN and a
+    // 4-octet AS_PATH, a Tunnel Encapsulation attribute (RFC 9012, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-2) and a PMSI_TUNNEL
+    // attribute (RFC 6514, Section 5 —
+    // https://www.rfc-editor.org/rfc/rfc6514#section-5).
+    let mut attrs = vec![0xC0, 128, 17]; // ATTR_SET, length 17
+    attrs.extend_from_slice(&65001u32.to_be_bytes()); // Origin AS
+    attrs.extend_from_slice(&[0x40, 1, 1, 0]); // ORIGIN = IGP
+    attrs.extend_from_slice(&[0x40, 2, 6, 2, 1, 0, 0, 0xfd, 0xe9]); // AS_PATH
+    // Tunnel Encapsulation: VXLAN with Tunnel Egress Endpoint and Color.
+    attrs.extend_from_slice(&[0xC0, 23, 26, 0, 8, 0, 22]);
+    attrs.extend_from_slice(&[6, 10, 0, 0, 0, 0, 0, 1, 192, 0, 2, 1]);
+    attrs.extend_from_slice(&[4, 8, 0x03, 0x0b, 0, 0, 0, 0, 0, 100]);
+    // PMSI_TUNNEL: Ingress Replication, label 100, endpoint 192.0.2.1.
+    attrs.extend_from_slice(&[0xC0, 22, 9, 0, 6, 0x00, 0x06, 0x41, 192, 0, 2, 1]);
+
+    let mut raw = vec![0xFF; 16]; // Marker
+    let total_len = 19 + 2 + 2 + attrs.len();
+    raw.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+    raw.push(2); // Type = UPDATE
+    raw.extend_from_slice(&0u16.to_be_bytes()); // Withdrawn Routes Length
+    raw.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    raw.extend_from_slice(&attrs);
+
+    let mut buf = DissectBuffer::new();
+    // Warm up so that the buffer has grown to its steady-state capacity.
+    BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP structured path attribute dissect allocated {allocs} times"
+    );
+}
