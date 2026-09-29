@@ -26,6 +26,12 @@
 //! - RFC 7311 (Accumulated IGP Metric Attribute): <https://www.rfc-editor.org/rfc/rfc7311>
 //! - RFC 8205 (BGPsec Protocol Specification): <https://www.rfc-editor.org/rfc/rfc8205>
 //! - RFC 8365 (Network Virtualization Overlay Solution Using EVPN): <https://www.rfc-editor.org/rfc/rfc8365>
+//! - RFC 7432 (BGP MPLS-Based Ethernet VPN): <https://www.rfc-editor.org/rfc/rfc7432>
+//! - RFC 9136 (IP Prefix Advertisement in EVPN): <https://www.rfc-editor.org/rfc/rfc9136>
+//! - RFC 9135 (Integrated Routing and Bridging in EVPN): <https://www.rfc-editor.org/rfc/rfc9135>
+//! - RFC 9251 (IGMP and MLD Proxies for EVPN): <https://www.rfc-editor.org/rfc/rfc9251>
+//! - RFC 9572 (Updates to EVPN Broadcast, Unknown Unicast, or Multicast (BUM) Procedures): <https://www.rfc-editor.org/rfc/rfc9572>
+//! - IANA EVPN Route Types: <https://www.iana.org/assignments/evpn/evpn.xhtml>
 //! - RFC 9015 (BGP Control Plane for the Network Service Header / SFP attribute): <https://www.rfc-editor.org/rfc/rfc9015>
 //! - RFC 9026 (Multicast VPN Fast Upstream Failover / BFD Discriminator): <https://www.rfc-editor.org/rfc/rfc9026>
 //! - RFC 9552 (BGP-LS): <https://www.rfc-editor.org/rfc/rfc9552>
@@ -230,12 +236,26 @@
 //! | 3/4 | UPDATE top-level afi/safi: first MP attribute in attribute order wins | `parse_bgp_update_top_level_afi_safi_first_attribute_wins` |
 //! | 3/4 | Plain IPv4 unicast UPDATE (no MP attribute) has no top-level afi/safi | `parse_bgp_update_plain_ipv4_unicast_has_no_top_level_afi_safi` |
 //! | 5 | Plain prefix NLRI for SAFI 2 (multicast) | `parse_bgp_update_mp_reach_ipv4_multicast_prefixes` |
-//! | 3 | Unsupported AFI (EVPN) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_evpn_nlri_is_raw` |
-//! | 4 | Unsupported AFI (EVPN) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_evpn_withdrawn_is_raw` |
 //! | 3 | Non-prefix SAFI of AFI 1 (FlowSpec) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw` |
 //! | 4 | Non-prefix SAFI of AFI 1 (SR Policy) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw` |
 //! | 5 | Malformed tail of a prefix NLRI block kept as raw bytes | `parse_bgp_update_mp_reach_prefix_tail_is_raw` |
 //! | 5 | Prefix withdrawn routes that do not decode kept as raw bytes | `parse_bgp_update_mp_unreach_invalid_prefixes_are_raw` |
+//!
+//! # EVPN NLRI Coverage (RFC 7432 / RFC 9136 / RFC 8365)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 7432 §7, §7.3 | Inclusive Multicast Ethernet Tag route | `parse_bgp_update_mp_reach_evpn_imet` |
+//! | RFC 7432 §9.2.1 | IPv4 / IPv6 MP_REACH_NLRI next hop for AFI 25 | `parse_bgp_update_mp_reach_evpn_next_hop` |
+//! | RFC 7432 §7.2; RFC 9135 | MAC/IP Advertisement (IPv4, IPv6 with Label2, MAC only) | `parse_bgp_update_mp_reach_evpn_mac_ip` |
+//! | RFC 7432 §7.1, §7.4; RFC 9136 §3.1 | Ethernet A-D, Ethernet Segment, IPv4 / IPv6 IP Prefix routes | `parse_bgp_update_mp_reach_evpn_ead_es_ip_prefix` |
+//! | RFC 8365 §5.1.3 | MPLS Label fields as VNIs with a VXLAN Encapsulation Extended Community | `parse_bgp_update_mp_reach_evpn_vni_with_vxlan_encapsulation` |
+//! | RFC 7432 §7 | Undecoded Route Type / layout mismatch kept as `value` | `parse_bgp_update_mp_reach_evpn_undecoded_routes_keep_value`, `parse_bgp_update_mp_reach_evpn_layout_mismatches_keep_value` |
+//! | RFC 7432 §9.2.1 | VPN-shaped next hop for AFI 25 kept raw | `parse_bgp_update_mp_reach_l2vpn_vpn_safi_next_hop_is_raw` |
+//! | RFC 7432 §7 | NLRI union `route_type` names MUP or EVPN routes | `nlri_union_route_type_name_follows_the_entry_kind` |
+//! | RFC 7432 §7 | EVPN routes in MP_UNREACH_NLRI | `parse_bgp_update_mp_unreach_evpn_withdrawn` |
+//! | RFC 7911 §3 | ADD-PATH EVPN block; truncated tail kept as `nlri_raw` | `parse_bgp_update_mp_reach_evpn_add_path_and_truncated_tail`, `detect_add_path_evpn_prefers_plain_encoding` |
+//! | IANA EVPN Route Types | Route Type names, ESI formatting | `evpn_name_tables` |
 //!
 //! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
 //!
@@ -388,6 +408,13 @@ const MUP_ROUTE_TYPE_MAX: u16 = 4;
 
 /// SAFI value for BGP-MUP (draft-ietf-bess-mup-safi-01).
 const SAFI_MUP: u8 = 85;
+
+/// AFI for L2VPN (IANA Address Family Numbers; RFC 7432, Section 7 —
+/// <https://www.rfc-editor.org/rfc/rfc7432#section-7>).
+const AFI_L2VPN: u16 = 25;
+/// SAFI for EVPN (RFC 7432, Section 7 —
+/// <https://www.rfc-editor.org/rfc/rfc7432#section-7>).
+const SAFI_EVPN: u8 = 70;
 
 /// AFI for IPv4 (IANA Address Family Numbers).
 const AFI_IPV4: u16 = 1;
@@ -3413,11 +3440,11 @@ fn parse_attr_value<'pkt>(
         }
         // MP_REACH_NLRI (RFC 4760, Section 3)
         14 if data.len() >= 5 => {
-            return Some(parse_mp_reach_nlri(buf, data, offset));
+            return Some(parse_mp_reach_nlri(buf, data, offset, ctx.vni_label));
         }
         // MP_UNREACH_NLRI (RFC 4760, Section 4)
         15 if data.len() >= 3 => {
-            return Some(parse_mp_unreach_nlri(buf, data, offset));
+            return Some(parse_mp_unreach_nlri(buf, data, offset, ctx.vni_label));
         }
         // EXTENDED COMMUNITIES (RFC 4360, Section 2 —
         // https://www.rfc-editor.org/rfc/rfc4360#section-2) — 8-octet
@@ -5335,6 +5362,9 @@ enum MpNlriEncoding {
     /// RFC 4364, Section 4.3.4 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.4>
     /// RFC 4659, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc4659#section-3.2>
     Labeled { ipv6: bool, vpn: bool },
+    /// EVPN NLRI (RFC 7432, Section 7 —
+    /// <https://www.rfc-editor.org/rfc/rfc7432#section-7>).
+    Evpn,
 }
 
 /// Shape of a labeled NLRI block.
@@ -5600,6 +5630,417 @@ fn parse_labeled_nlri<'pkt>(
     pos
 }
 
+/// Returns a human-readable name for EVPN Route Types.
+///
+/// IANA EVPN Route Types —
+/// <https://www.iana.org/assignments/evpn/evpn.xhtml#route-types>
+fn evpn_route_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        // RFC 7432, Section 7 — https://www.rfc-editor.org/rfc/rfc7432#section-7
+        EVPN_ROUTE_ETHERNET_AD => Some("Ethernet Auto-discovery"),
+        EVPN_ROUTE_MAC_IP => Some("MAC/IP Advertisement"),
+        EVPN_ROUTE_IMET => Some("Inclusive Multicast Ethernet Tag"),
+        EVPN_ROUTE_ETHERNET_SEGMENT => Some("Ethernet Segment"),
+        // RFC 9136, Section 3 — https://www.rfc-editor.org/rfc/rfc9136#section-3
+        EVPN_ROUTE_IP_PREFIX => Some("IP Prefix"),
+        // RFC 9251, Section 9 — https://www.rfc-editor.org/rfc/rfc9251#section-9
+        6 => Some("Selective Multicast Ethernet Tag Route"),
+        7 => Some("Multicast Membership Report Synch Route"),
+        8 => Some("Multicast Leave Synch Route"),
+        // RFC 9572, Section 3 — https://www.rfc-editor.org/rfc/rfc9572#section-3
+        9 => Some("Per-Region I-PMSI A-D route"),
+        10 => Some("S-PMSI A-D route"),
+        11 => Some("Leaf A-D route"),
+        _ => None,
+    }
+}
+
+/// EVPN Route Types decoded by [`parse_evpn_route_body`] (RFC 7432,
+/// Section 7 — <https://www.rfc-editor.org/rfc/rfc7432#section-7>; RFC 9136,
+/// Section 3 — <https://www.rfc-editor.org/rfc/rfc9136#section-3>).
+const EVPN_ROUTE_ETHERNET_AD: u8 = 1;
+const EVPN_ROUTE_MAC_IP: u8 = 2;
+const EVPN_ROUTE_IMET: u8 = 3;
+const EVPN_ROUTE_ETHERNET_SEGMENT: u8 = 4;
+const EVPN_ROUTE_IP_PREFIX: u8 = 5;
+/// Highest EVPN Route Type assigned by IANA (RFC 9572, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc9572#section-3>).
+const EVPN_ROUTE_TYPE_MAX: u8 = 11;
+/// EVPN NLRI Route Type (1) + Length (1) (RFC 7432, Section 7 —
+/// <https://www.rfc-editor.org/rfc/rfc7432#section-7>).
+const EVPN_NLRI_HEADER_SIZE: usize = 2;
+/// Ethernet Segment Identifier size (RFC 7432, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc7432#section-5>).
+const ESI_SIZE: usize = 10;
+
+/// Returns `true` when an EVPN route of `route_type` may have a
+/// Route Type specific field of `len` octets.
+///
+/// Route Types 1-5 have the fixed lengths of their figures (RFC 7432,
+/// Sections 7.1-7.4 — <https://www.rfc-editor.org/rfc/rfc7432#section-7.1>;
+/// RFC 9136, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9136#section-3.1>),
+/// the other assigned types any length.
+fn evpn_route_length_plausible(route_type: u8, len: usize) -> bool {
+    match route_type {
+        EVPN_ROUTE_ETHERNET_AD => len == 25,
+        // IP Address of 0, 4 or 16 octets, with or without MPLS Label2.
+        EVPN_ROUTE_MAC_IP => matches!(len, 33 | 36 | 37 | 40 | 49 | 52),
+        EVPN_ROUTE_IMET => matches!(len, 17 | 29),
+        EVPN_ROUTE_ETHERNET_SEGMENT => matches!(len, 23 | 35),
+        EVPN_ROUTE_IP_PREFIX => matches!(len, 34 | 58),
+        6..=EVPN_ROUTE_TYPE_MAX => true,
+        _ => false,
+    }
+}
+
+/// Returns `true` when `data` parses exactly as a sequence of EVPN NLRI
+/// entries, each preceded by `path_id_len` octets of Path Identifier, whose
+/// Route Type and Length pass `entry_ok`.
+fn evpn_block_parses(data: &[u8], path_id_len: usize, entry_ok: fn(u8, usize) -> bool) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        let entry = pos + path_id_len;
+        let (Some(&route_type), Some(&len)) = (data.get(entry), data.get(entry + 1)) else {
+            return false;
+        };
+        if !entry_ok(route_type, usize::from(len)) {
+            return false;
+        }
+        pos = entry + EVPN_NLRI_HEADER_SIZE + usize::from(len);
+        if pos > data.len() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Returns `true` when an EVPN block carries RFC 7911 ADD-PATH Path
+/// Identifiers.
+///
+/// The plain encoding wins whenever it frames the block exactly without a
+/// Reserved Route Type 0 — a Path Identifier usually starts with a zero
+/// octet, which would read as Route Type 0. Otherwise the block is ADD-PATH
+/// only if every Path Identifier is followed by an assigned Route Type with a
+/// plausible Length (see [`evpn_route_length_plausible`]).
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_evpn(data: &[u8]) -> bool {
+    !evpn_block_parses(data, 0, |route_type, _| route_type != 0)
+        && evpn_block_parses(data, PATH_ID_SIZE, evpn_route_length_plausible)
+}
+
+/// Parses an EVPN NLRI block (AFI 25 / SAFI 70) into one object per route,
+/// and returns the number of octets consumed.
+///
+/// RFC 7432, Section 7 — <https://www.rfc-editor.org/rfc/rfc7432#section-7>
+///
+/// Each entry is Route Type (1), Length (1) and the Route Type specific
+/// field (see [`parse_evpn_route_body`]). With RFC 7911 ADD-PATH each entry
+/// is preceded by a Path Identifier (see [`detect_add_path_evpn`]).
+fn parse_evpn_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+    vni_label: bool,
+) -> usize {
+    let id_len = if detect_add_path_evpn(data) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
+    let f = &EVPN_NLRI_FIELDS;
+    let mut pos = 0;
+    while pos + id_len + EVPN_NLRI_HEADER_SIZE <= data.len() {
+        let entry = pos + id_len;
+        let route_type = data[entry];
+        let len = usize::from(data[entry + 1]);
+        let end = entry + EVPN_NLRI_HEADER_SIZE + len;
+        if end > data.len() {
+            break;
+        }
+        let abs = base_offset + pos;
+        let entry_abs = base_offset + entry;
+        let obj_idx = buf.begin_container(
+            &EVPN_NLRI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + end,
+        );
+        if id_len != 0 {
+            buf.push_field(
+                &f[FD_EVPN_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+        buf.push_field(
+            &f[FD_EVPN_ROUTE_TYPE],
+            FieldValue::U16(u16::from(route_type)),
+            entry_abs..entry_abs + 1,
+        );
+        buf.push_field(
+            &f[FD_EVPN_LENGTH],
+            FieldValue::U8(data[entry + 1]),
+            entry_abs + 1..entry_abs + 2,
+        );
+        let body = &data[entry + EVPN_NLRI_HEADER_SIZE..end];
+        let body_abs = entry_abs + EVPN_NLRI_HEADER_SIZE;
+        let mark = buf.fields().len();
+        if !parse_evpn_route_body(buf, route_type, body, body_abs, vni_label) {
+            buf.truncate_fields(mark);
+            if !body.is_empty() {
+                buf.push_field(
+                    &f[FD_EVPN_VALUE],
+                    FieldValue::Bytes(body),
+                    body_abs..body_abs + body.len(),
+                );
+            }
+        }
+        buf.end_container(obj_idx);
+        pos = end;
+    }
+    pos
+}
+
+/// Reads the fields of an EVPN Route Type specific field in order, pushing
+/// each one; every read fails (returns `None`) past the end of the field.
+struct EvpnReader<'a, 'pkt> {
+    buf: &'a mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    pos: usize,
+}
+
+impl<'pkt> EvpnReader<'_, 'pkt> {
+    /// Takes the next `n` octets and their absolute range.
+    fn take(&mut self, n: usize) -> Option<(&'pkt [u8], core::ops::Range<usize>)> {
+        let bytes = self.data.get(self.pos..self.pos.checked_add(n)?)?;
+        let range = self.offset + self.pos..self.offset + self.pos + n;
+        self.pos += n;
+        Some((bytes, range))
+    }
+
+    /// Pushes the next `n` octets with the value built by `value`.
+    fn push(
+        &mut self,
+        fd: usize,
+        n: usize,
+        value: impl FnOnce(&'pkt [u8]) -> FieldValue<'pkt>,
+    ) -> Option<()> {
+        let (bytes, range) = self.take(n)?;
+        self.buf
+            .push_field(&EVPN_NLRI_FIELDS[fd], value(bytes), range);
+        Some(())
+    }
+
+    /// Route Distinguisher (8 octets, RFC 4364, Section 4.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc4364#section-4.2>).
+    fn rd(&mut self) -> Option<()> {
+        self.push(FD_EVPN_RD, RD_SIZE, FieldValue::Bytes)
+    }
+
+    /// Ethernet Segment Identifier (10 octets).
+    fn esi(&mut self) -> Option<()> {
+        self.push(FD_EVPN_ESI, ESI_SIZE, FieldValue::Bytes)
+    }
+
+    /// Ethernet Tag ID (4 octets).
+    fn ethernet_tag_id(&mut self) -> Option<()> {
+        self.push(FD_EVPN_ETHERNET_TAG_ID, 4, |b| {
+            FieldValue::U32(read_be_u32(b, 0).unwrap_or_default())
+        })
+    }
+
+    /// A 3-octet MPLS Label field: "The MPLS Label1 field is encoded as 3
+    /// octets, where the high-order 20 bits contain the label value"
+    /// (RFC 7432, Section 9.2.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1>), or, with a
+    /// VXLAN / NVGRE / VXLAN GPE encapsulation, a VNI where "the entire 24-bit
+    /// field is used to encode the VNI value" (RFC 8365, Section 5.1.3 —
+    /// <https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3>).
+    fn label(&mut self, label_fd: usize, vni_fd: usize, vni: bool) -> Option<()> {
+        let fd = if vni { vni_fd } else { label_fd };
+        self.push(fd, 3, |b| {
+            let raw = read_be_u24(b, 0).unwrap_or_default();
+            FieldValue::U32(if vni { raw } else { raw >> 4 })
+        })
+    }
+
+    /// An IP Address Length in bits (1 octet) followed by an address of that
+    /// length (`allow_empty` permits the length 0 of RFC 7432, Section 7.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc7432#section-7.2>).
+    fn ip(&mut self, fd: usize, allow_empty: bool) -> Option<()> {
+        let (len, range) = self.take(1)?;
+        let octets = match len[0] {
+            0 if allow_empty => 0,
+            32 => 4,
+            128 => 16,
+            _ => return None,
+        };
+        self.buf.push_field(
+            &EVPN_NLRI_FIELDS[FD_EVPN_IP_LENGTH],
+            FieldValue::U8(len[0]),
+            range,
+        );
+        if octets != 0 {
+            self.push(fd, octets, |b| format_address(b, octets == 16))?;
+        }
+        Some(())
+    }
+
+    /// Whether the whole field has been read.
+    fn done(&self) -> bool {
+        self.pos == self.data.len()
+    }
+}
+
+/// Parses the Route Type specific field of an EVPN route. Returns `false`
+/// when the Route Type is not decoded or the field does not match its layout
+/// exactly (the caller then discards what was pushed and keeps the field as
+/// `value`).
+fn parse_evpn_route_body<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    route_type: u8,
+    data: &'pkt [u8],
+    offset: usize,
+    vni: bool,
+) -> bool {
+    let mut r = EvpnReader {
+        buf,
+        data,
+        offset,
+        pos: 0,
+    };
+    let parsed = match route_type {
+        EVPN_ROUTE_ETHERNET_AD => r.ethernet_ad(vni),
+        EVPN_ROUTE_MAC_IP => r.mac_ip(vni),
+        EVPN_ROUTE_IMET => r.imet(),
+        EVPN_ROUTE_ETHERNET_SEGMENT => r.ethernet_segment(),
+        EVPN_ROUTE_IP_PREFIX => r.ip_prefix(vni),
+        _ => None,
+    };
+    parsed.is_some() && r.done()
+}
+
+impl EvpnReader<'_, '_> {
+    /// Ethernet Auto-discovery route: RD, ESI, Ethernet Tag ID, MPLS Label
+    /// (RFC 7432, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc7432#section-7.1>).
+    fn ethernet_ad(&mut self, vni: bool) -> Option<()> {
+        self.rd()?;
+        self.esi()?;
+        self.ethernet_tag_id()?;
+        self.label(FD_EVPN_MPLS_LABEL, FD_EVPN_VNI, vni)
+    }
+
+    /// MAC/IP Advertisement route: RD, ESI, Ethernet Tag ID, MAC Address
+    /// Length, MAC Address, IP Address Length, IP Address (0, 4 or 16
+    /// octets), MPLS Label1, MPLS Label2 (0 or 3 octets); "Both the IP and MAC
+    /// address lengths are in bits."
+    /// (RFC 7432, Section 7.2 — <https://www.rfc-editor.org/rfc/rfc7432#section-7.2>).
+    fn mac_ip(&mut self, vni: bool) -> Option<()> {
+        self.rd()?;
+        self.esi()?;
+        self.ethernet_tag_id()?;
+        let (mac_len, range) = self.take(1)?;
+        if mac_len[0] != 48 {
+            return None;
+        }
+        self.buf.push_field(
+            &EVPN_NLRI_FIELDS[FD_EVPN_MAC_LENGTH],
+            FieldValue::U8(48),
+            range,
+        );
+        self.push(FD_EVPN_MAC, 6, |b| {
+            FieldValue::MacAddr(MacAddr([b[0], b[1], b[2], b[3], b[4], b[5]]))
+        })?;
+        self.ip(FD_EVPN_IP_ADDRESS, true)?;
+        self.label(FD_EVPN_MPLS_LABEL1, FD_EVPN_VNI1, vni)?;
+        if !self.done() {
+            self.label(FD_EVPN_MPLS_LABEL2, FD_EVPN_VNI2, vni)?;
+        }
+        Some(())
+    }
+
+    /// Inclusive Multicast Ethernet Tag route: RD, Ethernet Tag ID, IP
+    /// Address Length, Originating Router's IP Address
+    /// (RFC 7432, Section 7.3 — <https://www.rfc-editor.org/rfc/rfc7432#section-7.3>).
+    fn imet(&mut self) -> Option<()> {
+        self.rd()?;
+        self.ethernet_tag_id()?;
+        self.ip(FD_EVPN_IP_ADDRESS, false)
+    }
+
+    /// Ethernet Segment route: RD, ESI, IP Address Length, Originating
+    /// Router's IP Address
+    /// (RFC 7432, Section 7.4 — <https://www.rfc-editor.org/rfc/rfc7432#section-7.4>).
+    fn ethernet_segment(&mut self) -> Option<()> {
+        self.rd()?;
+        self.esi()?;
+        self.ip(FD_EVPN_IP_ADDRESS, false)
+    }
+
+    /// IP Prefix route: RD, ESI, Ethernet Tag ID, IP Prefix Length, IP Prefix,
+    /// GW IP Address, MPLS Label, with 4-octet (Length 34) or 16-octet
+    /// (Length 58) addresses
+    /// (RFC 9136, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9136#section-3.1>).
+    fn ip_prefix(&mut self, vni: bool) -> Option<()> {
+        // "The Length field of the BGP EVPN NLRI for an EVPN IP Prefix route
+        // MUST be either 34 (if IPv4 addresses are carried) or 58 (if IPv6
+        // addresses are carried)."
+        let (octets, max_bits, descriptor) = match self.data.len() {
+            34 => (4, 32, &PREFIX_ENTRY_IPV4_DESCRIPTOR),
+            58 => (16, 128, &PREFIX_ENTRY_IPV6_DESCRIPTOR),
+            _ => return None,
+        };
+        self.rd()?;
+        self.esi()?;
+        self.ethernet_tag_id()?;
+        let (prefix_len, len_range) = self.take(1)?;
+        let bits = prefix_len[0];
+        if usize::from(bits) > max_bits {
+            return None;
+        }
+        let (prefix, prefix_range) = self.take(octets)?;
+        // `[length, octets...]` in the scratch buffer, as for the other NLRI
+        // prefixes.
+        let scratch = self.buf.push_scratch(&[bits]);
+        self.buf
+            .extend_scratch(&prefix[..usize::from(bits).div_ceil(8)]);
+        self.buf.push_field(
+            descriptor,
+            FieldValue::Scratch(scratch.start..self.buf.scratch_len()),
+            len_range.start..prefix_range.end,
+        );
+        self.push(FD_EVPN_GATEWAY_IP, octets, |b| {
+            format_address(b, octets == 16)
+        })?;
+        self.label(FD_EVPN_MPLS_LABEL, FD_EVPN_VNI, vni)
+    }
+}
+
+/// Writes an Ethernet Segment Identifier as colon-separated hex octets
+/// (e.g. `"00:01:02:03:04:05:06:07:08:09"`).
+///
+/// RFC 7432, Section 5 — <https://www.rfc-editor.org/rfc/rfc7432#section-5>
+fn format_esi(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    match value {
+        FieldValue::Bytes(b) if b.len() == ESI_SIZE => {
+            w.write_all(b"\"")?;
+            for (i, octet) in b.iter().enumerate() {
+                if i != 0 {
+                    w.write_all(b":")?;
+                }
+                write!(w, "{octet:02x}")?;
+            }
+            w.write_all(b"\"")
+        }
+        _ => w.write_all(b"\"\""),
+    }
+}
+
 /// Selects the NLRI encoding for an (AFI, SAFI) pair.
 ///
 /// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
@@ -5621,6 +6062,7 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
         }
         (AFI_IPV4 | AFI_IPV6, SAFI_MPLS_VPN) => Some(MpNlriEncoding::Labeled { ipv6, vpn: true }),
         (_, SAFI_MUP) => Some(MpNlriEncoding::Mup { ipv6 }),
+        (AFI_L2VPN, SAFI_EVPN) => Some(MpNlriEncoding::Evpn),
         _ => None,
     }
 }
@@ -5633,6 +6075,9 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
 /// implemented, or the malformed tail of a decoded block — are pushed as raw
 /// bytes with `raw_desc`, so that routes are never silently dropped.
 ///
+/// `vni_label` selects the VNI reading of the EVPN MPLS Label fields (see
+/// [`AttrContext::vni_label`]).
+///
 /// RFC 4760, Sections 3-4 — <https://www.rfc-editor.org/rfc/rfc4760#section-3>
 #[allow(clippy::too_many_arguments)]
 fn parse_mp_nlri_block<'pkt>(
@@ -5642,6 +6087,7 @@ fn parse_mp_nlri_block<'pkt>(
     afi: u16,
     safi: u8,
     withdraw: bool,
+    vni_label: bool,
     array_desc: &'static FieldDescriptor,
     raw_desc: &'static FieldDescriptor,
 ) {
@@ -5659,6 +6105,7 @@ fn parse_mp_nlri_block<'pkt>(
             MpNlriEncoding::Labeled { ipv6, vpn } => {
                 parse_labeled_nlri(buf, data, offset, &LabeledNlri::new(ipv6, vpn, withdraw))
             }
+            MpNlriEncoding::Evpn => parse_evpn_nlri(buf, data, offset, vni_label),
         };
         if buf.field_count() == before {
             buf.pop_field(); // remove empty array placeholder
@@ -5689,7 +6136,9 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 /// The layout is selected by the AFI, the SAFI and the Length of Next Hop
 /// Network Address:
 ///
-/// - AFI 1, non-VPN SAFI, length 4: IPv4 address.
+/// - AFI 1 or 25 (L2VPN), non-VPN SAFI, length 4: IPv4 address.
+/// - AFI 25 (L2VPN), non-VPN SAFI, length 16 or 32: IPv6 address(es), as
+///   for AFI 2 (RFC 7432, Section 9.2.1).
 /// - AFI 1 or 2, non-VPN SAFI, length 16 or 32: IPv6 global address,
 ///   optionally followed by a link-local address (RFC 2545, Section 3; for
 ///   AFI 1 RFC 8950, Section 3).
@@ -5707,6 +6156,7 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 /// RFC 4364, Section 4.3.2 — <https://www.rfc-editor.org/rfc/rfc4364#section-4.3.2>
 /// RFC 4659, Section 3.2.1.1 — <https://www.rfc-editor.org/rfc/rfc4659#section-3.2.1.1>
 /// RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>
+/// RFC 7432, Section 9.2.1 — <https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1>
 fn parse_mp_next_hop<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     afi: u16,
@@ -5715,10 +6165,15 @@ fn parse_mp_next_hop<'pkt>(
     offset: usize,
 ) {
     let ip_afi = afi == AFI_IPV4 || afi == AFI_IPV6;
+    // The L2VPN AFI carries a plain IPv4 or IPv6 next hop: "The Next Hop
+    // field of the MP_REACH_NLRI attribute of the route MUST be set to the
+    // IPv4 or IPv6 address of the advertising PE" (RFC 7432, Section 9.2.1 —
+    // https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1).
+    let l2vpn = afi == AFI_L2VPN && !is_vpn_next_hop_safi(safi);
     // Length of the Route Distinguisher preceding each address, if any.
     let rd_len = match (is_vpn_next_hop_safi(safi), nh.len()) {
-        (false, 4) if afi == AFI_IPV4 => 0,
-        (false, 16 | 32) if ip_afi => 0,
+        (false, 4) if afi == AFI_IPV4 || l2vpn => 0,
+        (false, 16 | 32) if ip_afi || l2vpn => 0,
         (true, 12) if afi == AFI_IPV4 => RD_SIZE,
         (true, 24 | 48) if ip_afi => RD_SIZE,
         _ => {
@@ -5781,6 +6236,7 @@ fn parse_mp_reach_nlri<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
+    vni_label: bool,
 ) -> MpAfiSafi {
     let afi = read_be_u16(data, 0).unwrap_or_default();
     let safi = data[2];
@@ -5822,6 +6278,7 @@ fn parse_mp_reach_nlri<'pkt>(
             afi,
             safi,
             false,
+            vni_label,
             &MP_CHILDREN[FD_MP_NLRI],
             &MP_CHILDREN[FD_MP_NLRI_RAW],
         );
@@ -5839,6 +6296,7 @@ fn parse_mp_unreach_nlri<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
+    vni_label: bool,
 ) -> MpAfiSafi {
     let afi = read_be_u16(data, 0).unwrap_or_default();
     let safi = data[2];
@@ -5869,6 +6327,7 @@ fn parse_mp_unreach_nlri<'pkt>(
             afi,
             safi,
             true,
+            vni_label,
             &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES],
             &MP_CHILDREN[FD_MP_WITHDRAWN_ROUTES_RAW],
         );
@@ -6109,21 +6568,36 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// consumer resolving a path such as `BGP.nlri.route_type` finds the same
 /// schema on either array.
 ///
-/// The element shape depends on the SAFI: SAFI 85 (BGP-MUP) yields MUP entries,
+/// The element shape depends on the SAFI: SAFI 70 (EVPN) yields EVPN entries,
+/// SAFI 85 (BGP-MUP) yields MUP entries,
 /// SAFI 4 / 128 yield labeled entries (`label_stack` or `compatibility`, `rd`
 /// for SAFI 128, `prefix`), and SAFI 1 / 2 yield plain prefix entries. All
 /// fields are therefore optional.
 ///
 /// RFC 4760 — <https://www.rfc-editor.org/rfc/rfc4760>
 /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+/// RFC 7432, Section 7 — <https://www.rfc-editor.org/rfc/rfc7432#section-7>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 14] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 28] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
     MUP_NLRI_FIELDS[FD_MUP_ARCH_TYPE].optional(),
-    MUP_NLRI_FIELDS[FD_MUP_ROUTE_TYPE].optional(),
+    // BGP-MUP (U16) and EVPN (U8 widened to U16) Route Type; an entry with an
+    // `architecture_type` is a MUP route.
+    FieldDescriptor::new("route_type", "Route Type", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, siblings| {
+            let FieldValue::U16(t) = v else {
+                return None;
+            };
+            if siblings.iter().any(|f| f.name() == "architecture_type") {
+                mup_route_type_name(*t)
+            } else {
+                u8::try_from(*t).ok().and_then(evpn_route_type_name)
+            }
+        }),
     MUP_NLRI_FIELDS[FD_MUP_VALUE],
     MUP_NLRI_FIELDS[FD_MUP_RD],
     MUP_NLRI_FIELDS[FD_MUP_ADDRESS],
@@ -6140,10 +6614,90 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 14] = [
         .optional()
         .with_children(&LABEL_ENTRY_FIELDS),
     FieldDescriptor::new("compatibility", "Compatibility", FieldType::U32).optional(),
+    // EVPN NLRI fields (RFC 7432, Section 7 —
+    // https://www.rfc-editor.org/rfc/rfc7432#section-7; RFC 9136, Section 3.1 —
+    // https://www.rfc-editor.org/rfc/rfc9136#section-3.1); `path_id`,
+    // `route_type`, `value`, `rd` and `prefix` are listed above.
+    EVPN_NLRI_FIELDS[FD_EVPN_LENGTH],
+    EVPN_NLRI_FIELDS[FD_EVPN_ESI],
+    EVPN_NLRI_FIELDS[FD_EVPN_ETHERNET_TAG_ID],
+    EVPN_NLRI_FIELDS[FD_EVPN_MAC_LENGTH],
+    EVPN_NLRI_FIELDS[FD_EVPN_MAC],
+    EVPN_NLRI_FIELDS[FD_EVPN_IP_LENGTH],
+    EVPN_NLRI_FIELDS[FD_EVPN_IP_ADDRESS],
+    EVPN_NLRI_FIELDS[FD_EVPN_GATEWAY_IP],
+    EVPN_NLRI_FIELDS[FD_EVPN_MPLS_LABEL],
+    EVPN_NLRI_FIELDS[FD_EVPN_MPLS_LABEL1],
+    EVPN_NLRI_FIELDS[FD_EVPN_MPLS_LABEL2],
+    EVPN_NLRI_FIELDS[FD_EVPN_VNI],
+    EVPN_NLRI_FIELDS[FD_EVPN_VNI1],
+    EVPN_NLRI_FIELDS[FD_EVPN_VNI2],
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
 static NLRI_ENTRY_CHILDREN: &[FieldDescriptor] = &NLRI_ENTRY_FIELDS;
+
+/// Field descriptor indices for [`EVPN_NLRI_FIELDS`].
+const FD_EVPN_PATH_ID: usize = 0;
+const FD_EVPN_ROUTE_TYPE: usize = 1;
+const FD_EVPN_LENGTH: usize = 2;
+const FD_EVPN_VALUE: usize = 3;
+const FD_EVPN_RD: usize = 4;
+const FD_EVPN_ESI: usize = 5;
+const FD_EVPN_ETHERNET_TAG_ID: usize = 6;
+const FD_EVPN_MAC_LENGTH: usize = 7;
+const FD_EVPN_MAC: usize = 8;
+const FD_EVPN_IP_LENGTH: usize = 9;
+const FD_EVPN_IP_ADDRESS: usize = 10;
+const FD_EVPN_GATEWAY_IP: usize = 11;
+const FD_EVPN_MPLS_LABEL: usize = 12;
+const FD_EVPN_MPLS_LABEL1: usize = 13;
+const FD_EVPN_MPLS_LABEL2: usize = 14;
+const FD_EVPN_VNI: usize = 15;
+const FD_EVPN_VNI1: usize = 16;
+const FD_EVPN_VNI2: usize = 17;
+
+/// Child field descriptors of an EVPN NLRI entry.
+///
+/// `route_type` is a U16 like the BGP-MUP one it shares the NLRI entry union
+/// with. The IP Prefix route's `prefix` is pushed with the address-family
+/// specific `PREFIX_ENTRY_*` descriptors (see [`NLRI_PREFIX_FIELD`]).
+///
+/// RFC 7432, Section 7 — <https://www.rfc-editor.org/rfc/rfc7432#section-7>
+/// RFC 9136, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9136#section-3.1>
+/// RFC 8365, Section 5.1.3 — <https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3>
+const EVPN_NLRI_FIELDS: [FieldDescriptor; 18] = [
+    PATH_ID_FIELD,
+    FieldDescriptor::new("route_type", "Route Type", FieldType::U16).with_display_fn(
+        |v, _| match v {
+            FieldValue::U16(t) => u8::try_from(*t).ok().and_then(evpn_route_type_name),
+            _ => None,
+        },
+    ),
+    FieldDescriptor::new("length", "Length", FieldType::U8).optional(),
+    MUP_NLRI_FIELDS[FD_MUP_VALUE],
+    MUP_NLRI_FIELDS[FD_MUP_RD],
+    FieldDescriptor::new("esi", "Ethernet Segment Identifier", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_esi),
+    FieldDescriptor::new("ethernet_tag_id", "Ethernet Tag ID", FieldType::U32).optional(),
+    FieldDescriptor::new("mac_length", "MAC Address Length", FieldType::U8).optional(),
+    FieldDescriptor::new("mac", "MAC Address", FieldType::MacAddr).optional(),
+    FieldDescriptor::new("ip_length", "IP Address Length", FieldType::U8).optional(),
+    FieldDescriptor::new("ip_address", "IP Address", FieldType::Any).optional(),
+    FieldDescriptor::new("gateway_ip", "GW IP Address", FieldType::Any).optional(),
+    FieldDescriptor::new("mpls_label", "MPLS Label", FieldType::U32).optional(),
+    FieldDescriptor::new("mpls_label1", "MPLS Label1", FieldType::U32).optional(),
+    FieldDescriptor::new("mpls_label2", "MPLS Label2", FieldType::U32).optional(),
+    FieldDescriptor::new("vni", "VNI", FieldType::U32).optional(),
+    FieldDescriptor::new("vni1", "VNI (MPLS Label1)", FieldType::U32).optional(),
+    FieldDescriptor::new("vni2", "VNI (MPLS Label2)", FieldType::U32).optional(),
+];
+
+/// Object descriptor for EVPN NLRI entries.
+static EVPN_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("evpn_route", "EVPN Route", FieldType::Object)
+        .with_children(&EVPN_NLRI_FIELDS);
 
 /// Object descriptor for AS_PATH segment entries.
 static AS_PATH_SEG_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -7932,6 +8486,31 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 8365",
         "A Network Virtualization Overlay Solution Using Ethernet VPN (EVPN)",
         "https://www.rfc-editor.org/rfc/rfc8365",
+    ),
+    SpecReference::new(
+        "RFC 7432",
+        "BGP MPLS-Based Ethernet VPN",
+        "https://www.rfc-editor.org/rfc/rfc7432",
+    ),
+    SpecReference::new(
+        "RFC 9136",
+        "IP Prefix Advertisement in Ethernet VPN (EVPN)",
+        "https://www.rfc-editor.org/rfc/rfc9136",
+    ),
+    SpecReference::new(
+        "RFC 9135",
+        "Integrated Routing and Bridging in Ethernet VPN (EVPN)",
+        "https://www.rfc-editor.org/rfc/rfc9135",
+    ),
+    SpecReference::new(
+        "RFC 9251",
+        "Internet Group Management Protocol (IGMP) and Multicast Listener Discovery (MLD) Proxies for Ethernet VPN (EVPN)",
+        "https://www.rfc-editor.org/rfc/rfc9251",
+    ),
+    SpecReference::new(
+        "RFC 9572",
+        "Updates to EVPN Broadcast, Unknown Unicast, or Multicast (BUM) Procedures",
+        "https://www.rfc-editor.org/rfc/rfc9572",
     ),
     SpecReference::new(
         "RFC 9015",
@@ -11602,42 +12181,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_bgp_update_mp_reach_evpn_nlri_is_raw() {
-        // EVPN IMET route (AFI 25, SAFI 70) from the issue: the NLRI must be
-        // kept as raw bytes, not dropped.
-        let nlri = [
-            0x03, 0x11, 0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64, 0, 0, 0, 0, 0x20, 0xc0, 0, 2, 1,
-        ];
-        let val = build_mp_reach(25, 70, &[0xc0, 0, 2, 1], &nlri);
-        let data = build_single_attr_update(14, &val);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let mp = first_attr_value_obj_range(&buf);
-        assert_eq!(
-            *nested_field_value(&buf, &mp, "nlri_raw"),
-            FieldValue::Bytes(&nlri)
-        );
-        assert!(nested_field_by_name_opt(&buf, &mp, "nlri").is_none());
-    }
-
-    #[test]
-    fn parse_bgp_update_mp_unreach_evpn_withdrawn_is_raw() {
-        let wr = [0x03, 0x02, 0xaa, 0xbb];
-        let val = build_mp_unreach(25, 70, &wr);
-        let data = build_single_attr_update(15, &val);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let mp = first_attr_value_obj_range(&buf);
-        assert_eq!(
-            *nested_field_value(&buf, &mp, "withdrawn_routes_raw"),
-            FieldValue::Bytes(&wr)
-        );
-        assert!(nested_field_by_name_opt(&buf, &mp, "withdrawn_routes").is_none());
-    }
-
-    #[test]
     fn parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw() {
         // IPv4 FlowSpec (AFI 1, SAFI 133; RFC 8955, Section 4) has a
         // zero-length next hop and an NLRI that is not a plain prefix list
@@ -14379,5 +14922,557 @@ mod tests {
             *nested_field_value(&buf, &es[0], "prefix"),
             FieldValue::Bytes(&[8, 0xaa])
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // EVPN NLRI (AFI 25 / SAFI 70; RFC 7432, Section 7; RFC 9136, Section 3)
+    // ---------------------------------------------------------------------
+
+    /// Helper: run a field's `format_fn` with the buffer's scratch data (for
+    /// values assembled in the scratch buffer).
+    fn call_format_fn_ctx(buf: &DissectBuffer<'_>, field: &Field<'_>) -> String {
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch: buf.scratch(),
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        (field.descriptor.format_fn.unwrap())(&field.value, &ctx, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// RD 65000:100 (Type 0) used by the EVPN tests.
+    const EVPN_RD: [u8; 8] = [0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64];
+    /// A Type 0 ESI used by the EVPN tests.
+    const EVPN_ESI: [u8; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    /// Helper: an EVPN NLRI entry (Route Type, Length, body).
+    fn evpn_route(route_type: u8, body: &[u8]) -> Vec<u8> {
+        let mut raw = vec![route_type, body.len() as u8];
+        raw.extend_from_slice(body);
+        raw
+    }
+
+    /// Helper: dissect an UPDATE carrying `attrs` and run `check` on the
+    /// entry objects of the MP_REACH_NLRI `nlri` array, which is the last
+    /// attribute.
+    fn with_evpn_nlri(
+        attrs: &[u8],
+        check: impl FnOnce(&DissectBuffer<'_>, &[core::ops::Range<u32>]),
+    ) {
+        let data = build_update(attrs, &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        let FieldValue::Array(ref pa) = buf.field_by_name(layer, "path_attributes").unwrap().value
+        else {
+            panic!("expected Array");
+        };
+        let attr = nlri_entry_ranges(&buf, pa).pop().unwrap();
+        let FieldValue::Object(ref mp) = *nested_field_value(&buf, &attr, "value") else {
+            panic!("expected Object");
+        };
+        assert!(nested_field_by_name_opt(&buf, mp, "nlri_raw").is_none());
+        let entries = array_objs(&buf, mp, "nlri");
+        check(&buf, &entries);
+    }
+
+    /// Helper: an MP_REACH_NLRI attribute (AFI 25, SAFI 70, next hop
+    /// 192.0.2.1) carrying `nlri`.
+    fn evpn_mp_reach(nlri: &[u8]) -> Vec<u8> {
+        build_attr(0x90, 14, &build_mp_reach(25, 70, &[192, 0, 2, 1], nlri))
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_imet() {
+        // EVPN IMET route from the issue (RFC 7432, Section 7.3): RD
+        // 65000:100, Ethernet Tag 0, Originating Router's IP 192.0.2.1.
+        let nlri = [
+            0x03, 0x11, 0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64, 0, 0, 0, 0, 0x20, 0xc0, 0, 2, 1,
+        ];
+        with_evpn_nlri(&evpn_mp_reach(&nlri), |buf, entries| {
+            assert_eq!(entries.len(), 1);
+            let e = &entries[0];
+            assert_eq!(
+                *nested_field_value(buf, e, "route_type"),
+                FieldValue::U16(3)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(e, "route_type_name"),
+                Some("Inclusive Multicast Ethernet Tag")
+            );
+            assert_eq!(*nested_field_value(buf, e, "length"), FieldValue::U8(17));
+            let rd = nested_field_by_name(buf, e, "rd");
+            assert_eq!(rd.value, FieldValue::Bytes(&EVPN_RD));
+            assert_eq!(
+                call_format_fn(rd.descriptor.format_fn.unwrap(), &rd.value),
+                "\"0:65000:100\""
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "ethernet_tag_id"),
+                FieldValue::U32(0)
+            );
+            assert_eq!(*nested_field_value(buf, e, "ip_length"), FieldValue::U8(32));
+            assert_eq!(
+                *nested_field_value(buf, e, "ip_address"),
+                FieldValue::Ipv4Addr([192, 0, 2, 1])
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_next_hop() {
+        // RFC 7432, Section 9.2.1: "The Next Hop field of the MP_REACH_NLRI
+        // attribute of the route MUST be set to the IPv4 or IPv6 address of
+        // the advertising PE."
+        let data = build_update(&evpn_mp_reach(&[]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        let mut v6 = [0u8; 16];
+        v6[..4].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
+        let data = build_update(
+            &build_attr(0x90, 14, &build_mp_reach(25, 70, &v6, &[])),
+            &[],
+        );
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv6Addr(v6)
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_mac_ip() {
+        // RFC 7432, Section 7.2: MAC/IP Advertisement with an IPv4 address and
+        // MPLS Label1 100 only; then with an IPv6 address and Label2 200
+        // (RFC 9135, Section 8.1 —
+        // https://www.rfc-editor.org/rfc/rfc9135#section-8.1); then MAC only.
+        let mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let mut body = EVPN_RD.to_vec();
+        body.extend_from_slice(&EVPN_ESI);
+        body.extend_from_slice(&7u32.to_be_bytes());
+        body.push(48);
+        body.extend_from_slice(&mac);
+        let mut v4 = body.clone();
+        v4.extend_from_slice(&[32, 10, 0, 0, 1, 0x00, 0x06, 0x41]);
+        let mut v6 = body.clone();
+        v6.push(128);
+        v6.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        v6.extend_from_slice(&[0x00, 0x06, 0x41, 0x00, 0x0c, 0x81]);
+        let mut mac_only = body.clone();
+        mac_only.extend_from_slice(&[0, 0x00, 0x06, 0x41]);
+        let mut nlri = evpn_route(2, &v4);
+        nlri.extend(evpn_route(2, &v6));
+        nlri.extend(evpn_route(2, &mac_only));
+        with_evpn_nlri(&evpn_mp_reach(&nlri), |buf, entries| {
+            assert_eq!(entries.len(), 3);
+            let e = &entries[0];
+            assert_eq!(
+                buf.resolve_nested_display_name(e, "route_type_name"),
+                Some("MAC/IP Advertisement")
+            );
+            let esi = nested_field_by_name(buf, e, "esi");
+            assert_eq!(esi.value, FieldValue::Bytes(&EVPN_ESI));
+            assert_eq!(
+                call_format_fn(esi.descriptor.format_fn.unwrap(), &esi.value),
+                "\"00:01:02:03:04:05:06:07:08:09\""
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "ethernet_tag_id"),
+                FieldValue::U32(7)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "mac_length"),
+                FieldValue::U8(48)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "mac"),
+                FieldValue::MacAddr(MacAddr(mac))
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "ip_address"),
+                FieldValue::Ipv4Addr([10, 0, 0, 1])
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "mpls_label1"),
+                FieldValue::U32(100)
+            );
+            assert!(nested_field_by_name_opt(buf, e, "mpls_label2").is_none());
+
+            let e = &entries[1];
+            assert_eq!(
+                *nested_field_value(buf, e, "ip_length"),
+                FieldValue::U8(128)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "ip_address"),
+                FieldValue::Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "mpls_label2"),
+                FieldValue::U32(200)
+            );
+
+            let e = &entries[2];
+            assert_eq!(*nested_field_value(buf, e, "ip_length"), FieldValue::U8(0));
+            assert!(nested_field_by_name_opt(buf, e, "ip_address").is_none());
+            assert_eq!(
+                *nested_field_value(buf, e, "mpls_label1"),
+                FieldValue::U32(100)
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_ead_es_ip_prefix() {
+        // RFC 7432, Sections 7.1 and 7.4; RFC 9136, Section 3.1.
+        let mut ead = EVPN_RD.to_vec();
+        ead.extend_from_slice(&EVPN_ESI);
+        ead.extend_from_slice(&0xffff_ffffu32.to_be_bytes());
+        ead.extend_from_slice(&[0x00, 0x00, 0x01]); // label 0, S bit
+        let mut es = EVPN_RD.to_vec();
+        es.extend_from_slice(&EVPN_ESI);
+        es.push(128);
+        es.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        let mut pfx4 = EVPN_RD.to_vec();
+        pfx4.extend_from_slice(&[0; 10]);
+        pfx4.extend_from_slice(&0u32.to_be_bytes());
+        pfx4.extend_from_slice(&[24, 10, 1, 2, 0, 192, 0, 2, 254, 0x00, 0x06, 0x41]);
+        let mut pfx6 = EVPN_RD.to_vec();
+        pfx6.extend_from_slice(&[0; 10]);
+        pfx6.extend_from_slice(&0u32.to_be_bytes());
+        pfx6.push(32);
+        pfx6.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        pfx6.extend_from_slice(&[0; 16]);
+        pfx6.extend_from_slice(&[0x00, 0x06, 0x41]);
+        let mut nlri = evpn_route(1, &ead);
+        nlri.extend(evpn_route(4, &es));
+        nlri.extend(evpn_route(5, &pfx4));
+        nlri.extend(evpn_route(5, &pfx6));
+        with_evpn_nlri(&evpn_mp_reach(&nlri), |buf, entries| {
+            assert_eq!(entries.len(), 4);
+            assert_eq!(
+                buf.resolve_nested_display_name(&entries[0], "route_type_name"),
+                Some("Ethernet Auto-discovery")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "ethernet_tag_id"),
+                FieldValue::U32(0xffff_ffff)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "mpls_label"),
+                FieldValue::U32(0)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(&entries[1], "route_type_name"),
+                Some("Ethernet Segment")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "esi"),
+                FieldValue::Bytes(&EVPN_ESI)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "ip_length"),
+                FieldValue::U8(128)
+            );
+            let e = &entries[2];
+            assert_eq!(
+                buf.resolve_nested_display_name(e, "route_type_name"),
+                Some("IP Prefix")
+            );
+            let prefix = nested_field_by_name(buf, e, "prefix");
+            assert_eq!(call_format_fn_ctx(buf, prefix), "\"10.1.2.0/24\"");
+            assert_eq!(
+                *nested_field_value(buf, e, "gateway_ip"),
+                FieldValue::Ipv4Addr([192, 0, 2, 254])
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "mpls_label"),
+                FieldValue::U32(100)
+            );
+            let prefix = nested_field_by_name(buf, &entries[3], "prefix");
+            assert_eq!(call_format_fn_ctx(buf, prefix), "\"2001:db8::/32\"");
+            assert_eq!(
+                *nested_field_value(buf, &entries[3], "gateway_ip"),
+                FieldValue::Ipv6Addr([0; 16])
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_vni_with_vxlan_encapsulation() {
+        // RFC 8365, Section 5.1.3: with a VXLAN Encapsulation Extended
+        // Community, "the entire 24-bit field is used to encode the VNI
+        // value" in MPLS Label1 / Label2 and the Ethernet A-D / IP Prefix
+        // MPLS Label. VNI 10100 = 0x002774.
+        let mut mac_ip = EVPN_RD.to_vec();
+        mac_ip.extend_from_slice(&[0; 10]);
+        mac_ip.extend_from_slice(&0u32.to_be_bytes());
+        mac_ip.extend_from_slice(&[48, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0]);
+        mac_ip.extend_from_slice(&[0x00, 0x27, 0x74, 0x00, 0x4e, 0x20]);
+        let mut ead = EVPN_RD.to_vec();
+        ead.extend_from_slice(&EVPN_ESI);
+        ead.extend_from_slice(&[0, 0, 0, 0, 0x00, 0x27, 0x74]);
+        let mut nlri = evpn_route(2, &mac_ip);
+        nlri.extend(evpn_route(1, &ead));
+        let mut attrs = build_attr(0xc0, 16, &[0x03, 0x0c, 0, 0, 0, 0, 0, 8]);
+        attrs.extend(evpn_mp_reach(&nlri));
+        with_evpn_nlri(&attrs, |buf, entries| {
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "vni1"),
+                FieldValue::U32(10100)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "vni2"),
+                FieldValue::U32(20000)
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[0], "mpls_label1").is_none());
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "vni"),
+                FieldValue::U32(10100)
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[1], "mpls_label").is_none());
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_undecoded_routes_keep_value() {
+        // A Route Type without a decoder (RFC 9251 SMET, 6) and a MAC/IP
+        // route whose body does not match its layout keep `value`.
+        let mut nlri = evpn_route(6, &[1, 2, 3]);
+        nlri.extend(evpn_route(2, &[0xaa; 20]));
+        with_evpn_nlri(&evpn_mp_reach(&nlri), |buf, entries| {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(
+                buf.resolve_nested_display_name(&entries[0], "route_type_name"),
+                Some("Selective Multicast Ethernet Tag Route")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "value"),
+                FieldValue::Bytes(&[1, 2, 3])
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "value"),
+                FieldValue::Bytes(&[0xaa; 20])
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[1], "rd").is_none());
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_unreach_evpn_withdrawn() {
+        // RFC 7432, Section 7: withdrawn EVPN routes use the same encoding.
+        let mut body = EVPN_RD.to_vec();
+        body.extend_from_slice(&[0, 0, 0, 0, 32, 192, 0, 2, 1]);
+        let mut wr = evpn_route(3, &body);
+        wr.extend_from_slice(&[0x03, 0x02, 0xaa, 0xbb]);
+        let val = build_mp_unreach(25, 70, &wr);
+        let data = build_single_attr_update(15, &val);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let entries = array_objs(&buf, &mp, "withdrawn_routes");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "ip_address"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[1], "value"),
+            FieldValue::Bytes(&[0xaa, 0xbb])
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "withdrawn_routes_raw").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_add_path_and_truncated_tail() {
+        // RFC 7911, Section 3: a Path Identifier before each EVPN route when
+        // the block only parses that way; a truncated tail is kept raw.
+        let mut body = EVPN_RD.to_vec();
+        body.extend_from_slice(&[0, 0, 0, 0, 32, 192, 0, 2, 1]);
+        let route = evpn_route(3, &body);
+        let mut nlri = 7u32.to_be_bytes().to_vec();
+        nlri.extend_from_slice(&route);
+        let data = build_update(&evpn_mp_reach(&nlri), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let entries = array_objs(&buf, &mp, "nlri");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "path_id"),
+            FieldValue::U32(7)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "ip_address"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+
+        let mut nlri = route.clone();
+        nlri.extend_from_slice(&[0x02, 0x30, 0x00]);
+        let data = build_update(&evpn_mp_reach(&nlri), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(array_objs(&buf, &mp, "nlri").len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "nlri_raw"),
+            FieldValue::Bytes(&[0x02, 0x30, 0x00])
+        );
+    }
+
+    #[test]
+    fn evpn_name_tables() {
+        let names: Vec<&str> = (0..=u8::MAX).filter_map(evpn_route_type_name).collect();
+        assert_eq!(names.len(), 11);
+        assert_eq!(evpn_route_type_name(0), None);
+        assert_eq!(evpn_route_type_name(11), Some("Leaf A-D route"));
+        assert_eq!(
+            call_format_fn(format_esi, &FieldValue::Bytes(&[1, 2])),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn field_schema_exposes_evpn_nlri_children() {
+        fn find<'a>(descs: &'a [FieldDescriptor], name: &str) -> Option<&'a FieldDescriptor> {
+            descs.iter().find(|d| d.name == name)
+        }
+        let descs = BgpDissector.field_descriptors();
+        let nlri = find(descs, "nlri").unwrap().children.unwrap();
+        for name in [
+            "route_type",
+            "length",
+            "rd",
+            "esi",
+            "ethernet_tag_id",
+            "mac_length",
+            "mac",
+            "ip_length",
+            "ip_address",
+            "gateway_ip",
+            "mpls_label",
+            "mpls_label1",
+            "mpls_label2",
+            "vni",
+            "vni1",
+            "vni2",
+            "value",
+        ] {
+            let child = find(nlri, name).unwrap_or_else(|| panic!("{name} missing"));
+            assert!(child.optional, "{name} in a union must be optional");
+        }
+        for (i, d) in nlri.iter().enumerate() {
+            assert!(
+                !nlri[i + 1..].iter().any(|o| o.name == d.name),
+                "duplicate {} in the NLRI entry union",
+                d.name
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_evpn_layout_mismatches_keep_value() {
+        // Field values that break the layouts of RFC 7432, Section 7 and
+        // RFC 9136, Section 3.1 keep the whole field as `value`: a MAC Address
+        // Length other than 48, an IP Address Length other than 0 / 32 / 128,
+        // an IMET route with IP Address Length 0, and an IPv4 IP Prefix Length
+        // above 32.
+        let mut mac_ip = EVPN_RD.to_vec();
+        mac_ip.extend_from_slice(&[0; 14]);
+        mac_ip.extend_from_slice(&[40, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0, 0, 0, 1]);
+        let mut bad_ip = EVPN_RD.to_vec();
+        bad_ip.extend_from_slice(&[0; 14]);
+        bad_ip.extend_from_slice(&[48, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 24, 10, 0, 0, 0, 0, 1]);
+        let mut imet = EVPN_RD.to_vec();
+        imet.extend_from_slice(&[0, 0, 0, 0, 0]);
+        let mut pfx = EVPN_RD.to_vec();
+        pfx.extend_from_slice(&[0; 14]);
+        pfx.extend_from_slice(&[33, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        for (route_type, body) in [(2u8, mac_ip), (2, bad_ip), (3, imet), (5, pfx)] {
+            let nlri = evpn_route(route_type, &body);
+            with_evpn_nlri(&evpn_mp_reach(&nlri), |buf, entries| {
+                let e = &entries[0];
+                assert_eq!(
+                    *nested_field_value(buf, e, "value"),
+                    FieldValue::Bytes(&body),
+                    "route type {route_type}"
+                );
+                assert!(nested_field_by_name_opt(buf, e, "rd").is_none());
+                assert!(nested_field_by_name_opt(buf, e, "prefix").is_none());
+            });
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_l2vpn_vpn_safi_next_hop_is_raw() {
+        // A VPN-shaped next hop is not defined for AFI 25: kept raw.
+        let nh = [0u8; 24];
+        let data = build_update(
+            &build_attr(0x90, 14, &build_mp_reach(25, 128, &nh, &[])),
+            &[],
+        );
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Bytes(&nh)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "next_hop_rd").is_none());
+    }
+
+    #[test]
+    fn nlri_union_route_type_name_follows_the_entry_kind() {
+        // The schema's `route_type` names a MUP route when the entry has an
+        // `architecture_type`, an EVPN route otherwise.
+        let descs = BgpDissector.field_descriptors();
+        let nlri = descs.iter().find(|d| d.name == "nlri").unwrap();
+        let route_type = nlri
+            .children
+            .unwrap()
+            .iter()
+            .find(|d| d.name == "route_type")
+            .unwrap();
+        let display = route_type.display_fn.unwrap();
+        let arch = Field {
+            descriptor: &MUP_NLRI_CHILDREN[FD_MUP_ARCH_TYPE],
+            value: FieldValue::U8(1),
+            range: 0..1,
+        };
+        assert_eq!(
+            display(&FieldValue::U16(1), core::slice::from_ref(&arch)),
+            mup_route_type_name(1)
+        );
+        assert_eq!(
+            display(&FieldValue::U16(3), &[]),
+            Some("Inclusive Multicast Ethernet Tag")
+        );
+        assert_eq!(display(&FieldValue::U8(3), &[]), None);
+        assert_eq!(display(&FieldValue::U16(300), &[]), None);
+    }
+
+    #[test]
+    fn detect_add_path_evpn_prefers_plain_encoding() {
+        let mut body = EVPN_RD.to_vec();
+        body.extend_from_slice(&[0, 0, 0, 0, 32, 192, 0, 2, 1]);
+        let route = evpn_route(3, &body);
+        // Plain framing without a Route Type 0: plain.
+        assert!(!detect_add_path_evpn(&route));
+        // A route type assigned after RFC 9572 still frames as plain.
+        assert!(!detect_add_path_evpn(&evpn_route(200, &[1, 2])));
+        let mut add_path = 1u32.to_be_bytes().to_vec();
+        add_path.extend_from_slice(&route);
+        assert!(detect_add_path_evpn(&add_path));
+        // Neither framing: not ADD-PATH.
+        assert!(!detect_add_path_evpn(&[0, 0, 0, 1, 3]));
     }
 }

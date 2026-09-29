@@ -31,6 +31,16 @@ ADD-PATH is inferred per NLRI block with the same heuristic as Wireshark's
 `detect_add_path_prefix46()` (see the `detect_add_path_prefixes` docs for its
 limits), because the negotiating OPEN is not tracked.
 
+EVPN (AFI 25 / SAFI 70) entries carry `route_type`, `length` and the Route
+Type specific fields of
+[RFC 7432](https://www.rfc-editor.org/rfc/rfc7432#section-7) /
+[RFC 9136](https://www.rfc-editor.org/rfc/rfc9136#section-3.1) (`rd`, `esi`,
+`ethernet_tag_id`, `mac`, `ip_address`, `prefix`, `gateway_ip`, ...). The MPLS
+Label fields are `mpls_label*`, or `vni*` when the UPDATE carries a VXLAN /
+NVGRE / VXLAN GPE Encapsulation Extended Community
+([RFC 8365](https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3)). Other route
+types, and routes that do not match their layout, keep a `value`.
+
 Every `nlri` / `withdrawn_routes` array — top level and inside
 `MP_REACH_NLRI` / `MP_UNREACH_NLRI` — declares the same entry `children`: the
 union of the plain prefix fields and the

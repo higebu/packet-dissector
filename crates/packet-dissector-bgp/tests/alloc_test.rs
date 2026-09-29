@@ -188,3 +188,46 @@ fn zero_alloc_dissect_bgp_route_refresh_orf_and_notification() {
         "BGP ROUTE-REFRESH / NOTIFICATION dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_update_evpn() {
+    // MP_REACH_NLRI (AFI 25, SAFI 70) with a MAC/IP Advertisement route
+    // (RFC 7432, Section 7.2 — https://www.rfc-editor.org/rfc/rfc7432#section-7.2)
+    // and an IP Prefix route, whose prefix is assembled in the scratch buffer
+    // (RFC 9136, Section 3.1 — https://www.rfc-editor.org/rfc/rfc9136#section-3.1).
+    let rd = [0u8, 0, 0xfd, 0xe8, 0, 0, 0, 0x64];
+    let mut nlri = vec![2, 37];
+    nlri.extend_from_slice(&rd);
+    nlri.extend_from_slice(&[0; 10]); // ESI
+    nlri.extend_from_slice(&[0, 0, 0, 0, 48, 0, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    nlri.extend_from_slice(&[32, 10, 0, 0, 1, 0x00, 0x06, 0x41]);
+    nlri.extend_from_slice(&[5, 34]);
+    nlri.extend_from_slice(&rd);
+    nlri.extend_from_slice(&[0; 14]); // ESI + Ethernet Tag ID
+    nlri.extend_from_slice(&[24, 10, 1, 2, 0, 0, 0, 0, 0, 0x00, 0x06, 0x41]);
+    let mut mp_reach = vec![0, 25, 70, 4, 192, 0, 2, 1, 0];
+    mp_reach.extend_from_slice(&nlri);
+    let mut attrs = vec![0x90, 14];
+    attrs.extend_from_slice(&(mp_reach.len() as u16).to_be_bytes());
+    attrs.extend_from_slice(&mp_reach);
+
+    let mut raw = vec![0xFF; 16]; // Marker
+    let total_len = 19 + 2 + 2 + attrs.len();
+    raw.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+    raw.push(2); // Type = UPDATE
+    raw.extend_from_slice(&0u16.to_be_bytes()); // Withdrawn Routes Length
+    raw.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    raw.extend_from_slice(&attrs);
+
+    let mut buf = DissectBuffer::new();
+    BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP EVPN update dissect allocated {allocs} times"
+    );
+}
