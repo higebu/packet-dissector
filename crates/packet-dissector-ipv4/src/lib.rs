@@ -5,8 +5,13 @@
 //! - RFC 2474 (DSCP, updates RFC 791 ToS field): <https://www.rfc-editor.org/rfc/rfc2474>
 //! - RFC 3168 (ECN): <https://www.rfc-editor.org/rfc/rfc3168>
 //! - RFC 6864 (updates RFC 791 Identification field): <https://www.rfc-editor.org/rfc/rfc6864>
+//! - RFC 1108 (DoD Basic Security option): <https://www.rfc-editor.org/rfc/rfc1108>
+//! - RFC 2113 (Router Alert option): <https://www.rfc-editor.org/rfc/rfc2113>
+//! - RFC 4782 (Quick-Start option): <https://www.rfc-editor.org/rfc/rfc4782>
 
 #![deny(missing_docs)]
+
+mod options;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -61,7 +66,9 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("checksum", "Header Checksum", FieldType::U16),
     FieldDescriptor::new("src", "Source Address", FieldType::Ipv4Addr),
     FieldDescriptor::new("dst", "Destination Address", FieldType::Ipv4Addr),
-    FieldDescriptor::new("options", "Options", FieldType::Bytes).optional(),
+    FieldDescriptor::new("options", "Options", FieldType::Array)
+        .optional()
+        .with_children(options::OPTION_CHILDREN),
 ];
 
 /// IPv4 dissector.
@@ -88,6 +95,21 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 6864",
         "Updated Specification of the IPv4 ID Field",
         "https://www.rfc-editor.org/rfc/rfc6864",
+    ),
+    SpecReference::new(
+        "RFC 1108",
+        "U.S. Department of Defense Security Options for the Internet Protocol",
+        "https://www.rfc-editor.org/rfc/rfc1108",
+    ),
+    SpecReference::new(
+        "RFC 2113",
+        "IP Router Alert Option",
+        "https://www.rfc-editor.org/rfc/rfc2113",
+    ),
+    SpecReference::new(
+        "RFC 4782",
+        "Quick-Start for TCP and IP",
+        "https://www.rfc-editor.org/rfc/rfc4782",
     ),
 ];
 
@@ -282,11 +304,17 @@ impl Dissector for Ipv4Dissector {
         // RFC 791, Section 3.1 — Options (variable length, present when IHL > 5).
         // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         if header_len > MIN_HEADER_SIZE {
-            buf.push_field(
+            let idx = buf.begin_container(
                 &FIELD_DESCRIPTORS[FD_OPTIONS],
-                FieldValue::Bytes(&data[MIN_HEADER_SIZE..header_len]),
+                FieldValue::Array(0..0),
                 offset + MIN_HEADER_SIZE..offset + header_len,
             );
+            options::push_options(
+                buf,
+                &data[MIN_HEADER_SIZE..header_len],
+                offset + MIN_HEADER_SIZE,
+            );
+            buf.end_container(idx);
         }
 
         buf.end_layer();

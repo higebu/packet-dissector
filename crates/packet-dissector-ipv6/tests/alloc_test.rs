@@ -37,3 +37,37 @@ fn zero_alloc_dissect_ipv6() {
     assert_eq!(fields[0].value, FieldValue::U8(6)); // version
     assert_eq!(fields[4].value, FieldValue::U8(6)); // next_header = TCP
 }
+
+#[test]
+fn zero_alloc_dissect_ipv6_extension_options() {
+    use packet_dissector_ipv6::{GenericRoutingDissector, HopByHopDissector, MobilityDissector};
+
+    // Hop-by-Hop: Router Alert, Jumbo Payload, PadN (RFC 8200, Section 4.2).
+    let hbh: &[u8] = &[
+        0x3a, 0x01, 0x05, 0x02, 0x00, 0x00, 0xC2, 0x04, //
+        0x00, 0x01, 0x11, 0x70, 0x01, 0x02, 0x00, 0x00,
+    ];
+    // Routing Type 3 (RFC 6554, Section 3): three compressed addresses.
+    let rh3: &[u8] = &[
+        59, 3, 3, 2, 0x8C, 0x40, 0x00, 0x00, 1, 1, 1, 1, 1, 1, 1, 1, //
+        2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 0, 0, 0, 0,
+    ];
+    // Binding Acknowledgement with a Binding Refresh Advice (RFC 6275).
+    let mh: &[u8] = &[
+        59, 1, 6, 0, 0, 0, 0x00, 0x80, 0x12, 0x34, 0x00, 0x96, 0x02, 0x02, 0x00, 0x3C,
+    ];
+    let mut buf = DissectBuffer::new();
+    // Warm up: fill the buffer once so field capacity is allocated.
+    HopByHopDissector.dissect(hbh, &mut buf, 40).unwrap();
+    GenericRoutingDissector.dissect(rh3, &mut buf, 56).unwrap();
+    MobilityDissector.dissect(mh, &mut buf, 88).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        HopByHopDissector.dissect(hbh, &mut buf, 40).unwrap();
+        GenericRoutingDissector.dissect(rh3, &mut buf, 56).unwrap();
+        MobilityDissector.dissect(mh, &mut buf, 88).unwrap();
+    });
+    assert_eq!(allocs, 0, "IPv6 extension headers allocated {allocs} times");
+    assert_eq!(buf.layers().len(), 3);
+}
