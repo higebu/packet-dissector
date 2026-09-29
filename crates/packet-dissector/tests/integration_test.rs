@@ -70,7 +70,14 @@
 //! | Ethernet → IPv4 → GRE → IPv6 → UDP                | integration_ethernet_ipv4_gre_ipv6                   |
 //! | Ethernet → IPv4 → TCP → TLS ClientHello            | ethernet_ipv4_tcp_tls_client_hello                   |
 //! | Ethernet → IPv4 → TCP → TLS Alert                  | ethernet_ipv4_tcp_tls_alert                          |
+//! | Ethernet → IPv4 → TCP → TLS coalesced handshakes   | ethernet_ipv4_tcp_tls_coalesced_server_flight        |
+//! | Ethernet → IPv4 → TCP (443) → non-TLS rejected     | ethernet_ipv4_tcp_non_tls_on_port_443                |
 //! | Ethernet → IPv4 → UDP → STUN Binding Request       | integration_ethernet_ipv4_udp_stun_binding_request   |
+//! | Ethernet → IPv4 → UDP → TURN ChannelData           | integration_ethernet_ipv4_udp_turn_channeldata       |
+//! | Ethernet → IPv4 → TCP → TURN ChannelData ×2        | integration_ethernet_ipv4_tcp_turn_channeldata_pipelined |
+//! | Ethernet → IPv4 → UDP → classic STUN (RFC 3489)    | integration_ethernet_ipv4_udp_classic_stun           |
+//! | Ethernet → IPv4 → TCP → ChannelData split in padding | integration_ethernet_ipv4_tcp_turn_channeldata_split_padding |
+//! | Ethernet → IPv4 → TCP → classic STUN rejected      | integration_ethernet_ipv4_tcp_classic_stun_rejected  |
 //! | Ethernet → IPv4 → GRE (Key) → IPv4 → UDP          | integration_ethernet_ipv4_gre_key_ipv4               |
 //! | link_type=1 (Ethernet) via dissect_with_link_type  | integration_dissect_with_link_type_ethernet          |
 //! | link_type=0 (NULL, LE/BE) → IPv4/IPv6 → UDP         | integration_link_type_null_ipv4_le, integration_link_type_null_ipv4_be, integration_link_type_null_ipv6 |
@@ -114,6 +121,7 @@
 //! | Ethernet → IPv4 → UDP → RTP                                  | integration_ethernet_ipv4_udp_rtp                    |
 //! | Ethernet → IPv4 → UDP → QUIC Initial                          | integration_ethernet_ipv4_udp_quic_initial            |
 //! | Ethernet → IPv4 → UDP → QUIC Short Header                     | integration_ethernet_ipv4_udp_quic_short              |
+//! | Ethernet → IPv4 → UDP → QUIC Initial + Handshake (coalesced)  | integration_ethernet_ipv4_udp_quic_coalesced          |
 //! | Ethernet → IPv4 → TCP → HTTP/2 (h2c)                        | integration_ethernet_ipv4_tcp_http2_settings         |
 //! | Ethernet → IPv4 → TCP → HTTP/1.1 (via HttpDispatcher)       | integration_ethernet_ipv4_tcp_http_dispatcher_http11 |
 //! | Ethernet → IPv4 → TCP → HTTP 301 (Content-Type dispatch)   | integration_ethernet_ipv4_tcp_http_response_content_type |
@@ -5543,22 +5551,24 @@ fn ethernet_ipv4_tcp_tls_client_hello() {
         FieldValue::U16(0x0301)
     );
     assert_eq!(display_name_for(&buf, tls, "version"), Some("TLS 1.0"));
+    // Labelled from the ClientHello legacy_version, not the 0x0301 record.
+    assert_eq!(tls.display_name, Some("TLSv1.2"));
+    let msgs = tls_handshake_messages(&buf, tls);
+    assert_eq!(msgs.len(), 1);
+    let FieldValue::Object(ref ch_range) = msgs[0].value else {
+        panic!("expected Object")
+    };
+    let ch = buf.nested_fields(ch_range);
+    assert_eq!(ch[0].name(), "type");
+    assert_eq!(ch[0].value, FieldValue::U8(1));
     assert_eq!(
-        buf.field_by_name(tls, "handshake_type").unwrap().value,
-        FieldValue::U8(1)
-    );
-    assert_eq!(
-        display_name_for(&buf, tls, "handshake_type"),
+        buf.resolve_nested_display_name(ch_range, "type_name"),
         Some("Client Hello")
     );
     // ClientHello body fields
-    assert_eq!(
-        buf.field_by_name(tls, "handshake_version").unwrap().value,
-        FieldValue::U16(0x0303)
-    );
-    let FieldValue::Array(ref suites_range) =
-        buf.field_by_name(tls, "cipher_suites").unwrap().value
-    else {
+    let field = |name: &str| ch.iter().find(|f| f.name() == name).unwrap();
+    assert_eq!(field("version").value, FieldValue::U16(0x0303));
+    let FieldValue::Array(ref suites_range) = field("cipher_suites").value else {
         panic!("expected Array")
     };
     let suites = buf.nested_fields(suites_range);
@@ -5566,8 +5576,7 @@ fn ethernet_ipv4_tcp_tls_client_hello() {
     assert_eq!(suites[0].value, FieldValue::U16(0x1301));
     assert_eq!(suites[1].value, FieldValue::U16(0xc02f));
     // SNI extension
-    let FieldValue::Array(ref exts_range) = buf.field_by_name(tls, "extensions").unwrap().value
-    else {
+    let FieldValue::Array(ref exts_range) = field("extensions").value else {
         panic!("expected Array")
     };
     let exts = direct_children(&buf, exts_range);
@@ -5614,22 +5623,108 @@ fn ethernet_ipv4_tcp_tls_server_hello() {
     assert_layers_contiguous(&buf);
 
     let tls = buf.layer_by_name("TLS").unwrap();
+    let msgs = tls_handshake_messages(&buf, tls);
+    assert_eq!(msgs.len(), 1);
+    let FieldValue::Object(ref sh_range) = msgs[0].value else {
+        panic!("expected Object")
+    };
+    let sh = buf.nested_fields(sh_range);
+    assert_eq!(sh[0].value, FieldValue::U8(2));
     assert_eq!(
-        buf.field_by_name(tls, "handshake_type").unwrap().value,
-        FieldValue::U8(2)
-    );
-    assert_eq!(
-        display_name_for(&buf, tls, "handshake_type"),
+        buf.resolve_nested_display_name(sh_range, "type_name"),
         Some("Server Hello")
     );
     assert_eq!(
-        buf.field_by_name(tls, "cipher_suite").unwrap().value,
+        sh.iter()
+            .find(|f| f.name() == "cipher_suite")
+            .unwrap()
+            .value,
         FieldValue::U16(0x1301)
     );
     assert_eq!(
-        display_name_for(&buf, tls, "cipher_suite"),
+        buf.resolve_nested_display_name(sh_range, "cipher_suite_name"),
         Some("TLS_AES_128_GCM_SHA256")
     );
+}
+
+/// Direct children of the TLS layer's `handshake_messages` array.
+fn tls_handshake_messages<'a, 'pkt>(
+    buf: &'a DissectBuffer<'pkt>,
+    tls: &packet_dissector::packet::Layer,
+) -> Vec<&'a packet_dissector::field::Field<'pkt>> {
+    let FieldValue::Array(ref range) = buf.field_by_name(tls, "handshake_messages").unwrap().value
+    else {
+        panic!("expected Array")
+    };
+    direct_children(buf, range)
+}
+
+#[test]
+fn ethernet_ipv4_tcp_tls_coalesced_server_flight() {
+    // RFC 9846, Section 5.1 — https://www.rfc-editor.org/rfc/rfc9846#section-5.1
+    // ServerHello, Certificate and ServerHelloDone in one record.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 2], [10, 0, 0, 1]);
+    push_tcp(&mut pkt, 443, 50000, 0x18);
+
+    let mut hs = vec![0x02, 0x00, 0x00, 0x26, 0x03, 0x03];
+    hs.extend_from_slice(&[0x11; 32]);
+    hs.extend_from_slice(&[0x00, 0xc0, 0x2f, 0x00]);
+    hs.extend_from_slice(&[0x0b, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00]);
+    hs.extend_from_slice(&[0x0e, 0x00, 0x00, 0x00]);
+    push_tls_record(&mut pkt, 0x16, 0x0303, &hs);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+
+    let tls = buf.layer_by_name("TLS").unwrap();
+    assert_eq!(tls.display_name, Some("TLSv1.2"));
+    let types: Vec<FieldValue> = tls_handshake_messages(&buf, tls)
+        .iter()
+        .map(|m| {
+            let FieldValue::Object(ref r) = m.value else {
+                panic!("expected Object")
+            };
+            buf.nested_fields(r)[0].value.clone()
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![FieldValue::U8(2), FieldValue::U8(11), FieldValue::U8(14)]
+    );
+}
+
+#[test]
+fn ethernet_ipv4_tcp_non_tls_on_port_443() {
+    // A payload that is not a TLS record is not reported as TLS.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 50000, 443, 0x18);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    let err = registry.dissect(&pkt, &mut buf).unwrap_err();
+    assert_eq!(
+        err,
+        PacketError::InvalidFieldValue {
+            field: "content_type",
+            value: 0
+        }
+    );
+    assert!(buf.layer_by_name("TLS").is_none());
 }
 
 #[test]
@@ -7189,7 +7284,7 @@ fn integration_ethernet_ipv4_udp_quic_short() {
     let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
     let udp_start = push_udp(&mut pkt, 443, 54321);
 
-    // QUIC Short Header: header_form=0, fixed_bit=1, spin_bit=1, key_phase=0
+    // QUIC Short Header: header_form=0, fixed_bit=1, spin_bit=1
     pkt.push(0x60); // 0b01100000
     pkt.extend_from_slice(&[0xBB; 20]); // DCID + encrypted payload
 
@@ -7212,10 +7307,55 @@ fn integration_ethernet_ipv4_udp_quic_short() {
         buf.field_by_name(quic, "spin_bit").unwrap().value,
         FieldValue::U8(1)
     );
-    assert_eq!(
-        buf.field_by_name(quic, "key_phase").unwrap().value,
-        FieldValue::U8(0)
-    );
+    // Key Phase is header-protected (RFC 9001, Section 5.4.1) and not shown.
+    // https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1
+    assert!(buf.field_by_name(quic, "key_phase").is_none());
+}
+
+/// RFC 9000, Section 12.2 — Initial and Handshake packets coalesced into one
+/// UDP datagram become two QUIC layers split at the Length field.
+/// <https://www.rfc-editor.org/rfc/rfc9000#section-12.2>
+#[test]
+fn integration_ethernet_ipv4_udp_quic_coalesced() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 2], [10, 0, 0, 1]);
+    let udp_start = push_udp(&mut pkt, 443, 50000);
+
+    let dcid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    // Initial (v1): Length = 20
+    pkt.push(0xc0);
+    pkt.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(&dcid);
+    pkt.push(0); // SCID length
+    pkt.extend_from_slice(&encode_quic_varint(0)); // token length
+    pkt.extend_from_slice(&encode_quic_varint(20));
+    pkt.extend_from_slice(&[0xAA; 20]);
+    // Handshake (v1): Length = 16
+    pkt.push(0xe0);
+    pkt.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+    pkt.push(dcid.len() as u8);
+    pkt.extend_from_slice(&dcid);
+    pkt.push(0); // SCID length
+    pkt.extend_from_slice(&encode_quic_varint(16));
+    pkt.extend_from_slice(&[0xBB; 16]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 5);
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].name, "QUIC");
+    assert_eq!(buf.layers()[3].display_name, Some("QUIC Initial"));
+    assert_eq!(buf.layers()[3].range, 42..79);
+    assert_eq!(buf.layers()[4].name, "QUIC");
+    assert_eq!(buf.layers()[4].display_name, Some("QUIC Handshake"));
+    assert_eq!(buf.layers()[4].range, 79..111);
+    assert_eq!(pkt.len(), 111);
 }
 
 // ---------------------------------------------------------------------------
@@ -7271,6 +7411,178 @@ fn integration_ethernet_ipv4_udp_stun_binding_request() {
     assert_eq!(
         buf.field_by_name(stun, "magic_cookie").unwrap().value,
         FieldValue::U32(0x2112_A442)
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_turn_channeldata() {
+    // RFC 8656, Section 12.4 — ChannelData on the TURN server port.
+    // https://www.rfc-editor.org/rfc/rfc8656#section-12.4
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 3478, 50000);
+    pkt.extend_from_slice(&[0x40, 0x00, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let cd = &buf.layers()[3];
+    assert_eq!(cd.name, "TURN-ChannelData");
+    assert_eq!(
+        buf.field_by_name(cd, "channel_number").unwrap().value,
+        FieldValue::U16(0x4000)
+    );
+    assert_eq!(
+        buf.field_by_name(cd, "data").unwrap().value,
+        FieldValue::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF])
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_tcp_turn_channeldata_pipelined() {
+    // RFC 8656, Section 12.5 — over TCP each ChannelData message is padded to
+    // a multiple of four bytes; two messages share one segment.
+    // https://www.rfc-editor.org/rfc/rfc8656#section-12.5
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 3478, 50000, 0x18);
+    pkt.extend_from_slice(&[
+        0x40, 0x00, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF, // channel 0x4000
+        0x40, 0x01, 0x00, 0x02, 0x11, 0x22, 0x00, 0x00, // channel 0x4001 + pad
+    ]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet",
+            "IPv4",
+            "TCP",
+            "TURN-ChannelData",
+            "TURN-ChannelData"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+    let second = &buf.layers()[4];
+    assert_eq!(
+        buf.field_by_name(second, "channel_number").unwrap().value,
+        FieldValue::U16(0x4001)
+    );
+    assert_eq!(
+        buf.field_by_name(second, "padding").unwrap().value,
+        FieldValue::Bytes(&[0x00, 0x00])
+    );
+    assert!(
+        buf.layer_fields(second)
+            .iter()
+            .all(|f| f.name() != "reassembly_in_progress")
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_tcp_turn_channeldata_split_padding() {
+    // RFC 8656, Section 12.5 — the padding of a ChannelData message over TCP
+    // is part of the message; a segment boundary inside it must not shift
+    // the stream. https://www.rfc-editor.org/rfc/rfc8656#section-12.5
+    let reg = DissectorRegistry::default();
+    let segment = |seq: u32, payload: &[u8]| {
+        let mut pkt: Vec<u8> = Vec::new();
+        push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+        let ip_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+        let tcp_start = pkt.len();
+        push_tcp(&mut pkt, 3478, 50000, 0x18);
+        pkt[tcp_start + 4..tcp_start + 8].copy_from_slice(&seq.to_be_bytes());
+        pkt.extend_from_slice(payload);
+        fixup_ipv4_length(&mut pkt, ip_start);
+        pkt
+    };
+
+    // Segment 1: channel 0x4001, length 2, data, but no padding yet.
+    let first = segment(1, &[0x40, 0x01, 0x00, 0x02, 0x11, 0x22]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&first, &mut buf).unwrap();
+    assert!(buf.layer_by_name("TURN-ChannelData").is_none());
+
+    // Segment 2: the two padding bytes, then channel 0x4000 with 4 bytes.
+    let second = segment(
+        7,
+        &[0x00, 0x00, 0x40, 0x00, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF],
+    );
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&second, &mut buf).unwrap();
+    let channels: Vec<_> = buf
+        .layers()
+        .iter()
+        .filter(|l| l.name == "TURN-ChannelData")
+        .map(|l| {
+            buf.field_by_name(l, "channel_number")
+                .unwrap()
+                .value
+                .clone()
+        })
+        .collect();
+    assert_eq!(channels, [FieldValue::U16(0x4001), FieldValue::U16(0x4000)]);
+}
+
+#[test]
+fn integration_ethernet_ipv4_tcp_classic_stun_rejected() {
+    // RFC 5389, Section 12 — "UDP was the only supported transport."
+    // https://www.rfc-editor.org/rfc/rfc5389#section-12
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 50000, 3478, 0x18);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0x5A; 16]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    let err = reg.dissect(&pkt, &mut buf).unwrap_err();
+    assert!(matches!(
+        err,
+        PacketError::InvalidFieldValue {
+            field: "magic_cookie",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_classic_stun() {
+    // RFC 5389, Section 12 — RFC 3489 Binding Request without magic cookie.
+    // https://www.rfc-editor.org/rfc/rfc5389#section-12
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 3478);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0x5A; 16]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let stun = &buf.layers()[3];
+    assert_eq!(stun.name, "STUN");
+    assert_eq!(stun.display_name, Some("Classic STUN (RFC 3489)"));
+    assert!(buf.field_by_name(stun, "magic_cookie").is_none());
+    assert_eq!(
+        buf.field_by_name(stun, "transaction_id").unwrap().value,
+        FieldValue::Bytes(&[0x5A; 16])
     );
 }
 

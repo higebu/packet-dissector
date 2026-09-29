@@ -403,3 +403,17 @@ fn field_descriptors_consistent_with_dissect_for_ethernet_ipv4_udp() {
         }
     }
 }
+
+#[test]
+fn turn_channeldata_schema_is_exposed() {
+    // StunDissector produces TURN-ChannelData layers on the STUN port, so
+    // their fields must be discoverable through all_field_schemas().
+    let registry = DissectorRegistry::default();
+    let schemas = registry.all_field_schemas();
+    let schema = schemas
+        .iter()
+        .find(|s| s.short_name == "TURN-ChannelData")
+        .expect("TURN-ChannelData schema missing");
+    assert!(schema.fields.iter().any(|f| f.name == "channel_number"));
+    assert_names_unique(&packet_dissector::dissectors::stun::TurnChannelDataDissector);
+}
