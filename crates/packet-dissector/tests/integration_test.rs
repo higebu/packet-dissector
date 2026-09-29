@@ -31,6 +31,7 @@
 //! | Ethernet → IPv6 → UDP → DHCPv6 Solicit    | integration_ethernet_ipv6_udp_dhcpv6_solicit |
 //! | Ethernet → IPv6 → UDP → DHCPv6 Advertise  | integration_ethernet_ipv6_udp_dhcpv6_advertise |
 //! | Ethernet → IPv6 → UDP → DHCPv6 Reply (PD) | integration_ethernet_ipv6_udp_dhcpv6_reply_pd |
+//! | Ethernet → IPv6 → UDP → DHCPv6 DHCPV4-QUERY → DHCP Discover | integration_ethernet_ipv6_udp_dhcpv4_query_dhcp_discover |
 //! | Ethernet → IPv6 → SRv6 → TCP              | integration_ethernet_ipv6_srv6_tcp            |
 //! | Ethernet → IPv6 → SRv6 (3 SIDs) → UDP     | integration_ethernet_ipv6_srv6_multi_seg_udp  |
 //! | Ethernet → IPv6 → SRv6 → IPv4 → TCP       | integration_ethernet_ipv6_srv6_inner_ipv4_tcp |
@@ -1678,6 +1679,50 @@ fn integration_ethernet_ipv6_udp_dhcpv6_reply_pd() {
             .unwrap()
             .value,
         FieldValue::Ipv6Addr(prefix)
+    );
+}
+
+/// RFC 7341, Sections 6 and 7.1 — a DHCPv4-query carries a DHCPDISCOVER in
+/// its DHCPv4 Message option (87); the DHCPv4 message is dissected by the
+/// DHCP dissector as the next layer.
+#[test]
+fn integration_ethernet_ipv6_udp_dhcpv4_query_dhcp_discover() {
+    let reg = DissectorRegistry::default();
+
+    let mut dhcp_opts = Vec::new();
+    dhcp_opts.extend_from_slice(&dhcp_option(53, &[1])); // DHCPDISCOVER
+    dhcp_opts.push(255);
+    let dhcpv4 = build_dhcp_message(1, 0x0102_0304, MAC_DHCP_CLIENT, [0; 4], &dhcp_opts);
+
+    // msg-type DHCPV4-QUERY (20), flags with the U bit clear.
+    let mut dhcpv6_msg = vec![20, 0, 0, 0];
+    dhcpv6_msg.extend_from_slice(&dhcpv6_option(87, &dhcpv4));
+    let data = build_eth_ipv6_udp_dhcpv6(546, 547, &dhcpv6_msg);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "UDP", "DHCPv6", "DHCP"]);
+
+    let dhcpv6 = &buf.layers()[3];
+    assert_eq!(
+        buf.resolve_display_name(dhcpv6, "msg_type_name"),
+        Some("DHCPV4_QUERY")
+    );
+    assert_eq!(buf.field_u32(dhcpv6, "flags"), Some(0));
+    assert_eq!(buf.field_u8(dhcpv6, "unicast"), Some(0));
+
+    // The DHCP layer covers exactly the DHCPv4 Message option data, which
+    // follows the DHCPv6 header (4) and the option header (4).
+    let dhcp = &buf.layers()[4];
+    let dhcpv4_start = dhcpv6.range.start + 8;
+    assert_eq!(dhcp.range, dhcpv4_start..dhcpv4_start + dhcpv4.len());
+    assert_eq!(dhcp.range.end, dhcpv6.range.end);
+    assert_eq!(buf.field_u32(dhcp, "xid"), Some(0x0102_0304));
+    assert_eq!(
+        buf.resolve_display_name(dhcp, "dhcp_message_type_name"),
+        Some("DISCOVER")
     );
 }
 
