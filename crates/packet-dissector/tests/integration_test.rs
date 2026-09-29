@@ -26,6 +26,12 @@
 //! | Ethernet → IPv4 → SCTP (DATA fragment, not dispatched) | integration_ethernet_ipv4_sctp_fragment_not_dispatched |
 //! | Ethernet → IPv4 → SCTP (bundled, 2nd malformed) → Diameter ×2 + Err | integration_ethernet_ipv4_sctp_bundled_error_keeps_other_chunks |
 //! | Ethernet → IPv4 → SCTP (bundled) summary stops at SCTP | integration_ethernet_ipv4_sctp_bundled_summary |
+//! | Ethernet → IPv4 → SCTP(40000→40001, PPID 46) → Diameter | integration_ethernet_ipv4_sctp_ppid_diameter_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 38412, PPID 46) → Diameter (PPID wins) | integration_ethernet_ipv4_sctp_ppid_wins_over_port |
+//! | Ethernet → IPv4 → SCTP(port 3868, PPID 0 / unknown) → Diameter by port | integration_ethernet_ipv4_sctp_ppid_falls_back_to_port |
+//! | Ethernet → IPv4 → SCTP(unknown PPID and ports) → no upper layer | integration_ethernet_ipv4_sctp_unknown_ppid_and_port |
+//! | Ethernet → IPv4 → SCTP(unknown PPID, then PPID 46) summary names Diameter | integration_ethernet_ipv4_sctp_summary_uses_first_resolvable_chunk |
+//! | Ethernet → IPv4 → SCTP(9487→40001, PPID 60) → NGAP | integration_ethernet_ipv4_sctp_ppid_ngap_nondefault_port |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
 //! | 802.1ad QinQ → IPv4 → UDP                | integration_qinq_ipv4_udp                     |
@@ -1148,6 +1154,98 @@ fn integration_ethernet_ipv4_sctp_bundled_summary() {
     assert_eq!(names, ["Ethernet", "IPv4", "SCTP"]);
     assert_eq!(summary.next_protocol, Some("Diameter"));
     assert!(buf.embedded_payloads().is_empty());
+}
+
+/// Ethernet → IPv4 → SCTP with one unfragmented DATA chunk carrying `ppid`.
+fn build_eth_ipv4_sctp_ppid(src_port: u16, dst_port: u16, ppid: u32, user_data: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, src_port, dst_port);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, ppid, user_data);
+    fixup_ipv4_length(&mut pkt, ip_start);
+    pkt
+}
+
+/// The summary names the first bundled user message whose protocol is
+/// known, even when an earlier chunk's PPID is not registered.
+#[test]
+fn integration_ethernet_ipv4_sctp_summary_uses_first_resolvable_chunk() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 9999, b"opaque");
+    push_sctp_data_chunk(&mut pkt, 0x03, 2, 46, &diameter_cer_header(1));
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    let summary = reg.dissect_summary(&pkt, &mut buf).unwrap();
+    assert_eq!(summary.next_protocol, Some("Diameter"));
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "SCTP"]);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "SCTP", "Diameter"]);
+}
+
+/// Diameter on ports registered for nothing is found by PPID 46.
+///
+/// RFC 9260, Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+/// IANA "SCTP Payload Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_diameter_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 46, &diameter_cer_header(1));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "SCTP", "Diameter"]);
+    assert_eq!(diameter_hop_by_hop_ids(&buf), [1]);
+
+    // The summary names the protocol selected by PPID.
+    let mut buf = DissectBuffer::new();
+    let summary = reg.dissect_summary(&data, &mut buf).unwrap();
+    assert_eq!(summary.next_protocol, Some("Diameter"));
+}
+
+/// The PPID is tried before the ports: PPID 46 on the NGAP port is Diameter.
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_wins_over_port() {
+    let reg = DissectorRegistry::default();
+    let data = build_eth_ipv4_sctp_ppid(40000, 38412, 46, &diameter_cer_header(7));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "SCTP", "Diameter"]);
+}
+
+/// PPID 0 ("unspecified") and unregistered PPIDs fall back to the SCTP port.
+///
+/// RFC 9260, Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc9260#section-3.3.1>
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_falls_back_to_port() {
+    let reg = DissectorRegistry::default();
+    for ppid in [0, 9999] {
+        let data = build_eth_ipv4_sctp_ppid(49152, 3868, ppid, &diameter_cer_header(2));
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&data, &mut buf).unwrap();
+        assert_eq!(
+            layer_names(&buf),
+            ["Ethernet", "IPv4", "SCTP", "Diameter"],
+            "ppid {ppid}"
+        );
+    }
+}
+
+/// With neither the PPID nor a port registered, the user data stays in the
+/// SCTP layer.
+#[test]
+fn integration_ethernet_ipv4_sctp_unknown_ppid_and_port() {
+    let reg = DissectorRegistry::default();
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 9999, &diameter_cer_header(2));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "SCTP"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -7369,6 +7467,25 @@ fn integration_ethernet_ipv4_udp_pfcp_session_establishment() {
 const NGAP_NG_SETUP_REQUEST: &[u8] = &[
     0x00, 0x15, 0x00, 0x0c, 0x00, 0x00, 0x01, 0x00, 0x1a, 0x00, 0x05, 0x00, 0x02, 0xf8, 0x39, 0x10,
 ];
+
+/// NGAP on a non-default port is found by PPID 60 (IANA "SCTP Payload
+/// Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>).
+#[cfg(all(feature = "sctp", feature = "ngap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_ngap_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 9487, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 60, NGAP_NG_SETUP_REQUEST);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "NGAP"]);
+}
 
 #[cfg(all(feature = "sctp", feature = "ngap"))]
 #[test]

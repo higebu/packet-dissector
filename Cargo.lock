@@ -981,6 +981,7 @@ dependencies = [
  "packet-dissector-ipv6",
  "packet-dissector-mdns",
  "packet-dissector-ntp",
+ "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
  "proptest",
