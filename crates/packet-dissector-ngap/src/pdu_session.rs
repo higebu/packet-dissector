@@ -796,6 +796,16 @@ mod tests {
         buf.fields().iter().filter(|f| f.name() == name).collect()
     }
 
+    /// The `pdu_session_id` of each list item, excluding the ones inside
+    /// the decoded NAS-PDUs (5GSM messages carry their own).
+    fn item_ids<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>) -> Vec<&'a Field<'pkt>> {
+        buf.fields()
+            .windows(2)
+            .filter(|w| w[0].name() == "item" && w[1].name() == "pdu_session_id")
+            .map(|w| &w[1])
+            .collect()
+    }
+
     fn one<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>, name: &str) -> &'a Field<'pkt> {
         let v = all(buf, name);
         assert_eq!(v.len(), 1, "{name}: {:?}", names(buf));
@@ -895,12 +905,9 @@ mod tests {
             ),
         );
         assert_eq!(one(&buf, "items").name(), "items");
-        let ids: Vec<_> = all(&buf, "pdu_session_id")
-            .iter()
-            .map(|f| f.value.clone())
-            .collect();
+        let ids: Vec<_> = item_ids(&buf).iter().map(|f| f.value.clone()).collect();
         assert_eq!(ids, [FieldValue::U8(1), FieldValue::U8(2)]);
-        assert_eq!(all(&buf, "pdu_session_id")[0].range, 2..3);
+        assert_eq!(item_ids(&buf)[0].range, 2..3);
 
         // The NAS-PDU of item 1 is decoded as 5G NAS (DL NAS transport).
         let nas = one(&buf, "nas_pdu");
@@ -931,7 +938,12 @@ mod tests {
             all(&buf, "pdu_session_ambr_dl")[0].value,
             FieldValue::U64(1_000_000_000)
         );
-        assert_eq!(all(&buf, "pdu_session_type")[0].value, FieldValue::U8(0));
+        // The NAS-PDU's 5GSM message has its own PDU session type IE; the
+        // last one is IE 134 of the second transfer.
+        assert_eq!(
+            all(&buf, "pdu_session_type").last().unwrap().value,
+            FieldValue::U8(0)
+        );
         assert!(
             names(&buf)
                 .iter()
@@ -1007,7 +1019,9 @@ mod tests {
             64,
             "0040010c7e00680100062e0501c212000d000001008200060407d01003e8",
         );
-        assert_eq!(one(&buf, "pdu_session_id").value, FieldValue::U8(1));
+        let ids = item_ids(&buf);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].value, FieldValue::U8(1));
         assert_eq!(all(&buf, "message_type")[0].value, FieldValue::U8(0x68));
         assert_eq!(
             one(&buf, "pdu_session_ambr_dl").value,
