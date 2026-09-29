@@ -12934,4 +12934,32 @@ mod tests {
         assert_eq!(call_format_fn(fmt, &FieldValue::Bytes(&v)), "1.5");
         assert_eq!(call_format_fn(fmt, &FieldValue::Bytes(&[0; 3])), "null");
     }
+
+    #[test]
+    fn extended_community_name_tables_have_unique_non_empty_names() {
+        // Walk every (Type, Sub-Type) pair: names are non-empty, and unique
+        // within each Type (the same sub-type name recurs across Types, e.g.
+        // Route Target).
+        for type_high in 0..=u8::MAX {
+            let names: Vec<&str> = (0..=u8::MAX)
+                .filter_map(|s| ext_community_sub_type_name(type_high, s))
+                .collect();
+            for (i, n) in names.iter().enumerate() {
+                assert!(!n.is_empty());
+                assert!(!names[i + 1..].contains(n), "duplicate {n}");
+            }
+            let v6: Vec<&str> = (0..=u8::MAX)
+                .filter_map(|s| ipv6_ext_community_sub_type_name(type_high, s))
+                .collect();
+            assert!(v6.iter().all(|n| !n.is_empty()));
+        }
+        let count = |f: fn(u8) -> Option<&'static str>| (0..=u8::MAX).filter_map(f).count();
+        assert_eq!(count(ext_community_type_name), 16);
+        assert_eq!(count(ipv6_ext_community_type_name), 2);
+        let pairs = (0..=u8::MAX)
+            .flat_map(|t| (0..=u8::MAX).map(move |s| (t, s)))
+            .filter(|&(t, s)| ext_community_sub_type_name(t, s).is_some())
+            .count();
+        assert_eq!(pairs, 65);
+    }
 }
