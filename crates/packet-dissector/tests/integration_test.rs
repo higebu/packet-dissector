@@ -64,6 +64,8 @@
 //! | Ethernet → IPv4 → GRE → IPv6 → UDP                | integration_ethernet_ipv4_gre_ipv6                   |
 //! | Ethernet → IPv4 → TCP → TLS ClientHello            | ethernet_ipv4_tcp_tls_client_hello                   |
 //! | Ethernet → IPv4 → TCP → TLS Alert                  | ethernet_ipv4_tcp_tls_alert                          |
+//! | Ethernet → IPv4 → TCP → TLS coalesced handshakes   | ethernet_ipv4_tcp_tls_coalesced_server_flight        |
+//! | Ethernet → IPv4 → TCP (443) → non-TLS rejected     | ethernet_ipv4_tcp_non_tls_on_port_443                |
 //! | Ethernet → IPv4 → UDP → STUN Binding Request       | integration_ethernet_ipv4_udp_stun_binding_request   |
 //! | Ethernet → IPv4 → UDP → TURN ChannelData           | integration_ethernet_ipv4_udp_turn_channeldata       |
 //! | Ethernet → IPv4 → TCP → TURN ChannelData ×2        | integration_ethernet_ipv4_tcp_turn_channeldata_pipelined |
@@ -5451,22 +5453,24 @@ fn ethernet_ipv4_tcp_tls_client_hello() {
         FieldValue::U16(0x0301)
     );
     assert_eq!(display_name_for(&buf, tls, "version"), Some("TLS 1.0"));
+    // Labelled from the ClientHello legacy_version, not the 0x0301 record.
+    assert_eq!(tls.display_name, Some("TLSv1.2"));
+    let msgs = tls_handshake_messages(&buf, tls);
+    assert_eq!(msgs.len(), 1);
+    let FieldValue::Object(ref ch_range) = msgs[0].value else {
+        panic!("expected Object")
+    };
+    let ch = buf.nested_fields(ch_range);
+    assert_eq!(ch[0].name(), "type");
+    assert_eq!(ch[0].value, FieldValue::U8(1));
     assert_eq!(
-        buf.field_by_name(tls, "handshake_type").unwrap().value,
-        FieldValue::U8(1)
-    );
-    assert_eq!(
-        display_name_for(&buf, tls, "handshake_type"),
+        buf.resolve_nested_display_name(ch_range, "type_name"),
         Some("Client Hello")
     );
     // ClientHello body fields
-    assert_eq!(
-        buf.field_by_name(tls, "handshake_version").unwrap().value,
-        FieldValue::U16(0x0303)
-    );
-    let FieldValue::Array(ref suites_range) =
-        buf.field_by_name(tls, "cipher_suites").unwrap().value
-    else {
+    let field = |name: &str| ch.iter().find(|f| f.name() == name).unwrap();
+    assert_eq!(field("version").value, FieldValue::U16(0x0303));
+    let FieldValue::Array(ref suites_range) = field("cipher_suites").value else {
         panic!("expected Array")
     };
     let suites = buf.nested_fields(suites_range);
@@ -5474,8 +5478,7 @@ fn ethernet_ipv4_tcp_tls_client_hello() {
     assert_eq!(suites[0].value, FieldValue::U16(0x1301));
     assert_eq!(suites[1].value, FieldValue::U16(0xc02f));
     // SNI extension
-    let FieldValue::Array(ref exts_range) = buf.field_by_name(tls, "extensions").unwrap().value
-    else {
+    let FieldValue::Array(ref exts_range) = field("extensions").value else {
         panic!("expected Array")
     };
     let exts = direct_children(&buf, exts_range);
@@ -5522,22 +5525,108 @@ fn ethernet_ipv4_tcp_tls_server_hello() {
     assert_layers_contiguous(&buf);
 
     let tls = buf.layer_by_name("TLS").unwrap();
+    let msgs = tls_handshake_messages(&buf, tls);
+    assert_eq!(msgs.len(), 1);
+    let FieldValue::Object(ref sh_range) = msgs[0].value else {
+        panic!("expected Object")
+    };
+    let sh = buf.nested_fields(sh_range);
+    assert_eq!(sh[0].value, FieldValue::U8(2));
     assert_eq!(
-        buf.field_by_name(tls, "handshake_type").unwrap().value,
-        FieldValue::U8(2)
-    );
-    assert_eq!(
-        display_name_for(&buf, tls, "handshake_type"),
+        buf.resolve_nested_display_name(sh_range, "type_name"),
         Some("Server Hello")
     );
     assert_eq!(
-        buf.field_by_name(tls, "cipher_suite").unwrap().value,
+        sh.iter()
+            .find(|f| f.name() == "cipher_suite")
+            .unwrap()
+            .value,
         FieldValue::U16(0x1301)
     );
     assert_eq!(
-        display_name_for(&buf, tls, "cipher_suite"),
+        buf.resolve_nested_display_name(sh_range, "cipher_suite_name"),
         Some("TLS_AES_128_GCM_SHA256")
     );
+}
+
+/// Direct children of the TLS layer's `handshake_messages` array.
+fn tls_handshake_messages<'a, 'pkt>(
+    buf: &'a DissectBuffer<'pkt>,
+    tls: &packet_dissector::packet::Layer,
+) -> Vec<&'a packet_dissector::field::Field<'pkt>> {
+    let FieldValue::Array(ref range) = buf.field_by_name(tls, "handshake_messages").unwrap().value
+    else {
+        panic!("expected Array")
+    };
+    direct_children(buf, range)
+}
+
+#[test]
+fn ethernet_ipv4_tcp_tls_coalesced_server_flight() {
+    // RFC 9846, Section 5.1 — https://www.rfc-editor.org/rfc/rfc9846#section-5.1
+    // ServerHello, Certificate and ServerHelloDone in one record.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 2], [10, 0, 0, 1]);
+    push_tcp(&mut pkt, 443, 50000, 0x18);
+
+    let mut hs = vec![0x02, 0x00, 0x00, 0x26, 0x03, 0x03];
+    hs.extend_from_slice(&[0x11; 32]);
+    hs.extend_from_slice(&[0x00, 0xc0, 0x2f, 0x00]);
+    hs.extend_from_slice(&[0x0b, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00]);
+    hs.extend_from_slice(&[0x0e, 0x00, 0x00, 0x00]);
+    push_tls_record(&mut pkt, 0x16, 0x0303, &hs);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+
+    let tls = buf.layer_by_name("TLS").unwrap();
+    assert_eq!(tls.display_name, Some("TLSv1.2"));
+    let types: Vec<FieldValue> = tls_handshake_messages(&buf, tls)
+        .iter()
+        .map(|m| {
+            let FieldValue::Object(ref r) = m.value else {
+                panic!("expected Object")
+            };
+            buf.nested_fields(r)[0].value.clone()
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![FieldValue::U8(2), FieldValue::U8(11), FieldValue::U8(14)]
+    );
+}
+
+#[test]
+fn ethernet_ipv4_tcp_non_tls_on_port_443() {
+    // A payload that is not a TLS record is not reported as TLS.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 50000, 443, 0x18);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    let err = registry.dissect(&pkt, &mut buf).unwrap_err();
+    assert_eq!(
+        err,
+        PacketError::InvalidFieldValue {
+            field: "content_type",
+            value: 0
+        }
+    );
+    assert!(buf.layer_by_name("TLS").is_none());
 }
 
 #[test]
