@@ -12,8 +12,15 @@
 //! - RFC 8489 (Obsoletes RFC 5389): <https://www.rfc-editor.org/rfc/rfc8489>
 //! - RFC 5389, Section 12 (Backwards Compatibility with RFC 3489):
 //!   <https://www.rfc-editor.org/rfc/rfc5389#section-12>
-//! - RFC 8656 (TURN, Obsoletes RFC 5766), Section 12 (Channels):
-//!   <https://www.rfc-editor.org/rfc/rfc8656#section-12>
+//! - RFC 8656 (TURN, Obsoletes RFC 5766), Section 12 (Channels), Sections
+//!   17-19 (methods, attributes, error codes):
+//!   <https://www.rfc-editor.org/rfc/rfc8656#section-12>,
+//!   <https://www.rfc-editor.org/rfc/rfc8656#section-17>
+//! - RFC 6062 (TURN TCP), Section 6: <https://www.rfc-editor.org/rfc/rfc6062#section-6>
+//! - RFC 8445 (ICE), Section 16: <https://www.rfc-editor.org/rfc/rfc8445#section-16>
+//! - RFC 5780 (NAT Behavior Discovery), Section 7:
+//!   <https://www.rfc-editor.org/rfc/rfc5780#section-7>
+//! - RFC 5769 (STUN test vectors): <https://www.rfc-editor.org/rfc/rfc5769>
 //! - RFC 7983 (Multiplexing Scheme Updates for SRTP with DTLS), Section 7,
 //!   updated by RFC 9443: <https://www.rfc-editor.org/rfc/rfc7983#section-7>,
 //!   <https://www.rfc-editor.org/rfc/rfc9443>
@@ -26,7 +33,7 @@ use packet_dissector_core::dissector::{
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u16, read_be_u32};
+use packet_dissector_core::util::{read_be_u16, read_be_u32, read_be_u64};
 
 /// STUN header size in bytes.
 ///
@@ -92,9 +99,22 @@ fn class_name(class: u8) -> &'static str {
 ///
 /// RFC 8489, Section 18.2 — STUN Methods Registry —
 /// <https://www.rfc-editor.org/rfc/rfc8489#section-18.2>.
+/// TURN methods: RFC 8656, Section 17 —
+/// <https://www.rfc-editor.org/rfc/rfc8656#section-17>.
+/// TURN-TCP methods: RFC 6062, Section 6.1 —
+/// <https://www.rfc-editor.org/rfc/rfc6062#section-6.1>.
 fn method_name(method: u16) -> Option<&'static str> {
     match method {
         0x001 => Some("Binding"),
+        0x003 => Some("Allocate"),
+        0x004 => Some("Refresh"),
+        0x006 => Some("Send"),
+        0x007 => Some("Data"),
+        0x008 => Some("CreatePermission"),
+        0x009 => Some("ChannelBind"),
+        0x00A => Some("Connect"),
+        0x00B => Some("ConnectionBind"),
+        0x00C => Some("ConnectionAttempt"),
         _ => None,
     }
 }
@@ -103,26 +123,172 @@ fn method_name(method: u16) -> Option<&'static str> {
 ///
 /// RFC 8489, Section 18.3 — STUN Attributes Registry —
 /// <https://www.rfc-editor.org/rfc/rfc8489#section-18.3>.
+///
+/// Also names the attributes of TURN (RFC 8656, Section 18 —
+/// <https://www.rfc-editor.org/rfc/rfc8656#section-18>), TURN-TCP
+/// (RFC 6062, Section 6.2 — <https://www.rfc-editor.org/rfc/rfc6062#section-6.2>),
+/// ICE (RFC 8445, Section 16.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8445#section-16.1>) and NAT behavior
+/// discovery (RFC 5780, Section 7 —
+/// <https://www.rfc-editor.org/rfc/rfc5780#section-7>).
 pub fn attribute_type_name(attr_type: u16) -> Option<&'static str> {
     match attr_type {
         // Comprehension-required range (0x0000-0x7FFF).
-        0x0001 => Some("MAPPED-ADDRESS"),
-        0x0006 => Some("USERNAME"),
-        0x0008 => Some("MESSAGE-INTEGRITY"),
-        0x0009 => Some("ERROR-CODE"),
-        0x000A => Some("UNKNOWN-ATTRIBUTES"),
-        0x0014 => Some("REALM"),
-        0x0015 => Some("NONCE"),
-        0x001C => Some("MESSAGE-INTEGRITY-SHA256"),
-        0x001D => Some("PASSWORD-ALGORITHM"),
-        0x001E => Some("USERHASH"),
-        0x0020 => Some("XOR-MAPPED-ADDRESS"),
+        ATTR_MAPPED_ADDRESS => Some("MAPPED-ADDRESS"),
+        ATTR_CHANGE_REQUEST => Some("CHANGE-REQUEST"),
+        ATTR_USERNAME => Some("USERNAME"),
+        ATTR_MESSAGE_INTEGRITY => Some("MESSAGE-INTEGRITY"),
+        ATTR_ERROR_CODE => Some("ERROR-CODE"),
+        ATTR_UNKNOWN_ATTRIBUTES => Some("UNKNOWN-ATTRIBUTES"),
+        ATTR_CHANNEL_NUMBER => Some("CHANNEL-NUMBER"),
+        ATTR_LIFETIME => Some("LIFETIME"),
+        ATTR_XOR_PEER_ADDRESS => Some("XOR-PEER-ADDRESS"),
+        ATTR_DATA => Some("DATA"),
+        ATTR_REALM => Some("REALM"),
+        ATTR_NONCE => Some("NONCE"),
+        ATTR_XOR_RELAYED_ADDRESS => Some("XOR-RELAYED-ADDRESS"),
+        ATTR_REQUESTED_ADDRESS_FAMILY => Some("REQUESTED-ADDRESS-FAMILY"),
+        ATTR_EVEN_PORT => Some("EVEN-PORT"),
+        ATTR_REQUESTED_TRANSPORT => Some("REQUESTED-TRANSPORT"),
+        ATTR_DONT_FRAGMENT => Some("DONT-FRAGMENT"),
+        ATTR_MESSAGE_INTEGRITY_SHA256 => Some("MESSAGE-INTEGRITY-SHA256"),
+        ATTR_PASSWORD_ALGORITHM => Some("PASSWORD-ALGORITHM"),
+        ATTR_USERHASH => Some("USERHASH"),
+        ATTR_XOR_MAPPED_ADDRESS => Some("XOR-MAPPED-ADDRESS"),
+        ATTR_RESERVATION_TOKEN => Some("RESERVATION-TOKEN"),
+        ATTR_PRIORITY => Some("PRIORITY"),
+        ATTR_USE_CANDIDATE => Some("USE-CANDIDATE"),
+        ATTR_PADDING => Some("PADDING"),
+        ATTR_RESPONSE_PORT => Some("RESPONSE-PORT"),
+        ATTR_CONNECTION_ID => Some("CONNECTION-ID"),
         // Comprehension-optional range (0x8000-0xFFFF).
-        0x8002 => Some("PASSWORD-ALGORITHMS"),
-        0x8003 => Some("ALTERNATE-DOMAIN"),
-        0x8022 => Some("SOFTWARE"),
-        0x8023 => Some("ALTERNATE-SERVER"),
-        0x8028 => Some("FINGERPRINT"),
+        ATTR_ADDITIONAL_ADDRESS_FAMILY => Some("ADDITIONAL-ADDRESS-FAMILY"),
+        ATTR_ADDRESS_ERROR_CODE => Some("ADDRESS-ERROR-CODE"),
+        ATTR_PASSWORD_ALGORITHMS => Some("PASSWORD-ALGORITHMS"),
+        ATTR_ALTERNATE_DOMAIN => Some("ALTERNATE-DOMAIN"),
+        ATTR_ICMP => Some("ICMP"),
+        ATTR_SOFTWARE => Some("SOFTWARE"),
+        ATTR_ALTERNATE_SERVER => Some("ALTERNATE-SERVER"),
+        ATTR_FINGERPRINT => Some("FINGERPRINT"),
+        ATTR_ICE_CONTROLLED => Some("ICE-CONTROLLED"),
+        ATTR_ICE_CONTROLLING => Some("ICE-CONTROLLING"),
+        ATTR_RESPONSE_ORIGIN => Some("RESPONSE-ORIGIN"),
+        ATTR_OTHER_ADDRESS => Some("OTHER-ADDRESS"),
+        _ => None,
+    }
+}
+
+// STUN attribute types.
+// RFC 8489, Section 18.3 — https://www.rfc-editor.org/rfc/rfc8489#section-18.3
+const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
+const ATTR_USERNAME: u16 = 0x0006;
+const ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
+const ATTR_ERROR_CODE: u16 = 0x0009;
+const ATTR_UNKNOWN_ATTRIBUTES: u16 = 0x000A;
+const ATTR_REALM: u16 = 0x0014;
+const ATTR_NONCE: u16 = 0x0015;
+const ATTR_MESSAGE_INTEGRITY_SHA256: u16 = 0x001C;
+const ATTR_PASSWORD_ALGORITHM: u16 = 0x001D;
+const ATTR_USERHASH: u16 = 0x001E;
+const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
+const ATTR_PASSWORD_ALGORITHMS: u16 = 0x8002;
+const ATTR_ALTERNATE_DOMAIN: u16 = 0x8003;
+const ATTR_SOFTWARE: u16 = 0x8022;
+const ATTR_ALTERNATE_SERVER: u16 = 0x8023;
+const ATTR_FINGERPRINT: u16 = 0x8028;
+// RFC 8656, Section 18 — https://www.rfc-editor.org/rfc/rfc8656#section-18
+const ATTR_CHANNEL_NUMBER: u16 = 0x000C;
+const ATTR_LIFETIME: u16 = 0x000D;
+const ATTR_XOR_PEER_ADDRESS: u16 = 0x0012;
+const ATTR_DATA: u16 = 0x0013;
+const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
+const ATTR_REQUESTED_ADDRESS_FAMILY: u16 = 0x0017;
+const ATTR_EVEN_PORT: u16 = 0x0018;
+const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
+const ATTR_DONT_FRAGMENT: u16 = 0x001A;
+const ATTR_RESERVATION_TOKEN: u16 = 0x0022;
+const ATTR_ADDITIONAL_ADDRESS_FAMILY: u16 = 0x8000;
+const ATTR_ADDRESS_ERROR_CODE: u16 = 0x8001;
+const ATTR_ICMP: u16 = 0x8004;
+// RFC 6062, Section 6.2 — https://www.rfc-editor.org/rfc/rfc6062#section-6.2
+const ATTR_CONNECTION_ID: u16 = 0x002A;
+// RFC 8445, Section 16.1 — https://www.rfc-editor.org/rfc/rfc8445#section-16.1
+const ATTR_PRIORITY: u16 = 0x0024;
+const ATTR_USE_CANDIDATE: u16 = 0x0025;
+const ATTR_ICE_CONTROLLED: u16 = 0x8029;
+const ATTR_ICE_CONTROLLING: u16 = 0x802A;
+// RFC 5780, Section 7 — https://www.rfc-editor.org/rfc/rfc5780#section-7
+const ATTR_CHANGE_REQUEST: u16 = 0x0003;
+const ATTR_PADDING: u16 = 0x0026;
+const ATTR_RESPONSE_PORT: u16 = 0x0027;
+const ATTR_RESPONSE_ORIGIN: u16 = 0x802B;
+const ATTR_OTHER_ADDRESS: u16 = 0x802C;
+
+/// Address family values.
+///
+/// RFC 8489, Section 14.1 — "0x01:IPv4", "0x02:IPv6" —
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-14.1>.
+const FAMILY_IPV4: u8 = 0x01;
+const FAMILY_IPV6: u8 = 0x02;
+
+fn family_name(family: u8) -> Option<&'static str> {
+    match family {
+        FAMILY_IPV4 => Some("IPv4"),
+        FAMILY_IPV6 => Some("IPv6"),
+        _ => None,
+    }
+}
+
+/// Returns the registered reason phrase for a STUN error code.
+///
+/// RFC 8489, Section 14.8 — <https://www.rfc-editor.org/rfc/rfc8489#section-14.8>;
+/// RFC 8656, Section 19 — <https://www.rfc-editor.org/rfc/rfc8656#section-19>;
+/// RFC 6062, Section 6.3 — <https://www.rfc-editor.org/rfc/rfc6062#section-6.3>;
+/// RFC 8445, Section 16.2 — <https://www.rfc-editor.org/rfc/rfc8445#section-16.2>.
+fn error_code_name(code: u16) -> Option<&'static str> {
+    match code {
+        300 => Some("Try Alternate"),
+        400 => Some("Bad Request"),
+        401 => Some("Unauthenticated"),
+        403 => Some("Forbidden"),
+        420 => Some("Unknown Attribute"),
+        437 => Some("Allocation Mismatch"),
+        438 => Some("Stale Nonce"),
+        440 => Some("Address Family not Supported"),
+        441 => Some("Wrong Credentials"),
+        442 => Some("Unsupported Transport Protocol"),
+        443 => Some("Peer Address Family Mismatch"),
+        446 => Some("Connection Already Exists"),
+        447 => Some("Connection Timeout or Failure"),
+        486 => Some("Allocation Quota Reached"),
+        487 => Some("Role Conflict"),
+        500 => Some("Server Error"),
+        508 => Some("Insufficient Capacity"),
+        _ => None,
+    }
+}
+
+/// Returns the name of a password algorithm.
+///
+/// RFC 8489, Section 18.5 — <https://www.rfc-editor.org/rfc/rfc8489#section-18.5>.
+fn password_algorithm_name(algorithm: u16) -> Option<&'static str> {
+    match algorithm {
+        0x0001 => Some("MD5"),
+        0x0002 => Some("SHA-256"),
+        _ => None,
+    }
+}
+
+/// Returns the name of a REQUESTED-TRANSPORT protocol number.
+///
+/// RFC 8656, Section 18.8 — "This specification only allows the use of code
+/// point 17 (User Datagram Protocol)." RFC 6062, Section 4.1 adds TCP (6).
+/// <https://www.rfc-editor.org/rfc/rfc8656#section-18.8>,
+/// <https://www.rfc-editor.org/rfc/rfc6062#section-4.1>.
+fn transport_protocol_name(protocol: u8) -> Option<&'static str> {
+    match protocol {
+        6 => Some("TCP"),
+        17 => Some("UDP"),
         _ => None,
     }
 }
@@ -140,6 +306,34 @@ const FD_ATTRIBUTES: usize = 6;
 const AFD_TYPE: usize = 0;
 const AFD_LENGTH: usize = 1;
 const AFD_VALUE: usize = 2;
+const AFD_FAMILY: usize = 3;
+const AFD_PORT: usize = 4;
+const AFD_ADDRESS: usize = 5;
+const AFD_TEXT: usize = 6;
+const AFD_HMAC: usize = 7;
+const AFD_USERHASH: usize = 8;
+const AFD_CRC32: usize = 9;
+const AFD_ERROR_CODE: usize = 10;
+const AFD_REASON: usize = 11;
+const AFD_ATTRIBUTE_TYPES: usize = 12;
+const AFD_ALGORITHM: usize = 13;
+const AFD_ALGORITHM_PARAMETERS: usize = 14;
+const AFD_ALGORITHMS: usize = 15;
+const AFD_CHANNEL_NUMBER: usize = 16;
+const AFD_LIFETIME: usize = 17;
+const AFD_DATA: usize = 18;
+const AFD_RESERVE_NEXT: usize = 19;
+const AFD_PROTOCOL: usize = 20;
+const AFD_TOKEN: usize = 21;
+const AFD_ICMP_TYPE: usize = 22;
+const AFD_ICMP_CODE: usize = 23;
+const AFD_ERROR_DATA: usize = 24;
+const AFD_CONNECTION_ID: usize = 25;
+const AFD_PRIORITY: usize = 26;
+const AFD_TIE_BREAKER: usize = 27;
+const AFD_CHANGE_IP: usize = 28;
+const AFD_CHANGE_PORT: usize = 29;
+const AFD_PADDING: usize = 30;
 
 /// Container descriptor for an attribute Object.
 ///
@@ -180,8 +374,121 @@ static ATTR_CHILD_FIELDS: &[FieldDescriptor] = &[
         format_fn: None,
     },
     FieldDescriptor::new("length", "Attribute Length", FieldType::U16),
-    FieldDescriptor::new("value", "Value", FieldType::Bytes),
+    // Raw value of an unknown or malformed attribute.
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+    // RFC 8489, Section 14.1 — https://www.rfc-editor.org/rfc/rfc8489#section-14.1
+    FieldDescriptor::new("family", "Family", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(f) => family_name(*f),
+            _ => None,
+        }),
+    FieldDescriptor::new("port", "Port", FieldType::U16).optional(),
+    // Ipv4Addr or Ipv6Addr depending on `family`.
+    FieldDescriptor::new("address", "Address", FieldType::Any).optional(),
+    // RFC 8489, Sections 14.3, 14.9, 14.10, 14.14, 14.16 —
+    // https://www.rfc-editor.org/rfc/rfc8489#section-14.3
+    FieldDescriptor::new("text", "Text", FieldType::Str).optional(),
+    // RFC 8489, Sections 14.5, 14.6 — https://www.rfc-editor.org/rfc/rfc8489#section-14.5
+    FieldDescriptor::new("hmac", "HMAC", FieldType::Bytes).optional(),
+    // RFC 8489, Section 14.4 — https://www.rfc-editor.org/rfc/rfc8489#section-14.4
+    FieldDescriptor::new("userhash", "Userhash", FieldType::Bytes).optional(),
+    // RFC 8489, Section 14.7 — https://www.rfc-editor.org/rfc/rfc8489#section-14.7
+    FieldDescriptor::new("crc32", "CRC-32", FieldType::U32).optional(),
+    // RFC 8489, Section 14.8 — https://www.rfc-editor.org/rfc/rfc8489#section-14.8
+    FieldDescriptor::new("error_code", "Error Code", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(c) => error_code_name(*c),
+            _ => None,
+        }),
+    FieldDescriptor::new("reason", "Reason Phrase", FieldType::Str).optional(),
+    // RFC 8489, Section 14.13 — https://www.rfc-editor.org/rfc/rfc8489#section-14.13
+    FieldDescriptor::new(
+        "attribute_types",
+        "Unknown Attribute Types",
+        FieldType::Array,
+    )
+    .optional()
+    .with_children(core::slice::from_ref(&FD_UNKNOWN_ATTRIBUTE_TYPE)),
+    // RFC 8489, Section 14.12 — https://www.rfc-editor.org/rfc/rfc8489#section-14.12
+    FD_PASSWORD_ALGORITHM,
+    FD_PASSWORD_ALGORITHM_PARAMETERS,
+    // RFC 8489, Section 14.11 — https://www.rfc-editor.org/rfc/rfc8489#section-14.11
+    FieldDescriptor::new("algorithms", "Password Algorithms", FieldType::Array)
+        .optional()
+        .with_children(core::slice::from_ref(&FD_PASSWORD_ALGORITHM_ENTRY)),
+    // RFC 8656, Section 18.1 — https://www.rfc-editor.org/rfc/rfc8656#section-18.1
+    FieldDescriptor::new("channel_number", "Channel Number", FieldType::U16).optional(),
+    // RFC 8656, Section 18.2 — https://www.rfc-editor.org/rfc/rfc8656#section-18.2
+    FieldDescriptor::new("lifetime", "Lifetime", FieldType::U32).optional(),
+    // RFC 8656, Section 18.4 — https://www.rfc-editor.org/rfc/rfc8656#section-18.4
+    FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
+    // RFC 8656, Section 18.7 — https://www.rfc-editor.org/rfc/rfc8656#section-18.7
+    FieldDescriptor::new("reserve_next", "Reserve Next Port (R)", FieldType::U8).optional(),
+    // RFC 8656, Section 18.8 — https://www.rfc-editor.org/rfc/rfc8656#section-18.8
+    FieldDescriptor::new("protocol", "Protocol", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(p) => transport_protocol_name(*p),
+            _ => None,
+        }),
+    // RFC 8656, Section 18.10 — https://www.rfc-editor.org/rfc/rfc8656#section-18.10
+    FieldDescriptor::new("token", "Reservation Token", FieldType::Bytes).optional(),
+    // RFC 8656, Section 18.13 — https://www.rfc-editor.org/rfc/rfc8656#section-18.13
+    FieldDescriptor::new("icmp_type", "ICMP Type", FieldType::U8).optional(),
+    FieldDescriptor::new("icmp_code", "ICMP Code", FieldType::U8).optional(),
+    FieldDescriptor::new("error_data", "Error Data", FieldType::U32).optional(),
+    // RFC 6062, Section 6.2.1 — https://www.rfc-editor.org/rfc/rfc6062#section-6.2.1
+    FieldDescriptor::new("connection_id", "Connection ID", FieldType::U32).optional(),
+    // RFC 8445, Section 16.1 — https://www.rfc-editor.org/rfc/rfc8445#section-16.1
+    FieldDescriptor::new("priority", "Priority", FieldType::U32).optional(),
+    FieldDescriptor::new("tie_breaker", "Tie Breaker", FieldType::U64).optional(),
+    // RFC 5780, Section 7.2 — https://www.rfc-editor.org/rfc/rfc5780#section-7.2
+    FieldDescriptor::new("change_ip", "Change IP (A)", FieldType::U8).optional(),
+    FieldDescriptor::new("change_port", "Change Port (B)", FieldType::U8).optional(),
+    // RFC 5780, Section 7.6 — https://www.rfc-editor.org/rfc/rfc5780#section-7.6
+    FieldDescriptor::new("padding", "Padding", FieldType::Bytes).optional(),
 ];
+
+/// Element descriptor for UNKNOWN-ATTRIBUTES entries.
+static FD_UNKNOWN_ATTRIBUTE_TYPE: FieldDescriptor =
+    FieldDescriptor::new("attribute_type", "Attribute Type", FieldType::U16).with_display_fn(
+        |v, _| match v {
+            FieldValue::U16(t) => attribute_type_name(*t),
+            _ => None,
+        },
+    );
+
+/// Password algorithm number (RFC 8489, Section 18.5 —
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-18.5>).
+const FD_PASSWORD_ALGORITHM: FieldDescriptor =
+    FieldDescriptor::new("algorithm", "Algorithm", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(a) => password_algorithm_name(*a),
+            _ => None,
+        });
+
+/// Password algorithm parameters.
+const FD_PASSWORD_ALGORITHM_PARAMETERS: FieldDescriptor = FieldDescriptor::new(
+    "algorithm_parameters",
+    "Algorithm Parameters",
+    FieldType::Bytes,
+)
+.optional();
+
+/// Children of a PASSWORD-ALGORITHMS entry.
+static PASSWORD_ALGORITHM_ENTRY_FIELDS: &[FieldDescriptor] =
+    &[FD_PASSWORD_ALGORITHM, FD_PASSWORD_ALGORITHM_PARAMETERS];
+
+/// Element descriptor for PASSWORD-ALGORITHMS entries.
+static FD_PASSWORD_ALGORITHM_ENTRY: FieldDescriptor = FieldDescriptor::new(
+    "password_algorithm",
+    "Password Algorithm",
+    FieldType::Object,
+)
+.with_children(PASSWORD_ALGORITHM_ENTRY_FIELDS);
 
 /// Field descriptors for the STUN dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -253,9 +560,17 @@ fn decode_message_type(raw_type: u16) -> (u8, u16) {
 
 /// Push STUN attributes into a [`DissectBuffer`].
 ///
+/// `xor_key` is the key for the XOR- address attributes ([`xor_key`]), or
+/// `None` for classic STUN, which has no magic cookie.
+///
 /// RFC 8489, Section 14 — Each attribute is TLV-encoded with 4-byte alignment —
 /// <https://www.rfc-editor.org/rfc/rfc8489#section-14>.
-fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectBuffer<'pkt>) {
+fn push_attrs<'pkt>(
+    attr_data: &'pkt [u8],
+    buf_offset: usize,
+    xor_key: Option<&[u8; 16]>,
+    buf: &mut DissectBuffer<'pkt>,
+) {
     let mut pos = 0;
 
     while pos + MIN_ATTR_SIZE <= attr_data.len() {
@@ -289,11 +604,14 @@ fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectB
             FieldValue::U16(attr_len as u16),
             abs + 2..abs + 4,
         );
-        buf.push_field(
-            &ATTR_CHILD_FIELDS[AFD_VALUE],
-            FieldValue::Bytes(value_data),
-            abs + MIN_ATTR_SIZE..abs + MIN_ATTR_SIZE + attr_len,
-        );
+        let value_abs = abs + MIN_ATTR_SIZE;
+        if !push_attr_value(attr_type, value_data, value_abs, xor_key, buf) {
+            buf.push_field(
+                &ATTR_CHILD_FIELDS[AFD_VALUE],
+                FieldValue::Bytes(value_data),
+                value_abs..value_abs + attr_len,
+            );
+        }
         buf.end_container(obj_idx);
 
         // RFC 8489, Section 14 — "STUN aligns attributes on 32-bit boundaries,
@@ -304,6 +622,421 @@ fn push_attrs<'pkt>(attr_data: &'pkt [u8], buf_offset: usize, buf: &mut DissectB
         let padded_len = MIN_ATTR_SIZE + attr_len.next_multiple_of(4);
         pos += padded_len;
     }
+}
+
+/// Push the decoded fields of a known attribute value.
+///
+/// Returns `false` without pushing anything when the attribute type is
+/// unknown or the value does not match its specified format; the caller then
+/// pushes the raw `value` bytes instead.
+fn push_attr_value<'pkt>(
+    attr_type: u16,
+    v: &'pkt [u8],
+    off: usize,
+    xor_key: Option<&[u8; 16]>,
+    buf: &mut DissectBuffer<'pkt>,
+) -> bool {
+    let f = |i: usize| &ATTR_CHILD_FIELDS[i];
+    match attr_type {
+        // RFC 8489, Section 14.1 (MAPPED-ADDRESS), 14.15 (ALTERNATE-SERVER);
+        // RFC 5780, Sections 7.3, 7.4 (RESPONSE-ORIGIN, OTHER-ADDRESS) use the
+        // MAPPED-ADDRESS format.
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.1
+        // https://www.rfc-editor.org/rfc/rfc5780#section-7.1
+        ATTR_MAPPED_ADDRESS | ATTR_ALTERNATE_SERVER | ATTR_RESPONSE_ORIGIN | ATTR_OTHER_ADDRESS => {
+            push_address(v, off, &[0; 16], buf)
+        }
+        // RFC 8489, Section 14.2 (XOR-MAPPED-ADDRESS); RFC 8656, Sections
+        // 18.3, 18.5 (XOR-PEER-ADDRESS, XOR-RELAYED-ADDRESS) — "encoded in the
+        // same way as the XOR-MAPPED-ADDRESS attribute".
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.2
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.3
+        //
+        // Classic STUN (RFC 3489) has no magic cookie and no XOR- attributes
+        // (RFC 5389, Section 12 —
+        // https://www.rfc-editor.org/rfc/rfc5389#section-12), so they stay raw.
+        ATTR_XOR_MAPPED_ADDRESS | ATTR_XOR_PEER_ADDRESS | ATTR_XOR_RELAYED_ADDRESS => {
+            xor_key.is_some_and(|key| push_address(v, off, key, buf))
+        }
+        // RFC 8489, Sections 14.3, 14.9, 14.10, 14.14, 14.16 — UTF-8 text.
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.3
+        ATTR_USERNAME | ATTR_REALM | ATTR_NONCE | ATTR_SOFTWARE | ATTR_ALTERNATE_DOMAIN => {
+            match core::str::from_utf8(v) {
+                Ok(text) => {
+                    buf.push_field(f(AFD_TEXT), FieldValue::Str(text), off..off + v.len());
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+        // RFC 8489, Section 14.4 — "The value of USERHASH has a fixed length
+        // of 32 bytes."
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.4
+        ATTR_USERHASH if v.len() == 32 => {
+            buf.push_field(f(AFD_USERHASH), FieldValue::Bytes(v), off..off + v.len());
+            true
+        }
+        // RFC 8489, Section 14.5 — "the HMAC will be 20 bytes."; Section 14.6 —
+        // "at most 32 bytes, but it MUST be at least 16 bytes and MUST be a
+        // multiple of 4 bytes."
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.5
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.6
+        ATTR_MESSAGE_INTEGRITY if v.len() == 20 => {
+            buf.push_field(f(AFD_HMAC), FieldValue::Bytes(v), off..off + v.len());
+            true
+        }
+        ATTR_MESSAGE_INTEGRITY_SHA256 if (16..=32).contains(&v.len()) && v.len() % 4 == 0 => {
+            buf.push_field(f(AFD_HMAC), FieldValue::Bytes(v), off..off + v.len());
+            true
+        }
+        // RFC 8489, Section 14.7 — CRC-32 XOR 0x5354554e (not verified).
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.7
+        ATTR_FINGERPRINT => push_u32(v, off, f(AFD_CRC32), buf),
+        // RFC 8489, Section 14.8 — https://www.rfc-editor.org/rfc/rfc8489#section-14.8
+        ATTR_ERROR_CODE => push_error_code(v, off, false, buf),
+        // RFC 8489, Section 14.13 — "The attribute contains a list of 16-bit
+        // values, each of which represents an attribute type".
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.13
+        ATTR_UNKNOWN_ATTRIBUTES if v.len() % 2 == 0 => {
+            let idx = buf.begin_container(
+                f(AFD_ATTRIBUTE_TYPES),
+                FieldValue::Array(0..0),
+                off..off + v.len(),
+            );
+            for (i, pair) in v.chunks_exact(2).enumerate() {
+                let t = u16::from_be_bytes([pair[0], pair[1]]);
+                let at = off + i * 2;
+                buf.push_field(&FD_UNKNOWN_ATTRIBUTE_TYPE, FieldValue::U16(t), at..at + 2);
+            }
+            buf.end_container(idx);
+            true
+        }
+        // RFC 8489, Section 14.12 — https://www.rfc-editor.org/rfc/rfc8489#section-14.12
+        ATTR_PASSWORD_ALGORITHM => match parse_password_algorithm(v) {
+            // The attribute holds exactly one entry. Its parameter padding is
+            // normally the attribute padding, but accept it inside the
+            // attribute length too.
+            Some((algorithm, params, consumed))
+                if consumed == v.len() || consumed.next_multiple_of(4) == v.len() =>
+            {
+                push_password_algorithm(
+                    algorithm,
+                    params,
+                    off,
+                    &ATTR_CHILD_FIELDS[AFD_ALGORITHM..=AFD_ALGORITHM_PARAMETERS],
+                    buf,
+                );
+                true
+            }
+            _ => false,
+        },
+        // RFC 8489, Section 14.11 — https://www.rfc-editor.org/rfc/rfc8489#section-14.11
+        ATTR_PASSWORD_ALGORITHMS => {
+            // Validate the whole list before pushing anything. The padding
+            // of the last entry may be the attribute padding.
+            let mut pos = 0;
+            while pos < v.len() {
+                match parse_password_algorithm(&v[pos..]) {
+                    Some((_, _, consumed)) => pos = (pos + consumed).next_multiple_of(4),
+                    None => return false,
+                }
+            }
+            let idx = buf.begin_container(
+                f(AFD_ALGORITHMS),
+                FieldValue::Array(0..0),
+                off..off + v.len(),
+            );
+            let mut pos = 0;
+            while let Some((algorithm, params, consumed)) =
+                v.get(pos..).and_then(parse_password_algorithm)
+            {
+                let at = off + pos;
+                let entry = buf.begin_container(
+                    &FD_PASSWORD_ALGORITHM_ENTRY,
+                    FieldValue::Object(0..0),
+                    at..at + consumed,
+                );
+                push_password_algorithm(
+                    algorithm,
+                    params,
+                    at,
+                    PASSWORD_ALGORITHM_ENTRY_FIELDS,
+                    buf,
+                );
+                buf.end_container(entry);
+                pos = (pos + consumed).next_multiple_of(4);
+            }
+            buf.end_container(idx);
+            true
+        }
+        // RFC 8656, Section 18.1 — "a 16-bit unsigned integer followed by a
+        // two-octet RFFU".
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.1
+        ATTR_CHANNEL_NUMBER if v.len() == 4 => {
+            let n = read_be_u16(v, 0).unwrap_or_default();
+            buf.push_field(f(AFD_CHANNEL_NUMBER), FieldValue::U16(n), off..off + 2);
+            true
+        }
+        // RFC 8656, Section 18.2 — https://www.rfc-editor.org/rfc/rfc8656#section-18.2
+        ATTR_LIFETIME => push_u32(v, off, f(AFD_LIFETIME), buf),
+        // RFC 8656, Section 18.4 — https://www.rfc-editor.org/rfc/rfc8656#section-18.4
+        ATTR_DATA => {
+            buf.push_field(f(AFD_DATA), FieldValue::Bytes(v), off..off + v.len());
+            true
+        }
+        // RFC 8656, Sections 18.6, 18.11 — Family(8) + Reserved(24).
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.6
+        ATTR_REQUESTED_ADDRESS_FAMILY | ATTR_ADDITIONAL_ADDRESS_FAMILY if v.len() == 4 => {
+            buf.push_field(f(AFD_FAMILY), FieldValue::U8(v[0]), off..off + 1);
+            true
+        }
+        // RFC 8656, Section 18.7 — "The value portion of this attribute is 1
+        // byte long." R is the most significant bit.
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.7
+        ATTR_EVEN_PORT if v.len() == 1 => {
+            buf.push_field(f(AFD_RESERVE_NEXT), FieldValue::U8(v[0] >> 7), off..off + 1);
+            true
+        }
+        // RFC 8656, Section 18.8 — Protocol(8) + RFFU(24).
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.8
+        ATTR_REQUESTED_TRANSPORT if v.len() == 4 => {
+            buf.push_field(f(AFD_PROTOCOL), FieldValue::U8(v[0]), off..off + 1);
+            true
+        }
+        // RFC 8656, Section 18.9 — "This attribute has no value part";
+        // RFC 8445, Section 16.1 — USE-CANDIDATE "has no content".
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.9
+        // https://www.rfc-editor.org/rfc/rfc8445#section-16.1
+        ATTR_DONT_FRAGMENT | ATTR_USE_CANDIDATE => v.is_empty(),
+        // RFC 8656, Section 18.10 — "The attribute value is 8 bytes".
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.10
+        ATTR_RESERVATION_TOKEN if v.len() == 8 => {
+            buf.push_field(f(AFD_TOKEN), FieldValue::Bytes(v), off..off + 8);
+            true
+        }
+        // RFC 8656, Section 18.12 — https://www.rfc-editor.org/rfc/rfc8656#section-18.12
+        ATTR_ADDRESS_ERROR_CODE => push_error_code(v, off, true, buf),
+        // RFC 8656, Section 18.13 — Reserved(16), ICMP Type, ICMP Code,
+        // Error Data(32).
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.13
+        ATTR_ICMP if v.len() == 8 => {
+            let error_data = read_be_u32(v, 4).unwrap_or_default();
+            buf.push_field(f(AFD_ICMP_TYPE), FieldValue::U8(v[2]), off + 2..off + 3);
+            buf.push_field(f(AFD_ICMP_CODE), FieldValue::U8(v[3]), off + 3..off + 4);
+            buf.push_field(
+                f(AFD_ERROR_DATA),
+                FieldValue::U32(error_data),
+                off + 4..off + 8,
+            );
+            true
+        }
+        // RFC 6062, Section 6.2.1 — "a 32-bit unsigned integral value".
+        // https://www.rfc-editor.org/rfc/rfc6062#section-6.2.1
+        ATTR_CONNECTION_ID => push_u32(v, off, f(AFD_CONNECTION_ID), buf),
+        // RFC 8445, Section 16.1 — PRIORITY "is a 32-bit unsigned integer";
+        // ICE-CONTROLLED / ICE-CONTROLLING carry "a 64-bit unsigned integer".
+        // https://www.rfc-editor.org/rfc/rfc8445#section-16.1
+        ATTR_PRIORITY => push_u32(v, off, f(AFD_PRIORITY), buf),
+        ATTR_ICE_CONTROLLED | ATTR_ICE_CONTROLLING if v.len() == 8 => {
+            let tie_breaker = read_be_u64(v, 0).unwrap_or_default();
+            buf.push_field(
+                f(AFD_TIE_BREAKER),
+                FieldValue::U64(tie_breaker),
+                off..off + 8,
+            );
+            true
+        }
+        // RFC 5780, Section 7.2 — 32 bits, A ("change IP") and B ("change
+        // port") are bits 29 and 30 of the value.
+        // https://www.rfc-editor.org/rfc/rfc5780#section-7.2
+        ATTR_CHANGE_REQUEST if v.len() == 4 => {
+            buf.push_field(
+                f(AFD_CHANGE_IP),
+                FieldValue::U8((v[3] >> 2) & 1),
+                off + 3..off + 4,
+            );
+            buf.push_field(
+                f(AFD_CHANGE_PORT),
+                FieldValue::U8((v[3] >> 1) & 1),
+                off + 3..off + 4,
+            );
+            true
+        }
+        // RFC 5780, Section 7.5 — "a 16-bit unsigned integer in network byte
+        // order followed by 2 bytes of padding."
+        // https://www.rfc-editor.org/rfc/rfc5780#section-7.5
+        ATTR_RESPONSE_PORT if v.len() == 4 => {
+            let port = read_be_u16(v, 0).unwrap_or_default();
+            buf.push_field(f(AFD_PORT), FieldValue::U16(port), off..off + 2);
+            true
+        }
+        // RFC 5780, Section 7.6 — "PADDING consists entirely of a free-form
+        // string, the value of which does not matter."
+        // https://www.rfc-editor.org/rfc/rfc5780#section-7.6
+        ATTR_PADDING => {
+            buf.push_field(f(AFD_PADDING), FieldValue::Bytes(v), off..off + v.len());
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Push a 4-byte unsigned value.
+fn push_u32<'pkt>(
+    v: &'pkt [u8],
+    off: usize,
+    descriptor: &'static FieldDescriptor,
+    buf: &mut DissectBuffer<'pkt>,
+) -> bool {
+    match read_be_u32(v, 0) {
+        Ok(value) if v.len() == 4 => {
+            buf.push_field(descriptor, FieldValue::U32(value), off..off + 4);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Push a (XOR-)MAPPED-ADDRESS style transport address.
+///
+/// RFC 8489, Section 14.1 — "If the address family is IPv4, the address MUST
+/// be 32 bits.  If the address family is IPv6, the address MUST be 128 bits."
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-14.1>.
+///
+/// `key` is XORed onto the port and address: all zeros for a plain address,
+/// or the magic cookie followed by the transaction ID for the XOR- attributes
+/// (see [`xor_key`]).
+fn push_address<'pkt>(
+    v: &'pkt [u8],
+    off: usize,
+    key: &[u8; 16],
+    buf: &mut DissectBuffer<'pkt>,
+) -> bool {
+    let family = match v.get(1) {
+        Some(&FAMILY_IPV4) if v.len() == 8 => FAMILY_IPV4,
+        Some(&FAMILY_IPV6) if v.len() == 20 => FAMILY_IPV6,
+        _ => return false,
+    };
+    let port = u16::from_be_bytes([v[2] ^ key[0], v[3] ^ key[1]]);
+    let mut raw = [0u8; 16];
+    for ((b, x), k) in raw.iter_mut().zip(&v[4..]).zip(key) {
+        *b = x ^ k;
+    }
+    let address = if family == FAMILY_IPV4 {
+        FieldValue::Ipv4Addr([raw[0], raw[1], raw[2], raw[3]])
+    } else {
+        FieldValue::Ipv6Addr(raw)
+    };
+    buf.push_field(
+        &ATTR_CHILD_FIELDS[AFD_FAMILY],
+        FieldValue::U8(family),
+        off + 1..off + 2,
+    );
+    buf.push_field(
+        &ATTR_CHILD_FIELDS[AFD_PORT],
+        FieldValue::U16(port),
+        off + 2..off + 4,
+    );
+    buf.push_field(
+        &ATTR_CHILD_FIELDS[AFD_ADDRESS],
+        address,
+        off + 4..off + v.len(),
+    );
+    true
+}
+
+/// XOR key for the XOR- address attributes.
+///
+/// RFC 8489, Section 14.2 — "X-Port is computed by XOR'ing the mapped port
+/// with the most significant 16 bits of the magic cookie.  If the IP address
+/// family is IPv4, X-Address is computed by XOR'ing the mapped IP address with
+/// the magic cookie.  If the IP address family is IPv6, X-Address is computed
+/// by XOR'ing the mapped IP address with the concatenation of the magic cookie
+/// and the 96-bit transaction ID."
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-14.2>.
+fn xor_key(transaction_id: &[u8]) -> Option<[u8; 16]> {
+    let mut key = [0u8; 16];
+    key[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
+    key[4..].copy_from_slice(transaction_id.get(..12)?);
+    Some(key)
+}
+
+/// Push ERROR-CODE (or, with `family`, ADDRESS-ERROR-CODE) fields.
+///
+/// RFC 8489, Section 14.8 — "The Class represents the hundreds digit of the
+/// error code.  The value MUST be between 3 and 6.  The Number represents the
+/// binary encoding of the error code modulo 100, and its value MUST be between
+/// 0 and 99."
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-14.8>.
+/// RFC 8656, Section 18.12 — ADDRESS-ERROR-CODE carries a Family in the first
+/// byte. <https://www.rfc-editor.org/rfc/rfc8656#section-18.12>.
+fn push_error_code<'pkt>(
+    v: &'pkt [u8],
+    off: usize,
+    family: bool,
+    buf: &mut DissectBuffer<'pkt>,
+) -> bool {
+    if v.len() < 4 {
+        return false;
+    }
+    let class = v[2] & 0x07;
+    let number = v[3];
+    if !(3..=6).contains(&class) || number > 99 {
+        return false;
+    }
+    let Ok(reason) = core::str::from_utf8(&v[4..]) else {
+        return false;
+    };
+    if family {
+        buf.push_field(
+            &ATTR_CHILD_FIELDS[AFD_FAMILY],
+            FieldValue::U8(v[0]),
+            off..off + 1,
+        );
+    }
+    let code = u16::from(class) * 100 + u16::from(number);
+    buf.push_field(
+        &ATTR_CHILD_FIELDS[AFD_ERROR_CODE],
+        FieldValue::U16(code),
+        off + 2..off + 4,
+    );
+    buf.push_field(
+        &ATTR_CHILD_FIELDS[AFD_REASON],
+        FieldValue::Str(reason),
+        off + 4..off + v.len(),
+    );
+    true
+}
+
+/// Parse one algorithm entry: Algorithm(16) + Parameters Length(16) +
+/// Parameters. Returns the algorithm, the parameters and the unpadded size.
+///
+/// RFC 8489, Section 14.11 — "The parameters start with the length (prior to
+/// padding) of the parameters as a 16-bit value, followed by the parameters
+/// that are specific to each algorithm.  The parameters are padded to a
+/// 32-bit boundary, in the same manner as an attribute."
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-14.11>.
+fn parse_password_algorithm(v: &[u8]) -> Option<(u16, &[u8], usize)> {
+    let algorithm = read_be_u16(v, 0).ok()?;
+    let len = usize::from(read_be_u16(v, 2).ok()?);
+    let params = v.get(4..4 + len)?;
+    Some((algorithm, params, 4 + len))
+}
+
+/// Push `algorithm` and `algorithm_parameters` for one entry at `at`.
+fn push_password_algorithm<'pkt>(
+    algorithm: u16,
+    params: &'pkt [u8],
+    at: usize,
+    fields: &'static [FieldDescriptor],
+    buf: &mut DissectBuffer<'pkt>,
+) {
+    buf.push_field(&fields[0], FieldValue::U16(algorithm), at..at + 2);
+    buf.push_field(
+        &fields[1],
+        FieldValue::Bytes(params),
+        at + 4..at + 4 + params.len(),
+    );
 }
 
 /// STUN dissector.
@@ -320,6 +1053,26 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 5389",
         "Session Traversal Utilities for NAT (STUN), Section 12: Backwards Compatibility with RFC 3489",
         "https://www.rfc-editor.org/rfc/rfc5389#section-12",
+    ),
+    SpecReference::new(
+        "RFC 8656",
+        "Traversal Using Relays around NAT (TURN), Sections 17-19: Methods, Attributes, Error Codes",
+        "https://www.rfc-editor.org/rfc/rfc8656#section-17",
+    ),
+    SpecReference::new(
+        "RFC 6062",
+        "TURN Extensions for TCP Allocations, Section 6",
+        "https://www.rfc-editor.org/rfc/rfc6062#section-6",
+    ),
+    SpecReference::new(
+        "RFC 8445",
+        "Interactive Connectivity Establishment (ICE), Section 16",
+        "https://www.rfc-editor.org/rfc/rfc8445#section-16",
+    ),
+    SpecReference::new(
+        "RFC 5780",
+        "NAT Behavior Discovery Using STUN, Section 7",
+        "https://www.rfc-editor.org/rfc/rfc5780#section-7",
     ),
 ];
 
@@ -542,7 +1295,12 @@ fn dissect_stun<'pkt>(
             FieldValue::Array(0..0),
             offset + HEADER_SIZE..offset + total_len,
         );
-        push_attrs(attr_data, offset + HEADER_SIZE, buf);
+        let key = if classic {
+            None
+        } else {
+            xor_key(&data[8..HEADER_SIZE])
+        };
+        push_attrs(attr_data, offset + HEADER_SIZE, key.as_ref(), buf);
         buf.end_container(array_idx);
     }
 
@@ -744,6 +1502,7 @@ fn dissect_channeldata<'pkt>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use packet_dissector_core::field::Field;
 
     // # RFC 8489 Coverage
     //
@@ -766,7 +1525,54 @@ mod tests {
     // | 14          | Multiple attributes                   | test_multiple_attributes                |
     // | 14          | 4-byte attribute padding              | test_attribute_with_non_aligned_length  |
     // | 18.2        | Method: Binding (0x001)               | test_parse_binding_request              |
+    // | 18.2        | Method: Binding (0x001)               | test_method_names                       |
     // | 18.3        | Attribute Registry (codes & names)    | test_attribute_type_name_lookup         |
+    //
+    // # STUN attribute value coverage (RFC 8489, RFC 8656, RFC 6062, RFC 8445, RFC 5780)
+    //
+    // | RFC Section      | Description                              | Test                                        |
+    // |------------------|------------------------------------------|---------------------------------------------|
+    // | 5769 2.1         | Sample request (SOFTWARE, PRIORITY,      | test_rfc5769_sample_request                 |
+    // |                  | ICE-CONTROLLED, USERNAME, M-I, FP)       |                                             |
+    // | 5769 2.2         | Sample IPv4 response (XOR-MAPPED-ADDRESS)| test_rfc5769_sample_ipv4_response           |
+    // | 5769 2.3         | Sample IPv6 response (XOR-MAPPED-ADDRESS)| test_rfc5769_sample_ipv6_response           |
+    // | 5769 2.4         | Long-term auth (USERNAME, NONCE, REALM)  | test_rfc5769_long_term_auth_request         |
+    // | 8489 14.1        | MAPPED-ADDRESS (IPv4 / IPv6)             | test_mapped_address_ipv4, _ipv6             |
+    // | 8489 14.1        | Unknown family / bad length → raw value  | test_address_malformed_falls_back_to_raw    |
+    // | 8489 14.4        | USERHASH                                 | test_userhash                               |
+    // | 8489 14.6        | MESSAGE-INTEGRITY-SHA256                 | test_message_integrity_sha256               |
+    // | 8489 14.8        | ERROR-CODE                               | test_error_code                             |
+    // | 8489 14.8        | ERROR-CODE with invalid class → raw      | test_error_code_malformed                   |
+    // | 8489 14.11       | PASSWORD-ALGORITHMS                      | test_password_algorithms                    |
+    // | 8489 14.12       | PASSWORD-ALGORITHM                       | test_password_algorithm                     |
+    // | 8489 14.13       | UNKNOWN-ATTRIBUTES                       | test_unknown_attributes                     |
+    // | 8489 14.15       | ALTERNATE-SERVER                         | test_alternate_server                       |
+    // | 8489 14.16       | ALTERNATE-DOMAIN                         | test_alternate_domain                       |
+    // | 8489 14.3        | Invalid UTF-8 text → raw value           | test_text_invalid_utf8_falls_back_to_raw    |
+    // | 8489 18.3        | Unknown attribute keeps raw value        | test_unknown_attribute_raw_value            |
+    // | 8656 17          | TURN method names                        | test_method_names                           |
+    // | 8656 18.1        | CHANNEL-NUMBER                           | test_turn_channel_number                    |
+    // | 8656 18.2        | LIFETIME                                 | test_turn_lifetime                          |
+    // | 8656 18.3        | XOR-PEER-ADDRESS                         | test_turn_xor_peer_and_relayed_address      |
+    // | 8656 18.4        | DATA                                     | test_turn_data                              |
+    // | 8656 18.5        | XOR-RELAYED-ADDRESS                      | test_turn_xor_peer_and_relayed_address      |
+    // | 8656 18.6        | REQUESTED-ADDRESS-FAMILY                 | test_turn_address_family_attributes         |
+    // | 8656 18.7        | EVEN-PORT                                | test_turn_even_port                         |
+    // | 8656 18.8        | REQUESTED-TRANSPORT                      | test_turn_requested_transport               |
+    // | 8656 18.9        | DONT-FRAGMENT                            | test_empty_flag_attributes                  |
+    // | 8656 18.10       | RESERVATION-TOKEN                        | test_turn_reservation_token                 |
+    // | 8656 18.11       | ADDITIONAL-ADDRESS-FAMILY                | test_turn_address_family_attributes         |
+    // | 8656 18.12       | ADDRESS-ERROR-CODE                       | test_turn_address_error_code                |
+    // | 8656 18.13       | ICMP                                     | test_turn_icmp                              |
+    // | 6062 6.1         | TURN-TCP method names                    | test_method_names                           |
+    // | 6062 6.2.1       | CONNECTION-ID                            | test_connection_id                          |
+    // | 8445 16.1        | PRIORITY / ICE-CONTROLLED                | test_rfc5769_sample_request                 |
+    // | 8445 16.1        | USE-CANDIDATE                            | test_empty_flag_attributes                  |
+    // | 8445 16.1        | ICE-CONTROLLING                          | test_ice_controlling                        |
+    // | 5780 7.2         | CHANGE-REQUEST                           | test_change_request                         |
+    // | 5780 7.3, 7.4    | RESPONSE-ORIGIN / OTHER-ADDRESS          | test_response_origin_and_other_address      |
+    // | 5780 7.5         | RESPONSE-PORT                            | test_response_port                          |
+    // | 5780 7.6         | PADDING                                  | test_padding_attribute                      |
     //
     // # RFC 5389 / RFC 8489 Classic STUN (RFC 3489) Coverage
     //
@@ -778,6 +1584,7 @@ mod tests {
     // | 5389 12          | Classic length must match datagram     | test_classic_length_mismatch_rejected     |
     // | 5389 12          | Truncated classic message              | test_classic_truncated                    |
     // | 5389 12          | Classic STUN is UDP only               | test_classic_rejected_over_stream         |
+    // | 5389 12          | No XOR- decoding without magic cookie  | test_classic_xor_attribute_stays_raw      |
     //
     // # RFC 8656 (TURN) ChannelData Coverage
     //
@@ -942,11 +1749,12 @@ mod tests {
             let fields = buf.nested_fields(&obj_range);
             let type_field = fields.iter().find(|f| f.name() == "type").unwrap();
             assert_eq!(type_field.value, FieldValue::U16(0x0020));
-            let value_field = fields.iter().find(|f| f.name() == "value").unwrap();
-            assert_eq!(
-                value_field.value,
-                FieldValue::Bytes(&[0x00, 0x01, 0xA1, 0x47, 0xE1, 0x12, 0xA6, 0x43])
-            );
+            // Decoded with the header's cookie and transaction ID.
+            let port = fields.iter().find(|f| f.name() == "port").unwrap();
+            // X-Port 0xA147 XOR 0x2112 (RFC 5769, Section 2.2 —
+            // https://www.rfc-editor.org/rfc/rfc5769#section-2.2).
+            assert_eq!(port.value, FieldValue::U16(0x8055));
+            assert!(fields.iter().all(|f| f.name() != "value"));
         } else {
             panic!("expected Array");
         }
@@ -1128,11 +1936,8 @@ mod tests {
             let fields1 = buf.nested_fields(&obj1);
             let type_field = fields1.iter().find(|f| f.name() == "type").unwrap();
             assert_eq!(type_field.value, FieldValue::U16(0x8028));
-            let value_field = fields1.iter().find(|f| f.name() == "value").unwrap();
-            assert_eq!(
-                value_field.value,
-                FieldValue::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF])
-            );
+            let crc = fields1.iter().find(|f| f.name() == "crc32").unwrap();
+            assert_eq!(crc.value, FieldValue::U32(0xDEAD_BEEF));
         } else {
             panic!("expected Array");
         }
@@ -1189,7 +1994,40 @@ mod tests {
         // Reserved or unassigned codepoints return None.
         assert_eq!(attribute_type_name(0x0000), None);
         assert_eq!(attribute_type_name(0x0002), None);
-        assert_eq!(attribute_type_name(0x802B), None);
+        assert_eq!(attribute_type_name(0x0010), None);
+        // TURN (https://www.rfc-editor.org/rfc/rfc8656#section-18) and
+        // RFC 6062 (https://www.rfc-editor.org/rfc/rfc6062#section-6.2).
+        assert_eq!(attribute_type_name(0x000C), Some("CHANNEL-NUMBER"));
+        assert_eq!(attribute_type_name(0x000D), Some("LIFETIME"));
+        assert_eq!(attribute_type_name(0x0012), Some("XOR-PEER-ADDRESS"));
+        assert_eq!(attribute_type_name(0x0013), Some("DATA"));
+        assert_eq!(attribute_type_name(0x0016), Some("XOR-RELAYED-ADDRESS"));
+        assert_eq!(
+            attribute_type_name(0x0017),
+            Some("REQUESTED-ADDRESS-FAMILY")
+        );
+        assert_eq!(attribute_type_name(0x0018), Some("EVEN-PORT"));
+        assert_eq!(attribute_type_name(0x0019), Some("REQUESTED-TRANSPORT"));
+        assert_eq!(attribute_type_name(0x001A), Some("DONT-FRAGMENT"));
+        assert_eq!(attribute_type_name(0x0022), Some("RESERVATION-TOKEN"));
+        assert_eq!(attribute_type_name(0x002A), Some("CONNECTION-ID"));
+        assert_eq!(
+            attribute_type_name(0x8000),
+            Some("ADDITIONAL-ADDRESS-FAMILY")
+        );
+        assert_eq!(attribute_type_name(0x8001), Some("ADDRESS-ERROR-CODE"));
+        assert_eq!(attribute_type_name(0x8004), Some("ICMP"));
+        // ICE (https://www.rfc-editor.org/rfc/rfc8445#section-16.1).
+        assert_eq!(attribute_type_name(0x0024), Some("PRIORITY"));
+        assert_eq!(attribute_type_name(0x0025), Some("USE-CANDIDATE"));
+        assert_eq!(attribute_type_name(0x8029), Some("ICE-CONTROLLED"));
+        assert_eq!(attribute_type_name(0x802A), Some("ICE-CONTROLLING"));
+        // NAT behavior discovery (https://www.rfc-editor.org/rfc/rfc5780#section-7).
+        assert_eq!(attribute_type_name(0x0003), Some("CHANGE-REQUEST"));
+        assert_eq!(attribute_type_name(0x0026), Some("PADDING"));
+        assert_eq!(attribute_type_name(0x0027), Some("RESPONSE-PORT"));
+        assert_eq!(attribute_type_name(0x802B), Some("RESPONSE-ORIGIN"));
+        assert_eq!(attribute_type_name(0x802C), Some("OTHER-ADDRESS"));
         assert_eq!(attribute_type_name(0xFFFF), None);
     }
 
@@ -1209,8 +2047,9 @@ mod tests {
             let fields = buf.nested_fields(&obj_range);
             let len_field = fields.iter().find(|f| f.name() == "length").unwrap();
             assert_eq!(len_field.value, FieldValue::U16(3));
-            let value_field = fields.iter().find(|f| f.name() == "value").unwrap();
-            assert_eq!(value_field.value, FieldValue::Bytes(b"abc"));
+            let text = fields.iter().find(|f| f.name() == "text").unwrap();
+            assert_eq!(text.value, FieldValue::Str("abc"));
+            assert_eq!(text.range, 24..27);
         } else {
             panic!("expected Array");
         }
@@ -1265,6 +2104,623 @@ mod tests {
         let mut buf = DissectBuffer::new();
         StunDissector.dissect(&data, &mut buf, 0).unwrap();
         assert!(buf.field_by_name(&buf.layers()[0], "attributes").is_none());
+    }
+
+    // --- Attribute values ----------------------------------------------------
+
+    /// Transaction ID of the RFC 5769 Section 2.1-2.3 test vectors
+    /// (<https://www.rfc-editor.org/rfc/rfc5769#section-2>).
+    const RFC5769_TID: [u8; 12] = [
+        0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xae,
+    ];
+
+    /// Parse a hex dump (whitespace separated) into bytes.
+    fn hex(s: &str) -> Vec<u8> {
+        s.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    /// Fields of the `index`th attribute object.
+    fn attr<'a>(buf: &'a DissectBuffer<'a>, index: usize) -> &'a [Field<'a>] {
+        let layer = &buf.layers()[0];
+        let FieldValue::Array(ref array_range) =
+            buf.field_by_name(layer, "attributes").unwrap().value
+        else {
+            panic!("expected Array");
+        };
+        let obj = nth_object_range(buf, array_range, index);
+        buf.nested_fields(&obj)
+    }
+
+    fn get<'a>(fields: &'a [Field<'a>], name: &str) -> Option<&'a FieldValue<'a>> {
+        fields.iter().find(|f| f.name() == name).map(|f| &f.value)
+    }
+
+    /// Resolve a child's display name via its descriptor's `display_fn`.
+    fn display<'a>(fields: &'a [Field<'a>], name: &str) -> Option<&'static str> {
+        let field = fields.iter().find(|f| f.name() == name)?;
+        (field.descriptor.display_fn?)(&field.value, fields)
+    }
+
+    /// Dissect a single-attribute message and return the buffer.
+    fn dissect_one(class: u8, method: u16, attr_type: u16, value: &[u8]) -> DissectBuffer<'static> {
+        let data: &'static [u8] =
+            Box::leak(build_stun(class, method, &build_attr(attr_type, value)).into_boxed_slice());
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(data, &mut buf, 0).unwrap();
+        buf
+    }
+
+    #[test]
+    fn test_rfc5769_sample_request() {
+        let data = hex("00 01 00 58 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae
+             80 22 00 10 53 54 55 4e 20 74 65 73 74 20 63 6c 69 65 6e 74
+             00 24 00 04 6e 00 01 ff
+             80 29 00 08 93 2f f9 b1 51 26 3b 36
+             00 06 00 09 65 76 74 6a 3a 68 36 76 59 20 20 20
+             00 08 00 14 9a ea a7 0c bf d8 cb 56 78 1e f2 b5 b2 d3 f2 49 c1 b5 71 a2
+             80 28 00 04 e5 7a 3b cf");
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let software = attr(&buf, 0);
+        assert_eq!(
+            get(software, "text"),
+            Some(&FieldValue::Str("STUN test client"))
+        );
+        assert!(get(software, "value").is_none());
+        let priority = attr(&buf, 1);
+        assert_eq!(
+            get(priority, "priority"),
+            Some(&FieldValue::U32(0x6e00_01ff))
+        );
+        let controlled = attr(&buf, 2);
+        assert_eq!(
+            get(controlled, "tie_breaker"),
+            Some(&FieldValue::U64(0x932f_f9b1_5126_3b36))
+        );
+        let username = attr(&buf, 3);
+        assert_eq!(get(username, "text"), Some(&FieldValue::Str("evtj:h6vY")));
+        let integrity = attr(&buf, 4);
+        assert_eq!(
+            get(integrity, "hmac"),
+            Some(&FieldValue::Bytes(&data[80..100]))
+        );
+        let fingerprint = attr(&buf, 5);
+        assert_eq!(
+            get(fingerprint, "crc32"),
+            Some(&FieldValue::U32(0xe57a_3bcf))
+        );
+    }
+
+    #[test]
+    fn test_rfc5769_sample_ipv4_response() {
+        let data = hex("01 01 00 3c 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae
+             80 22 00 0b 74 65 73 74 20 76 65 63 74 6f 72 20
+             00 20 00 08 00 01 a1 47 e1 12 a6 43
+             00 08 00 14 2b 91 f5 99 fd 9e 90 c3 8c 74 89 f9 2a f9 ba 53 f0 6b e7 d7
+             80 28 00 04 c0 7d 4c 96");
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            get(attr(&buf, 0), "text"),
+            Some(&FieldValue::Str("test vector"))
+        );
+        let xma = attr(&buf, 1);
+        assert_eq!(get(xma, "family"), Some(&FieldValue::U8(1)));
+        assert_eq!(display(xma, "family"), Some("IPv4"));
+        assert_eq!(get(xma, "port"), Some(&FieldValue::U16(32853)));
+        assert_eq!(
+            get(xma, "address"),
+            Some(&FieldValue::Ipv4Addr([192, 0, 2, 1]))
+        );
+        assert!(get(xma, "value").is_none());
+        let address = xma.iter().find(|f| f.name() == "address").unwrap();
+        assert_eq!(address.range, 44..48);
+    }
+
+    #[test]
+    fn test_rfc5769_sample_ipv6_response() {
+        let data = hex("01 01 00 48 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae
+             80 22 00 0b 74 65 73 74 20 76 65 63 74 6f 72 20
+             00 20 00 14 00 02 a1 47 01 13 a9 fa a5 d3 f1 79 bc 25 f4 b5 be d2 b9 d9
+             00 08 00 14 a3 82 95 4e 4b e6 7b f1 17 84 c9 7c 82 92 c2 75 bf e3 ed 41
+             80 28 00 04 c8 fb 0b 4c");
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            buf.field_by_name(&buf.layers()[0], "transaction_id")
+                .unwrap()
+                .value,
+            FieldValue::Bytes(&RFC5769_TID)
+        );
+        let xma = attr(&buf, 1);
+        assert_eq!(get(xma, "family"), Some(&FieldValue::U8(2)));
+        assert_eq!(display(xma, "family"), Some("IPv6"));
+        assert_eq!(get(xma, "port"), Some(&FieldValue::U16(32853)));
+        assert_eq!(
+            get(xma, "address"),
+            Some(&FieldValue::Ipv6Addr([
+                0x20, 0x01, 0x0d, 0xb8, 0x12, 0x34, 0x56, 0x78, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+                0x66, 0x77
+            ]))
+        );
+        assert_eq!(
+            get(attr(&buf, 3), "crc32"),
+            Some(&FieldValue::U32(0xc8fb_0b4c))
+        );
+    }
+
+    #[test]
+    fn test_rfc5769_long_term_auth_request() {
+        let data = hex("00 01 00 60 21 12 a4 42 78 ad 34 33 c6 ad 72 c0 29 da 41 2e
+             00 06 00 12 e3 83 9e e3 83 88 e3 83 aa e3 83 83 e3 82 af e3 82 b9 00 00
+             00 15 00 1c 66 2f 2f 34 39 39 6b 39 35 34 64 36 4f 4c 33 34 6f 4c 39 46
+                         53 54 76 79 36 34 73 41
+             00 14 00 0b 65 78 61 6d 70 6c 65 2e 6f 72 67 00
+             00 08 00 14 f6 70 24 65 6d d6 4a 3e 02 b8 e0 71 2e 85 c9 a2 8c a8 96 66");
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        assert_eq!(
+            get(attr(&buf, 0), "text"),
+            Some(&FieldValue::Str(
+                "\u{30DE}\u{30C8}\u{30EA}\u{30C3}\u{30AF}\u{30B9}"
+            ))
+        );
+        assert_eq!(
+            get(attr(&buf, 1), "text"),
+            Some(&FieldValue::Str("f//499k954d6OL34oL9FSTvy64sA"))
+        );
+        assert_eq!(
+            get(attr(&buf, 2), "text"),
+            Some(&FieldValue::Str("example.org"))
+        );
+    }
+
+    #[test]
+    fn test_mapped_address_ipv4() {
+        let buf = dissect_one(0b10, 0x001, 0x0001, &[0x00, 0x01, 0x80, 0x55, 192, 0, 2, 1]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "port"), Some(&FieldValue::U16(0x8055)));
+        assert_eq!(
+            get(a, "address"),
+            Some(&FieldValue::Ipv4Addr([192, 0, 2, 1]))
+        );
+    }
+
+    #[test]
+    fn test_mapped_address_ipv6() {
+        let mut v = vec![0x00, 0x02, 0x12, 0x34];
+        v.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let buf = dissect_one(0b10, 0x001, 0x0001, &v);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "port"), Some(&FieldValue::U16(0x1234)));
+        assert_eq!(
+            get(a, "address"),
+            Some(&FieldValue::Ipv6Addr([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_address_malformed_falls_back_to_raw() {
+        // Unknown family.
+        let buf = dissect_one(0b10, 0x001, 0x0020, &[0x00, 0x03, 0xa1, 0x47, 0, 0, 0, 0]);
+        let a = attr(&buf, 0);
+        assert!(get(a, "address").is_none());
+        assert_eq!(
+            get(a, "value"),
+            Some(&FieldValue::Bytes(&[0x00, 0x03, 0xa1, 0x47, 0, 0, 0, 0]))
+        );
+        // IPv6 family with an IPv4-sized value.
+        let buf = dissect_one(0b10, 0x001, 0x0001, &[0x00, 0x02, 0xa1, 0x47, 0, 0, 0, 0]);
+        assert!(get(attr(&buf, 0), "value").is_some());
+    }
+
+    #[test]
+    fn test_text_invalid_utf8_falls_back_to_raw() {
+        let buf = dissect_one(0b00, 0x001, 0x0006, &[0xff, 0xfe]);
+        let a = attr(&buf, 0);
+        assert!(get(a, "text").is_none());
+        assert_eq!(get(a, "value"), Some(&FieldValue::Bytes(&[0xff, 0xfe])));
+    }
+
+    #[test]
+    fn test_unknown_attribute_raw_value() {
+        let buf = dissect_one(0b00, 0x001, 0x7fff, &[1, 2, 3]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "value"), Some(&FieldValue::Bytes(&[1, 2, 3])));
+    }
+
+    #[test]
+    fn test_userhash() {
+        let buf = dissect_one(0b00, 0x001, 0x001E, &[0xAB; 32]);
+        assert_eq!(
+            get(attr(&buf, 0), "userhash"),
+            Some(&FieldValue::Bytes(&[0xAB; 32]))
+        );
+    }
+
+    #[test]
+    fn test_message_integrity_sha256() {
+        let buf = dissect_one(0b00, 0x001, 0x001C, &[0xCD; 32]);
+        assert_eq!(
+            get(attr(&buf, 0), "hmac"),
+            Some(&FieldValue::Bytes(&[0xCD; 32]))
+        );
+    }
+
+    #[test]
+    fn test_error_code() {
+        let mut v = vec![0x00, 0x00, 0x04, 0x01];
+        v.extend_from_slice(b"Unauthorized");
+        let buf = dissect_one(0b11, 0x001, 0x0009, &v);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "error_code"), Some(&FieldValue::U16(401)));
+        assert_eq!(display(a, "error_code"), Some("Unauthenticated"));
+        assert_eq!(get(a, "reason"), Some(&FieldValue::Str("Unauthorized")));
+        // Empty reason phrase is valid.
+        let buf = dissect_one(0b11, 0x001, 0x0009, &[0x00, 0x00, 0x04, 0x26]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "error_code"), Some(&FieldValue::U16(438)));
+        assert_eq!(display(a, "error_code"), Some("Stale Nonce"));
+        assert_eq!(get(a, "reason"), Some(&FieldValue::Str("")));
+    }
+
+    #[test]
+    fn test_error_code_malformed() {
+        // Number 100 is out of range (MUST be 0-99).
+        let buf = dissect_one(0b11, 0x001, 0x0009, &[0x00, 0x00, 0x04, 100]);
+        let a = attr(&buf, 0);
+        assert!(get(a, "error_code").is_none());
+        assert!(get(a, "value").is_some());
+        // Too short.
+        let buf = dissect_one(0b11, 0x001, 0x0009, &[0x00, 0x00, 0x04]);
+        assert!(get(attr(&buf, 0), "value").is_some());
+    }
+
+    #[test]
+    fn test_error_code_names() {
+        for (code, name) in [
+            (300, "Try Alternate"),
+            (400, "Bad Request"),
+            (401, "Unauthenticated"),
+            (403, "Forbidden"),
+            (420, "Unknown Attribute"),
+            (437, "Allocation Mismatch"),
+            (438, "Stale Nonce"),
+            (440, "Address Family not Supported"),
+            (441, "Wrong Credentials"),
+            (442, "Unsupported Transport Protocol"),
+            (443, "Peer Address Family Mismatch"),
+            (446, "Connection Already Exists"),
+            (447, "Connection Timeout or Failure"),
+            (486, "Allocation Quota Reached"),
+            (487, "Role Conflict"),
+            (500, "Server Error"),
+            (508, "Insufficient Capacity"),
+        ] {
+            assert_eq!(error_code_name(code), Some(name), "{code}");
+        }
+        assert_eq!(error_code_name(499), None);
+    }
+
+    #[test]
+    fn test_unknown_attributes() {
+        let buf = dissect_one(0b11, 0x001, 0x000A, &[0x00, 0x1A, 0x7F, 0x00, 0x00, 0x25]);
+        let a = attr(&buf, 0);
+        let Some(FieldValue::Array(r)) = get(a, "attribute_types") else {
+            panic!("expected attribute_types array");
+        };
+        let types: Vec<_> = buf
+            .nested_fields(r)
+            .iter()
+            .map(|f| f.value.clone())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                FieldValue::U16(0x001A),
+                FieldValue::U16(0x7F00),
+                FieldValue::U16(0x0025)
+            ]
+        );
+        let first = &buf.nested_fields(r)[0];
+        assert_eq!(
+            (first.descriptor.display_fn.unwrap())(&first.value, &[]),
+            Some("DONT-FRAGMENT")
+        );
+        // Odd length is malformed.
+        let buf = dissect_one(0b11, 0x001, 0x000A, &[0x00, 0x1A, 0x7F]);
+        assert!(get(attr(&buf, 0), "value").is_some());
+    }
+
+    #[test]
+    fn test_password_algorithm() {
+        let buf = dissect_one(0b00, 0x001, 0x001D, &[0x00, 0x02, 0x00, 0x00]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "algorithm"), Some(&FieldValue::U16(2)));
+        assert_eq!(display(a, "algorithm"), Some("SHA-256"));
+        assert_eq!(
+            get(a, "algorithm_parameters"),
+            Some(&FieldValue::Bytes(&[]))
+        );
+        // Parameter padding counted in the attribute length is accepted.
+        let buf = dissect_one(
+            0b00,
+            0x001,
+            0x001D,
+            &[0x00, 0x01, 0x00, 0x01, 0xAA, 0, 0, 0],
+        );
+        let a = attr(&buf, 0);
+        assert_eq!(
+            get(a, "algorithm_parameters"),
+            Some(&FieldValue::Bytes(&[0xAA]))
+        );
+        // Parameters longer than the attribute are malformed.
+        let buf = dissect_one(0b00, 0x001, 0x001D, &[0x00, 0x01, 0x00, 0x08]);
+        assert!(get(attr(&buf, 0), "value").is_some());
+    }
+
+    #[test]
+    fn test_password_algorithms() {
+        // MD5 with 3 parameter bytes (padded to 4), then SHA-256 without.
+        let v = [
+            0x00, 0x01, 0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x02, 0x00, 0x00,
+        ];
+        let buf = dissect_one(0b10, 0x001, 0x8002, &v);
+        let a = attr(&buf, 0);
+        let Some(FieldValue::Array(r)) = get(a, "algorithms") else {
+            panic!("expected algorithms array");
+        };
+        let entries: Vec<_> = buf
+            .nested_fields(r)
+            .iter()
+            .filter_map(|f| match &f.value {
+                FieldValue::Object(o) => Some(o.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entries.len(), 2);
+        let first = buf.nested_fields(&entries[0]);
+        assert_eq!(get(first, "algorithm"), Some(&FieldValue::U16(1)));
+        assert_eq!(display(first, "algorithm"), Some("MD5"));
+        assert_eq!(
+            get(first, "algorithm_parameters"),
+            Some(&FieldValue::Bytes(&[0xAA, 0xBB, 0xCC]))
+        );
+        let second = buf.nested_fields(&entries[1]);
+        assert_eq!(get(second, "algorithm"), Some(&FieldValue::U16(2)));
+        // Truncated entry is malformed.
+        let buf = dissect_one(0b10, 0x001, 0x8002, &[0x00, 0x01, 0x00, 0x04, 0xAA]);
+        assert!(get(attr(&buf, 0), "value").is_some());
+    }
+
+    #[test]
+    fn test_alternate_server() {
+        let buf = dissect_one(0b11, 0x001, 0x8023, &[0x00, 0x01, 0x0D, 0x96, 10, 0, 0, 1]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "port"), Some(&FieldValue::U16(3478)));
+        assert_eq!(
+            get(a, "address"),
+            Some(&FieldValue::Ipv4Addr([10, 0, 0, 1]))
+        );
+    }
+
+    #[test]
+    fn test_alternate_domain() {
+        let buf = dissect_one(0b11, 0x001, 0x8003, b"turn.example.org");
+        assert_eq!(
+            get(attr(&buf, 0), "text"),
+            Some(&FieldValue::Str("turn.example.org"))
+        );
+    }
+
+    #[test]
+    fn test_method_names() {
+        for (m, name) in [
+            (0x001, "Binding"),
+            (0x003, "Allocate"),
+            (0x004, "Refresh"),
+            (0x006, "Send"),
+            (0x007, "Data"),
+            (0x008, "CreatePermission"),
+            (0x009, "ChannelBind"),
+            (0x00A, "Connect"),
+            (0x00B, "ConnectionBind"),
+            (0x00C, "ConnectionAttempt"),
+        ] {
+            assert_eq!(method_name(m), Some(name), "{m:#x}");
+        }
+        assert_eq!(method_name(0x000), None);
+        assert_eq!(method_name(0x002), None);
+        assert_eq!(method_name(0x005), None);
+
+        // Allocate request resolves its method name through the layer.
+        let data = build_stun(0b00, 0x003, &[]);
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(
+            buf.resolve_display_name(&buf.layers()[0], "message_method_name"),
+            Some("Allocate")
+        );
+    }
+
+    #[test]
+    fn test_turn_channel_number() {
+        let buf = dissect_one(0b00, 0x009, 0x000C, &[0x40, 0x01, 0x00, 0x00]);
+        assert_eq!(
+            get(attr(&buf, 0), "channel_number"),
+            Some(&FieldValue::U16(0x4001))
+        );
+    }
+
+    #[test]
+    fn test_turn_lifetime() {
+        let buf = dissect_one(0b10, 0x003, 0x000D, &[0x00, 0x00, 0x02, 0x58]);
+        assert_eq!(get(attr(&buf, 0), "lifetime"), Some(&FieldValue::U32(600)));
+    }
+
+    #[test]
+    fn test_turn_xor_peer_and_relayed_address() {
+        // 192.0.2.1:32853 XOR-encoded (RFC 8489, Section 14.2 —
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.2).
+        let v = [0x00, 0x01, 0xa1, 0x47, 0xe1, 0x12, 0xa6, 0x43];
+        for attr_type in [0x0012, 0x0016] {
+            let buf = dissect_one(0b10, 0x003, attr_type, &v);
+            let a = attr(&buf, 0);
+            assert_eq!(get(a, "port"), Some(&FieldValue::U16(32853)));
+            assert_eq!(
+                get(a, "address"),
+                Some(&FieldValue::Ipv4Addr([192, 0, 2, 1]))
+            );
+        }
+    }
+
+    #[test]
+    fn test_turn_data() {
+        let buf = dissect_one(0b01, 0x006, 0x0013, &[0x80, 0x60, 0x00]);
+        assert_eq!(
+            get(attr(&buf, 0), "data"),
+            Some(&FieldValue::Bytes(&[0x80, 0x60, 0x00]))
+        );
+    }
+
+    #[test]
+    fn test_turn_address_family_attributes() {
+        for attr_type in [0x0017, 0x8000] {
+            let buf = dissect_one(0b00, 0x003, attr_type, &[0x02, 0x00, 0x00, 0x00]);
+            let a = attr(&buf, 0);
+            assert_eq!(get(a, "family"), Some(&FieldValue::U8(2)));
+            assert_eq!(display(a, "family"), Some("IPv6"));
+        }
+    }
+
+    #[test]
+    fn test_turn_even_port() {
+        let buf = dissect_one(0b00, 0x003, 0x0018, &[0x80]);
+        assert_eq!(get(attr(&buf, 0), "reserve_next"), Some(&FieldValue::U8(1)));
+        let buf = dissect_one(0b00, 0x003, 0x0018, &[0x7F]);
+        assert_eq!(get(attr(&buf, 0), "reserve_next"), Some(&FieldValue::U8(0)));
+    }
+
+    #[test]
+    fn test_turn_requested_transport() {
+        let buf = dissect_one(0b00, 0x003, 0x0019, &[17, 0, 0, 0]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "protocol"), Some(&FieldValue::U8(17)));
+        assert_eq!(display(a, "protocol"), Some("UDP"));
+    }
+
+    #[test]
+    fn test_empty_flag_attributes() {
+        // DONT-FRAGMENT and USE-CANDIDATE carry no value.
+        for attr_type in [0x001A, 0x0025] {
+            let buf = dissect_one(0b00, 0x001, attr_type, &[]);
+            let a = attr(&buf, 0);
+            assert_eq!(get(a, "length"), Some(&FieldValue::U16(0)));
+            assert!(get(a, "value").is_none());
+        }
+    }
+
+    #[test]
+    fn test_turn_reservation_token() {
+        let buf = dissect_one(0b10, 0x003, 0x0022, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            get(attr(&buf, 0), "token"),
+            Some(&FieldValue::Bytes(&[1, 2, 3, 4, 5, 6, 7, 8]))
+        );
+    }
+
+    #[test]
+    fn test_turn_address_error_code() {
+        let mut v = vec![0x02, 0x00, 0x04, 40];
+        v.extend_from_slice(b"Address Family not Supported");
+        let buf = dissect_one(0b10, 0x003, 0x8001, &v);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "family"), Some(&FieldValue::U8(2)));
+        assert_eq!(get(a, "error_code"), Some(&FieldValue::U16(440)));
+        assert_eq!(
+            get(a, "reason"),
+            Some(&FieldValue::Str("Address Family not Supported"))
+        );
+    }
+
+    #[test]
+    fn test_turn_icmp() {
+        let buf = dissect_one(0b01, 0x007, 0x8004, &[0, 0, 3, 4, 0, 0, 0x05, 0xDC]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "icmp_type"), Some(&FieldValue::U8(3)));
+        assert_eq!(get(a, "icmp_code"), Some(&FieldValue::U8(4)));
+        assert_eq!(get(a, "error_data"), Some(&FieldValue::U32(1500)));
+    }
+
+    #[test]
+    fn test_connection_id() {
+        let buf = dissect_one(0b01, 0x00C, 0x002A, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(
+            get(attr(&buf, 0), "connection_id"),
+            Some(&FieldValue::U32(0xDEAD_BEEF))
+        );
+    }
+
+    #[test]
+    fn test_ice_controlling() {
+        let buf = dissect_one(0b00, 0x001, 0x802A, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            get(attr(&buf, 0), "tie_breaker"),
+            Some(&FieldValue::U64(0x0102_0304_0506_0708))
+        );
+    }
+
+    #[test]
+    fn test_change_request() {
+        let buf = dissect_one(0b00, 0x001, 0x0003, &[0, 0, 0, 0x06]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "change_ip"), Some(&FieldValue::U8(1)));
+        assert_eq!(get(a, "change_port"), Some(&FieldValue::U8(1)));
+        let buf = dissect_one(0b00, 0x001, 0x0003, &[0, 0, 0, 0x02]);
+        let a = attr(&buf, 0);
+        assert_eq!(get(a, "change_ip"), Some(&FieldValue::U8(0)));
+        assert_eq!(get(a, "change_port"), Some(&FieldValue::U8(1)));
+    }
+
+    #[test]
+    fn test_response_origin_and_other_address() {
+        for attr_type in [0x802B, 0x802C] {
+            let buf = dissect_one(
+                0b10,
+                0x001,
+                attr_type,
+                &[0x00, 0x01, 0x0D, 0x97, 10, 0, 0, 2],
+            );
+            let a = attr(&buf, 0);
+            assert_eq!(get(a, "port"), Some(&FieldValue::U16(3479)));
+            assert_eq!(
+                get(a, "address"),
+                Some(&FieldValue::Ipv4Addr([10, 0, 0, 2]))
+            );
+        }
+    }
+
+    #[test]
+    fn test_response_port() {
+        let buf = dissect_one(0b00, 0x001, 0x0027, &[0x13, 0x88, 0x00, 0x00]);
+        assert_eq!(get(attr(&buf, 0), "port"), Some(&FieldValue::U16(5000)));
+    }
+
+    #[test]
+    fn test_padding_attribute() {
+        let buf = dissect_one(0b00, 0x001, 0x0026, &[0x20; 8]);
+        assert_eq!(
+            get(attr(&buf, 0), "padding"),
+            Some(&FieldValue::Bytes(&[0x20; 8]))
+        );
     }
 
     // --- Classic STUN (RFC 3489) --------------------------------------------
@@ -1360,6 +2816,20 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_classic_xor_attribute_stays_raw() {
+        // RFC 3489 has no magic cookie, so XOR-MAPPED-ADDRESS cannot be
+        // decoded (RFC 5389, Section 12 —
+        // https://www.rfc-editor.org/rfc/rfc5389#section-12).
+        let v = [0x00, 0x01, 0xa1, 0x47, 0xe1, 0x12, 0xa6, 0x43];
+        let data = build_classic(0x0101, &build_attr(0x0020, &v));
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+        let a = attr(&buf, 0);
+        assert!(get(a, "address").is_none());
+        assert_eq!(get(a, "value"), Some(&FieldValue::Bytes(&v)));
     }
 
     #[test]
@@ -1466,7 +2936,8 @@ mod tests {
 
     #[test]
     fn test_channeldata_without_padding() {
-        // UDP: padding is optional (RFC 8656, Section 12.5).
+        // UDP: padding is optional (RFC 8656, Section 12.5 —
+        // https://www.rfc-editor.org/rfc/rfc8656#section-12.5).
         let data = [0x40, 0x01, 0x00, 0x02, 0x11, 0x22];
         let mut buf = DissectBuffer::new();
         let result = StunDissector.dissect(&data, &mut buf, 0).unwrap();
