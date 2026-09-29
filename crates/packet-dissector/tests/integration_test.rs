@@ -100,6 +100,10 @@
 //! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
 //! | Ethernet → IPv4 → UDP → GENEVE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_geneve_ipv4        |
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
+//! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ipv4      |
+//! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ethernet |
+//! | Ethernet → IPv4 → UDP → VXLAN-GBP → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gbp      |
+//! | Ethernet → IPv4 → UDP → VXLAN (I=0) → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_i_flag_clear |
 //! | Ethernet → IPv4 → UDP → L2TP → PPP → IPv4 → UDP          | ethernet_ipv4_udp_l2tp_ppp_ipv4_udp              |
 //! | Ethernet → IPv4 → UDP → L2TP(L) → PPP → IPv4 → UDP      | ethernet_ipv4_udp_l2tp_length_ppp_ipv4_udp       |
 //! | Ethernet → IPv4 → UDP → L2TP (control)                   | ethernet_ipv4_udp_l2tp_control                   |
@@ -4607,6 +4611,131 @@ fn integration_ethernet_mpls_two_labels_ipv4_udp() {
 
 // ---- VXLAN tests ----
 
+/// Build an Ethernet → IPv4 → UDP(`dst_port`) packet carrying the `tunnel`
+/// header followed by whatever `inner` appends.
+fn build_udp_tunnel_packet(
+    dst_port: u16,
+    tunnel: &[u8],
+    inner: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, dst_port);
+    pkt.extend_from_slice(tunnel);
+    inner(&mut pkt);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    pkt
+}
+
+/// Inner IPv4 → UDP.
+fn push_inner_ipv4_udp(pkt: &mut Vec<u8>) {
+    let start = push_ipv4(pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(pkt, 12345, 80);
+    fixup_udp_length(pkt, udp_start);
+    fixup_ipv4_length(pkt, start);
+}
+
+/// Ethernet → IPv4 → UDP(4790) → VXLAN-GPE (Next Protocol IPv4) → IPv4 → UDP
+/// (draft-ietf-nvo3-vxlan-gpe-13 §3.2 —
+/// <https://datatracker.ietf.org/doc/html/draft-ietf-nvo3-vxlan-gpe-13#section-3.2>)
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gpe_ipv4() {
+    let reg = DissectorRegistry::default();
+    // Ver 0, I=1, P=1; Next Protocol 0x01 (IPv4); VNI 100
+    let gpe = [0x0C, 0x00, 0x00, 0x01, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4790, &gpe, push_inner_ipv4_udp);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv4", "UDP", "VXLAN-GPE", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+    let layer = buf.layer_by_name("VXLAN-GPE").unwrap();
+    assert_eq!(buf.field_u32(layer, "vni"), Some(100));
+    assert_eq!(buf.field_u8(layer, "next_protocol"), Some(1));
+}
+
+/// Ethernet → IPv4 → UDP(4790) → VXLAN-GPE (Next Protocol Ethernet) →
+/// Ethernet → IPv4 → UDP
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gpe_ethernet() {
+    let reg = DissectorRegistry::default();
+    let gpe = [0x0C, 0x00, 0x00, 0x03, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4790, &gpe, |pkt| {
+        push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet",
+            "IPv4",
+            "UDP",
+            "VXLAN-GPE",
+            "Ethernet",
+            "IPv4",
+            "UDP"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → IPv4 → UDP(4789) → VXLAN-GBP → Ethernet → IPv4 → UDP
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gbp() {
+    let reg = DissectorRegistry::default();
+    // G=1 I=1, Group Policy ID 0x1234, VNI 100
+    let vxlan = [0x88, 0x00, 0x12, 0x34, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4789, &vxlan, |pkt| {
+        push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet", "IPv4", "UDP", "VXLAN", "Ethernet", "IPv4", "UDP"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+    let layer = buf.layer_by_name("VXLAN").unwrap();
+    assert_eq!(buf.field_u16(layer, "group_policy_id"), Some(0x1234));
+}
+
+/// Ethernet → IPv4 → UDP(4789) → VXLAN (I=0) → Ethernet → IPv4 → UDP
+///
+/// RFC 7348, Section 5 gives receivers no instruction to discard I=0
+/// packets, so the payload is still decoded.
+/// <https://www.rfc-editor.org/rfc/rfc7348#section-5>
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_i_flag_clear() {
+    let reg = DissectorRegistry::default();
+    let vxlan = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4789, &vxlan, |pkt| {
+        push_ethernet(pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 7);
+    assert_layers_contiguous(&buf);
+    let layer = buf.layer_by_name("VXLAN").unwrap();
+    assert_eq!(buf.field_u8(layer, "vni_valid"), Some(0));
+}
+
 /// Ethernet → IPv4 → UDP(4789) → VXLAN → inner Ethernet → inner IPv4 → inner UDP
 #[test]
 fn integration_ethernet_ipv4_udp_vxlan_ethernet_ipv4_udp() {
@@ -5098,6 +5227,19 @@ fn integration_ethernet_ipv4_udp_geneve_with_options() {
     assert_eq!(
         buf.field_by_name(geneve, "options").unwrap().value,
         FieldValue::Bytes(options)
+    );
+    // RFC 8926 §3.5 — the option TLV is decoded too.
+    // https://www.rfc-editor.org/rfc/rfc8926#section-3.5
+    let list = buf.field_by_name(geneve, "tunnel_options").unwrap();
+    let objects: Vec<_> = buf
+        .nested_fields(list.value.as_container_range().unwrap())
+        .iter()
+        .filter_map(|f| f.value.as_container_range())
+        .collect();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(
+        buf.resolve_nested_display_name(objects[0], "class_name"),
+        Some("Open Virtual Networking (OVN)")
     );
 }
 
