@@ -2670,6 +2670,63 @@ mod tests {
         assert!(buf.embedded_payloads().is_empty());
     }
 
+    /// Records a payload that starts past the end of its input.
+    struct OutOfRangeRecorder;
+
+    impl Dissector for OutOfRangeRecorder {
+        fn name(&self) -> &'static str {
+            "OutOfRangeRecorder"
+        }
+        fn short_name(&self) -> &'static str {
+            "OutOfRangeRecorder"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.begin_layer("OutOfRangeRecorder", None, &[], offset..offset + data.len());
+            buf.end_layer();
+            let past_end = offset + data.len();
+            buf.push_embedded_payload(past_end..past_end + 4, DispatchHint::ByLlcSap(0x42));
+            Ok(DissectResult::new(data.len(), DispatchHint::End))
+        }
+    }
+
+    #[test]
+    fn embedded_payload_past_input_end_is_skipped() {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(OutOfRangeRecorder));
+        reg.register_by_llc_sap(0x42, Box::new(MsgDissector))
+            .unwrap();
+        let data = [0x00, 0x01];
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&data, &mut buf).unwrap();
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["OutOfRangeRecorder"]);
+        assert!(buf.embedded_payloads().is_empty());
+    }
+
+    #[test]
+    fn embedded_payload_test_dissectors_metadata() {
+        let dissectors: [&dyn Dissector; 6] = [
+            &BundleDissector,
+            &MsgDissector,
+            &ZeroStep(0x43),
+            &RecordThenStall,
+            &FailingRecorder,
+            &OutOfRangeRecorder,
+        ];
+        for d in dissectors {
+            assert_eq!(d.name(), d.short_name());
+            assert!(d.field_descriptors().is_empty());
+        }
+    }
+
     #[test]
     fn summary_stop_drops_recorded_payloads() {
         // A stop on the entry dissector's hint drops its recorded payloads.
