@@ -50,6 +50,22 @@ VXLAN / NVGRE / VXLAN GPE Encapsulation Extended Community
 ([RFC 8365, Section 5.1.3](https://www.rfc-editor.org/rfc/rfc8365#section-5.1.3)),
 and as `mpls_label` otherwise.
 
+EXTENDED COMMUNITIES and IPv6 Address Specific Extended Community entries are
+objects with `type`, `sub_type` (each with a `_name`) and the value sub-fields
+of their layout (`global_admin` / `local_admin`, `color`, `mac`,
+`sequence_number`, ...), per
+[RFC 4360](https://www.rfc-editor.org/rfc/rfc4360#section-2) and the IANA
+registries; sub-types that are not decoded keep a 6-octet `value`.
+
+NOTIFICATION `data` stays raw; Cease / Administrative Shutdown and Reset also
+expose `shutdown_communication` ([RFC 9003](https://www.rfc-editor.org/rfc/rfc9003#section-2)),
+and Cease / Hard Reset a `hard_reset` object with the encapsulated error
+([RFC 8538](https://www.rfc-editor.org/rfc/rfc8538#section-3.1)). ROUTE-REFRESH
+ORFs are decoded as `when_to_refresh` and `orfs`
+([RFC 5291](https://www.rfc-editor.org/rfc/rfc5291#section-4)); octets that do
+not parse, and the body of KEEPALIVE / unknown message types, are kept as
+`data`.
+
 Top-level `afi` / `safi` are set for ROUTE-REFRESH and, for UPDATE, mirror the
 first `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attribute so the address family can
 be filtered without descending into `path_attributes`. UPDATEs without an MP

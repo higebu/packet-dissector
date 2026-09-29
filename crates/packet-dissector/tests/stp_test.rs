@@ -11,6 +11,16 @@
 //! | IEEE 802.1D-2004 §9.3.1   | Flags: TC and TCA bits                   | parse_stp_flags_tc_tca        |
 //! | IEEE 802.1w-2004 §9.3.3   | RSTP flags: all bits                     | parse_rstp_flags_all          |
 //! | IEEE 802.1D-2004 §9.2.5   | Bridge ID: priority + MAC                | parse_stp_bridge_id           |
+//! | IEEE 802.1Q §14.2.5       | Bridge ID kept as the raw 16-bit value   | parse_stp_bridge_id_raw_priority |
+//! | IEEE 802.1Q §14.2.9       | Port Role names (Unknown vs Master)      | parse_port_role_names         |
+//! | IEEE 802.1Q §14.4 a)–u)   | MST BPDU without MSTI messages           | parse_mst_bpdu_no_msti        |
+//! | IEEE 802.1Q §14.4 j)      | Octets 18–25 = CIST Regional Root in MST | parse_mst_bpdu_no_msti        |
+//! | IEEE 802.1Q §14.4.1       | MSTI Configuration Messages              | parse_mst_bpdu_two_mstis      |
+//! | IEEE 802.1Q §14.5 d)      | Bad Version 3 Length → RST + unparsed    | parse_mst_bpdu_bad_version3_length |
+//! | IEEE 802.1Q §14.5 d) 1)   | Version 3 but < 102 octets → RST         | parse_mst_bpdu_short          |
+//! | IEEE 802.1Q §14.4 w)      | SPT BPDU: Version 4 Length + unparsed    | parse_spt_bpdu_version4       |
+//! | IEEE 802.1Q §14.4 w)      | SPT data bounded by Version 4 Length     | parse_spt_bpdu_version4       |
+//! | IEEE 802.1Q §14.5 f)/g)   | Malformed SPT part → MST                 | parse_spt_bpdu_version4       |
 //! | —                         | Dissector metadata                       | stp_dissector_metadata        |
 
 use packet_dissector::dissector::{DispatchHint, Dissector};
@@ -315,4 +325,417 @@ fn stp_dissector_metadata() {
     assert_eq!(d.name(), "Spanning Tree Protocol");
     assert_eq!(d.short_name(), "STP");
     assert!(!d.field_descriptors().is_empty());
+}
+
+/// MST BPDU (IEEE 802.1Q Clause 14.4) with `mstis` 16-octet MSTI messages.
+fn build_mst_bpdu(mstis: &[[u8; 16]]) -> Vec<u8> {
+    let mut pkt = vec![
+        0x00, 0x00, 0x03, 0x02, // protocol 0, version 3, type 0x02
+        0x7C, // flags: role Designated, learning, forwarding, agreement
+        0x80, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // CIST root ID
+        0x00, 0x00, 0x00, 0x00, // CIST external root path cost
+        0x80, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // CIST regional root ID
+        0x80, 0x01, // CIST port ID
+        0x00, 0x00, 0x14, 0x00, 0x02, 0x00, 0x0F, 0x00, // timers
+        0x00, // Version 1 Length
+    ];
+    pkt.extend_from_slice(&((64 + 16 * mstis.len()) as u16).to_be_bytes());
+    pkt.push(0x00); // format selector
+    let mut name = [0u8; 32];
+    name[..7].copy_from_slice(b"REGION1");
+    pkt.extend_from_slice(&name);
+    pkt.extend_from_slice(&[0x00, 0x05]); // revision level
+    pkt.extend_from_slice(&[0xAC; 16]); // digest
+    pkt.extend_from_slice(&[0x00, 0x00, 0x4E, 0x20]); // CIST internal root path cost 20000
+    pkt.extend_from_slice(&[0x80, 0x00, 0x00, 0x66, 0x77, 0x88, 0x99, 0xAA]); // CIST bridge ID
+    pkt.push(20); // CIST remaining hops
+    for m in mstis {
+        pkt.extend_from_slice(m);
+    }
+    pkt
+}
+
+fn msti(id: u16, flags: u8) -> [u8; 16] {
+    let mut m = [0u8; 16];
+    m[0] = flags;
+    m[1..3].copy_from_slice(&(0x8000 | id).to_be_bytes());
+    m[3..9].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    m[9..13].copy_from_slice(&2000u32.to_be_bytes());
+    m[13] = 0x90; // bridge priority 9 → 36864
+    m[14] = 0x80; // port priority 128
+    m[15] = 19;
+    m
+}
+
+fn field<'a>(buf: &'a DissectBuffer<'_>, name: &str) -> Option<&'a FieldValue<'a>> {
+    let layer = buf.layer_by_name("STP")?;
+    buf.field_by_name(layer, name).map(|f| &f.value)
+}
+
+#[test]
+fn parse_mst_bpdu_no_msti() {
+    let data = build_mst_bpdu(&[]);
+    assert_eq!(data.len(), 102);
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, 102);
+    let layer = buf.layer_by_name("STP").unwrap();
+    assert_eq!(layer.range, 0..102);
+    assert_eq!(
+        buf.resolve_display_name(layer, "bpdu_type_name"),
+        Some("MST")
+    );
+
+    // Octets 18-25 are the CIST Regional Root Identifier in an MST BPDU; the
+    // bridge_* fields keep reporting them for compatibility.
+    assert_eq!(
+        field(&buf, "bridge_priority"),
+        Some(&FieldValue::U16(0x8000))
+    );
+    assert_eq!(
+        field(&buf, "cist_regional_root_priority"),
+        Some(&FieldValue::U16(0x8000))
+    );
+    assert_eq!(
+        field(&buf, "cist_regional_root_mac"),
+        Some(&FieldValue::MacAddr(MacAddr([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55
+        ])))
+    );
+    assert_eq!(field(&buf, "version1_length"), Some(&FieldValue::U8(0)));
+    assert_eq!(field(&buf, "version3_length"), Some(&FieldValue::U16(64)));
+    assert_eq!(
+        field(&buf, "mst_config_format_selector"),
+        Some(&FieldValue::U8(0))
+    );
+    assert_eq!(
+        field(&buf, "mst_config_name"),
+        Some(&FieldValue::Bytes(b"REGION1"))
+    );
+    assert_eq!(
+        field(&buf, "mst_config_revision"),
+        Some(&FieldValue::U16(5))
+    );
+    assert_eq!(
+        field(&buf, "mst_config_digest"),
+        Some(&FieldValue::Bytes(&[0xAC; 16]))
+    );
+    assert_eq!(
+        field(&buf, "cist_internal_root_path_cost"),
+        Some(&FieldValue::U32(20000))
+    );
+    assert_eq!(
+        field(&buf, "cist_bridge_priority"),
+        Some(&FieldValue::U16(0x8000))
+    );
+    assert_eq!(
+        field(&buf, "cist_bridge_mac"),
+        Some(&FieldValue::MacAddr(MacAddr([
+            0x00, 0x66, 0x77, 0x88, 0x99, 0xAA
+        ])))
+    );
+    assert_eq!(
+        field(&buf, "cist_remaining_hops"),
+        Some(&FieldValue::U8(20))
+    );
+    assert!(field(&buf, "mstis").is_none());
+    assert!(field(&buf, "unparsed").is_none());
+    assert_eq!(
+        buf.field_by_name(layer, "cist_remaining_hops")
+            .unwrap()
+            .range,
+        101..102
+    );
+    assert_eq!(
+        buf.field_by_name(layer, "mst_config_name").unwrap().range,
+        39..71
+    );
+}
+
+#[test]
+fn parse_mst_bpdu_two_mstis() {
+    let data = build_mst_bpdu(&[msti(10, 0x7C), msti(20, 0x81)]);
+    assert_eq!(data.len(), 134);
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, 134);
+    assert_eq!(field(&buf, "version3_length"), Some(&FieldValue::U16(96)));
+    // MSTI children do not shadow top-level fields.
+    assert_eq!(
+        field(&buf, "bridge_priority"),
+        Some(&FieldValue::U16(0x8000))
+    );
+
+    let Some(FieldValue::Array(arr)) = field(&buf, "mstis") else {
+        panic!("mstis")
+    };
+    let objs: Vec<_> = buf
+        .nested_fields(arr)
+        .iter()
+        .filter_map(|f| match &f.value {
+            FieldValue::Object(o) => Some((f.range.clone(), buf.nested_fields(o))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(objs.len(), 2);
+    assert_eq!(objs[0].0, 102..118);
+    assert_eq!(objs[1].0, 118..134);
+    fn get<'a>(
+        fields: &[packet_dissector::field::Field<'a>],
+        name: &str,
+    ) -> Option<FieldValue<'a>> {
+        fields
+            .iter()
+            .find(|f| f.name() == name)
+            .map(|f| f.value.clone())
+    }
+    let m0 = objs[0].1;
+    assert_eq!(get(m0, "msti_flags"), Some(FieldValue::U8(0x7C)));
+    assert_eq!(get(m0, "msti_flags_port_role"), Some(FieldValue::U8(3)));
+    assert_eq!(get(m0, "msti_flags_agreement"), Some(FieldValue::U8(1)));
+    assert_eq!(get(m0, "msti_flags_master"), Some(FieldValue::U8(0)));
+    // Raw 16-bit priority part (priority component + MSTID), like the CIST fields.
+    assert_eq!(
+        get(m0, "msti_regional_root_priority"),
+        Some(FieldValue::U16(0x800A))
+    );
+    assert_eq!(get(m0, "msti_id"), Some(FieldValue::U16(10)));
+    assert_eq!(
+        get(m0, "msti_regional_root_mac"),
+        Some(FieldValue::MacAddr(MacAddr([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55
+        ])))
+    );
+    assert_eq!(
+        get(m0, "msti_internal_root_path_cost"),
+        Some(FieldValue::U32(2000))
+    );
+    assert_eq!(
+        get(m0, "msti_bridge_priority"),
+        Some(FieldValue::U16(36864))
+    );
+    assert_eq!(get(m0, "msti_port_priority"), Some(FieldValue::U8(128)));
+    assert_eq!(get(m0, "msti_remaining_hops"), Some(FieldValue::U8(19)));
+    let m1 = objs[1].1;
+    assert_eq!(get(m1, "msti_id"), Some(FieldValue::U16(20)));
+    assert_eq!(get(m1, "msti_flags_tc"), Some(FieldValue::U8(1)));
+    assert_eq!(get(m1, "msti_flags_master"), Some(FieldValue::U8(1)));
+    assert_eq!(get(m1, "msti_flags_port_role"), Some(FieldValue::U8(0)));
+    assert_eq!(
+        buf.resolve_nested_display_name(
+            match &buf
+                .nested_fields(arr)
+                .iter()
+                .filter(|f| f.value.is_object())
+                .nth(1)
+                .unwrap()
+                .value
+            {
+                FieldValue::Object(o) => o,
+                _ => unreachable!(),
+            },
+            "msti_flags_port_role_name"
+        ),
+        Some("Master")
+    );
+}
+
+#[test]
+fn parse_mst_bpdu_bad_version3_length() {
+    // Version 3 Length 70 is not 64 + 16n: decoded as an RST BPDU and the
+    // remaining octets are reported as unparsed (IEEE 802.1Q §14.5 d) 3)).
+    let mut data = build_mst_bpdu(&[msti(10, 0)]);
+    data[36..38].copy_from_slice(&70u16.to_be_bytes());
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, data.len());
+    let layer = buf.layer_by_name("STP").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(layer, "bpdu_type_name"),
+        Some("RST")
+    );
+    assert_eq!(
+        field(&buf, "bridge_priority"),
+        Some(&FieldValue::U16(0x8000))
+    );
+    assert!(field(&buf, "mst_config_name").is_none());
+    assert_eq!(
+        field(&buf, "unparsed"),
+        Some(&FieldValue::Bytes(&data[36..]))
+    );
+    assert_eq!(
+        buf.field_by_name(layer, "unparsed").unwrap().range,
+        36..data.len()
+    );
+
+    // Version 1 Length other than 0 also prevents MST decoding (§14.5 d) 2)).
+    let mut data = build_mst_bpdu(&[]);
+    data[35] = 1;
+    let mut buf = DissectBuffer::new();
+    StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert!(field(&buf, "mst_config_name").is_none());
+
+    // More than 64 MSTI messages.
+    let mut data = build_mst_bpdu(&[]);
+    data[36..38].copy_from_slice(&(64u16 + 16 * 65).to_be_bytes());
+    let mut buf = DissectBuffer::new();
+    StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert!(field(&buf, "mst_config_name").is_none());
+
+    // Version 3 Length claims an MSTI message that was not captured.
+    let mut data = build_mst_bpdu(&[]);
+    data[36..38].copy_from_slice(&80u16.to_be_bytes());
+    let mut buf = DissectBuffer::new();
+    StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert!(field(&buf, "mst_config_name").is_none());
+    assert_eq!(
+        field(&buf, "unparsed"),
+        Some(&FieldValue::Bytes(&data[36..]))
+    );
+}
+
+#[test]
+fn parse_mst_bpdu_short() {
+    // Version 3 but fewer than 102 octets: an RST BPDU (§14.5 d) 1)).
+    let data = build_mst_bpdu(&[]);
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data[..60], &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, 60);
+    assert_eq!(
+        field(&buf, "unparsed"),
+        Some(&FieldValue::Bytes(&data[36..60]))
+    );
+
+    // Exactly 36 octets: plain RST BPDU fields, nothing unparsed.
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data[..36], &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, 36);
+    assert!(field(&buf, "unparsed").is_none());
+}
+
+#[test]
+fn parse_spt_bpdu_version4() {
+    // SPT BPDU: MST part with Format Selector 1, Version 4 Length, then SPT
+    // data (IEEE 802.1Q §14.4 w)-y), §14.5 g)).
+    let spt = |tail: &[u8]| {
+        let mut data = build_mst_bpdu(&[]);
+        data[2] = 4;
+        data[38] = 1; // MST Configuration Identifier Format Selector
+        data.extend_from_slice(tail);
+        data
+    };
+    let data = spt(&[0x00, 0x04, 0x05, 0x00, 0xDE, 0xAD]);
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, data.len());
+    let layer = buf.layer_by_name("STP").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(layer, "bpdu_type_name"),
+        Some("SPT")
+    );
+    assert_eq!(
+        field(&buf, "cist_remaining_hops"),
+        Some(&FieldValue::U8(20))
+    );
+    assert_eq!(field(&buf, "version4_length"), Some(&FieldValue::U16(4)));
+    assert_eq!(
+        field(&buf, "unparsed"),
+        Some(&FieldValue::Bytes(&[0x05, 0x00, 0xDE, 0xAD]))
+    );
+
+    // Octets after those covered by the Version 4 Length are not part of it.
+    let data = spt(&[0x00, 0x04, 0x05, 0x00, 0xDE, 0xAD, 0xEE, 0xEE]);
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, data.len() - 2);
+    assert_eq!(
+        field(&buf, "unparsed"),
+        Some(&FieldValue::Bytes(&[0x05, 0x00, 0xDE, 0xAD]))
+    );
+
+    // Not a well-formed SPT BPDU (§14.5 f) 4)): decoded as MST, and the
+    // trailing octets are not part of the BPDU.
+    for (selector, tail) in [
+        (1u8, &[][..]),                             // nothing after the MST part
+        (1, &[0x00, 0x00]),                         // fewer than 6 octets
+        (1, &[0x00]),                               // no room for Version 4 Length
+        (1, &[0x00, 0x03, 0x05, 0x00, 0xDE, 0xAD]), // Version 4 Length < 4
+        (0, &[0x00, 0x04, 0x05, 0x00, 0xDE, 0xAD]), // Format Selector 0
+    ] {
+        let mut data = spt(tail);
+        data[38] = selector;
+        let mut buf = DissectBuffer::new();
+        let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.bytes_consumed, 102, "tail {tail:?} selector {selector}");
+        let layer = buf.layer_by_name("STP").unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "bpdu_type_name"),
+            Some("MST")
+        );
+        assert!(field(&buf, "version4_length").is_none());
+        assert!(field(&buf, "unparsed").is_none());
+    }
+
+    // Version 3 MST BPDU followed by extra octets: they are not part of it.
+    let mut data = build_mst_bpdu(&[]);
+    data.extend_from_slice(&[0xFF, 0xFF]);
+    let mut buf = DissectBuffer::new();
+    let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(r.bytes_consumed, 102);
+    assert!(field(&buf, "version4_length").is_none());
+}
+
+#[test]
+fn parse_stp_bridge_id_raw_priority() {
+    // Priority 32768 + system ID extension 100 (PVST+ / MSTP): the 16-bit
+    // priority part of the Bridge Identifier is reported as-is.
+    let data = build_config_bpdu(
+        0x8064,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        0,
+        0x7065,
+        [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        0x8001,
+        0x00,
+    );
+    let mut buf = DissectBuffer::new();
+    StpDissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(field(&buf, "root_priority"), Some(&FieldValue::U16(0x8064)));
+    assert_eq!(
+        field(&buf, "bridge_priority"),
+        Some(&FieldValue::U16(0x7065))
+    );
+    assert_eq!(field(&buf, "port_id"), Some(&FieldValue::U16(0x8001)));
+}
+
+#[test]
+fn parse_port_role_names() {
+    let mut rst = vec![0u8; 36];
+    rst[2] = 2;
+    rst[3] = 2;
+    for (flags, name) in [
+        (0x00, "Unknown"),
+        (0x04, "Alternate/Backup"),
+        (0x08, "Root"),
+        (0x0C, "Designated"),
+    ] {
+        rst[4] = flags;
+        let mut buf = DissectBuffer::new();
+        StpDissector.dissect(&rst, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("STP").unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "flags_port_role_name"),
+            Some(name)
+        );
+    }
+    // In an MST BPDU role 0 is Master (IEEE 802.1Q §14.2.9 a)).
+    let mut mst = build_mst_bpdu(&[]);
+    mst[4] = 0x00;
+    let mut buf = DissectBuffer::new();
+    StpDissector.dissect(&mst, &mut buf, 0).unwrap();
+    let layer = buf.layer_by_name("STP").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(layer, "flags_port_role_name"),
+        Some("Master")
+    );
 }

@@ -166,6 +166,40 @@ impl ReassemblyBuffer {
         }
     }
 
+    /// Insert `data` in front of offset 0, shifting all existing data and
+    /// filled ranges forward by `data.len()`.
+    ///
+    /// This is used for TCP stream reassembly when a segment that precedes
+    /// the first buffered byte arrives late (reordering): the stream origin
+    /// moves back to the new segment.
+    ///
+    /// Returns `None` (leaving the buffer unchanged) if the shifted length
+    /// overflows `usize`.
+    pub fn prepend(&mut self, data: &[u8]) -> Option<()> {
+        let n = data.len();
+        if n == 0 {
+            return Some(());
+        }
+        self.data.len().checked_add(n)?;
+        for range in &self.filled {
+            range.end.checked_add(n)?;
+        }
+        if let Some(tl) = self.total_len {
+            tl.checked_add(n)?;
+        }
+
+        self.data.splice(0..0, data.iter().copied());
+        for range in &mut self.filled {
+            range.start += n;
+            range.end += n;
+        }
+        if let Some(tl) = self.total_len.as_mut() {
+            *tl += n;
+        }
+        self.merge_range(0..n);
+        Some(())
+    }
+
     /// Merge a new range into the sorted `filled` list, coalescing any
     /// overlapping or adjacent ranges.
     fn merge_range(&mut self, new: core::ops::Range<usize>) {
@@ -379,6 +413,39 @@ mod tests {
         buf.insert(0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         assert_eq!(buf.contiguous_len(), 14);
         assert_eq!(buf.bytes_received(), 14);
+    }
+
+    #[test]
+    fn prepend_shifts_existing_data() {
+        let mut buf = ReassemblyBuffer::new();
+        buf.insert(0, b"cd").unwrap();
+        buf.insert(4, b"gh").unwrap();
+        buf.prepend(b"ab").unwrap();
+        assert_eq!(buf.contiguous_len(), 4);
+        assert_eq!(&buf.data()[..4], b"abcd");
+        assert_eq!(buf.bytes_received(), 6);
+        buf.insert(4, b"ef").unwrap();
+        assert_eq!(buf.contiguous_len(), 8);
+        assert_eq!(buf.data(), b"abcdefgh");
+    }
+
+    #[test]
+    fn prepend_to_gap_keeps_gap() {
+        let mut buf = ReassemblyBuffer::new();
+        buf.insert(3, b"d").unwrap();
+        buf.set_total_len(4);
+        buf.prepend(b"a").unwrap();
+        assert_eq!(buf.contiguous_len(), 1);
+        assert_eq!(buf.total_len(), Some(5));
+        assert!(!buf.is_complete());
+    }
+
+    #[test]
+    fn prepend_empty_is_noop() {
+        let mut buf = ReassemblyBuffer::new();
+        buf.insert(0, b"x").unwrap();
+        buf.prepend(b"").unwrap();
+        assert_eq!(buf.data(), b"x");
     }
 
     #[test]

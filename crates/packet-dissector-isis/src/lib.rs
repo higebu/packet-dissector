@@ -13,10 +13,21 @@
 //! - RFC 5310: <https://www.rfc-editor.org/rfc/rfc5310>
 //! - RFC 7981: <https://www.rfc-editor.org/rfc/rfc7981>
 //! - RFC 8706: <https://www.rfc-editor.org/rfc/rfc8706>
+//! - RFC 5130: <https://www.rfc-editor.org/rfc/rfc5130>
+//! - RFC 5307: <https://www.rfc-editor.org/rfc/rfc5307>
+//! - RFC 6119: <https://www.rfc-editor.org/rfc/rfc6119>
+//! - RFC 7794: <https://www.rfc-editor.org/rfc/rfc7794>
+//! - RFC 8491: <https://www.rfc-editor.org/rfc/rfc8491>
+//! - RFC 8570: <https://www.rfc-editor.org/rfc/rfc8570>
+//! - RFC 8667: <https://www.rfc-editor.org/rfc/rfc8667>
+//! - RFC 9346: <https://www.rfc-editor.org/rfc/rfc9346>
+//! - RFC 9352: <https://www.rfc-editor.org/rfc/rfc9352>
 //! - IANA IS-IS TLV Codepoints registry:
 //!   <https://www.iana.org/assignments/isis-tlv-codepoints/isis-tlv-codepoints.xhtml>
 
 #![deny(missing_docs)]
+
+mod sub_tlv;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -26,7 +37,12 @@ use packet_dissector_core::field::{
     FieldDescriptor, FieldType, FieldValue, FormatContext, MacAddr, format_utf8_lossy,
 };
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u32};
+use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u32, read_ipv6_addr};
+
+use sub_tlv::{
+    RAW_DESCRIPTOR, SUB_TLVS_DESCRIPTOR, SYSTEM_ID_LEN, SubTlvContext, mask_prefix, push_flag,
+    push_sub_tlvs, set_range_end,
+};
 
 /// Specification references for the IS-IS dissector.
 ///
@@ -89,6 +105,26 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 8706",
         "Restart Signaling for IS-IS",
         "https://www.rfc-editor.org/rfc/rfc8706",
+    ),
+    SpecReference::new(
+        "RFC 7794",
+        "IS-IS Prefix Attributes for Extended IPv4 and IPv6 Reachability",
+        "https://www.rfc-editor.org/rfc/rfc7794",
+    ),
+    SpecReference::new(
+        "RFC 8570",
+        "IS-IS Traffic Engineering (TE) Metric Extensions",
+        "https://www.rfc-editor.org/rfc/rfc8570",
+    ),
+    SpecReference::new(
+        "RFC 8667",
+        "IS-IS Extensions for Segment Routing",
+        "https://www.rfc-editor.org/rfc/rfc8667",
+    ),
+    SpecReference::new(
+        "RFC 9352",
+        "IS-IS Extensions to Support Segment Routing over the IPv6 Data Plane",
+        "https://www.rfc-editor.org/rfc/rfc9352",
     ),
     SpecReference::new(
         "IANA IS-IS TLV Codepoints",
@@ -202,24 +238,24 @@ const TLV_DYNAMIC_HOSTNAME: u8 = 137;
 /// <https://www.rfc-editor.org/rfc/rfc8706#section-3>.
 const TLV_RESTART: u8 = 211;
 
-/// TLV type: MT IS Neighbors — RFC 5120, Section 7.1 —
-/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.1>.
+/// TLV type: MT IS Neighbors — RFC 5120, Section 7.2 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.2>.
 const TLV_MT_IS_NEIGHBORS: u8 = 222;
 
-/// TLV type: IPv6 Interface Address — RFC 5308, Section 2 —
-/// <https://www.rfc-editor.org/rfc/rfc5308#section-2>.
+/// TLV type: IPv6 Interface Address — RFC 5308, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-3>.
 const TLV_IPV6_INTERFACE_ADDRESS: u8 = 232;
 
-/// TLV type: MT IP Reachability — RFC 5120, Section 7.2 —
-/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.2>.
+/// TLV type: MT IP Reachability — RFC 5120, Section 7.3 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.3>.
 const TLV_MT_IP_REACHABILITY: u8 = 235;
 
-/// TLV type: IPv6 Reachability — RFC 5308, Section 5 —
-/// <https://www.rfc-editor.org/rfc/rfc5308#section-5>.
+/// TLV type: IPv6 Reachability — RFC 5308, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-2>.
 const TLV_IPV6_REACHABILITY: u8 = 236;
 
-/// TLV type: MT IPv6 Reachability — RFC 5120, Section 7.2 —
-/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.2>.
+/// TLV type: MT IPv6 Reachability — RFC 5120, Section 7.4 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.4>.
 const TLV_MT_IPV6_REACHABILITY: u8 = 237;
 
 /// TLV type: P2P Three-Way Adjacency — RFC 5303, Section 3 —
@@ -229,6 +265,45 @@ const TLV_P2P_THREE_WAY_ADJ: u8 = 240;
 /// TLV type: Router Capability — RFC 7981, Section 2 —
 /// <https://www.rfc-editor.org/rfc/rfc7981#section-2>.
 const TLV_ROUTER_CAPABILITY: u8 = 242;
+
+/// TLV 27: SRv6 Locator — RFC 9352, Section 7.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>.
+const TLV_SRV6_LOCATOR: u8 = 27;
+
+/// Returns whether every locator entry of a TLV 27 value (up to the first
+/// entry that does not fit) has a Loc-Size in the range 1-128.
+///
+/// RFC 9352, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>
+/// "Loc-Size:  1 octet.  Number of bits in the SRv6 Locator field, which
+/// MUST be from the range (1-128).  The entire TLV MUST be ignored if the
+/// Loc-Size is outside this range."
+fn srv6_locator_sizes_valid(value: &[u8]) -> bool {
+    let mut i = 2;
+    while i + 7 <= value.len() {
+        let loc_size = value[i + 6];
+        if !(1..=128).contains(&loc_size) {
+            return false;
+        }
+        let len_at = i + 7 + (loc_size as usize).div_ceil(8);
+        let Some(&sub_len) = value.get(len_at) else {
+            break;
+        };
+        i = len_at + 1 + sub_len as usize;
+    }
+    true
+}
+
+/// TLV 149: SID/Label Binding — RFC 8667, Section 2.4 —
+/// <https://www.rfc-editor.org/rfc/rfc8667#section-2.4>.
+const TLV_SID_LABEL_BINDING: u8 = 149;
+
+/// TLV 150: Multi-Topology SID/Label Binding — RFC 8667, Section 2.5 —
+/// <https://www.rfc-editor.org/rfc/rfc8667#section-2.5>.
+const TLV_MT_SID_LABEL_BINDING: u8 = 150;
+
+/// TLV 229: Multi-Topology — RFC 5120, Section 7.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.1>.
+const TLV_MULTI_TOPOLOGY: u8 = 229;
 
 // ---------------------------------------------------------------------------
 // Name lookup helpers
@@ -278,7 +353,7 @@ fn tlv_type_name(v: u8) -> Option<&'static str> {
         23 => Some("IS Neighbor Attribute"), // RFC 5311 — https://www.rfc-editor.org/rfc/rfc5311
         24 => Some("IS Alias ID"),           // RFC 5311 — https://www.rfc-editor.org/rfc/rfc5311
         25 => Some("L2 Bundle Member Attributes"), // RFC 8668 — https://www.rfc-editor.org/rfc/rfc8668
-        27 => Some("SRv6 Locator"), // RFC 9352 — https://www.rfc-editor.org/rfc/rfc9352
+        TLV_SRV6_LOCATOR => Some("SRv6 Locator"), // RFC 9352 — https://www.rfc-editor.org/rfc/rfc9352
         TLV_IP_INTERNAL_REACHABILITY => Some("IP Internal Reachability"), // 128, RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
         TLV_PROTOCOLS_SUPPORTED => Some("Protocols Supported"), // 129, RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
         TLV_IP_EXTERNAL_REACHABILITY => Some("IP External Reachability"), // 130, RFC 1195 — https://www.rfc-editor.org/rfc/rfc1195
@@ -294,13 +369,13 @@ fn tlv_type_name(v: u8) -> Option<&'static str> {
         143 => Some("MT Port Capability"), // RFC 6165 — https://www.rfc-editor.org/rfc/rfc6165
         144 => Some("MT Capability"),      // RFC 6329 — https://www.rfc-editor.org/rfc/rfc6329
         148 => Some("BFD Enabled"),        // RFC 6213 — https://www.rfc-editor.org/rfc/rfc6213
-        149 => Some("Segment Identifier / Label Binding"), // RFC 8667 — https://www.rfc-editor.org/rfc/rfc8667
-        150 => Some("MT Segment Identifier / Label Binding"), // RFC 8667 — https://www.rfc-editor.org/rfc/rfc8667
+        TLV_SID_LABEL_BINDING => Some("Segment Identifier / Label Binding"), // RFC 8667 — https://www.rfc-editor.org/rfc/rfc8667
+        TLV_MT_SID_LABEL_BINDING => Some("MT Segment Identifier / Label Binding"), // RFC 8667 — https://www.rfc-editor.org/rfc/rfc8667
         161 => Some("Flood Reflection"), // RFC 9377 — https://www.rfc-editor.org/rfc/rfc9377
         TLV_RESTART => Some("Restart"),  // 211, RFC 8706 — https://www.rfc-editor.org/rfc/rfc8706
         TLV_MT_IS_NEIGHBORS => Some("MT IS Neighbors"), // 222, RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
         223 => Some("MT IS Neighbor Attribute"), // RFC 5311 — https://www.rfc-editor.org/rfc/rfc5311
-        229 => Some("Multi-Topology"), // RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
+        TLV_MULTI_TOPOLOGY => Some("Multi-Topology"), // RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
         TLV_IPV6_INTERFACE_ADDRESS => Some("IPv6 Interface Address"), // 232, RFC 5308 — https://www.rfc-editor.org/rfc/rfc5308
         233 => Some("IPv6 Global Interface Address"), // RFC 6119 — https://www.rfc-editor.org/rfc/rfc6119
         TLV_MT_IP_REACHABILITY => Some("MT IP Reachability"), // 235, RFC 5120 — https://www.rfc-editor.org/rfc/rfc5120
@@ -418,6 +493,23 @@ const FD_TLV_AUTH_TYPE: usize = 11;
 const FD_TLV_FLAGS: usize = 12;
 const FD_TLV_REMAINING_TIME: usize = 13;
 const FD_TLV_RAW: usize = 14;
+const FD_TLV_MT_ID: usize = 15;
+const FD_TLV_TOPOLOGIES: usize = 16;
+const FD_TLV_LOCATORS: usize = 17;
+const FD_TLV_CAPABILITY_FLAGS: usize = 18;
+const FD_TLV_FLAG_S: usize = 19;
+const FD_TLV_FLAG_D: usize = 20;
+const FD_TLV_EXTENDED_LOCAL_CIRCUIT_ID: usize = 22;
+const FD_TLV_NEIGHBOR_SYSTEM_ID: usize = 23;
+const FD_TLV_NEIGHBOR_EXTENDED_CIRCUIT_ID: usize = 24;
+const FD_TLV_PASSWORD: usize = 25;
+const FD_TLV_DIGEST: usize = 26;
+const FD_TLV_KEY_ID: usize = 27;
+const FD_TLV_RESTARTING_NEIGHBOR_ID: usize = 28;
+const FD_TLV_BINDING_FLAGS: usize = 29;
+const FD_TLV_RANGE: usize = 30;
+const FD_TLV_PREFIX_LENGTH: usize = 31;
+const FD_TLV_PREFIX: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Nested child field descriptors for TLV-specific objects.
@@ -470,42 +562,72 @@ static EXT_IS_REACH_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("neighbor_id", "Neighbor ID", FieldType::Bytes)
         .with_format_fn(format_isis_id),
     FieldDescriptor::new("metric", "Metric", FieldType::U32),
+    SUB_TLVS_DESCRIPTOR,
+    RAW_DESCRIPTOR,
 ];
 
 /// Field descriptor indices for [`EXT_IP_REACH_CHILD_FIELDS`].
 const FD_EIPR_PREFIX: usize = 0;
 const FD_EIPR_PREFIX_LENGTH: usize = 1;
 const FD_EIPR_METRIC: usize = 2;
+const FD_EIPR_UP_DOWN: usize = 3;
+const FD_EIPR_SUB_TLVS_PRESENT: usize = 4;
 
 /// Child fields for Extended IP Reachability entries (TLV 135).
 static EXT_IP_REACH_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("prefix", "Prefix", FieldType::Ipv4Addr),
     FieldDescriptor::new("prefix_length", "Prefix Length", FieldType::U8),
     FieldDescriptor::new("metric", "Metric", FieldType::U32),
+    // RFC 5305, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc5305#section-4.1>
+    FieldDescriptor::new("up_down", "Up/Down Bit", FieldType::U8),
+    FieldDescriptor::new("sub_tlvs_present", "Sub-TLV Present Bit", FieldType::U8),
+    SUB_TLVS_DESCRIPTOR,
+    RAW_DESCRIPTOR,
 ];
 
 /// Field descriptor indices for [`IPV6_REACH_CHILD_FIELDS`].
 const FD_IP6R_PREFIX: usize = 0;
 const FD_IP6R_PREFIX_LENGTH: usize = 1;
 const FD_IP6R_METRIC: usize = 2;
+const FD_IP6R_UP_DOWN: usize = 3;
+const FD_IP6R_EXTERNAL: usize = 4;
+const FD_IP6R_SUB_TLVS_PRESENT: usize = 5;
 
 /// Child fields for IPv6 Reachability entries (TLV 236).
 static IPV6_REACH_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("prefix", "Prefix", FieldType::Ipv6Addr),
     FieldDescriptor::new("prefix_length", "Prefix Length", FieldType::U8),
     FieldDescriptor::new("metric", "Metric", FieldType::U32),
+    // RFC 5308, Section 2 — <https://www.rfc-editor.org/rfc/rfc5308#section-2>
+    FieldDescriptor::new("up_down", "Up/Down Bit", FieldType::U8),
+    FieldDescriptor::new("external", "External Original Bit", FieldType::U8),
+    FieldDescriptor::new("sub_tlvs_present", "Sub-TLV Present Bit", FieldType::U8),
+    SUB_TLVS_DESCRIPTOR,
+    RAW_DESCRIPTOR,
 ];
 
 /// Field descriptor indices for [`IP_REACH_CHILD_FIELDS`].
 const FD_IPR_IP_ADDRESS: usize = 0;
 const FD_IPR_SUBNET_MASK: usize = 1;
 const FD_IPR_METRIC: usize = 2;
+const FD_IPR_UP_DOWN: usize = 3;
+const FD_IPR_IE: usize = 4;
+const FD_IPR_DELAY_METRIC: usize = 5;
+const FD_IPR_EXPENSE_METRIC: usize = 6;
+const FD_IPR_ERROR_METRIC: usize = 7;
 
 /// Child fields for IP Internal/External Reachability entries (TLV 128/130).
 static IP_REACH_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("ip_address", "IP Address", FieldType::Ipv4Addr),
     FieldDescriptor::new("subnet_mask", "Subnet Mask", FieldType::Ipv4Addr),
     FieldDescriptor::new("metric", "Metric", FieldType::U8),
+    // RFC 5302, Section 2 — <https://www.rfc-editor.org/rfc/rfc5302#section-2>
+    FieldDescriptor::new("up_down", "Up/Down Bit", FieldType::U8),
+    // RFC 1195, Section 5 — <https://www.rfc-editor.org/rfc/rfc1195#section-5>
+    FieldDescriptor::new("ie", "I/E Bit", FieldType::U8),
+    FieldDescriptor::new("delay_metric", "Delay Metric", FieldType::U8).optional(),
+    FieldDescriptor::new("expense_metric", "Expense Metric", FieldType::U8).optional(),
+    FieldDescriptor::new("error_metric", "Error Metric", FieldType::U8).optional(),
 ];
 
 /// Field descriptor indices for [`LSP_ENTRY_CHILD_FIELDS`].
@@ -600,7 +722,117 @@ static TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
     },
     FieldDescriptor::new("remaining_time", "Remaining Time", FieldType::U16).optional(),
     FieldDescriptor::new("raw", "Raw", FieldType::Bytes).optional(),
+    // RFC 5120, Section 7 — MT ID of TLVs 222/235/237/150, and TLV 27
+    // (RFC 9352, Section 7.1)
+    // <https://www.rfc-editor.org/rfc/rfc5120#section-7>
+    // <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>
+    FieldDescriptor::new("mt_id", "MT ID", FieldType::U16).optional(),
+    FieldDescriptor::new("topologies", "Topologies", FieldType::Array)
+        .optional()
+        .with_children(TOPOLOGY_CHILD_FIELDS),
+    FieldDescriptor::new("locators", "Locators", FieldType::Array)
+        .optional()
+        .with_children(LOCATOR_CHILD_FIELDS),
+    // RFC 7981, Section 2 — Router Capability flags
+    // <https://www.rfc-editor.org/rfc/rfc7981#section-2>
+    FieldDescriptor::new("capability_flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("flag_s", "S bit (Flood Domain-Wide)", FieldType::U8).optional(),
+    FieldDescriptor::new("flag_d", "D bit (Leaked Down)", FieldType::U8).optional(),
+    SUB_TLVS_DESCRIPTOR,
+    // RFC 5303, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc5303#section-3.1>
+    FieldDescriptor::new(
+        "extended_local_circuit_id",
+        "Extended Local Circuit ID",
+        FieldType::U32,
+    )
+    .optional(),
+    FieldDescriptor::new("neighbor_system_id", "Neighbor System ID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_isis_id),
+    FieldDescriptor::new(
+        "neighbor_extended_circuit_id",
+        "Neighbor Extended Local Circuit ID",
+        FieldType::U32,
+    )
+    .optional(),
+    // ISO/IEC 10589:2002; RFC 5304, Section 2; RFC 5310, Section 3.1
+    // <https://www.rfc-editor.org/rfc/rfc5304#section-2>
+    // <https://www.rfc-editor.org/rfc/rfc5310#section-3.1>
+    FieldDescriptor::new("password", "Password", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_utf8_lossy),
+    FieldDescriptor::new("digest", "Authentication Data", FieldType::Bytes).optional(),
+    FieldDescriptor::new("key_id", "Key ID", FieldType::U16).optional(),
+    // RFC 8706, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc8706#section-3.2>
+    FieldDescriptor::new(
+        "restarting_neighbor_id",
+        "Restarting Neighbor ID",
+        FieldType::Bytes,
+    )
+    .optional()
+    .with_format_fn(format_isis_id),
+    // RFC 8667, Sections 2.4-2.5 — <https://www.rfc-editor.org/rfc/rfc8667#section-2.4>
+    FieldDescriptor::new("binding_flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("range", "Range", FieldType::U16).optional(),
+    FieldDescriptor::new("prefix_length", "Prefix Length", FieldType::U8).optional(),
+    // IPv4 or IPv6 according to the F-Flag.
+    FieldDescriptor::new("prefix", "Prefix", FieldType::Any).optional(),
 ];
+
+/// Container for one TLV, labeled with the TLV type name.
+static FD_TLV: FieldDescriptor = FieldDescriptor::new("tlv", "TLV", FieldType::Object)
+    .with_children(TLV_CHILD_FIELDS)
+    .with_display_fn(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U8(t)) => tlv_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    });
+
+/// Field descriptor indices for [`TOPOLOGY_CHILD_FIELDS`].
+const FD_MT_OVERLOAD: usize = 0;
+const FD_MT_ATTACHED: usize = 1;
+const FD_MT_MT_ID: usize = 2;
+
+/// Child fields of a Multi-Topology (TLV 229) entry.
+///
+/// RFC 5120, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc5120#section-7.1>
+static TOPOLOGY_CHILD_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor::new("overload", "O bit (Overload)", FieldType::U8),
+    FieldDescriptor::new("attached", "A bit (Attach)", FieldType::U8),
+    FieldDescriptor::new("mt_id", "MT ID", FieldType::U16),
+];
+
+static FD_TOPOLOGY_ENTRY: FieldDescriptor =
+    FieldDescriptor::new("topology", "Topology", FieldType::Object)
+        .with_children(TOPOLOGY_CHILD_FIELDS);
+
+/// Field descriptor indices for [`LOCATOR_CHILD_FIELDS`].
+const FD_LOC_METRIC: usize = 0;
+const FD_LOC_FLAGS: usize = 1;
+const FD_LOC_UP_DOWN: usize = 2;
+const FD_LOC_ALGORITHM: usize = 3;
+const FD_LOC_SIZE: usize = 4;
+const FD_LOC_LOCATOR: usize = 5;
+
+/// Child fields of an SRv6 Locator (TLV 27) entry.
+///
+/// RFC 9352, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>
+static LOCATOR_CHILD_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor::new("metric", "Metric", FieldType::U32),
+    FieldDescriptor::new("flags", "Flags", FieldType::U8),
+    FieldDescriptor::new("up_down", "D-flag (Up/Down)", FieldType::U8),
+    FieldDescriptor::new("algorithm", "Algorithm", FieldType::U8),
+    FieldDescriptor::new("locator_size", "Locator Size", FieldType::U8),
+    FieldDescriptor::new("locator", "Locator", FieldType::Ipv6Addr),
+    SUB_TLVS_DESCRIPTOR,
+    RAW_DESCRIPTOR,
+];
+
+static FD_LOCATOR_ENTRY: FieldDescriptor =
+    FieldDescriptor::new("locator_entry", "Locator", FieldType::Object)
+        .with_children(LOCATOR_CHILD_FIELDS);
 
 /// Writes an IS-IS identifier as a JSON-quoted string in ISO 10589 dotted notation.
 ///
@@ -708,13 +940,17 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 // ---------------------------------------------------------------------------
 
 /// Parses TLV-type-specific fields and pushes them into the buffer.
-/// Returns `true` if typed fields were pushed, `false` for unknown/padding TLVs.
+///
+/// Returns the number of value octets decoded, or `None` for unknown or
+/// padding TLVs and for values too short for their fixed part (nothing is
+/// pushed in that case). Octets after the decoded part are reported as
+/// `raw` by [`parse_tlvs`].
 fn parse_tlv_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     tlv_type: u8,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     match tlv_type {
         TLV_AREA_ADDRESSES => parse_area_addresses_fields(buf, value, offset),
         TLV_PROTOCOLS_SUPPORTED => parse_protocols_supported_fields(buf, value, offset),
@@ -726,6 +962,12 @@ fn parse_tlv_fields<'pkt>(
         TLV_EXTENDED_IS_REACHABILITY => parse_extended_is_reach_fields(buf, value, offset),
         TLV_EXTENDED_IP_REACHABILITY => parse_extended_ip_reach_fields(buf, value, offset),
         TLV_IPV6_REACHABILITY => parse_ipv6_reach_fields(buf, value, offset),
+        TLV_MT_IS_NEIGHBORS => parse_with_mt_id(buf, value, offset, parse_extended_is_reach_fields),
+        TLV_MT_IP_REACHABILITY => {
+            parse_with_mt_id(buf, value, offset, parse_extended_ip_reach_fields)
+        }
+        TLV_MT_IPV6_REACHABILITY => parse_with_mt_id(buf, value, offset, parse_ipv6_reach_fields),
+        TLV_MULTI_TOPOLOGY => parse_multi_topology_fields(buf, value, offset),
         TLV_IP_INTERNAL_REACHABILITY | TLV_IP_EXTERNAL_REACHABILITY => {
             parse_ip_reach_fields(buf, value, offset)
         }
@@ -733,9 +975,38 @@ fn parse_tlv_fields<'pkt>(
         TLV_P2P_THREE_WAY_ADJ => parse_p2p_adj_fields(buf, value, offset),
         TLV_AUTHENTICATION => parse_authentication_fields(buf, value, offset),
         TLV_RESTART => parse_restart_fields(buf, value, offset),
-        TLV_PADDING => false,
-        _ => false,
+        TLV_ROUTER_CAPABILITY => parse_router_capability_fields(buf, value, offset),
+        TLV_SRV6_LOCATOR => parse_srv6_locator_fields(buf, value, offset),
+        TLV_SID_LABEL_BINDING => parse_binding_fields(buf, value, offset),
+        TLV_MT_SID_LABEL_BINDING => parse_with_mt_id(buf, value, offset, parse_binding_fields),
+        _ => None,
     }
+}
+
+/// Signature shared by the TLV value parsers.
+type TlvParser = for<'pkt> fn(&mut DissectBuffer<'pkt>, &'pkt [u8], usize) -> Option<usize>;
+
+/// Parses a 2-octet MT ID and then the rest of the value with `parse`.
+///
+/// RFC 5120, Sections 7.2-7.4 — <https://www.rfc-editor.org/rfc/rfc5120#section-7.2>
+/// Layout: 4 reserved bits, then a 12-bit MT ID.
+fn parse_with_mt_id<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+    parse: TlvParser,
+) -> Option<usize> {
+    if value.len() < 2 {
+        return None;
+    }
+    let mt_id = read_be_u16(value, 0).unwrap_or_default() & 0x0FFF;
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_MT_ID],
+        FieldValue::U16(mt_id),
+        offset..offset + 2,
+    );
+    // An MT TLV without entries still decodes its MT ID.
+    Some(2 + parse(buf, &value[2..], offset + 2).unwrap_or(0))
 }
 
 /// TLV 1: Area Addresses — ISO/IEC 10589:2002.
@@ -743,7 +1014,7 @@ fn parse_area_addresses_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_AREAS],
         FieldValue::Array(0..0),
@@ -752,19 +1023,19 @@ fn parse_area_addresses_fields<'pkt>(
     let mut i = 0;
     while i < value.len() {
         let addr_len = value[i] as usize;
-        i += 1;
-        if i + addr_len > value.len() {
+        if i + 1 + addr_len > value.len() {
             break;
         }
         buf.push_field(
             &TLV_CHILD_FIELDS[FD_TLV_AREAS],
-            FieldValue::Bytes(&value[i..i + addr_len]),
-            offset + i - 1..offset + i + addr_len,
+            FieldValue::Bytes(&value[i + 1..i + 1 + addr_len]),
+            offset + i..offset + i + 1 + addr_len,
         );
-        i += addr_len;
+        i += 1 + addr_len;
     }
     buf.end_container(array_idx);
-    true
+    set_range_end(buf, array_idx, offset + i);
+    Some(i)
 }
 
 /// TLV 129: Protocols Supported — RFC 1195, Section 5 —
@@ -773,7 +1044,7 @@ fn parse_protocols_supported_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_PROTOCOLS],
         FieldValue::Array(0..0),
@@ -793,7 +1064,41 @@ fn parse_protocols_supported_fields<'pkt>(
         buf.end_container(obj_idx);
     }
     buf.end_container(array_idx);
-    true
+    Some(value.len())
+}
+
+/// Pushes an `addresses` array of `size`-octet addresses; returns the
+/// octets covered, or `None` when no complete address is present.
+fn parse_address_array(
+    buf: &mut DissectBuffer<'_>,
+    value: &[u8],
+    offset: usize,
+    size: usize,
+) -> Option<usize> {
+    let n = value.len() / size * size;
+    if n == 0 {
+        return None;
+    }
+    let array_idx = buf.begin_container(
+        &TLV_CHILD_FIELDS[FD_TLV_ADDRESSES],
+        FieldValue::Array(0..0),
+        offset..offset + n,
+    );
+    for (i, c) in value[..n].chunks_exact(size).enumerate() {
+        let start = offset + i * size;
+        let addr = if size == 4 {
+            FieldValue::Ipv4Addr([c[0], c[1], c[2], c[3]])
+        } else {
+            FieldValue::Ipv6Addr(read_ipv6_addr(c, 0).unwrap_or_default())
+        };
+        buf.push_field(
+            &TLV_CHILD_FIELDS[FD_TLV_ADDRESSES],
+            addr,
+            start..start + size,
+        );
+    }
+    buf.end_container(array_idx);
+    Some(n)
 }
 
 /// TLV 132: IP Interface Address — RFC 1195, Section 5 —
@@ -802,25 +1107,8 @@ fn parse_ip_address_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
-    if value.len() < 4 || value.len() % 4 != 0 {
-        return false;
-    }
-    let array_idx = buf.begin_container(
-        &TLV_CHILD_FIELDS[FD_TLV_ADDRESSES],
-        FieldValue::Array(0..0),
-        offset..offset + value.len(),
-    );
-    for (i, c) in value.chunks_exact(4).enumerate() {
-        let start = offset + i * 4;
-        buf.push_field(
-            &TLV_CHILD_FIELDS[FD_TLV_ADDRESSES],
-            FieldValue::Ipv4Addr([c[0], c[1], c[2], c[3]]),
-            start..start + 4,
-        );
-    }
-    buf.end_container(array_idx);
-    true
+) -> Option<usize> {
+    parse_address_array(buf, value, offset, 4)
 }
 
 /// TLV 134: TE Router ID — RFC 5305, Section 4.3 —
@@ -829,16 +1117,16 @@ fn parse_te_router_id_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     if value.len() < 4 {
-        return false;
+        return None;
     }
     buf.push_field(
         &TLV_CHILD_FIELDS[FD_TLV_ROUTER_ID],
         FieldValue::Ipv4Addr([value[0], value[1], value[2], value[3]]),
         offset..offset + 4,
     );
-    true
+    Some(4)
 }
 
 /// TLV 137: Dynamic Hostname — RFC 5301, Section 3 —
@@ -847,41 +1135,23 @@ fn parse_hostname_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     buf.push_field(
         &TLV_CHILD_FIELDS[FD_TLV_HOSTNAME],
         FieldValue::Bytes(value),
         offset..offset + value.len(),
     );
-    true
+    Some(value.len())
 }
 
-/// TLV 232: IPv6 Interface Address — RFC 5308, Section 2 —
-/// <https://www.rfc-editor.org/rfc/rfc5308#section-2>.
+/// TLV 232: IPv6 Interface Address — RFC 5308, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-3>.
 fn parse_ipv6_address_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
-    if value.len() < 16 || value.len() % 16 != 0 {
-        return false;
-    }
-    let array_idx = buf.begin_container(
-        &TLV_CHILD_FIELDS[FD_TLV_ADDRESSES],
-        FieldValue::Array(0..0),
-        offset..offset + value.len(),
-    );
-    for (i, c) in value.chunks_exact(16).enumerate() {
-        let start = offset + i * 16;
-        let addr: [u8; 16] = c.try_into().unwrap_or([0; 16]);
-        buf.push_field(
-            &TLV_CHILD_FIELDS[FD_TLV_ADDRESSES],
-            FieldValue::Ipv6Addr(addr),
-            start..start + 16,
-        );
-    }
-    buf.end_container(array_idx);
-    true
+) -> Option<usize> {
+    parse_address_array(buf, value, offset, 16)
 }
 
 /// TLV 6: IS Neighbors (IIH) — ISO/IEC 10589:2002.
@@ -889,16 +1159,17 @@ fn parse_is_neighbors_iih_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
-    if value.is_empty() || value.len() % 6 != 0 {
-        return false;
+) -> Option<usize> {
+    let n = value.len() / 6 * 6;
+    if n == 0 {
+        return None;
     }
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_NEIGHBORS],
         FieldValue::Array(0..0),
-        offset..offset + value.len(),
+        offset..offset + n,
     );
-    for (i, c) in value.chunks_exact(6).enumerate() {
+    for (i, c) in value[..n].chunks_exact(6).enumerate() {
         let start = offset + i * 6;
         buf.push_field(
             &TLV_CHILD_FIELDS[FD_TLV_NEIGHBORS],
@@ -907,16 +1178,19 @@ fn parse_is_neighbors_iih_fields<'pkt>(
         );
     }
     buf.end_container(array_idx);
-    true
+    Some(n)
 }
 
 /// TLV 22: Extended IS Reachability — RFC 5305, Section 3 —
 /// <https://www.rfc-editor.org/rfc/rfc5305#section-3>.
+///
+/// Each entry: system ID and pseudonode number (7 octets), default metric
+/// (3 octets), length of sub-TLVs (1 octet), then the sub-TLVs.
 fn parse_extended_is_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_NEIGHBORS],
         FieldValue::Array(0..0),
@@ -945,20 +1219,31 @@ fn parse_extended_is_reach_fields<'pkt>(
             FieldValue::U32(metric),
             offset + i + 7..offset + i + 10,
         );
+        push_sub_tlvs(
+            buf,
+            &value[i + 11..entry_end],
+            offset + i + 11,
+            SubTlvContext::Neighbor,
+        );
         buf.end_container(obj_idx);
         i = entry_end;
     }
     buf.end_container(array_idx);
-    true
+    set_range_end(buf, array_idx, offset + i);
+    Some(i)
 }
 
 /// TLV 135: Extended IP Reachability — RFC 5305, Section 4 —
 /// <https://www.rfc-editor.org/rfc/rfc5305#section-4>.
+///
+/// RFC 5305, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc5305#section-4.1>
+/// Control octet: "1 bit of up/down information", "1 bit indicating the
+/// presence of sub-TLVs", "6 bits of prefix length".
 fn parse_extended_ip_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_PREFIXES],
         FieldValue::Array(0..0),
@@ -974,33 +1259,33 @@ fn parse_extended_ip_reach_fields<'pkt>(
         }
         let prefix_bytes = (prefix_len as usize).div_ceil(8);
         let entry_start = i;
-        i += 5;
-        if i + prefix_bytes > value.len() {
+        let prefix_start = i + 5;
+        if prefix_start + prefix_bytes > value.len() {
             break;
         }
-        let mut addr = [0u8; 4];
-        addr[..prefix_bytes].copy_from_slice(&value[i..i + prefix_bytes]);
-        i += prefix_bytes;
+        let mut entry_end = prefix_start + prefix_bytes;
         let has_sub_tlvs = (control & 0x40) != 0;
         if has_sub_tlvs {
-            if i >= value.len() {
+            let Some(&sub_len) = value.get(entry_end) else {
+                break;
+            };
+            if entry_end + 1 + sub_len as usize > value.len() {
                 break;
             }
-            let sub_len = value[i] as usize;
-            if i + 1 + sub_len > value.len() {
-                break;
-            }
-            i += 1 + sub_len;
+            entry_end += 1 + sub_len as usize;
         }
+        let mut addr = [0u8; 4];
+        addr[..prefix_bytes].copy_from_slice(&value[prefix_start..prefix_start + prefix_bytes]);
+        mask_prefix(&mut addr, prefix_len as usize);
         let obj_idx = buf.begin_container(
             &TLV_CHILD_FIELDS[FD_TLV_PREFIXES],
             FieldValue::Object(0..0),
-            offset + entry_start..offset + i,
+            offset + entry_start..offset + entry_end,
         );
         buf.push_field(
             &EXT_IP_REACH_CHILD_FIELDS[FD_EIPR_PREFIX],
             FieldValue::Ipv4Addr(addr),
-            offset + entry_start + 5..offset + entry_start + 5 + prefix_bytes,
+            offset + prefix_start..offset + prefix_start + prefix_bytes,
         );
         buf.push_field(
             &EXT_IP_REACH_CHILD_FIELDS[FD_EIPR_PREFIX_LENGTH],
@@ -1012,19 +1297,48 @@ fn parse_extended_ip_reach_fields<'pkt>(
             FieldValue::U32(metric),
             offset + entry_start..offset + entry_start + 4,
         );
+        push_flag(
+            buf,
+            &EXT_IP_REACH_CHILD_FIELDS[FD_EIPR_UP_DOWN],
+            control,
+            0x80,
+            offset + entry_start + 4,
+        );
+        push_flag(
+            buf,
+            &EXT_IP_REACH_CHILD_FIELDS[FD_EIPR_SUB_TLVS_PRESENT],
+            control,
+            0x40,
+            offset + entry_start + 4,
+        );
+        if has_sub_tlvs {
+            // Sub-TLV Len octet, then the sub-TLVs up to `entry_end`.
+            let sub_start = prefix_start + prefix_bytes + 1;
+            push_sub_tlvs(
+                buf,
+                &value[sub_start..entry_end],
+                offset + sub_start,
+                SubTlvContext::Prefix,
+            );
+        }
         buf.end_container(obj_idx);
+        i = entry_end;
     }
     buf.end_container(array_idx);
-    true
+    set_range_end(buf, array_idx, offset + i);
+    Some(i)
 }
 
-/// TLV 236: IPv6 Reachability — RFC 5308, Section 5 —
-/// <https://www.rfc-editor.org/rfc/rfc5308#section-5>.
+/// TLV 236: IPv6 Reachability — RFC 5308, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc5308#section-2>.
+///
+/// Layout: Metric (4), U / X / S bits, Prefix Len, Prefix, and Sub-TLV Len
+/// plus Sub-TLVs when S is set.
 fn parse_ipv6_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_PREFIXES],
         FieldValue::Array(0..0),
@@ -1040,33 +1354,33 @@ fn parse_ipv6_reach_fields<'pkt>(
         }
         let prefix_bytes = (prefix_len as usize).div_ceil(8);
         let entry_start = i;
-        i += 6;
-        if i + prefix_bytes > value.len() {
+        let prefix_start = i + 6;
+        if prefix_start + prefix_bytes > value.len() {
             break;
         }
-        let mut addr = [0u8; 16];
-        addr[..prefix_bytes].copy_from_slice(&value[i..i + prefix_bytes]);
-        i += prefix_bytes;
+        let mut entry_end = prefix_start + prefix_bytes;
         let has_sub_tlvs = (control & 0x20) != 0;
         if has_sub_tlvs {
-            if i >= value.len() {
+            let Some(&sub_len) = value.get(entry_end) else {
+                break;
+            };
+            if entry_end + 1 + sub_len as usize > value.len() {
                 break;
             }
-            let sub_len = value[i] as usize;
-            if i + 1 + sub_len > value.len() {
-                break;
-            }
-            i += 1 + sub_len;
+            entry_end += 1 + sub_len as usize;
         }
+        let mut addr = [0u8; 16];
+        addr[..prefix_bytes].copy_from_slice(&value[prefix_start..prefix_start + prefix_bytes]);
+        mask_prefix(&mut addr, prefix_len as usize);
         let obj_idx = buf.begin_container(
             &TLV_CHILD_FIELDS[FD_TLV_PREFIXES],
             FieldValue::Object(0..0),
-            offset + entry_start..offset + i,
+            offset + entry_start..offset + entry_end,
         );
         buf.push_field(
             &IPV6_REACH_CHILD_FIELDS[FD_IP6R_PREFIX],
             FieldValue::Ipv6Addr(addr),
-            offset + entry_start + 6..offset + entry_start + 6 + prefix_bytes,
+            offset + prefix_start..offset + prefix_start + prefix_bytes,
         );
         buf.push_field(
             &IPV6_REACH_CHILD_FIELDS[FD_IP6R_PREFIX_LENGTH],
@@ -1078,26 +1392,69 @@ fn parse_ipv6_reach_fields<'pkt>(
             FieldValue::U32(metric),
             offset + entry_start..offset + entry_start + 4,
         );
+        let flags_at = offset + entry_start + 4;
+        push_flag(
+            buf,
+            &IPV6_REACH_CHILD_FIELDS[FD_IP6R_UP_DOWN],
+            control,
+            0x80,
+            flags_at,
+        );
+        push_flag(
+            buf,
+            &IPV6_REACH_CHILD_FIELDS[FD_IP6R_EXTERNAL],
+            control,
+            0x40,
+            flags_at,
+        );
+        push_flag(
+            buf,
+            &IPV6_REACH_CHILD_FIELDS[FD_IP6R_SUB_TLVS_PRESENT],
+            control,
+            0x20,
+            flags_at,
+        );
+        if has_sub_tlvs {
+            // Sub-TLV Len octet, then the sub-TLVs up to `entry_end`.
+            let sub_start = prefix_start + prefix_bytes + 1;
+            push_sub_tlvs(
+                buf,
+                &value[sub_start..entry_end],
+                offset + sub_start,
+                SubTlvContext::Prefix,
+            );
+        }
         buf.end_container(obj_idx);
+        i = entry_end;
     }
     buf.end_container(array_idx);
-    true
+    set_range_end(buf, array_idx, offset + i);
+    Some(i)
 }
 
 /// TLV 128/130: IP Internal/External Reachability — RFC 1195, Section 5 —
 /// <https://www.rfc-editor.org/rfc/rfc1195#section-5>.
+///
+/// Layout: default metric octet with the I/E bit, then the delay, expense
+/// and error metric octets, each with an S bit: "If this IS does not
+/// support this metric it shall set the bit "S" to 1". RFC 5302, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc5302#section-2> redefines the
+/// high-order default-metric bit as the up/down bit.
 fn parse_ip_reach_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
+    let n = value.len() / 12 * 12;
+    if n == 0 {
+        return None;
+    }
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_ENTRIES],
         FieldValue::Array(0..0),
-        offset..offset + value.len(),
+        offset..offset + n,
     );
-    let mut i = 0;
-    while i + 12 <= value.len() {
+    for i in (0..n).step_by(12) {
         let metric = value[i] & 0x3F;
         let ip = [value[i + 4], value[i + 5], value[i + 6], value[i + 7]];
         let mask = [value[i + 8], value[i + 9], value[i + 10], value[i + 11]];
@@ -1121,11 +1478,42 @@ fn parse_ip_reach_fields<'pkt>(
             FieldValue::U8(metric),
             offset + i..offset + i + 1,
         );
+        push_flag(
+            buf,
+            &IP_REACH_CHILD_FIELDS[FD_IPR_UP_DOWN],
+            value[i],
+            0x80,
+            offset + i,
+        );
+        push_flag(
+            buf,
+            &IP_REACH_CHILD_FIELDS[FD_IPR_IE],
+            value[i],
+            0x40,
+            offset + i,
+        );
+        for (k, f) in [
+            FD_IPR_DELAY_METRIC,
+            FD_IPR_EXPENSE_METRIC,
+            FD_IPR_ERROR_METRIC,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let b = value[i + 1 + k];
+            // S bit set: the metric is not supported and carries no value.
+            if b & 0x80 == 0 {
+                buf.push_field(
+                    &IP_REACH_CHILD_FIELDS[f],
+                    FieldValue::U8(b & 0x3F),
+                    offset + i + 1 + k..offset + i + 2 + k,
+                );
+            }
+        }
         buf.end_container(obj_idx);
-        i += 12;
     }
     buf.end_container(array_idx);
-    true
+    Some(n)
 }
 
 /// TLV 9: LSP Entries — ISO/IEC 10589:2002.
@@ -1133,14 +1521,17 @@ fn parse_lsp_entries_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
+) -> Option<usize> {
+    let n = value.len() / 16 * 16;
+    if n == 0 {
+        return None;
+    }
     let array_idx = buf.begin_container(
         &TLV_CHILD_FIELDS[FD_TLV_ENTRIES],
         FieldValue::Array(0..0),
-        offset..offset + value.len(),
+        offset..offset + n,
     );
-    let mut i = 0;
-    while i + 16 <= value.len() {
+    for i in (0..n).step_by(16) {
         let remaining_lifetime = read_be_u16(value, i).unwrap_or_default();
         let seq = read_be_u32(value, i + 10).unwrap_or_default();
         let checksum = read_be_u16(value, i + 14).unwrap_or_default();
@@ -1170,76 +1561,414 @@ fn parse_lsp_entries_fields<'pkt>(
             offset + i + 14..offset + i + 16,
         );
         buf.end_container(obj_idx);
-        i += 16;
     }
     buf.end_container(array_idx);
-    true
+    Some(n)
 }
 
-/// TLV 240: P2P Three-Way Adjacency — RFC 5303, Section 3 —
-/// <https://www.rfc-editor.org/rfc/rfc5303#section-3>.
+/// TLV 240: P2P Three-Way Adjacency — RFC 5303, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5303#section-3.1>.
+///
+/// Layout: Adjacency Three-Way State (1), Extended Local Circuit ID (4),
+/// Neighbor System ID (ID Length), Neighbor Extended Local Circuit ID (4);
+/// the fields after the state are optional.
 fn parse_p2p_adj_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    let state = value[0];
+) -> Option<usize> {
+    let &state = value.first()?;
     buf.push_field(
         &TLV_CHILD_FIELDS[FD_TLV_STATE],
         FieldValue::U8(state),
         offset..offset + 1,
     );
-    true
+    if value.len() < 5 {
+        return Some(1);
+    }
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_EXTENDED_LOCAL_CIRCUIT_ID],
+        FieldValue::U32(read_be_u32(value, 1).unwrap_or_default()),
+        offset + 1..offset + 5,
+    );
+    let id_end = 5 + SYSTEM_ID_LEN;
+    if value.len() < id_end {
+        return Some(5);
+    }
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_NEIGHBOR_SYSTEM_ID],
+        FieldValue::Bytes(&value[5..id_end]),
+        offset + 5..offset + id_end,
+    );
+    if value.len() < id_end + 4 {
+        return Some(id_end);
+    }
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_NEIGHBOR_EXTENDED_CIRCUIT_ID],
+        FieldValue::U32(read_be_u32(value, id_end).unwrap_or_default()),
+        offset + id_end..offset + id_end + 4,
+    );
+    Some(id_end + 4)
 }
 
+/// Authentication type: Cleartext Password — ISO/IEC 10589:2002, Section 9.
+const AUTH_TYPE_CLEARTEXT: u8 = 1;
+
+/// Authentication type: Generic Cryptographic Authentication —
+/// RFC 5310, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc5310#section-3.1>.
+const AUTH_TYPE_GENERIC_CRYPTO: u8 = 3;
+
+/// Authentication type: HMAC-MD5 —
+/// RFC 5304, Section 2 — <https://www.rfc-editor.org/rfc/rfc5304#section-2>.
+const AUTH_TYPE_HMAC_MD5: u8 = 54;
+
+/// HMAC-MD5 digest length.
+///
+/// RFC 5304, Section 2 — <https://www.rfc-editor.org/rfc/rfc5304#section-2>
+/// "The length of the Authentication Value for HMAC-MD5 is 16"
+const HMAC_MD5_LEN: usize = 16;
+
 /// TLV 10: Authentication — ISO/IEC 10589:2002;
-/// RFC 5304, Section 3 — <https://www.rfc-editor.org/rfc/rfc5304#section-3>;
-/// RFC 5310, Section 3 — <https://www.rfc-editor.org/rfc/rfc5310#section-3>.
+/// RFC 5304, Section 2 — <https://www.rfc-editor.org/rfc/rfc5304#section-2>;
+/// RFC 5310, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc5310#section-3.1>.
 fn parse_authentication_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    let auth_type = value[0];
+) -> Option<usize> {
+    let &auth_type = value.first()?;
     buf.push_field(
         &TLV_CHILD_FIELDS[FD_TLV_AUTH_TYPE],
         FieldValue::U8(auth_type),
         offset..offset + 1,
     );
-    true
+    let rest = &value[1..];
+    match auth_type {
+        AUTH_TYPE_CLEARTEXT => {
+            buf.push_field(
+                &TLV_CHILD_FIELDS[FD_TLV_PASSWORD],
+                FieldValue::Bytes(rest),
+                offset + 1..offset + value.len(),
+            );
+            Some(value.len())
+        }
+        AUTH_TYPE_HMAC_MD5 if rest.len() >= HMAC_MD5_LEN => {
+            buf.push_field(
+                &TLV_CHILD_FIELDS[FD_TLV_DIGEST],
+                FieldValue::Bytes(&rest[..HMAC_MD5_LEN]),
+                offset + 1..offset + 1 + HMAC_MD5_LEN,
+            );
+            Some(1 + HMAC_MD5_LEN)
+        }
+        // RFC 5310, Section 3.1: Auth Type 3, Key ID (2), Authentication Data
+        // <https://www.rfc-editor.org/rfc/rfc5310#section-3.1>
+        AUTH_TYPE_GENERIC_CRYPTO if rest.len() >= 2 => {
+            buf.push_field(
+                &TLV_CHILD_FIELDS[FD_TLV_KEY_ID],
+                FieldValue::U16(read_be_u16(rest, 0).unwrap_or_default()),
+                offset + 1..offset + 3,
+            );
+            buf.push_field(
+                &TLV_CHILD_FIELDS[FD_TLV_DIGEST],
+                FieldValue::Bytes(&rest[2..]),
+                offset + 3..offset + value.len(),
+            );
+            Some(value.len())
+        }
+        _ => Some(1),
+    }
 }
 
-/// TLV 211: Restart — RFC 8706, Section 3 —
-/// <https://www.rfc-editor.org/rfc/rfc8706#section-3>.
+/// TLV 211: Restart — RFC 8706, Section 3.2 —
+/// <https://www.rfc-editor.org/rfc/rfc8706#section-3.2>.
+///
+/// Layout: Flags (1), Remaining Time (2), Restarting Neighbor ID (ID Length).
 fn parse_restart_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     value: &'pkt [u8],
     offset: usize,
-) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    let flags = value[0];
+) -> Option<usize> {
+    let &flags = value.first()?;
     buf.push_field(
         &TLV_CHILD_FIELDS[FD_TLV_FLAGS],
         FieldValue::U8(flags),
         offset..offset + 1,
     );
-    if value.len() >= 3 {
-        let remaining_time = read_be_u16(value, 1).unwrap_or_default();
-        buf.push_field(
-            &TLV_CHILD_FIELDS[FD_TLV_REMAINING_TIME],
-            FieldValue::U16(remaining_time),
-            offset + 1..offset + 3,
-        );
+    if value.len() < 3 {
+        return Some(1);
     }
-    true
+    let remaining_time = read_be_u16(value, 1).unwrap_or_default();
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_REMAINING_TIME],
+        FieldValue::U16(remaining_time),
+        offset + 1..offset + 3,
+    );
+    let id_end = 3 + SYSTEM_ID_LEN;
+    if value.len() < id_end {
+        return Some(3);
+    }
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_RESTARTING_NEIGHBOR_ID],
+        FieldValue::Bytes(&value[3..id_end]),
+        offset + 3..offset + id_end,
+    );
+    Some(id_end)
+}
+
+/// TLV 229: Multi-Topology — RFC 5120, Section 7.1 —
+/// <https://www.rfc-editor.org/rfc/rfc5120#section-7.1>.
+///
+/// Layout per 2-octet entry: O bit, A bit, 2 reserved bits, 12-bit MT ID.
+fn parse_multi_topology_fields<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+) -> Option<usize> {
+    let n = value.len() / 2 * 2;
+    if n == 0 {
+        return None;
+    }
+    let array_idx = buf.begin_container(
+        &TLV_CHILD_FIELDS[FD_TLV_TOPOLOGIES],
+        FieldValue::Array(0..0),
+        offset..offset + n,
+    );
+    for i in (0..n).step_by(2) {
+        let at = offset + i;
+        let obj_idx = buf.begin_container(&FD_TOPOLOGY_ENTRY, FieldValue::Object(0..0), at..at + 2);
+        push_flag(
+            buf,
+            &TOPOLOGY_CHILD_FIELDS[FD_MT_OVERLOAD],
+            value[i],
+            0x80,
+            at,
+        );
+        push_flag(
+            buf,
+            &TOPOLOGY_CHILD_FIELDS[FD_MT_ATTACHED],
+            value[i],
+            0x40,
+            at,
+        );
+        buf.push_field(
+            &TOPOLOGY_CHILD_FIELDS[FD_MT_MT_ID],
+            FieldValue::U16(read_be_u16(value, i).unwrap_or_default() & 0x0FFF),
+            at..at + 2,
+        );
+        buf.end_container(obj_idx);
+    }
+    buf.end_container(array_idx);
+    Some(n)
+}
+
+/// TLV 242: Router Capability — RFC 7981, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc7981#section-2>.
+///
+/// Layout: Router ID (4 octets), Flags (1 octet), optional sub-TLVs; the
+/// flags define "S bit (0x01)" and "D bit (0x02)".
+fn parse_router_capability_fields<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+) -> Option<usize> {
+    if value.len() < 5 {
+        return None;
+    }
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_ROUTER_ID],
+        FieldValue::Ipv4Addr([value[0], value[1], value[2], value[3]]),
+        offset..offset + 4,
+    );
+    let flags = value[4];
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_CAPABILITY_FLAGS],
+        FieldValue::U8(flags),
+        offset + 4..offset + 5,
+    );
+    push_flag(
+        buf,
+        &TLV_CHILD_FIELDS[FD_TLV_FLAG_S],
+        flags,
+        0x01,
+        offset + 4,
+    );
+    push_flag(
+        buf,
+        &TLV_CHILD_FIELDS[FD_TLV_FLAG_D],
+        flags,
+        0x02,
+        offset + 4,
+    );
+    push_sub_tlvs(
+        buf,
+        &value[5..],
+        offset + 5,
+        SubTlvContext::RouterCapability,
+    );
+    Some(value.len())
+}
+
+/// TLV 27: SRv6 Locator — RFC 9352, Section 7.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>.
+///
+/// Layout: 4 reserved bits and a 12-bit MTID, then entries of Metric (4),
+/// Flags (1), Algorithm (1), Loc Size (1), Locator, Sub-TLV-len (1) and
+/// Sub-TLVs.
+fn parse_srv6_locator_fields<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+) -> Option<usize> {
+    // "The entire TLV MUST be ignored if the Loc-Size is outside this range."
+    if value.len() < 2 || !srv6_locator_sizes_valid(value) {
+        return None;
+    }
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_MT_ID],
+        FieldValue::U16(read_be_u16(value, 0).unwrap_or_default() & 0x0FFF),
+        offset..offset + 2,
+    );
+    let array_idx = buf.begin_container(
+        &TLV_CHILD_FIELDS[FD_TLV_LOCATORS],
+        FieldValue::Array(0..0),
+        offset + 2..offset + value.len(),
+    );
+    let mut i = 2;
+    while i + 7 <= value.len() {
+        let loc_size = value[i + 6];
+        let loc_bytes = (loc_size as usize).div_ceil(8);
+        let loc_start = i + 7;
+        let len_at = loc_start + loc_bytes;
+        let Some(&sub_len) = value.get(len_at) else {
+            break;
+        };
+        let entry_end = len_at + 1 + sub_len as usize;
+        if entry_end > value.len() {
+            break;
+        }
+        let obj_idx = buf.begin_container(
+            &FD_LOCATOR_ENTRY,
+            FieldValue::Object(0..0),
+            offset + i..offset + entry_end,
+        );
+        buf.push_field(
+            &LOCATOR_CHILD_FIELDS[FD_LOC_METRIC],
+            FieldValue::U32(read_be_u32(value, i).unwrap_or_default()),
+            offset + i..offset + i + 4,
+        );
+        buf.push_field(
+            &LOCATOR_CHILD_FIELDS[FD_LOC_FLAGS],
+            FieldValue::U8(value[i + 4]),
+            offset + i + 4..offset + i + 5,
+        );
+        // RFC 9352, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>
+        // "D-flag: "up/down bit" as described in Section 4.1 of [RFC5305]."
+        push_flag(
+            buf,
+            &LOCATOR_CHILD_FIELDS[FD_LOC_UP_DOWN],
+            value[i + 4],
+            0x80,
+            offset + i + 4,
+        );
+        buf.push_field(
+            &LOCATOR_CHILD_FIELDS[FD_LOC_ALGORITHM],
+            FieldValue::U8(value[i + 5]),
+            offset + i + 5..offset + i + 6,
+        );
+        buf.push_field(
+            &LOCATOR_CHILD_FIELDS[FD_LOC_SIZE],
+            FieldValue::U8(loc_size),
+            offset + i + 6..offset + i + 7,
+        );
+        let mut addr = [0u8; 16];
+        addr[..loc_bytes].copy_from_slice(&value[loc_start..len_at]);
+        // "Trailing bits MUST be set to zero and ignored when received."
+        mask_prefix(&mut addr, loc_size as usize);
+        buf.push_field(
+            &LOCATOR_CHILD_FIELDS[FD_LOC_LOCATOR],
+            FieldValue::Ipv6Addr(addr),
+            offset + loc_start..offset + len_at,
+        );
+        push_sub_tlvs(
+            buf,
+            &value[len_at + 1..entry_end],
+            offset + len_at + 1,
+            SubTlvContext::Prefix,
+        );
+        buf.end_container(obj_idx);
+        i = entry_end;
+    }
+    buf.end_container(array_idx);
+    set_range_end(buf, array_idx, offset + i);
+    Some(i)
+}
+
+/// TLV 149: SID/Label Binding — RFC 8667, Section 2.4 —
+/// <https://www.rfc-editor.org/rfc/rfc8667#section-2.4>.
+///
+/// Layout: Flags (1), RESERVED (1), Range (2), Prefix Length (1), Prefix
+/// (0-16), Sub-TLVs; for the F-Flag, "If set, then the prefix carries an
+/// IPv6 prefix." Also used after the MT ID of TLV 150 (Section 2.5).
+fn parse_binding_fields<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    value: &'pkt [u8],
+    offset: usize,
+) -> Option<usize> {
+    if value.len() < 5 {
+        return None;
+    }
+    let flags = value[0];
+    let ipv6 = flags & 0x80 != 0;
+    let prefix_len = value[4];
+    if prefix_len > if ipv6 { 128 } else { 32 } {
+        return None;
+    }
+    let prefix_bytes = (prefix_len as usize).div_ceil(8);
+    let prefix_end = 5 + prefix_bytes;
+    if prefix_end > value.len() {
+        return None;
+    }
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_BINDING_FLAGS],
+        FieldValue::U8(flags),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_RANGE],
+        FieldValue::U16(read_be_u16(value, 2).unwrap_or_default()),
+        offset + 2..offset + 4,
+    );
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_PREFIX_LENGTH],
+        FieldValue::U8(prefix_len),
+        offset + 4..offset + 5,
+    );
+    let prefix = &value[5..prefix_end];
+    // RFC 8667, Section 2.4.3 — <https://www.rfc-editor.org/rfc/rfc8667#section-2.4.3>
+    // "Only the most significant octets of the prefix are encoded"
+    let prefix_value = if ipv6 {
+        let mut a = [0u8; 16];
+        a[..prefix_bytes].copy_from_slice(prefix);
+        mask_prefix(&mut a, prefix_len as usize);
+        FieldValue::Ipv6Addr(a)
+    } else {
+        let mut a = [0u8; 4];
+        a[..prefix_bytes].copy_from_slice(prefix);
+        mask_prefix(&mut a, prefix_len as usize);
+        FieldValue::Ipv4Addr(a)
+    };
+    buf.push_field(
+        &TLV_CHILD_FIELDS[FD_TLV_PREFIX],
+        prefix_value,
+        offset + 5..offset + prefix_end,
+    );
+    push_sub_tlvs(
+        buf,
+        &value[prefix_end..],
+        offset + prefix_end,
+        SubTlvContext::Binding,
+    );
+    Some(value.len())
 }
 
 /// Parses the TLV area starting at `data[tlv_start..]` up to `pdu_end`.
@@ -1268,7 +1997,7 @@ fn parse_tlvs<'pkt>(
         let tlv_value = &data[value_start..value_end];
 
         let obj_idx = buf.begin_container(
-            &TLV_CHILD_FIELDS[FD_TLV_TYPE],
+            &FD_TLV,
             FieldValue::Object(0..0),
             offset + pos..offset + value_end,
         );
@@ -1284,12 +2013,16 @@ fn parse_tlvs<'pkt>(
             offset + pos + 1..offset + value_start,
         );
 
-        let has_typed = parse_tlv_fields(buf, tlv_type, tlv_value, offset + value_start);
-        if !has_typed && tlv_type != TLV_PADDING {
+        // Octets a typed parser did not consume (or the whole value when no
+        // parser applies) are kept as `raw`; Padding carries no information.
+        let consumed = parse_tlv_fields(buf, tlv_type, tlv_value, offset + value_start)
+            .unwrap_or(0)
+            .min(tlv_len);
+        if consumed < tlv_len && tlv_type != TLV_PADDING {
             buf.push_field(
                 &TLV_CHILD_FIELDS[FD_TLV_RAW],
-                FieldValue::Bytes(tlv_value),
-                offset + value_start..offset + value_end,
+                FieldValue::Bytes(&tlv_value[consumed..]),
+                offset + value_start + consumed..offset + value_end,
             );
         }
 
@@ -1815,9 +2548,12 @@ mod tests {
     // | RFC 5305 §4.3              | TE Router ID TLV (134)         | parse_tlv_te_router_id                 |
     // | RFC 5304                   | Authentication TLV (10)        | parse_tlv_authentication               |
     // | RFC 5310 §3                | Generic Crypto Authentication   | parse_tlv_authentication_hmac_sha      |
-    // | RFC 5308 §2                | IPv6 Interface Address TLV     | parse_tlv_ipv6_interface_address       |
-    // | RFC 5308 §5                | IPv6 Reachability TLV (236)    | parse_tlv_ipv6_reachability            |
-    // | RFC 5120                   | MT IS Neighbors (222) raw      | parse_tlv_mt_is_neighbors_raw          |
+    // | RFC 5308 §3                | IPv6 Interface Address TLV     | parse_tlv_ipv6_interface_address       |
+    // | RFC 5308 §2                | IPv6 Reachability TLV (236)    | parse_tlv_ipv6_reachability            |
+    // | RFC 5120 §7.2-7.4          | MT TLVs shorter than one entry | parse_tlv_mt_is_neighbors_short_value, |
+    // |                            |                                | parse_tlv_mt_ip_reachability_short_value, |
+    // |                            |                                | parse_tlv_mt_ipv6_reachability_short_value |
+    // | RFC 7981 §2                | Router Capability too short    | parse_tlv_router_capability_short_value |
     // | ISO 10589                  | Area Addresses TLV             | parse_tlv_area_addresses               |
     // | ISO 10589                  | Unknown PDU type               | reject_unknown_pdu_type                |
     // | ISO 10589                  | Truncated LAN IIH              | reject_truncated_lan_iih               |
@@ -1827,6 +2563,30 @@ mod tests {
     // | ISO 10589 §7.1             | LSP ID format (8 bytes)        | format_isis_lsp_id                     |
     // | ISO 10589 §7.1             | ID format edge cases           | format_isis_id_edge_cases              |
     // | ISO 10589 §7.1             | format_fn descriptor wiring    | format_isis_id_descriptor_attached     |
+    // | ISO 10589 §9               | TLV container label            | tlv_container_is_labeled               |
+    // | ISO 10589 §9               | Undecoded octets kept as raw   | typed_tlv_trailing_bytes_are_raw,      |
+    // |                            |                                | parse_tlv_ip_address_odd_length        |
+    // | RFC 5305 §4, RFC 8667 §2.1 | TLV 135 flags, Prefix-SID      | parse_tlv_135_prefix_sid_sub_tlv       |
+    // | RFC 5305 §3, RFC 5307,     | TLV 22 sub-TLVs (TE, Adj-SID,  | parse_tlv_22_sub_tlvs                  |
+    // | RFC 8667 §2.2, RFC 8570,   | delay / loss, SRv6 End.X,      |                                        |
+    // | RFC 9352 §8-9              | SID Structure)                 |                                        |
+    // | RFC 5305 §3                | Malformed sub-TLVs             | parse_malformed_sub_tlvs               |
+    // | RFC 5120 §7.2              | MT IS Neighbors (222)          | parse_tlv_222_mt_is_neighbors          |
+    // | RFC 5120 §7.3-7.4,         | TLVs 235/236/237 flags and     | parse_tlv_235_236_237                  |
+    // | RFC 5308 §2, RFC 7794 §2,  | prefix sub-TLVs                |                                        |
+    // | RFC 5130                   |                                |                                        |
+    // | RFC 5120 §7.1              | Multi-Topology (229)           | parse_tlv_229_multi_topology           |
+    // | RFC 1195 §5, RFC 5302 §2   | TLV 128/130 bits and metrics   | parse_tlv_128_flags_and_metrics        |
+    // | RFC 7981 §2, RFC 8667 §3,  | Router Capability (242)        | parse_tlv_242_router_capability        |
+    // | RFC 8491 §2, RFC 9352 §2   |                                |                                        |
+    // | RFC 9352 §7                | SRv6 Locator (27), End SID     | parse_tlv_27_srv6_locator              |
+    // | RFC 8667 §2.4-2.5          | SID/Label Binding (149/150)    | parse_tlv_149_150_binding              |
+    // | RFC 5303 §3.1              | TLV 240 all fields             | parse_tlv_240_full                     |
+    // | RFC 5304 §2, RFC 5310 §3.1 | TLV 10 password / digests      | parse_tlv_10_values                    |
+    // | RFC 8706 §3.2              | TLV 211 restarting neighbor    | parse_tlv_211_restarting_neighbor      |
+    // | RFC 9352 §7.1              | Loc-Size range, trailing bits  | parse_tlv_27_loc_size_rules            |
+    // | RFC 5305 §4                | Trailing prefix bits ignored   | parse_tlv_135_masks_trailing_prefix_bits |
+    // | RFC 1195 §5, ISO 10589     | TLV 128 / 9 shorter than entry | short_entry_tlvs_are_raw_only          |
 
     /// Helper: build a minimal L1 LAN IIH PDU (27 bytes header + TLVs).
     fn build_l1_lan_iih(tlvs: &[u8]) -> Vec<u8> {
@@ -3358,12 +4118,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Multi-topology TLV tests (raw fallback for unsupported MT TLVs)
+    // Multi-topology / Router Capability TLVs with values too short for an
+    // entry: the MT ID (if any) is decoded and the rest stays raw
     // -----------------------------------------------------------------------
 
     #[test]
-    fn parse_tlv_mt_is_neighbors_raw() {
-        // TLV 222: MT IS Neighbors — not fully parsed, falls through to raw.
+    fn parse_tlv_mt_is_neighbors_short_value() {
+        // TLV 222: MT ID 0x102, then 2 octets — shorter than one entry.
         let tlvs = [TLV_MT_IS_NEIGHBORS, 4, 0x01, 0x02, 0x03, 0x04];
         let data = build_l1_lsp(&tlvs);
         let mut buf = DissectBuffer::new();
@@ -3382,12 +4143,19 @@ mod tests {
                 Some("MT IS Neighbors")
             );
         }
-        assert!(tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw").is_some());
+        assert_eq!(
+            tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "mt_id"),
+            Some(FieldValue::U16(0x102))
+        );
+        assert_eq!(
+            tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw"),
+            Some(FieldValue::Bytes(&[0x03, 0x04]))
+        );
     }
 
     #[test]
-    fn parse_tlv_mt_ip_reachability_raw() {
-        // TLV 235: MT IP Reachability — not fully parsed, raw fallback.
+    fn parse_tlv_mt_ip_reachability_short_value() {
+        // TLV 235: MT ID 0x102, then 2 octets — shorter than one entry.
         let tlvs = [TLV_MT_IP_REACHABILITY, 4, 0x01, 0x02, 0x03, 0x04];
         let data = build_l1_lsp(&tlvs);
         let mut buf = DissectBuffer::new();
@@ -3406,12 +4174,19 @@ mod tests {
                 Some("MT IP Reachability")
             );
         }
-        assert!(tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw").is_some());
+        assert_eq!(
+            tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "mt_id"),
+            Some(FieldValue::U16(0x102))
+        );
+        assert_eq!(
+            tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw"),
+            Some(FieldValue::Bytes(&[0x03, 0x04]))
+        );
     }
 
     #[test]
-    fn parse_tlv_mt_ipv6_reachability_raw() {
-        // TLV 237: MT IPv6 Reachability — not fully parsed, raw fallback.
+    fn parse_tlv_mt_ipv6_reachability_short_value() {
+        // TLV 237: MT ID 0x102, then 2 octets — shorter than one entry.
         let tlvs = [TLV_MT_IPV6_REACHABILITY, 4, 0x01, 0x02, 0x03, 0x04];
         let data = build_l1_lsp(&tlvs);
         let mut buf = DissectBuffer::new();
@@ -3430,12 +4205,19 @@ mod tests {
                 Some("MT IPv6 Reachability")
             );
         }
-        assert!(tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw").is_some());
+        assert_eq!(
+            tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "mt_id"),
+            Some(FieldValue::U16(0x102))
+        );
+        assert_eq!(
+            tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw"),
+            Some(FieldValue::Bytes(&[0x03, 0x04]))
+        );
     }
 
     #[test]
-    fn parse_tlv_router_capability_raw() {
-        // TLV 242: Router Capability — not fully parsed, raw fallback.
+    fn parse_tlv_router_capability_short_value() {
+        // TLV 242: shorter than Router ID + Flags (5 octets) — kept raw.
         let tlvs = [TLV_ROUTER_CAPABILITY, 2, 0x01, 0x02];
         let data = build_l1_lsp(&tlvs);
         let mut buf = DissectBuffer::new();
@@ -3633,7 +4415,8 @@ mod tests {
 
     #[test]
     fn parse_tlv_ip_address_odd_length() {
-        // IP address TLV with 5 bytes (not a multiple of 4) — returns empty.
+        // IP address TLV with 5 bytes (not a multiple of 4): the complete
+        // address is decoded and the trailing octet is kept as `raw`.
         let tlvs = [TLV_IP_INTERFACE_ADDRESS, 5, 10, 0, 0, 1, 0xFF];
         let data = build_l1_lan_iih(&tlvs);
         let mut buf = DissectBuffer::new();
@@ -3641,8 +4424,11 @@ mod tests {
         let layer = buf.layer_by_name("ISIS").unwrap();
         let tlvs_field = buf.field_by_name(layer, "tlvs").unwrap();
         let tlvs_range = tlvs_field.value.as_container_range().unwrap().clone();
-        assert!(tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "addresses").is_none());
-        assert!(tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw").is_some());
+        assert!(tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "addresses").is_some());
+        assert_eq!(
+            tlv_field_value(&buf, &nth_tlv_range(&buf, &tlvs_range, 0), "raw"),
+            Some(FieldValue::Bytes(&[0xFF]))
+        );
     }
 
     #[test]
@@ -4044,5 +4830,689 @@ mod tests {
             assert!(r.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
+    }
+
+    // ---------------------------------------------------------------------
+    // Sub-TLVs, MT / Router Capability / SRv6 / Binding TLVs, trailing data
+    // ---------------------------------------------------------------------
+
+    /// Direct children of a container (descendants of nested containers skipped).
+    fn kids<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>, range: &Range<u32>) -> Vec<&'a Field<'pkt>> {
+        let all = buf.nested_fields(range);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < all.len() {
+            out.push(&all[i]);
+            i += match all[i].value.as_container_range() {
+                Some(r) => (r.end - r.start) as usize + 1,
+                None => 1,
+            };
+        }
+        out
+    }
+
+    /// Direct child `name` of a container.
+    fn kid<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        range: &Range<u32>,
+        name: &str,
+    ) -> &'a Field<'pkt> {
+        kids(buf, range)
+            .into_iter()
+            .find(|f| f.name() == name)
+            .unwrap_or_else(|| panic!("missing child {name}"))
+    }
+
+    fn has_kid(buf: &DissectBuffer<'_>, range: &Range<u32>, name: &str) -> bool {
+        kids(buf, range).iter().any(|f| f.name() == name)
+    }
+
+    fn crange(f: &Field<'_>) -> Range<u32> {
+        f.value.as_container_range().unwrap().clone()
+    }
+
+    /// Child range of the `index`-th element of array `name` inside `parent`.
+    fn item(buf: &DissectBuffer<'_>, parent: &Range<u32>, name: &str, index: usize) -> Range<u32> {
+        crange(kids(buf, &crange(kid(buf, parent, name)))[index])
+    }
+
+    /// Container display name of the `index`-th element of array `name`.
+    fn item_name(
+        buf: &DissectBuffer<'_>,
+        parent: &Range<u32>,
+        name: &str,
+        index: usize,
+    ) -> Option<&'static str> {
+        let items = kids(buf, &crange(kid(buf, parent, name)));
+        let idx = buf
+            .fields()
+            .iter()
+            .position(|f| core::ptr::eq(f, items[index]))
+            .unwrap() as u32;
+        buf.resolve_container_display_name(idx)
+    }
+
+    /// Dissects `pdu` and returns the child range of the `n`-th TLV object.
+    fn tlv_n(buf: &DissectBuffer<'_>, n: usize) -> Range<u32> {
+        let layer = buf.layer_by_name("ISIS").unwrap();
+        let tlvs = buf.field_by_name(layer, "tlvs").unwrap();
+        crange(kids(buf, &crange(tlvs))[n])
+    }
+
+    fn val(buf: &DissectBuffer<'_>, range: &Range<u32>, name: &str) -> FieldValue<'static> {
+        match kid(buf, range, name).value {
+            FieldValue::U8(v) => FieldValue::U8(v),
+            FieldValue::U16(v) => FieldValue::U16(v),
+            FieldValue::U32(v) => FieldValue::U32(v),
+            FieldValue::U64(v) => FieldValue::U64(v),
+            FieldValue::Ipv4Addr(v) => FieldValue::Ipv4Addr(v),
+            FieldValue::Ipv6Addr(v) => FieldValue::Ipv6Addr(v),
+            ref other => panic!("unexpected value {other:?} for {name}"),
+        }
+    }
+
+    fn bytes<'a>(buf: &'a DissectBuffer<'_>, range: &Range<u32>, name: &str) -> &'a [u8] {
+        kid(buf, range, name).value.as_bytes().unwrap()
+    }
+
+    fn ipv6(prefix: &[u8]) -> FieldValue<'static> {
+        let mut a = [0u8; 16];
+        a[..prefix.len()].copy_from_slice(prefix);
+        FieldValue::Ipv6Addr(a)
+    }
+
+    /// Build a TLV / sub-TLV with a 1-octet type and length.
+    fn t(ty: u8, value: &[u8]) -> Vec<u8> {
+        let mut out = vec![ty, value.len() as u8];
+        out.extend_from_slice(value);
+        out
+    }
+
+    const SID6: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x41,
+    ];
+
+    /// The issue reproduction: TLV 135 with S=1 and a Prefix-SID sub-TLV.
+    /// RFC 5305, Section 4 and RFC 8667, Section 2.1.
+    /// <https://www.rfc-editor.org/rfc/rfc5305#section-4>
+    /// <https://www.rfc-editor.org/rfc/rfc8667#section-2.1>
+    #[test]
+    fn parse_tlv_135_prefix_sid_sub_tlv() {
+        let tlvs = [
+            0x87, 0x12, 0, 0, 0, 0x0a, 0x60, 0x0a, 0, 0, 1, 0x08, 0x03, 0x06, 0x40, 0x00, 0, 0, 0,
+            0x65,
+        ];
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let tlv = tlv_n(&buf, 0);
+        let p = item(&buf, &tlv, "prefixes", 0);
+        assert_eq!(val(&buf, &p, "prefix"), FieldValue::Ipv4Addr([10, 0, 0, 1]));
+        assert_eq!(val(&buf, &p, "prefix_length"), FieldValue::U8(32));
+        assert_eq!(val(&buf, &p, "metric"), FieldValue::U32(10));
+        assert_eq!(val(&buf, &p, "up_down"), FieldValue::U8(0));
+        assert_eq!(val(&buf, &p, "sub_tlvs_present"), FieldValue::U8(1));
+        assert_eq!(
+            item_name(&buf, &p, "sub_tlvs", 0),
+            Some("Prefix Segment Identifier")
+        );
+        let sid = item(&buf, &p, "sub_tlvs", 0);
+        assert_eq!(val(&buf, &sid, "type"), FieldValue::U8(3));
+        assert_eq!(val(&buf, &sid, "length"), FieldValue::U8(6));
+        assert_eq!(val(&buf, &sid, "flags"), FieldValue::U8(0x40));
+        assert_eq!(val(&buf, &sid, "algorithm"), FieldValue::U8(0));
+        assert_eq!(val(&buf, &sid, "sid"), FieldValue::U32(101));
+    }
+
+    /// TLV objects are `tlv` containers labeled with the TLV type name.
+    #[test]
+    fn tlv_container_is_labeled() {
+        let data = build_l1_lsp(&t(TLV_TE_ROUTER_ID, &[1, 1, 1, 1]));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("ISIS").unwrap();
+        let tlvs = buf.field_by_name(layer, "tlvs").unwrap();
+        let items = kids(&buf, &crange(tlvs));
+        assert_eq!(items[0].name(), "tlv");
+        let idx = buf
+            .fields()
+            .iter()
+            .position(|f| core::ptr::eq(f, items[0]))
+            .unwrap();
+        assert_eq!(
+            buf.resolve_container_display_name(idx as u32),
+            Some("TE Router ID")
+        );
+    }
+
+    /// Octets a typed decoder does not consume are exposed as `raw`.
+    #[test]
+    fn typed_tlv_trailing_bytes_are_raw() {
+        let mut tlvs = t(TLV_TE_ROUTER_ID, &[1, 1, 1, 1, 9, 9]);
+        tlvs.extend(t(TLV_IP_INTERFACE_ADDRESS, &[10, 0, 0, 1, 7]));
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let te = tlv_n(&buf, 0);
+        assert_eq!(
+            val(&buf, &te, "router_id"),
+            FieldValue::Ipv4Addr([1, 1, 1, 1])
+        );
+        assert_eq!(bytes(&buf, &te, "raw"), &[9, 9]);
+        let ip = tlv_n(&buf, 1);
+        assert_eq!(bytes(&buf, &ip, "raw"), &[7]);
+    }
+
+    /// RFC 5303, Section 3.1 — every field of TLV 240.
+    /// <https://www.rfc-editor.org/rfc/rfc5303#section-3.1>
+    #[test]
+    fn parse_tlv_240_full() {
+        let tlvs = [
+            0xf0, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00,
+            0x00, 0x00, 0x02,
+        ];
+        let data = build_p2p_iih(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let tlv = tlv_n(&buf, 0);
+        assert_eq!(val(&buf, &tlv, "state"), FieldValue::U8(0));
+        assert_eq!(
+            val(&buf, &tlv, "extended_local_circuit_id"),
+            FieldValue::U32(1)
+        );
+        assert_eq!(bytes(&buf, &tlv, "neighbor_system_id"), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            val(&buf, &tlv, "neighbor_extended_circuit_id"),
+            FieldValue::U32(2)
+        );
+        assert!(!has_kid(&buf, &tlv, "raw"));
+    }
+
+    /// RFC 5304, Section 2 and RFC 5310, Section 3.1 — TLV 10 values.
+    /// <https://www.rfc-editor.org/rfc/rfc5304#section-2>
+    /// <https://www.rfc-editor.org/rfc/rfc5310#section-3.1>
+    #[test]
+    fn parse_tlv_10_values() {
+        let mut tlvs = t(TLV_AUTHENTICATION, b"\x01secret");
+        let mut md5 = vec![54];
+        md5.extend_from_slice(&[0xAB; 16]);
+        tlvs.extend(t(TLV_AUTHENTICATION, &md5));
+        tlvs.extend(t(TLV_AUTHENTICATION, &[3, 0, 7, 0xCD, 0xCD, 0xCD]));
+        tlvs.extend(t(TLV_AUTHENTICATION, &[54, 1, 2]));
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(bytes(&buf, &tlv_n(&buf, 0), "password"), b"secret");
+        assert_eq!(bytes(&buf, &tlv_n(&buf, 1), "digest"), &[0xAB; 16]);
+        let generic = tlv_n(&buf, 2);
+        assert_eq!(val(&buf, &generic, "key_id"), FieldValue::U16(7));
+        assert_eq!(bytes(&buf, &generic, "digest"), &[0xCD; 3]);
+        assert_eq!(bytes(&buf, &tlv_n(&buf, 3), "raw"), &[1, 2]);
+    }
+
+    /// RFC 8706, Section 3.2 — Restarting Neighbor ID in TLV 211.
+    /// <https://www.rfc-editor.org/rfc/rfc8706#section-3.2>
+    #[test]
+    fn parse_tlv_211_restarting_neighbor() {
+        let data = build_p2p_iih(&t(TLV_RESTART, &[0x02, 0, 30, 1, 2, 3, 4, 5, 6]));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let tlv = tlv_n(&buf, 0);
+        assert_eq!(val(&buf, &tlv, "remaining_time"), FieldValue::U16(30));
+        assert_eq!(
+            bytes(&buf, &tlv, "restarting_neighbor_id"),
+            &[1, 2, 3, 4, 5, 6]
+        );
+    }
+
+    /// RFC 1195, Section 5 and RFC 5302, Section 2 — TLV 128/130 flag bits
+    /// and optional metrics.
+    /// <https://www.rfc-editor.org/rfc/rfc1195#section-5>
+    /// <https://www.rfc-editor.org/rfc/rfc5302#section-2>
+    #[test]
+    fn parse_tlv_128_flags_and_metrics() {
+        let entry = [0xCA, 0x05, 0x80, 0x07, 10, 0, 0, 0, 255, 0, 0, 0];
+        let data = build_l1_lsp(&t(TLV_IP_EXTERNAL_REACHABILITY, &entry));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let e = item(&buf, &tlv_n(&buf, 0), "entries", 0);
+        assert_eq!(val(&buf, &e, "metric"), FieldValue::U8(10));
+        assert_eq!(val(&buf, &e, "up_down"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &e, "ie"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &e, "delay_metric"), FieldValue::U8(5));
+        assert!(!has_kid(&buf, &e, "expense_metric"));
+        assert_eq!(val(&buf, &e, "error_metric"), FieldValue::U8(7));
+    }
+
+    /// RFC 5305, Section 3; RFC 5307; RFC 8667, Section 2.2; RFC 8570,
+    /// Section 4; RFC 9352, Section 8 — TLV 22 sub-TLVs.
+    /// <https://www.rfc-editor.org/rfc/rfc5305#section-3>
+    /// <https://www.rfc-editor.org/rfc/rfc8667#section-2.2>
+    /// <https://www.rfc-editor.org/rfc/rfc8570#section-4>
+    /// <https://www.rfc-editor.org/rfc/rfc9352#section-8>
+    #[test]
+    fn parse_tlv_22_sub_tlvs() {
+        let mut subs = t(3, &[0, 0, 0, 0x0f]);
+        subs.extend(t(4, &[0, 0, 0, 1, 0, 0, 0, 2]));
+        subs.extend(t(6, &[10, 0, 0, 1]));
+        subs.extend(t(8, &[10, 0, 0, 2]));
+        subs.extend(t(9, &1.25e8f32.to_bits().to_be_bytes()));
+        subs.extend(t(10, &1.0e8f32.to_bits().to_be_bytes()));
+        let mut unres = Vec::new();
+        for _ in 0..8 {
+            unres.extend_from_slice(&5.0e7f32.to_bits().to_be_bytes());
+        }
+        subs.extend(t(11, &unres));
+        subs.extend(t(18, &[0, 0, 20]));
+        subs.extend(t(31, &[0x30, 1, 0x00, 0x3e, 0x80])); // V|L label 16000
+        subs.extend(t(32, &[0x30, 2, 1, 2, 3, 4, 5, 6, 0, 0x3e, 0x81]));
+        subs.extend(t(33, &[0x80, 0, 0x03, 0xe8])); // A, delay 1000
+        subs.extend(t(34, &[0, 0, 0, 10, 0, 0, 0, 50]));
+        subs.extend(t(35, &[0, 0, 0, 5]));
+        subs.extend(t(36, &[0x80, 0, 0, 3]));
+        subs.extend(t(37, &2.0e7f32.to_bits().to_be_bytes()));
+        let mut end_x = vec![0x80, 0, 1, 0, 5];
+        end_x.extend_from_slice(&SID6);
+        end_x.push(6);
+        end_x.extend(t(1, &[32, 16, 16, 0]));
+        subs.extend(t(43, &end_x));
+        let mut lan = vec![1, 2, 3, 4, 5, 6, 0, 0, 1, 0, 5];
+        lan.extend_from_slice(&SID6);
+        lan.push(0);
+        subs.extend(t(44, &lan));
+        subs.extend(t(250, &[1, 2]));
+        let mut value = vec![1, 2, 3, 4, 5, 6, 0, 0, 0, 10, subs.len() as u8];
+        value.extend(&subs);
+        let data = build_l1_lsp(&t(TLV_EXTENDED_IS_REACHABILITY, &value));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let n = item(&buf, &tlv_n(&buf, 0), "neighbors", 0);
+        let s = |i| item(&buf, &n, "sub_tlvs", i);
+        assert_eq!(
+            item_name(&buf, &n, "sub_tlvs", 0),
+            Some("Administrative group (color)")
+        );
+        assert_eq!(val(&buf, &s(0), "admin_group"), FieldValue::U32(0x0f));
+        assert_eq!(val(&buf, &s(1), "local_identifier"), FieldValue::U32(1));
+        assert_eq!(val(&buf, &s(1), "remote_identifier"), FieldValue::U32(2));
+        assert_eq!(
+            val(&buf, &s(2), "ipv4_interface_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 1])
+        );
+        assert_eq!(
+            val(&buf, &s(3), "ipv4_neighbor_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 2])
+        );
+        assert_eq!(
+            val(&buf, &s(4), "max_bandwidth"),
+            FieldValue::U32(1.25e8f32.to_bits())
+        );
+        assert_eq!(
+            val(&buf, &s(5), "max_reservable_bandwidth"),
+            FieldValue::U32(1.0e8f32.to_bits())
+        );
+        assert_eq!(
+            kids(&buf, &crange(kid(&buf, &s(6), "unreserved_bandwidth"))).len(),
+            8
+        );
+        assert_eq!(val(&buf, &s(7), "te_default_metric"), FieldValue::U32(20));
+        assert_eq!(val(&buf, &s(8), "flags"), FieldValue::U8(0x30));
+        assert_eq!(val(&buf, &s(8), "weight"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &s(8), "sid"), FieldValue::U32(16000));
+        assert_eq!(
+            bytes(&buf, &s(9), "neighbor_system_id"),
+            &[1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(val(&buf, &s(9), "sid"), FieldValue::U32(16001));
+        assert_eq!(val(&buf, &s(10), "anomalous"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &s(10), "delay"), FieldValue::U32(1000));
+        assert_eq!(val(&buf, &s(11), "min_delay"), FieldValue::U32(10));
+        assert_eq!(val(&buf, &s(11), "max_delay"), FieldValue::U32(50));
+        assert_eq!(val(&buf, &s(12), "delay_variation"), FieldValue::U32(5));
+        assert_eq!(val(&buf, &s(13), "link_loss"), FieldValue::U32(3));
+        assert_eq!(
+            val(&buf, &s(14), "bandwidth"),
+            FieldValue::U32(2.0e7f32.to_bits())
+        );
+        let ex = s(15);
+        assert_eq!(item_name(&buf, &n, "sub_tlvs", 15), Some("SRv6 End.X SID"));
+        assert_eq!(val(&buf, &ex, "flags"), FieldValue::U8(0x80));
+        assert_eq!(val(&buf, &ex, "algorithm"), FieldValue::U8(0));
+        assert_eq!(val(&buf, &ex, "weight"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &ex, "endpoint_behavior"), FieldValue::U16(5));
+        assert_eq!(val(&buf, &ex, "srv6_sid"), FieldValue::Ipv6Addr(SID6));
+        let st = item(&buf, &ex, "sub_tlvs", 0);
+        assert_eq!(
+            item_name(&buf, &ex, "sub_tlvs", 0),
+            Some("SRv6 SID Structure")
+        );
+        assert_eq!(val(&buf, &st, "locator_block_length"), FieldValue::U8(32));
+        assert_eq!(val(&buf, &st, "locator_node_length"), FieldValue::U8(16));
+        assert_eq!(val(&buf, &st, "function_length"), FieldValue::U8(16));
+        assert_eq!(val(&buf, &st, "argument_length"), FieldValue::U8(0));
+        let lex = s(16);
+        assert_eq!(bytes(&buf, &lex, "neighbor_system_id"), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(val(&buf, &lex, "srv6_sid"), FieldValue::Ipv6Addr(SID6));
+        assert!(!has_kid(&buf, &lex, "sub_tlvs"));
+        assert_eq!(bytes(&buf, &s(17), "value"), &[1, 2]);
+    }
+
+    /// Malformed sub-TLVs: a short fixed part stays raw and an overrunning
+    /// sub-TLV ends the walk with the rest in `unparsed`.
+    #[test]
+    fn parse_malformed_sub_tlvs() {
+        let mut subs = t(31, &[0x30, 1]); // Adj-SID too short
+        subs.extend_from_slice(&[6, 9, 1]); // overruns
+        let mut value = vec![1, 2, 3, 4, 5, 6, 0, 0, 0, 10, subs.len() as u8];
+        value.extend(&subs);
+        let data = build_l1_lsp(&t(TLV_EXTENDED_IS_REACHABILITY, &value));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let n = item(&buf, &tlv_n(&buf, 0), "neighbors", 0);
+        assert_eq!(
+            bytes(&buf, &item(&buf, &n, "sub_tlvs", 0), "value"),
+            &[0x30, 1]
+        );
+        assert_eq!(bytes(&buf, &n, "raw"), &[6, 9, 1]);
+    }
+
+    /// RFC 5120, Section 7.2 — TLV 222: MT ID then TLV 22 entries.
+    /// <https://www.rfc-editor.org/rfc/rfc5120#section-7.2>
+    #[test]
+    fn parse_tlv_222_mt_is_neighbors() {
+        let mut value = vec![0x00, 0x02];
+        value.extend_from_slice(&[1, 2, 3, 4, 5, 6, 0, 0, 0, 10, 6]);
+        value.extend(t(6, &[10, 0, 0, 1]));
+        let data = build_l1_lsp(&t(TLV_MT_IS_NEIGHBORS, &value));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let tlv = tlv_n(&buf, 0);
+        assert_eq!(val(&buf, &tlv, "mt_id"), FieldValue::U16(2));
+        let n = item(&buf, &tlv, "neighbors", 0);
+        assert_eq!(val(&buf, &n, "metric"), FieldValue::U32(10));
+        let s = item(&buf, &n, "sub_tlvs", 0);
+        assert_eq!(
+            val(&buf, &s, "ipv4_interface_address"),
+            FieldValue::Ipv4Addr([10, 0, 0, 1])
+        );
+    }
+
+    /// RFC 5120, Sections 7.3-7.4; RFC 5308, Section 2; RFC 7794, Section 2;
+    /// RFC 5130 — TLVs 235 / 236 / 237 with flags and prefix sub-TLVs.
+    /// <https://www.rfc-editor.org/rfc/rfc5120#section-7.3>
+    /// <https://www.rfc-editor.org/rfc/rfc5308#section-2>
+    /// <https://www.rfc-editor.org/rfc/rfc7794#section-2>
+    #[test]
+    fn parse_tlv_235_236_237() {
+        // 235: MT 2, 10.1.0.0/16, up/down, no sub-TLVs
+        let mut v235 = vec![0x00, 0x02, 0, 0, 0, 5, 0x90, 10, 1];
+        v235.extend_from_slice(&[]);
+        // 236: 2001:db8::/32, X and S bits, sub-TLVs
+        let mut subs = t(4, &[0xE0]); // X|R|N
+        subs.extend(t(11, &[1, 1, 1, 1]));
+        subs.extend(t(12, &SID6));
+        subs.extend(t(1, &[0, 0, 0, 7, 0, 0, 0, 8]));
+        subs.extend(t(2, &[0, 0, 0, 0, 0, 0, 0, 9]));
+        subs.extend(t(3, &[0x60, 0, 0, 0x3e, 0x80]));
+        let mut v236 = vec![
+            0,
+            0,
+            0,
+            20,
+            0x60,
+            32,
+            0x20,
+            0x01,
+            0x0d,
+            0xb8,
+            subs.len() as u8,
+        ];
+        v236.extend(&subs);
+        // 237: MT 2, ::/0 with U bit
+        let v237 = [0x00, 0x02, 0, 0, 0, 1, 0x80, 0];
+        let mut tlvs = t(TLV_MT_IP_REACHABILITY, &v235);
+        tlvs.extend(t(TLV_IPV6_REACHABILITY, &v236));
+        tlvs.extend(t(TLV_MT_IPV6_REACHABILITY, &v237));
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let t235 = tlv_n(&buf, 0);
+        assert_eq!(val(&buf, &t235, "mt_id"), FieldValue::U16(2));
+        let p = item(&buf, &t235, "prefixes", 0);
+        assert_eq!(val(&buf, &p, "prefix"), FieldValue::Ipv4Addr([10, 1, 0, 0]));
+        assert_eq!(val(&buf, &p, "up_down"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &p, "sub_tlvs_present"), FieldValue::U8(0));
+
+        let p = item(&buf, &tlv_n(&buf, 1), "prefixes", 0);
+        assert_eq!(val(&buf, &p, "up_down"), FieldValue::U8(0));
+        assert_eq!(val(&buf, &p, "external"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &p, "sub_tlvs_present"), FieldValue::U8(1));
+        let s = |i| item(&buf, &p, "sub_tlvs", i);
+        assert_eq!(val(&buf, &s(0), "flags"), FieldValue::U8(0xE0));
+        assert_eq!(val(&buf, &s(0), "flag_x"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &s(0), "flag_r"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &s(0), "flag_n"), FieldValue::U8(1));
+        assert_eq!(
+            val(&buf, &s(1), "ipv4_source_router_id"),
+            FieldValue::Ipv4Addr([1, 1, 1, 1])
+        );
+        assert_eq!(
+            val(&buf, &s(2), "ipv6_source_router_id"),
+            FieldValue::Ipv6Addr(SID6)
+        );
+        let tags = kids(&buf, &crange(kid(&buf, &s(3), "tags")));
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[1].value, FieldValue::U32(8));
+        let tags = kids(&buf, &crange(kid(&buf, &s(4), "tags")));
+        assert_eq!(tags[0].value, FieldValue::U64(9));
+        assert_eq!(val(&buf, &s(5), "sid"), FieldValue::U32(16000));
+
+        let t237 = tlv_n(&buf, 2);
+        assert_eq!(val(&buf, &t237, "mt_id"), FieldValue::U16(2));
+        let p = item(&buf, &t237, "prefixes", 0);
+        assert_eq!(val(&buf, &p, "up_down"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &p, "prefix_length"), FieldValue::U8(0));
+    }
+
+    /// RFC 5120, Section 7.1 — TLV 229 Multi-Topology.
+    /// <https://www.rfc-editor.org/rfc/rfc5120#section-7.1>
+    #[test]
+    fn parse_tlv_229_multi_topology() {
+        let data = build_l1_lsp(&t(229, &[0x00, 0x00, 0xC0, 0x02, 9]));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let tlv = tlv_n(&buf, 0);
+        let m = item(&buf, &tlv, "topologies", 1);
+        assert_eq!(val(&buf, &m, "overload"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &m, "attached"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &m, "mt_id"), FieldValue::U16(2));
+        assert_eq!(bytes(&buf, &tlv, "raw"), &[9]);
+    }
+
+    /// RFC 7981, Section 2; RFC 8667, Section 3; RFC 8491, Section 2;
+    /// RFC 9352, Section 2 — TLV 242 Router Capability.
+    /// <https://www.rfc-editor.org/rfc/rfc7981#section-2>
+    /// <https://www.rfc-editor.org/rfc/rfc8667#section-3>
+    /// <https://www.rfc-editor.org/rfc/rfc8491#section-2>
+    /// <https://www.rfc-editor.org/rfc/rfc9352#section-2>
+    #[test]
+    fn parse_tlv_242_router_capability() {
+        let mut value = vec![1, 1, 1, 1, 0x03];
+        let mut srgb = vec![0xC0, 0x00, 0x1f, 0x40];
+        srgb.extend(t(1, &[0x00, 0x3e, 0x80]));
+        value.extend(t(2, &srgb));
+        value.extend(t(19, &[0, 1]));
+        let mut srlb = vec![0x00, 0x00, 0x03, 0xe8];
+        srlb.extend(t(1, &[0, 0, 0x3a, 0x98]));
+        value.extend(t(22, &srlb));
+        value.extend(t(23, &[1, 10]));
+        value.extend(t(24, &[100]));
+        value.extend(t(25, &[0x40, 0x00]));
+        value.extend(t(11, &[2, 2, 2, 2]));
+        value.extend(t(21, &[0, 0, 0, 1]));
+        let data = build_l1_lsp(&t(TLV_ROUTER_CAPABILITY, &value));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+
+        let tlv = tlv_n(&buf, 0);
+        assert_eq!(
+            val(&buf, &tlv, "router_id"),
+            FieldValue::Ipv4Addr([1, 1, 1, 1])
+        );
+        assert_eq!(val(&buf, &tlv, "capability_flags"), FieldValue::U8(3));
+        assert_eq!(val(&buf, &tlv, "flag_s"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &tlv, "flag_d"), FieldValue::U8(1));
+        let s = |i| item(&buf, &tlv, "sub_tlvs", i);
+        assert_eq!(
+            item_name(&buf, &tlv, "sub_tlvs", 0),
+            Some("Segment Routing Capability")
+        );
+        assert_eq!(val(&buf, &s(0), "flags"), FieldValue::U8(0xC0));
+        let r = item(&buf, &s(0), "ranges", 0);
+        assert_eq!(val(&buf, &r, "range_size"), FieldValue::U32(8000));
+        assert_eq!(val(&buf, &r, "sid"), FieldValue::U32(16000));
+        let algs = kids(&buf, &crange(kid(&buf, &s(1), "algorithms")));
+        assert_eq!(algs[1].value, FieldValue::U8(1));
+        let r = item(&buf, &s(2), "ranges", 0);
+        assert_eq!(val(&buf, &r, "range_size"), FieldValue::U32(1000));
+        assert_eq!(val(&buf, &r, "sid"), FieldValue::U32(15000));
+        let msd = item(&buf, &s(3), "msds", 0);
+        assert_eq!(val(&buf, &msd, "msd_type"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &msd, "msd_value"), FieldValue::U8(10));
+        assert_eq!(val(&buf, &s(4), "preference"), FieldValue::U8(100));
+        assert_eq!(val(&buf, &s(5), "srv6_flags"), FieldValue::U16(0x4000));
+        assert_eq!(
+            val(&buf, &s(6), "ipv4_te_router_id"),
+            FieldValue::Ipv4Addr([2, 2, 2, 2])
+        );
+        assert_eq!(bytes(&buf, &s(7), "value"), &[0, 0, 0, 1]);
+    }
+
+    /// RFC 9352, Sections 7.1-7.2 — TLV 27 SRv6 Locator with an End SID.
+    /// <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>
+    #[test]
+    fn parse_tlv_27_srv6_locator() {
+        let mut end = vec![0, 0, 1];
+        end.extend_from_slice(&SID6);
+        end.push(0);
+        let sub = t(5, &end);
+        let mut value = vec![0x00, 0x00, 0, 0, 0, 10, 0x80, 0, 48];
+        value.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 1]);
+        value.push(sub.len() as u8);
+        value.extend(&sub);
+        let data = build_l1_lsp(&t(27, &value));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let tlv = tlv_n(&buf, 0);
+        assert_eq!(val(&buf, &tlv, "mt_id"), FieldValue::U16(0));
+        let l = item(&buf, &tlv, "locators", 0);
+        assert_eq!(val(&buf, &l, "metric"), FieldValue::U32(10));
+        assert_eq!(val(&buf, &l, "up_down"), FieldValue::U8(1));
+        assert_eq!(val(&buf, &l, "algorithm"), FieldValue::U8(0));
+        assert_eq!(val(&buf, &l, "locator_size"), FieldValue::U8(48));
+        assert_eq!(
+            val(&buf, &l, "locator"),
+            ipv6(&[0x20, 0x01, 0x0d, 0xb8, 0, 1])
+        );
+        let e = item(&buf, &l, "sub_tlvs", 0);
+        assert_eq!(item_name(&buf, &l, "sub_tlvs", 0), Some("SRv6 End SID"));
+        assert_eq!(val(&buf, &e, "endpoint_behavior"), FieldValue::U16(1));
+        assert_eq!(val(&buf, &e, "srv6_sid"), FieldValue::Ipv6Addr(SID6));
+    }
+
+    /// RFC 8667, Sections 2.4-2.5 — TLVs 149 / 150 SID/Label Binding.
+    /// <https://www.rfc-editor.org/rfc/rfc8667#section-2.4>
+    #[test]
+    fn parse_tlv_149_150_binding() {
+        let mut v149 = vec![0x00, 0, 0, 10, 24, 192, 168, 1];
+        v149.extend(t(3, &[0, 0, 0, 0, 0, 100]));
+        let mut v150 = vec![0x00, 0x02, 0x80, 0, 0, 1, 32, 0x20, 0x01, 0x0d, 0xb8];
+        v150.extend(t(1, &[0, 0x3e, 0x80]));
+        let mut tlvs = t(149, &v149);
+        tlvs.extend(t(150, &v150));
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let b = tlv_n(&buf, 0);
+        assert_eq!(val(&buf, &b, "binding_flags"), FieldValue::U8(0));
+        assert_eq!(val(&buf, &b, "range"), FieldValue::U16(10));
+        assert_eq!(val(&buf, &b, "prefix_length"), FieldValue::U8(24));
+        assert_eq!(
+            val(&buf, &b, "prefix"),
+            FieldValue::Ipv4Addr([192, 168, 1, 0])
+        );
+        assert_eq!(
+            val(&buf, &item(&buf, &b, "sub_tlvs", 0), "sid"),
+            FieldValue::U32(100)
+        );
+        let m = tlv_n(&buf, 1);
+        assert_eq!(val(&buf, &m, "mt_id"), FieldValue::U16(2));
+        assert_eq!(val(&buf, &m, "binding_flags"), FieldValue::U8(0x80));
+        assert_eq!(val(&buf, &m, "prefix"), ipv6(&[0x20, 0x01, 0x0d, 0xb8]));
+        assert_eq!(
+            val(&buf, &item(&buf, &m, "sub_tlvs", 0), "sid"),
+            FieldValue::U32(16000)
+        );
+    }
+
+    /// RFC 9352, Section 7.1 — a Loc-Size outside 1-128 makes the whole TLV
+    /// ignored, and locator bits past Loc-Size are ignored.
+    /// <https://www.rfc-editor.org/rfc/rfc9352#section-7.1>
+    #[test]
+    fn parse_tlv_27_loc_size_rules() {
+        // Valid /60 locator whose 8th octet has trailing bits set.
+        let mut good = vec![0x00, 0x00, 0, 0, 0, 1, 0, 0, 60];
+        good.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0xff, 0]);
+        let mut bad = good.clone();
+        bad.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0]); // Loc-Size 0
+        let mut tlvs = t(27, &good);
+        tlvs.extend(t(27, &bad));
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let l = item(&buf, &tlv_n(&buf, 0), "locators", 0);
+        assert_eq!(
+            val(&buf, &l, "locator"),
+            ipv6(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0xf0])
+        );
+        let ignored = tlv_n(&buf, 1);
+        assert!(!has_kid(&buf, &ignored, "locators"));
+        assert_eq!(bytes(&buf, &ignored, "raw"), bad.as_slice());
+    }
+
+    /// RFC 5305, Section 4 — prefix bits past the prefix length are ignored.
+    /// <https://www.rfc-editor.org/rfc/rfc5305#section-4>
+    #[test]
+    fn parse_tlv_135_masks_trailing_prefix_bits() {
+        let data = build_l1_lsp(&t(
+            TLV_EXTENDED_IP_REACHABILITY,
+            &[0, 0, 0, 1, 20, 10, 1, 0xff],
+        ));
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        let p = item(&buf, &tlv_n(&buf, 0), "prefixes", 0);
+        assert_eq!(
+            val(&buf, &p, "prefix"),
+            FieldValue::Ipv4Addr([10, 1, 0xf0, 0])
+        );
+    }
+
+    /// TLVs 128 and 9 shorter than one entry are kept raw without an empty
+    /// array.
+    #[test]
+    fn short_entry_tlvs_are_raw_only() {
+        let mut tlvs = t(TLV_IP_INTERNAL_REACHABILITY, &[0; 7]);
+        tlvs.extend(t(TLV_LSP_ENTRIES, &[0; 10]));
+        let data = build_l1_lsp(&tlvs);
+        let mut buf = DissectBuffer::new();
+        IsisDissector.dissect(&data, &mut buf, 0).unwrap();
+        for i in 0..2 {
+            let tlv = tlv_n(&buf, i);
+            assert!(!has_kid(&buf, &tlv, "entries"));
+            assert!(has_kid(&buf, &tlv, "raw"));
+        }
     }
 }

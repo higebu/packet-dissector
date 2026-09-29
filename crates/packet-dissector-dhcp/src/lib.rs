@@ -44,8 +44,44 @@ use packet_dissector_core::dissector::{
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{
-    FieldDescriptor, FieldType, FieldValue, MacAddr, format_fqdn_labels, format_utf8_lossy,
+    FieldDescriptor, FieldType, FieldValue, FormatContext, MacAddr, format_fqdn_labels,
+    format_utf8_lossy,
 };
+
+/// Resolve a [`FieldValue::Scratch`] value to the bytes it refers to, so the
+/// shared formatters see a [`FieldValue::Bytes`].
+///
+/// Values of split options (RFC 3396, Section 7 —
+/// <https://www.rfc-editor.org/rfc/rfc3396#section-7>) that straddle two split portions are
+/// assembled in the scratch buffer.
+fn resolve_scratch<'a>(value: &FieldValue<'a>, ctx: &FormatContext<'a>) -> FieldValue<'a> {
+    match value {
+        FieldValue::Scratch(r) => FieldValue::Bytes(
+            ctx.scratch
+                .get(r.start as usize..r.end as usize)
+                .unwrap_or_default(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// [`format_utf8_lossy`] that also accepts scratch-buffer values.
+fn format_text(
+    value: &FieldValue<'_>,
+    ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    format_utf8_lossy(&resolve_scratch(value, ctx), ctx, w)
+}
+
+/// [`format_fqdn_labels`] that also accepts scratch-buffer values.
+fn format_fqdn(
+    value: &FieldValue<'_>,
+    ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    format_fqdn_labels(&resolve_scratch(value, ctx), ctx, w)
+}
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_OP: usize = 0;
@@ -156,6 +192,7 @@ const FD_VI_VENDOR_CLASS: usize = 104;
 const FD_VI_VENDOR_SPECIFIC_INFO: usize = 105;
 const FD_FORCERENEW_NONCE_CAPABLE: usize = 106;
 const FD_TFTP_SERVER_ADDRESS: usize = 107;
+const FD_SPLIT_OPTION: usize = 108;
 
 // Fixed header fields are always present; DHCP options are dynamic
 // and represented as individual option fields at the top level.
@@ -178,10 +215,10 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("chaddr", "Client Hardware Address", FieldType::MacAddr).optional(),
     FieldDescriptor::new("sname", "Server Host Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("file", "Boot File Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor {
         name: "dhcp_message_type",
         display_name: "DHCP Message Type",
@@ -199,7 +236,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("boot_file_size", "Boot File Size", FieldType::U16).optional(),
     FieldDescriptor::new("bootfile_name", "Bootfile Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new(
         "broadcast_address",
         "Broadcast Address",
@@ -221,7 +258,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("dns_server", "Domain Name Server", FieldType::Array).optional(),
     FieldDescriptor::new("domain_name", "Domain Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("domain_search", "Domain Search List", FieldType::Array).optional(),
     FieldDescriptor::new(
         "ethernet_encapsulation",
@@ -231,10 +268,10 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional(),
     FieldDescriptor::new("extensions_path", "Extensions Path", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("hostname", "Host Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("impress_server", "Impress Server", FieldType::Array).optional(),
     FieldDescriptor::new("interface_mtu", "Interface MTU", FieldType::U16).optional(),
     FieldDescriptor::new("ip_forwarding", "IP Forwarding", FieldType::U8).optional(),
@@ -256,10 +293,10 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional(),
     FieldDescriptor::new("merit_dump_file", "Merit Dump File", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("message", "Message", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("name_server", "Name Server", FieldType::Array).optional(),
     FieldDescriptor::new("netbios_dd_server", "NetBIOS DD Server", FieldType::Array).optional(),
     FieldDescriptor::new(
@@ -271,14 +308,14 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("netbios_node_type", "NetBIOS Node Type", FieldType::U8).optional(),
     FieldDescriptor::new("netbios_scope", "NetBIOS Scope", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("nis_domain", "NIS Domain Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("nis_servers", "NIS Servers", FieldType::Array).optional(),
     FieldDescriptor::new("nisplus_domain", "NIS+ Domain Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("nisplus_servers", "NIS+ Servers", FieldType::Array).optional(),
     FieldDescriptor::new(
         "non_local_source_routing",
@@ -339,7 +376,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional(),
     FieldDescriptor::new("root_path", "Root Path", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("router", "Router", FieldType::Array).optional(),
     FieldDescriptor::new(
         "router_solicitation_address",
@@ -373,7 +410,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     .optional(),
     FieldDescriptor::new("tftp_server_name", "TFTP Server Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     FieldDescriptor::new("time_offset", "Time Offset", FieldType::I32).optional(),
     FieldDescriptor::new("time_server", "Time Server", FieldType::Array).optional(),
     FieldDescriptor::new(
@@ -488,7 +525,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // <https://www.rfc-editor.org/rfc/rfc8910#section-2.1>
     FieldDescriptor::new("captive_portal", "Captive-Portal URI", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     // RFC 3011, Section 3 — Subnet Selection (option 118).
     // <https://www.rfc-editor.org/rfc/rfc3011#section-3>
     FieldDescriptor::new("subnet_selection", "Subnet Selection", FieldType::Ipv4Addr).optional(),
@@ -522,7 +559,40 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::Array,
     )
     .optional(),
+    // RFC 3396, Section 7 — an option found more than once, with its split
+    // portions. <https://www.rfc-editor.org/rfc/rfc3396#section-7>
+    FieldDescriptor::new("split_option", "Split Option", FieldType::Object)
+        .optional()
+        .with_children(SPLIT_OPTION_CHILDREN),
 ];
+
+/// Child field descriptor indices for [`SPLIT_OPTION_CHILDREN`].
+const CFD_SPLIT_CODE: usize = 0;
+const CFD_SPLIT_FRAGMENTS: usize = 1;
+
+/// Children of a `split_option` object.
+///
+/// RFC 3396, Section 6 — <https://www.rfc-editor.org/rfc/rfc3396#section-6>
+static SPLIT_OPTION_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("code", "Option Code", FieldType::U8),
+    FieldDescriptor::new("fragments", "Split Portions", FieldType::Array)
+        .with_children(SPLIT_FRAGMENT_CHILDREN),
+];
+
+/// Child field descriptor indices for [`SPLIT_FRAGMENT_CHILDREN`].
+const CFD_FRAGMENT_LENGTH: usize = 0;
+const CFD_FRAGMENT_DATA: usize = 1;
+
+/// Children of one split portion: its length octet and data.
+static SPLIT_FRAGMENT_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("length", "Length", FieldType::U8),
+    FieldDescriptor::new("data", "Data", FieldType::Bytes),
+];
+
+/// Descriptor for one split portion Object inside `fragments`.
+static FD_SPLIT_FRAGMENT: FieldDescriptor =
+    FieldDescriptor::new("fragment", "Split Portion", FieldType::Object)
+        .with_children(SPLIT_FRAGMENT_CHILDREN);
 
 /// Child field descriptor indices for [`CLIENT_ID_CHILDREN`].
 const CFD_CLIENT_ID_TYPE: usize = 0;
@@ -574,7 +644,7 @@ static RELAY_AGENT_CHILDREN: &[FieldDescriptor] = &[
     // RFC 3993, Section 3 — <https://www.rfc-editor.org/rfc/rfc3993#section-3>
     FieldDescriptor::new("subscriber_id", "Subscriber-ID", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_utf8_lossy),
+        .with_format_fn(format_text),
     // RFC 4014, Section 3 — <https://www.rfc-editor.org/rfc/rfc4014#section-3>
     FieldDescriptor::new("radius_attributes", "RADIUS Attributes", FieldType::Array)
         .optional()
@@ -665,7 +735,7 @@ static CLIENT_FQDN_CHILDREN: &[FieldDescriptor] = &[
     // <https://www.rfc-editor.org/rfc/rfc4702#section-2.3>
     FieldDescriptor::new("domain_name", "Domain Name", FieldType::Bytes)
         .optional()
-        .with_format_fn(format_fqdn_labels),
+        .with_format_fn(format_fqdn),
 ];
 
 /// Child field descriptor indices for [`AUTHENTICATION_CHILDREN`].
@@ -1530,6 +1600,7 @@ fn parse_options<'pkt>(
     data: &'pkt [u8],
     offset: usize,
     pos: usize,
+    split: &CodeSet,
 ) -> Result<(usize, Option<u8>), PacketError> {
     let mut overload: Option<u8> = None;
     let mut cursor = pos;
@@ -1569,461 +1640,856 @@ fn parse_options<'pkt>(
             });
         }
 
-        let opt_data = &data[cursor + 2..cursor + 2 + len];
-        let opt_offset = offset + cursor;
-        let opt_range = opt_offset..opt_offset + 2 + len;
-
-        // --- Table-driven parsing for common patterns ---
-
-        // Single IPv4 address (len == 4)
-        if len == 4 {
-            if let Some(fd) = lookup_option(IPV4_OPTIONS, code) {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[fd],
-                    FieldValue::Ipv4Addr([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]),
-                    opt_range,
-                );
-                cursor += 2 + len;
-                continue;
-            }
-        }
-
-        // IPv4 address list (len >= 4, len % 4 == 0)
-        if len >= 4 && len % 4 == 0 {
-            if let Some(fd) = lookup_option(IPV4_LIST_OPTIONS, code) {
-                push_ipv4_list(buf, &FIELD_DESCRIPTORS[fd], opt_data, opt_offset, opt_range);
-                cursor += 2 + len;
-                continue;
-            }
-        }
-
-        // Single U8 (len == 1)
-        if len == 1 {
-            if let Some(fd) = lookup_option(U8_OPTIONS, code) {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[fd],
-                    FieldValue::U8(opt_data[0]),
-                    opt_range,
-                );
-                cursor += 2 + len;
-                continue;
-            }
-        }
-
-        // Single U16 (len == 2)
-        if len == 2 {
-            if let Some(fd) = lookup_option(U16_OPTIONS, code) {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[fd],
-                    FieldValue::U16(read_be_u16(opt_data, 0)?),
-                    opt_range,
-                );
-                cursor += 2 + len;
-                continue;
-            }
-        }
-
-        // Single U32 (len == 4)
-        if len == 4 {
-            if let Some(fd) = lookup_option(U32_OPTIONS, code) {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[fd],
-                    FieldValue::U32(read_be_u32(opt_data, 0)?),
-                    opt_range,
-                );
-                cursor += 2 + len;
-                continue;
-            }
-        }
-
-        // String options
-        if let Some(fd) = lookup_option(STRING_OPTIONS, code) {
-            buf.push_field(
-                &FIELD_DESCRIPTORS[fd],
-                FieldValue::Bytes(opt_data),
-                opt_range,
-            );
+        if split.contains(code) {
+            // RFC 3396, Section 7 — <https://www.rfc-editor.org/rfc/rfc3396#section-7>:
+            // split portions are decoded together by `push_split_options`
+            // once every area has been scanned.
             cursor += 2 + len;
             continue;
         }
 
-        // --- Special-case options not covered by tables ---
-        match code {
-            // RFC 2132, Section 9.3 — Option Overload
-            52 if len == 1 => {
-                overload = Some(opt_data[0]);
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_OPTION_OVERLOAD],
-                    FieldValue::U8(opt_data[0]),
-                    opt_range,
-                );
-            }
-            // RFC 2132, Section 9.6 — DHCP Message Type
-            53 if len == 1 => {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_DHCP_MESSAGE_TYPE],
-                    FieldValue::U8(opt_data[0]),
-                    opt_range,
-                );
-            }
-
-            // RFC 2132, Section 3.4 — Time Offset (signed I32)
-            2 if len == 4 => {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_TIME_OFFSET],
-                    FieldValue::I32(read_be_i32(opt_data, 0)?),
-                    opt_range,
-                );
-            }
-
-            // RFC 2132, Section 4.7 — Path MTU Plateau Table
-            25 if len >= 2 && len % 2 == 0 => {
-                push_u16_list(
-                    buf,
-                    &FIELD_DESCRIPTORS[FD_PATH_MTU_PLATEAU_TABLE],
-                    opt_data,
-                    opt_offset,
-                    opt_range,
-                );
-            }
-
-            // RFC 2132, Section 4.3 — Policy Filter
-            21 if len >= 8 && len % 8 == 0 => {
-                push_ipv4_pairs(
-                    buf,
-                    &FIELD_DESCRIPTORS[FD_POLICY_FILTER],
-                    opt_data,
-                    opt_offset,
-                    POLICY_FILTER_CHILD_FIELDS,
-                    opt_range,
-                );
-            }
-            // RFC 2132, Section 5.8 — Static Route
-            33 if len >= 8 && len % 8 == 0 => {
-                push_ipv4_pairs(
-                    buf,
-                    &FIELD_DESCRIPTORS[FD_STATIC_ROUTE],
-                    opt_data,
-                    opt_offset,
-                    STATIC_ROUTE_CHILD_FIELDS,
-                    opt_range,
-                );
-            }
-
-            // RFC 2132, Section 8.4 — Vendor Specific Information
-            43 => {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_VENDOR_SPECIFIC_INFO],
-                    FieldValue::Bytes(opt_data),
-                    opt_range,
-                );
-            }
-            // RFC 2132, Section 9.8 — Parameter Request List
-            55 => {
-                let arr_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_PARAMETER_REQUEST_LIST],
-                    FieldValue::Array(0..0),
-                    opt_range.clone(),
-                );
-                for (i, &b) in opt_data.iter().enumerate() {
-                    buf.push_field(
-                        &FIELD_DESCRIPTORS[FD_PARAMETER_REQUEST_LIST],
-                        FieldValue::U8(b),
-                        (opt_offset + 2 + i)..(opt_offset + 2 + i + 1),
-                    );
-                }
-                buf.end_container(arr_idx);
-            }
-            // RFC 2132, Section 9.13 — Vendor Class Identifier
-            60 => {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_VENDOR_CLASS_IDENTIFIER],
-                    FieldValue::Bytes(opt_data),
-                    opt_range,
-                );
-            }
-            // RFC 2132, Section 9.14 — Client Identifier
-            61 if len >= 2 => {
-                let hw_type = opt_data[0];
-                let id_value = if hw_type == 1 && len == 7 {
-                    FieldValue::MacAddr(MacAddr([
-                        opt_data[1],
-                        opt_data[2],
-                        opt_data[3],
-                        opt_data[4],
-                        opt_data[5],
-                        opt_data[6],
-                    ]))
-                } else {
-                    FieldValue::Bytes(&opt_data[1..])
-                };
-                let obj_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_CLIENT_IDENTIFIER],
-                    FieldValue::Object(0..0),
-                    opt_range,
-                );
-                buf.push_field(
-                    &CLIENT_ID_CHILDREN[CFD_CLIENT_ID_TYPE],
-                    FieldValue::U8(hw_type),
-                    opt_offset + 2..opt_offset + 3,
-                );
-                buf.push_field(
-                    &CLIENT_ID_CHILDREN[CFD_CLIENT_ID_ID],
-                    id_value,
-                    opt_offset + 3..opt_offset + 2 + len,
-                );
-                buf.end_container(obj_idx);
-            }
-
-            // RFC 2132, Section 8.13 — Mobile IP Home Agent: "Its minimum
-            // length is 0 (indicating no home agents are available) and the
-            // length MUST be a multiple of 4."
-            // <https://www.rfc-editor.org/rfc/rfc2132#section-8.13>
-            68 if len % 4 == 0 => {
-                push_ipv4_list(
-                    buf,
-                    &FIELD_DESCRIPTORS[FD_MOBILE_IP_HOME_AGENT],
-                    opt_data,
-                    opt_offset,
-                    opt_range,
-                );
-            }
-
-            // RFC 3004, Section 4 — User Class
-            // <https://www.rfc-editor.org/rfc/rfc3004#section-4>
-            77 if user_class_valid(opt_data) => {
-                push_user_class(buf, opt_data, opt_offset + 2, opt_range);
-            }
-
-            // RFC 4039, Section 4 — Rapid Commit: "The code for the Rapid
-            // Commit option is 80." Its Len is 0.
-            // <https://www.rfc-editor.org/rfc/rfc4039#section-4>
-            80 if len == 0 => {
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_RAPID_COMMIT],
-                    FieldValue::Bytes(opt_data),
-                    opt_range,
-                );
-            }
-
-            // RFC 4702, Section 2 — Client FQDN: "Len contains the number of
-            // octets that follow the Len field, and the minimum value is 3
-            // (octets)."
-            // <https://www.rfc-editor.org/rfc/rfc4702#section-2>
-            81 if len >= 3 => {
-                let data_start = opt_offset + 2;
-                let obj_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_CLIENT_FQDN],
-                    FieldValue::Object(0..0),
-                    opt_range,
-                );
-                buf.push_field(
-                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_FLAGS],
-                    FieldValue::U8(opt_data[0]),
-                    data_start..data_start + 1,
-                );
-                buf.push_field(
-                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_RCODE1],
-                    FieldValue::U8(opt_data[1]),
-                    data_start + 1..data_start + 2,
-                );
-                buf.push_field(
-                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_RCODE2],
-                    FieldValue::U8(opt_data[2]),
-                    data_start + 2..data_start + 3,
-                );
-                // RFC 4702, Section 2.3 — "A client MAY also leave the Domain
-                // Name field empty if it desires the server to provide a
-                // name."
-                // <https://www.rfc-editor.org/rfc/rfc4702#section-2.3>
-                if len > 3 {
-                    buf.push_field(
-                        &CLIENT_FQDN_CHILDREN[CFD_FQDN_DOMAIN_NAME],
-                        FieldValue::Bytes(&opt_data[3..]),
-                        data_start + 3..data_start + len,
-                    );
-                }
-                buf.end_container(obj_idx);
-            }
-
-            // RFC 3118, Section 2 — Authentication: Protocol (1), Algorithm
-            // (1), RDM (1), Replay Detection (8), Authentication Information.
-            // <https://www.rfc-editor.org/rfc/rfc3118#section-2>
-            90 if len >= DHCP_AUTH_FIXED_LEN => {
-                let data_start = opt_offset + 2;
-                let obj_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_AUTHENTICATION],
-                    FieldValue::Object(0..0),
-                    opt_range,
-                );
-                buf.push_field(
-                    &AUTHENTICATION_CHILDREN[CFD_AUTH_PROTOCOL],
-                    FieldValue::U8(opt_data[0]),
-                    data_start..data_start + 1,
-                );
-                buf.push_field(
-                    &AUTHENTICATION_CHILDREN[CFD_AUTH_ALGORITHM],
-                    FieldValue::U8(opt_data[1]),
-                    data_start + 1..data_start + 2,
-                );
-                buf.push_field(
-                    &AUTHENTICATION_CHILDREN[CFD_AUTH_RDM],
-                    FieldValue::U8(opt_data[2]),
-                    data_start + 2..data_start + 3,
-                );
-                buf.push_field(
-                    &AUTHENTICATION_CHILDREN[CFD_AUTH_REPLAY_DETECTION],
-                    FieldValue::Bytes(&opt_data[3..DHCP_AUTH_FIXED_LEN]),
-                    data_start + 3..data_start + DHCP_AUTH_FIXED_LEN,
-                );
-                if len > DHCP_AUTH_FIXED_LEN {
-                    buf.push_field(
-                        &AUTHENTICATION_CHILDREN[CFD_AUTH_INFORMATION],
-                        FieldValue::Bytes(&opt_data[DHCP_AUTH_FIXED_LEN..]),
-                        data_start + DHCP_AUTH_FIXED_LEN..data_start + len,
-                    );
-                }
-                buf.end_container(obj_idx);
-            }
-
-            // RFC 4578, Section 2.1 — Client System Architecture Type: "It
-            // MUST be an even number greater than zero."
-            // <https://www.rfc-editor.org/rfc/rfc4578#section-2.1>
-            93 if len >= 2 && len % 2 == 0 => {
-                push_u16_list(
-                    buf,
-                    &FIELD_DESCRIPTORS[FD_CLIENT_SYSTEM_ARCHITECTURE],
-                    opt_data,
-                    opt_offset,
-                    opt_range,
-                );
-            }
-
-            // RFC 4578, Section 2.2 — Client Network Interface Identifier:
-            // Type, Major, Minor (Len 3).
-            // <https://www.rfc-editor.org/rfc/rfc4578#section-2.2>
-            94 if len == 3 => {
-                let data_start = opt_offset + 2;
-                let obj_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_CLIENT_NII],
-                    FieldValue::Object(0..0),
-                    opt_range,
-                );
-                for (i, fd) in CLIENT_NII_CHILDREN.iter().enumerate() {
-                    buf.push_field(
-                        fd,
-                        FieldValue::U8(opt_data[i]),
-                        data_start + i..data_start + i + 1,
-                    );
-                }
-                buf.end_container(obj_idx);
-            }
-
-            // RFC 4578, Section 2.3 — Client Machine Identifier: "Octet "t"
-            // describes the type of the machine identifier in the remaining
-            // octets in this option."
-            // <https://www.rfc-editor.org/rfc/rfc4578#section-2.3>
-            97 if len >= 1 => {
-                let data_start = opt_offset + 2;
-                let obj_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_CLIENT_MACHINE_ID],
-                    FieldValue::Object(0..0),
-                    opt_range,
-                );
-                buf.push_field(
-                    &CLIENT_MACHINE_ID_CHILDREN[0],
-                    FieldValue::U8(opt_data[0]),
-                    data_start..data_start + 1,
-                );
-                buf.push_field(
-                    &CLIENT_MACHINE_ID_CHILDREN[1],
-                    FieldValue::Bytes(&opt_data[1..]),
-                    data_start + 1..data_start + len,
-                );
-                buf.end_container(obj_idx);
-            }
-
-            // RFC 3925, Section 3 — V-I Vendor Class
-            // <https://www.rfc-editor.org/rfc/rfc3925#section-3>
-            124 if vendor_entries_valid(opt_data) => {
-                push_vendor_entries(
-                    buf,
-                    &FIELD_DESCRIPTORS[FD_VI_VENDOR_CLASS],
-                    opt_data,
-                    opt_offset + 2,
-                    opt_range,
-                );
-            }
-
-            // RFC 3925, Section 4 — V-I Vendor-Specific Information
-            // <https://www.rfc-editor.org/rfc/rfc3925#section-4>
-            125 if vendor_entries_valid(opt_data) => {
-                push_vendor_entries(
-                    buf,
-                    &FIELD_DESCRIPTORS[FD_VI_VENDOR_SPECIFIC_INFO],
-                    opt_data,
-                    opt_offset + 2,
-                    opt_range,
-                );
-            }
-
-            // RFC 6704, Section 3.1.1 — "The FORCERENEW_NONCE_CAPABLE option
-            // contains code 145, length n, and a sequence of algorithms the
-            // client supports"
-            // <https://www.rfc-editor.org/rfc/rfc6704#section-3.1.1>
-            145 if len >= 1 => {
-                let fd = &FIELD_DESCRIPTORS[FD_FORCERENEW_NONCE_CAPABLE];
-                let arr_idx = buf.begin_container(fd, FieldValue::Array(0..0), opt_range);
-                for (i, &alg) in opt_data.iter().enumerate() {
-                    buf.push_field(
-                        fd,
-                        FieldValue::U8(alg),
-                        opt_offset + 2 + i..opt_offset + 3 + i,
-                    );
-                }
-                buf.end_container(arr_idx);
-            }
-
-            // RFC 3046 — Relay Agent Information
-            82 => {
-                push_relay_agent_info(buf, opt_data, opt_offset, opt_range);
-            }
-
-            // RFC 3397 — Domain Search List
-            119 => {
-                push_domain_search_list(buf, opt_data, opt_offset, opt_range);
-            }
-
-            // RFC 3442 — Classless Static Route
-            121 => {
-                push_classless_static_routes(buf, opt_data, opt_offset, opt_range);
-            }
-
-            // Generic: store as raw bytes
-            _ => {
-                let obj_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_UNKNOWN_OPTION],
-                    FieldValue::Object(0..0),
-                    opt_range.clone(),
-                );
-                buf.push_field(
-                    &UNKNOWN_OPTION_CHILDREN[CFD_UNKNOWN_CODE],
-                    FieldValue::U8(code),
-                    opt_range.start..opt_range.start + 1,
-                );
-                buf.push_field(
-                    &UNKNOWN_OPTION_CHILDREN[CFD_UNKNOWN_DATA],
-                    FieldValue::Bytes(opt_data),
-                    opt_range.start + 2..opt_range.end,
-                );
-                buf.end_container(obj_idx);
-            }
+        let opt_data = &data[cursor + 2..cursor + 2 + len];
+        if let Some(v) = decode_option(buf, code, opt_data, offset + cursor) {
+            overload = Some(v);
         }
-
         cursor += 2 + len;
     }
 
     Ok((cursor - pos, overload))
+}
+
+/// A set of option codes.
+#[derive(Default)]
+struct CodeSet([u64; 4]);
+
+impl CodeSet {
+    fn insert(&mut self, code: u8) {
+        self.0[(code >> 6) as usize] |= 1 << (code & 63);
+    }
+
+    fn contains(&self, code: u8) -> bool {
+        self.0[(code >> 6) as usize] & (1 << (code & 63)) != 0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0 == [0; 4]
+    }
+}
+
+/// One option instance in the aggregate option buffer.
+#[derive(Clone, Copy)]
+struct OptionInstance {
+    code: u8,
+    /// Offset of the code octet within the DHCP message.
+    pos: u32,
+    /// Length of the option data.
+    len: u8,
+}
+
+/// Call `f(code, pos, len)` for every option in `area[start..]`, stopping at
+/// the End option or at the first truncated option (reported later by
+/// [`parse_options`]). Returns the Option Overload value, if seen.
+fn scan_area(area: &[u8], start: usize, f: &mut impl FnMut(u8, usize, u8)) -> Option<u8> {
+    let mut overload = None;
+    let mut cursor = start;
+    while let Some(&code) = area.get(cursor) {
+        match code {
+            // RFC 2132, Sections 3.1 and 3.2 — Pad and End.
+            // <https://www.rfc-editor.org/rfc/rfc2132#section-3.1>
+            0 => {
+                cursor += 1;
+                continue;
+            }
+            255 => break,
+            _ => {}
+        }
+        let Some(&len) = area.get(cursor + 1) else {
+            break;
+        };
+        if cursor + 2 + len as usize > area.len() {
+            break;
+        }
+        if code == OPTION_OVERLOAD && len == 1 {
+            overload = Some(area[cursor + 2]);
+        }
+        f(code, cursor, len);
+        cursor += 2 + len as usize;
+    }
+    overload
+}
+
+/// Call `f(code, pos, len)` for every option in the aggregate option buffer,
+/// in its order.
+///
+/// RFC 3396, Section 5 — <https://www.rfc-editor.org/rfc/rfc3396#section-5>:
+/// "The aggregate option buffer is made up of the optional parameters field,
+/// the file field, and the sname field, in that order." The `file` and
+/// `sname` fields are part of it only when option 52 says so (RFC 2132,
+/// Section 9.3 — <https://www.rfc-editor.org/rfc/rfc2132#section-9.3>).
+fn scan_aggregate(data: &[u8], mut f: impl FnMut(u8, usize, u8)) {
+    let overload = scan_area(data, MIN_MSG_SIZE, &mut f);
+    if matches!(overload, Some(1 | 3)) {
+        scan_area(&data[..OPTIONS_FIXED_END], FILE_OFFSET, &mut f);
+    }
+    if matches!(overload, Some(2 | 3)) {
+        scan_area(&data[..FILE_OFFSET], SNAME_OFFSET, &mut f);
+    }
+}
+
+/// Codes that occur more than once in the aggregate option buffer, which
+/// RFC 3396, Section 7 — <https://www.rfc-editor.org/rfc/rfc3396#section-7> —
+/// requires to be concatenated: "When a decoding agent is scanning an
+/// incoming DHCP packet's option buffer and finds two or more options with
+/// the same option code, it MUST consider them to be split portions of an
+/// option".
+///
+/// Option Overload (52) is excluded: it selects which fields form the
+/// aggregate option buffer, so it is never concatenated. Only two small bit
+/// sets are used, so ordinary messages pay a single extra pass.
+fn split_codes(data: &[u8]) -> CodeSet {
+    let mut seen = CodeSet::default();
+    let mut split = CodeSet::default();
+    scan_aggregate(data, |code, _, _| {
+        if code == OPTION_OVERLOAD {
+            return;
+        }
+        if seen.contains(code) {
+            split.insert(code);
+        }
+        seen.insert(code);
+    });
+    split
+}
+
+/// The instances of the split codes, grouped by code.
+///
+/// Built only when a message has split options. Each group keeps aggregate
+/// option buffer order, and groups are ordered by their code's first
+/// instance.
+fn collect_split_instances(data: &[u8], split: &CodeSet) -> Vec<OptionInstance> {
+    let mut items = Vec::new();
+    // Aggregate index of each code's first instance.
+    let mut first_seen = [u32::MAX; 256];
+    scan_aggregate(data, |code, pos, len| {
+        if split.contains(code) {
+            let slot = &mut first_seen[code as usize];
+            if *slot == u32::MAX {
+                *slot = items.len() as u32;
+            }
+            items.push(OptionInstance {
+                code,
+                pos: pos as u32,
+                len,
+            });
+        }
+    });
+    // Stable, so each group stays in aggregate order.
+    items.sort_by_key(|i| first_seen[i.code as usize]);
+    items
+}
+
+/// Option Overload option code (RFC 2132, Section 9.3 —
+/// <https://www.rfc-editor.org/rfc/rfc2132#section-9.3>).
+const OPTION_OVERLOAD: u8 = 52;
+
+/// Push one `split_option` object per split code, followed by the fields
+/// decoded from the concatenated value.
+///
+/// RFC 3396, Section 7 — <https://www.rfc-editor.org/rfc/rfc3396#section-7>:
+/// the decoding agent "MUST treat the contents of that option as a single
+/// option, and the contents MUST be reassembled in the order that was
+/// described above under encoding agent behavior."
+///
+/// The concatenated value is decoded into a temporary buffer (this is the
+/// only path that allocates). Its fields are then copied into `buf`: a byte
+/// value that lies inside one split portion points at the packet, and one
+/// that straddles portions is copied to the scratch buffer. A field range
+/// that straddles portions covers everything from its first to its last
+/// octet in the message.
+fn push_split_options<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    split: &CodeSet,
+) {
+    if split.is_empty() {
+        return;
+    }
+    let instances = collect_split_instances(data, split);
+    // Scratch space reused for every split code.
+    let mut value: Vec<u8> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
+    let mut tmp_store = DissectBuffer::new();
+    for group in instances.chunk_by(|a, b| a.code == b.code) {
+        let first = &group[0];
+        let code = first.code;
+        let parts = || group.iter();
+
+        let lo = parts().map(|i| i.pos as usize).min().unwrap_or_default();
+        let hi = parts()
+            .map(|i| i.pos as usize + 2 + i.len as usize)
+            .max()
+            .unwrap_or_default();
+        let obj = buf.begin_container(
+            &FIELD_DESCRIPTORS[FD_SPLIT_OPTION],
+            FieldValue::Object(0..0),
+            offset + lo..offset + hi,
+        );
+        buf.push_field(
+            &SPLIT_OPTION_CHILDREN[CFD_SPLIT_CODE],
+            FieldValue::U8(code),
+            offset + first.pos as usize..offset + first.pos as usize + 1,
+        );
+        let arr = buf.begin_container(
+            &SPLIT_OPTION_CHILDREN[CFD_SPLIT_FRAGMENTS],
+            FieldValue::Array(0..0),
+            offset + lo..offset + hi,
+        );
+        for part in parts() {
+            let p = part.pos as usize;
+            let end = p + 2 + part.len as usize;
+            let frag = buf.begin_container(
+                &FD_SPLIT_FRAGMENT,
+                FieldValue::Object(0..0),
+                offset + p..offset + end,
+            );
+            buf.push_field(
+                &SPLIT_FRAGMENT_CHILDREN[CFD_FRAGMENT_LENGTH],
+                FieldValue::U8(part.len),
+                offset + p + 1..offset + p + 2,
+            );
+            buf.push_field(
+                &SPLIT_FRAGMENT_CHILDREN[CFD_FRAGMENT_DATA],
+                FieldValue::Bytes(&data[p + 2..end]),
+                offset + p + 2..offset + end,
+            );
+            buf.end_container(frag);
+        }
+        buf.end_container(arr);
+        buf.end_container(obj);
+
+        value.clear();
+        starts.clear();
+        for part in parts() {
+            let p = part.pos as usize + 2;
+            starts.push(value.len());
+            value.extend_from_slice(&data[p..p + part.len as usize]);
+        }
+        let map = SplitMap {
+            data,
+            offset,
+            parts: group,
+            starts: &starts,
+        };
+        // The value is decoded as if its code octet were at virtual offset 0.
+        let tmp = tmp_store.clear_into();
+        decode_option(tmp, code, &value, 0);
+        if !is_generic(tmp) {
+            map.copy_fields(buf, tmp, &value);
+            continue;
+        }
+        // Some senders repeat a fixed-length option (e.g. two DHCP Message
+        // Type options) rather than split it. When the concatenated value
+        // does not have the option's format but a single portion does, each
+        // portion is decoded on its own so that its meaning is not lost.
+        let first_data = &data[first.pos as usize + 2..first.pos as usize + 2 + first.len as usize];
+        let probe = tmp_store.clear_into();
+        decode_option(probe, code, first_data, 0);
+        if is_generic(probe) {
+            let tmp = tmp_store.clear_into();
+            decode_option(tmp, code, &value, 0);
+            map.copy_fields(buf, tmp, &value);
+        } else {
+            for part in parts() {
+                let p = part.pos as usize;
+                decode_option(
+                    buf,
+                    code,
+                    &data[p + 2..p + 2 + part.len as usize],
+                    offset + p,
+                );
+            }
+        }
+    }
+}
+
+/// Whether `tmp` holds only the generic `unknown_option` rendering, i.e. no
+/// typed decoder accepted the value.
+fn is_generic(tmp: &DissectBuffer<'_>) -> bool {
+    tmp.fields()
+        .first()
+        .is_none_or(|f| core::ptr::eq(f.descriptor, &FIELD_DESCRIPTORS[FD_UNKNOWN_OPTION]))
+}
+
+/// Maps positions in a concatenated split option value back to the message.
+struct SplitMap<'a, 'pkt> {
+    data: &'pkt [u8],
+    offset: usize,
+    /// The split portions of the option, in aggregate order.
+    parts: &'a [OptionInstance],
+    /// Offset of each portion's data within the concatenated value.
+    starts: &'a [usize],
+}
+
+impl<'pkt> SplitMap<'_, 'pkt> {
+    /// Locate value octet `i`: the message offset of its split portion's
+    /// data and the index of `i` within that portion.
+    fn locate(&self, i: usize) -> Option<(usize, usize, usize)> {
+        // The last portion starting at or before `i`; empty portions share
+        // their start with the next one, which is the one found.
+        let idx = self.starts.partition_point(|&s| s <= i).checked_sub(1)?;
+        let part = &self.parts[idx];
+        let at = i - self.starts[idx];
+        let len = part.len as usize;
+        (at < len).then_some((part.pos as usize + 2, at, len))
+    }
+
+    /// Message offset of virtual position `v` (the code octet is at 0, the
+    /// length octet at 1 and value octet `i` at `2 + i`).
+    fn position(&self, v: usize) -> usize {
+        if v < 2 {
+            let first = self.parts.first().map_or(0, |p| p.pos as usize);
+            return first + v;
+        }
+        match self.locate(v - 2) {
+            Some((data_pos, i, _)) => data_pos + i,
+            None => self
+                .parts
+                .last()
+                .map_or(0, |p| p.pos as usize + 1 + p.len as usize),
+        }
+    }
+
+    /// Absolute range covering virtual range `a..b`.
+    fn range(&self, a: usize, b: usize) -> core::ops::Range<usize> {
+        let start = self.position(a);
+        if b <= a {
+            return self.offset + start..self.offset + start;
+        }
+        let end = self.position(b - 1) + 1;
+        let (lo, hi) = if end > start {
+            (start, end)
+        } else {
+            (end - 1, start + 1)
+        };
+        self.offset + lo..self.offset + hi
+    }
+
+    /// The packet bytes for value octets `i..i + len`, when they lie inside
+    /// one split portion.
+    fn packet_bytes(&self, i: usize, len: usize) -> Option<&'pkt [u8]> {
+        let (data_pos, at, part_len) = self.locate(i)?;
+        (at + len <= part_len).then(|| &self.data[data_pos + at..data_pos + at + len])
+    }
+
+    /// Copy the fields decoded from the concatenated `value` into `buf`.
+    fn copy_fields(&self, buf: &mut DissectBuffer<'pkt>, tmp: &DissectBuffer<'_>, value: &[u8]) {
+        let base = buf.field_count();
+        let value_start = value.as_ptr() as usize;
+        let value_end = value_start + value.len();
+        // Index of a borrowed slice within `value`, if it points into it.
+        let index_of = |ptr: *const u8, len: usize| {
+            let p = ptr as usize;
+            (p >= value_start && p + len <= value_end && len > 0).then(|| p - value_start)
+        };
+        for f in tmp.fields() {
+            let v = match &f.value {
+                FieldValue::Bytes(b) => match index_of(b.as_ptr(), b.len())
+                    .and_then(|i| self.packet_bytes(i, b.len()))
+                {
+                    Some(pkt) => FieldValue::Bytes(pkt),
+                    None if b.is_empty() => FieldValue::Bytes(&[]),
+                    None => FieldValue::Scratch(buf.push_scratch(b)),
+                },
+                FieldValue::Str(s) => match index_of(s.as_ptr(), s.len())
+                    .and_then(|i| self.packet_bytes(i, s.len()))
+                    .and_then(|pkt| core::str::from_utf8(pkt).ok())
+                {
+                    Some(pkt) => FieldValue::Str(pkt),
+                    None if s.is_empty() => FieldValue::Str(""),
+                    None => FieldValue::Scratch(buf.push_scratch(s.as_bytes())),
+                },
+                FieldValue::Scratch(r) => FieldValue::Scratch(
+                    buf.push_scratch(
+                        tmp.scratch()
+                            .get(r.start as usize..r.end as usize)
+                            .unwrap_or_default(),
+                    ),
+                ),
+                FieldValue::Array(r) => FieldValue::Array(r.start + base..r.end + base),
+                FieldValue::Object(r) => FieldValue::Object(r.start + base..r.end + base),
+                FieldValue::U8(x) => FieldValue::U8(*x),
+                FieldValue::U16(x) => FieldValue::U16(*x),
+                FieldValue::U32(x) => FieldValue::U32(*x),
+                FieldValue::U64(x) => FieldValue::U64(*x),
+                FieldValue::I32(x) => FieldValue::I32(*x),
+                FieldValue::Ipv4Addr(x) => FieldValue::Ipv4Addr(*x),
+                FieldValue::Ipv6Addr(x) => FieldValue::Ipv6Addr(*x),
+                FieldValue::MacAddr(x) => FieldValue::MacAddr(*x),
+            };
+            buf.push_field(f.descriptor, v, self.range(f.range.start, f.range.end));
+        }
+    }
+}
+
+/// Decode the value of one option and push its fields.
+///
+/// `opt_offset` is the absolute offset of the option's code octet; the value
+/// starts two octets later. Returns the Option Overload value when `code` is
+/// 52 (RFC 2132, Section 9.3 —
+/// <https://www.rfc-editor.org/rfc/rfc2132#section-9.3>).
+fn decode_option<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    code: u8,
+    opt_data: &'pkt [u8],
+    opt_offset: usize,
+) -> Option<u8> {
+    let len = opt_data.len();
+    let opt_range = opt_offset..opt_offset + 2 + len;
+    let mut overload: Option<u8> = None;
+
+    // --- Table-driven parsing for common patterns ---
+
+    // Single IPv4 address (len == 4)
+    if len == 4 {
+        if let Some(fd) = lookup_option(IPV4_OPTIONS, code) {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[fd],
+                FieldValue::Ipv4Addr([opt_data[0], opt_data[1], opt_data[2], opt_data[3]]),
+                opt_range,
+            );
+            return overload;
+        }
+    }
+
+    // IPv4 address list (len >= 4, len % 4 == 0)
+    if len >= 4 && len % 4 == 0 {
+        if let Some(fd) = lookup_option(IPV4_LIST_OPTIONS, code) {
+            push_ipv4_list(buf, &FIELD_DESCRIPTORS[fd], opt_data, opt_offset, opt_range);
+            return overload;
+        }
+    }
+
+    // Single U8 (len == 1)
+    if len == 1 {
+        if let Some(fd) = lookup_option(U8_OPTIONS, code) {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[fd],
+                FieldValue::U8(opt_data[0]),
+                opt_range,
+            );
+            return overload;
+        }
+    }
+
+    // Single U16 (len == 2)
+    if len == 2 {
+        if let Some(fd) = lookup_option(U16_OPTIONS, code) {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[fd],
+                FieldValue::U16(read_be_u16(opt_data, 0).unwrap_or_default()),
+                opt_range,
+            );
+            return overload;
+        }
+    }
+
+    // Single U32 (len == 4)
+    if len == 4 {
+        if let Some(fd) = lookup_option(U32_OPTIONS, code) {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[fd],
+                FieldValue::U32(read_be_u32(opt_data, 0).unwrap_or_default()),
+                opt_range,
+            );
+            return overload;
+        }
+    }
+
+    // String options
+    if let Some(fd) = lookup_option(STRING_OPTIONS, code) {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[fd],
+            FieldValue::Bytes(opt_data),
+            opt_range,
+        );
+        return overload;
+    }
+
+    // --- Special-case options not covered by tables ---
+    match code {
+        // RFC 2132, Section 9.3 — Option Overload
+        52 if len == 1 => {
+            overload = Some(opt_data[0]);
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_OPTION_OVERLOAD],
+                FieldValue::U8(opt_data[0]),
+                opt_range,
+            );
+        }
+        // RFC 2132, Section 9.6 — DHCP Message Type
+        53 if len == 1 => {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_DHCP_MESSAGE_TYPE],
+                FieldValue::U8(opt_data[0]),
+                opt_range,
+            );
+        }
+
+        // RFC 2132, Section 3.4 — Time Offset (signed I32)
+        2 if len == 4 => {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_TIME_OFFSET],
+                FieldValue::I32(read_be_i32(opt_data, 0).unwrap_or_default()),
+                opt_range,
+            );
+        }
+
+        // RFC 2132, Section 4.7 — Path MTU Plateau Table
+        25 if len >= 2 && len % 2 == 0 => {
+            push_u16_list(
+                buf,
+                &FIELD_DESCRIPTORS[FD_PATH_MTU_PLATEAU_TABLE],
+                opt_data,
+                opt_offset,
+                opt_range,
+            );
+        }
+
+        // RFC 2132, Section 4.3 — Policy Filter
+        21 if len >= 8 && len % 8 == 0 => {
+            push_ipv4_pairs(
+                buf,
+                &FIELD_DESCRIPTORS[FD_POLICY_FILTER],
+                opt_data,
+                opt_offset,
+                POLICY_FILTER_CHILD_FIELDS,
+                opt_range,
+            );
+        }
+        // RFC 2132, Section 5.8 — Static Route
+        33 if len >= 8 && len % 8 == 0 => {
+            push_ipv4_pairs(
+                buf,
+                &FIELD_DESCRIPTORS[FD_STATIC_ROUTE],
+                opt_data,
+                opt_offset,
+                STATIC_ROUTE_CHILD_FIELDS,
+                opt_range,
+            );
+        }
+
+        // RFC 2132, Section 8.4 — Vendor Specific Information
+        43 => {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_VENDOR_SPECIFIC_INFO],
+                FieldValue::Bytes(opt_data),
+                opt_range,
+            );
+        }
+        // RFC 2132, Section 9.8 — Parameter Request List
+        55 => {
+            let arr_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_PARAMETER_REQUEST_LIST],
+                FieldValue::Array(0..0),
+                opt_range.clone(),
+            );
+            for (i, &b) in opt_data.iter().enumerate() {
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_PARAMETER_REQUEST_LIST],
+                    FieldValue::U8(b),
+                    (opt_offset + 2 + i)..(opt_offset + 2 + i + 1),
+                );
+            }
+            buf.end_container(arr_idx);
+        }
+        // RFC 2132, Section 9.13 — Vendor Class Identifier
+        60 => {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_VENDOR_CLASS_IDENTIFIER],
+                FieldValue::Bytes(opt_data),
+                opt_range,
+            );
+        }
+        // RFC 2132, Section 9.14 — Client Identifier
+        61 if len >= 2 => {
+            let hw_type = opt_data[0];
+            let id_value = if hw_type == 1 && len == 7 {
+                FieldValue::MacAddr(MacAddr([
+                    opt_data[1],
+                    opt_data[2],
+                    opt_data[3],
+                    opt_data[4],
+                    opt_data[5],
+                    opt_data[6],
+                ]))
+            } else {
+                FieldValue::Bytes(&opt_data[1..])
+            };
+            let obj_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_CLIENT_IDENTIFIER],
+                FieldValue::Object(0..0),
+                opt_range,
+            );
+            buf.push_field(
+                &CLIENT_ID_CHILDREN[CFD_CLIENT_ID_TYPE],
+                FieldValue::U8(hw_type),
+                opt_offset + 2..opt_offset + 3,
+            );
+            buf.push_field(
+                &CLIENT_ID_CHILDREN[CFD_CLIENT_ID_ID],
+                id_value,
+                opt_offset + 3..opt_offset + 2 + len,
+            );
+            buf.end_container(obj_idx);
+        }
+
+        // RFC 2132, Section 8.13 — Mobile IP Home Agent: "Its minimum
+        // length is 0 (indicating no home agents are available) and the
+        // length MUST be a multiple of 4."
+        // <https://www.rfc-editor.org/rfc/rfc2132#section-8.13>
+        68 if len % 4 == 0 => {
+            push_ipv4_list(
+                buf,
+                &FIELD_DESCRIPTORS[FD_MOBILE_IP_HOME_AGENT],
+                opt_data,
+                opt_offset,
+                opt_range,
+            );
+        }
+
+        // RFC 3004, Section 4 — User Class
+        // <https://www.rfc-editor.org/rfc/rfc3004#section-4>
+        77 if user_class_valid(opt_data) => {
+            push_user_class(buf, opt_data, opt_offset + 2, opt_range);
+        }
+
+        // RFC 4039, Section 4 — Rapid Commit: "The code for the Rapid
+        // Commit option is 80." Its Len is 0.
+        // <https://www.rfc-editor.org/rfc/rfc4039#section-4>
+        80 if len == 0 => {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_RAPID_COMMIT],
+                FieldValue::Bytes(opt_data),
+                opt_range,
+            );
+        }
+
+        // RFC 4702, Section 2 — Client FQDN: "Len contains the number of
+        // octets that follow the Len field, and the minimum value is 3
+        // (octets)."
+        // <https://www.rfc-editor.org/rfc/rfc4702#section-2>
+        81 if len >= 3 => {
+            let data_start = opt_offset + 2;
+            let obj_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_CLIENT_FQDN],
+                FieldValue::Object(0..0),
+                opt_range,
+            );
+            buf.push_field(
+                &CLIENT_FQDN_CHILDREN[CFD_FQDN_FLAGS],
+                FieldValue::U8(opt_data[0]),
+                data_start..data_start + 1,
+            );
+            buf.push_field(
+                &CLIENT_FQDN_CHILDREN[CFD_FQDN_RCODE1],
+                FieldValue::U8(opt_data[1]),
+                data_start + 1..data_start + 2,
+            );
+            buf.push_field(
+                &CLIENT_FQDN_CHILDREN[CFD_FQDN_RCODE2],
+                FieldValue::U8(opt_data[2]),
+                data_start + 2..data_start + 3,
+            );
+            // RFC 4702, Section 2.3 — "A client MAY also leave the Domain
+            // Name field empty if it desires the server to provide a
+            // name."
+            // <https://www.rfc-editor.org/rfc/rfc4702#section-2.3>
+            if len > 3 {
+                buf.push_field(
+                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_DOMAIN_NAME],
+                    FieldValue::Bytes(&opt_data[3..]),
+                    data_start + 3..data_start + len,
+                );
+            }
+            buf.end_container(obj_idx);
+        }
+
+        // RFC 3118, Section 2 — Authentication: Protocol (1), Algorithm
+        // (1), RDM (1), Replay Detection (8), Authentication Information.
+        // <https://www.rfc-editor.org/rfc/rfc3118#section-2>
+        90 if len >= DHCP_AUTH_FIXED_LEN => {
+            let data_start = opt_offset + 2;
+            let obj_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_AUTHENTICATION],
+                FieldValue::Object(0..0),
+                opt_range,
+            );
+            buf.push_field(
+                &AUTHENTICATION_CHILDREN[CFD_AUTH_PROTOCOL],
+                FieldValue::U8(opt_data[0]),
+                data_start..data_start + 1,
+            );
+            buf.push_field(
+                &AUTHENTICATION_CHILDREN[CFD_AUTH_ALGORITHM],
+                FieldValue::U8(opt_data[1]),
+                data_start + 1..data_start + 2,
+            );
+            buf.push_field(
+                &AUTHENTICATION_CHILDREN[CFD_AUTH_RDM],
+                FieldValue::U8(opt_data[2]),
+                data_start + 2..data_start + 3,
+            );
+            buf.push_field(
+                &AUTHENTICATION_CHILDREN[CFD_AUTH_REPLAY_DETECTION],
+                FieldValue::Bytes(&opt_data[3..DHCP_AUTH_FIXED_LEN]),
+                data_start + 3..data_start + DHCP_AUTH_FIXED_LEN,
+            );
+            if len > DHCP_AUTH_FIXED_LEN {
+                buf.push_field(
+                    &AUTHENTICATION_CHILDREN[CFD_AUTH_INFORMATION],
+                    FieldValue::Bytes(&opt_data[DHCP_AUTH_FIXED_LEN..]),
+                    data_start + DHCP_AUTH_FIXED_LEN..data_start + len,
+                );
+            }
+            buf.end_container(obj_idx);
+        }
+
+        // RFC 4578, Section 2.1 — Client System Architecture Type: "It
+        // MUST be an even number greater than zero."
+        // <https://www.rfc-editor.org/rfc/rfc4578#section-2.1>
+        93 if len >= 2 && len % 2 == 0 => {
+            push_u16_list(
+                buf,
+                &FIELD_DESCRIPTORS[FD_CLIENT_SYSTEM_ARCHITECTURE],
+                opt_data,
+                opt_offset,
+                opt_range,
+            );
+        }
+
+        // RFC 4578, Section 2.2 — Client Network Interface Identifier:
+        // Type, Major, Minor (Len 3).
+        // <https://www.rfc-editor.org/rfc/rfc4578#section-2.2>
+        94 if len == 3 => {
+            let data_start = opt_offset + 2;
+            let obj_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_CLIENT_NII],
+                FieldValue::Object(0..0),
+                opt_range,
+            );
+            for (i, fd) in CLIENT_NII_CHILDREN.iter().enumerate() {
+                buf.push_field(
+                    fd,
+                    FieldValue::U8(opt_data[i]),
+                    data_start + i..data_start + i + 1,
+                );
+            }
+            buf.end_container(obj_idx);
+        }
+
+        // RFC 4578, Section 2.3 — Client Machine Identifier: "Octet "t"
+        // describes the type of the machine identifier in the remaining
+        // octets in this option."
+        // <https://www.rfc-editor.org/rfc/rfc4578#section-2.3>
+        97 if len >= 1 => {
+            let data_start = opt_offset + 2;
+            let obj_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_CLIENT_MACHINE_ID],
+                FieldValue::Object(0..0),
+                opt_range,
+            );
+            buf.push_field(
+                &CLIENT_MACHINE_ID_CHILDREN[0],
+                FieldValue::U8(opt_data[0]),
+                data_start..data_start + 1,
+            );
+            buf.push_field(
+                &CLIENT_MACHINE_ID_CHILDREN[1],
+                FieldValue::Bytes(&opt_data[1..]),
+                data_start + 1..data_start + len,
+            );
+            buf.end_container(obj_idx);
+        }
+
+        // RFC 3925, Section 3 — V-I Vendor Class
+        // <https://www.rfc-editor.org/rfc/rfc3925#section-3>
+        124 if vendor_entries_valid(opt_data) => {
+            push_vendor_entries(
+                buf,
+                &FIELD_DESCRIPTORS[FD_VI_VENDOR_CLASS],
+                opt_data,
+                opt_offset + 2,
+                opt_range,
+            );
+        }
+
+        // RFC 3925, Section 4 — V-I Vendor-Specific Information
+        // <https://www.rfc-editor.org/rfc/rfc3925#section-4>
+        125 if vendor_entries_valid(opt_data) => {
+            push_vendor_entries(
+                buf,
+                &FIELD_DESCRIPTORS[FD_VI_VENDOR_SPECIFIC_INFO],
+                opt_data,
+                opt_offset + 2,
+                opt_range,
+            );
+        }
+
+        // RFC 6704, Section 3.1.1 — "The FORCERENEW_NONCE_CAPABLE option
+        // contains code 145, length n, and a sequence of algorithms the
+        // client supports"
+        // <https://www.rfc-editor.org/rfc/rfc6704#section-3.1.1>
+        145 if len >= 1 => {
+            let fd = &FIELD_DESCRIPTORS[FD_FORCERENEW_NONCE_CAPABLE];
+            let arr_idx = buf.begin_container(fd, FieldValue::Array(0..0), opt_range);
+            for (i, &alg) in opt_data.iter().enumerate() {
+                buf.push_field(
+                    fd,
+                    FieldValue::U8(alg),
+                    opt_offset + 2 + i..opt_offset + 3 + i,
+                );
+            }
+            buf.end_container(arr_idx);
+        }
+
+        // RFC 3046 — Relay Agent Information
+        82 => {
+            push_relay_agent_info(buf, opt_data, opt_offset, opt_range);
+        }
+
+        // RFC 3397 — Domain Search List
+        119 => {
+            push_domain_search_list(buf, opt_data, opt_offset, opt_range);
+        }
+
+        // RFC 3442 — Classless Static Route
+        121 => {
+            push_classless_static_routes(buf, opt_data, opt_offset, opt_range);
+        }
+
+        // Generic: store as raw bytes
+        _ => {
+            let obj_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_UNKNOWN_OPTION],
+                FieldValue::Object(0..0),
+                opt_range.clone(),
+            );
+            buf.push_field(
+                &UNKNOWN_OPTION_CHILDREN[CFD_UNKNOWN_CODE],
+                FieldValue::U8(code),
+                opt_range.start..opt_range.start + 1,
+            );
+            buf.push_field(
+                &UNKNOWN_OPTION_CHILDREN[CFD_UNKNOWN_DATA],
+                FieldValue::Bytes(opt_data),
+                opt_range.start + 2..opt_range.end,
+            );
+            buf.end_container(obj_idx);
+        }
+    }
+
+    overload
 }
 
 /// Specification references for the DHCP dissector.
@@ -2375,7 +2841,12 @@ impl Dissector for DhcpDissector {
             );
             total_consumed = data.len();
         } else if data.len() > options_start {
-            let (opt_consumed, overload) = parse_options(buf, data, offset, options_start)?;
+            // RFC 3396, Section 7 — find the codes that occur more than once
+            // in the aggregate option buffer before decoding any option.
+            // <https://www.rfc-editor.org/rfc/rfc3396#section-7>
+            let split = split_codes(data);
+
+            let (opt_consumed, overload) = parse_options(buf, data, offset, options_start, &split)?;
             total_consumed = options_start + opt_consumed;
             overload_value = overload;
 
@@ -2384,14 +2855,21 @@ impl Dissector for DhcpDissector {
             if let Some(ov) = overload {
                 // Value 1 or 3: `file` field (bytes 108..236) carries options.
                 if ov == 1 || ov == 3 {
-                    let (_, _) =
-                        parse_options(buf, &data[..OPTIONS_FIXED_END], offset, FILE_OFFSET)?;
+                    let (_, _) = parse_options(
+                        buf,
+                        &data[..OPTIONS_FIXED_END],
+                        offset,
+                        FILE_OFFSET,
+                        &split,
+                    )?;
                 }
                 // Value 2 or 3: `sname` field (bytes 44..108) carries options.
                 if ov == 2 || ov == 3 {
-                    let (_, _) = parse_options(buf, &data[..FILE_OFFSET], offset, SNAME_OFFSET)?;
+                    let (_, _) =
+                        parse_options(buf, &data[..FILE_OFFSET], offset, SNAME_OFFSET, &split)?;
                 }
             }
+            push_split_options(buf, data, offset, &split);
         }
 
         // RFC 2131, Section 2 — sname: optional server host name, null-terminated string.
@@ -2449,6 +2927,7 @@ impl Dissector for DhcpDissector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use packet_dissector_core::field::Field;
 
     // # RFC 2131 Coverage
     //
@@ -2560,6 +3039,22 @@ mod tests {
     // | 9.6         | DHCP Message Type                   | parse_dhcp_discover                         |
     // | 9.6         | Message Types 9-18 (IANA)           | dhcp_message_type_names_later_registrations |
     // | 9.6 / 3203  | DHCPFORCERENEW (RFC 3203, 4)        | parse_dhcp_forcerenew_message_type          |
+    //
+    // # RFC 3396 (Encoding Long Options) Coverage
+    //
+    // | RFC Section | Description                         | Test                                        |
+    // |-------------|-------------------------------------|---------------------------------------------|
+    // | 7           | Split option concatenated, decoded once | rfc3396_split_classless_static_route_is_concatenated |
+    // | 5, 7        | Aggregate order: options, then file | rfc3396_split_across_options_and_file_with_overload |
+    // | 7           | Value straddling portions (scratch) | rfc3396_split_string_straddling_fragments_uses_scratch |
+    // | 4, 7        | Single instances unchanged          | rfc3396_single_instances_are_unchanged      |
+    // | 4           | Value longer than 255 octets        | rfc3396_split_value_over_255_octets         |
+    // | 7           | Unknown split option                | rfc3396_split_unknown_option_keeps_concatenated_data |
+    // | 7           | Hundreds of portions                | rfc3396_many_instances_are_concatenated |
+    // | 7           | Repeated fixed-length option        | rfc3396_repeated_fixed_length_option_is_decoded_per_portion |
+    // | 7           | Numeric values straddling portions  | rfc3396_split_numeric_values_are_reassembled |
+    // | 7           | FQDN straddling portions (scratch)  | rfc3396_split_client_fqdn_formats_scratch_name |
+    // | —           | Truncated option ends the scan      | rfc3396_scan_stops_at_truncated_option      |
     // | 9.7         | Server Identifier                   | parse_dhcp_offer                            |
     // | 9.8         | Parameter Request List              | parse_dhcp_parameter_request_list           |
     // | 9.9         | Message                             | parse_dhcp_message_option                   |
@@ -5500,5 +5995,366 @@ mod tests {
         }
 
         assert_layer_and_references(&DhcpDissector);
+    }
+
+    // ---- RFC 3396 — split (long) options ---------------------------------
+
+    /// Direct children of an Object / Array field.
+    fn direct_children_of<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        parent: &Field<'pkt>,
+    ) -> Vec<&'a Field<'pkt>> {
+        let range = parent.value.as_container_range().unwrap().clone();
+        let fields = buf.fields();
+        let mut out = Vec::new();
+        let mut i = range.start;
+        while i < range.end {
+            let f = &fields[i as usize];
+            out.push(f);
+            i = match &f.value {
+                FieldValue::Object(r) | FieldValue::Array(r) => r.end,
+                _ => i + 1,
+            };
+        }
+        out
+    }
+
+    /// Top-level (layer-level) fields named `name`.
+    fn top_fields<'a, 'pkt>(buf: &'a DissectBuffer<'pkt>, name: &str) -> Vec<&'a Field<'pkt>> {
+        let layer = &buf.layers()[0];
+        let fields = buf.layer_fields(layer);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < fields.len() {
+            let f = &fields[i];
+            if f.name() == name {
+                out.push(f);
+            }
+            i += match &f.value {
+                FieldValue::Object(r) | FieldValue::Array(r) => (r.end - r.start) as usize + 1,
+                _ => 1,
+            };
+        }
+        out
+    }
+
+    #[test]
+    fn rfc3396_split_classless_static_route_is_concatenated() {
+        // Issue reproduction: option 121 split into two instances.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 53, &[1]);
+        let first = pkt.len();
+        push_option(&mut pkt, 121, &[0x18, 0x0a, 0x00, 0x00, 0x0a]);
+        let second = pkt.len();
+        push_option(&mut pkt, 121, &[0x00, 0x00, 0x01]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        let res = DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(res.bytes_consumed, pkt.len());
+
+        // One split_option object with two fragments.
+        let split = top_fields(&buf, "split_option");
+        assert_eq!(split.len(), 1);
+        let children = direct_children_of(&buf, split[0]);
+        assert_eq!(children[0].name(), "code");
+        assert_eq!(children[0].value, FieldValue::U8(121));
+        let frags = direct_children_of(&buf, children[1]);
+        assert_eq!(frags.len(), 2);
+        assert_eq!(frags[0].range, first..first + 7);
+        assert_eq!(frags[1].range, second..second + 5);
+        let f0 = direct_children_of(&buf, frags[0]);
+        assert_eq!(f0[0].name(), "length");
+        assert_eq!(f0[0].value, FieldValue::U8(5));
+        assert_eq!(f0[1].name(), "data");
+        assert_eq!(
+            f0[1].value,
+            FieldValue::Bytes(&[0x18, 0x0a, 0x00, 0x00, 0x0a])
+        );
+        assert_eq!(f0[1].range, first + 2..first + 7);
+
+        // The typed decoder ran once, on 18 0a 00 00 0a 00 00 01.
+        let arrays = top_fields(&buf, "classless_static_route");
+        assert_eq!(arrays.len(), 1);
+        let routes = direct_children_of(&buf, arrays[0]);
+        assert_eq!(routes.len(), 1);
+        let r = direct_children_of(&buf, routes[0]);
+        assert_eq!(r[0].value, FieldValue::U8(24));
+        // The destination lies inside the first fragment: zero-copy bytes.
+        assert_eq!(r[1].value, FieldValue::Bytes(&[0x0a, 0x00, 0x00]));
+        assert_eq!(r[1].range, first + 3..first + 6);
+        assert_eq!(r[2].value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
+        // The router straddles both fragments: its range spans them.
+        assert_eq!(r[2].range, first + 6..second + 5);
+        assert!(top_fields(&buf, "unknown_option").is_empty());
+    }
+
+    #[test]
+    fn rfc3396_split_across_options_and_file_with_overload() {
+        // Option 82 split: first part in `options`, second in `file`
+        // (option 52 = 1). RFC 3396, Section 5: options, then file, then sname.
+        // <https://www.rfc-editor.org/rfc/rfc3396#section-5>
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        // file field: 82, len 4: rest of Remote-ID sub-option
+        pkt[108] = 82;
+        pkt[109] = 4;
+        pkt[110..114].copy_from_slice(b"cdef");
+        pkt[114] = 255;
+        push_option(&mut pkt, 52, &[1]);
+        // options: 82, len 6: Circuit-ID "ab" + Remote-ID header (len 4) + ""
+        push_option(&mut pkt, 82, &[1, 2, b'a', b'b', 2, 4]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let split = top_fields(&buf, "split_option");
+        assert_eq!(split.len(), 1);
+        let frags = direct_children_of(&buf, direct_children_of(&buf, split[0])[1]);
+        assert_eq!(frags.len(), 2);
+        // Options-area fragment first, then the file fragment.
+        assert!(frags[0].range.start > 236);
+        assert_eq!(frags[1].range, 108..114);
+
+        let info = top_fields(&buf, "relay_agent_info");
+        assert_eq!(info.len(), 1);
+        let subs = direct_children_of(&buf, info[0]);
+        assert_eq!(subs.len(), 2);
+        let remote = direct_children_of(&buf, subs[1]);
+        assert_eq!(remote[1].name(), "remote_id");
+        // "cdef" lies entirely inside the file fragment → packet bytes.
+        assert_eq!(remote[1].value, FieldValue::Bytes(b"cdef"));
+        assert_eq!(remote[1].range, 110..114);
+    }
+
+    #[test]
+    fn rfc3396_split_string_straddling_fragments_uses_scratch() {
+        // Host Name split as "exa" + "mple": the value straddles fragments,
+        // so it is assembled in the scratch buffer.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 12, b"exa");
+        push_option(&mut pkt, 53, &[1]);
+        push_option(&mut pkt, 12, b"mple");
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let host = top_fields(&buf, "hostname");
+        assert_eq!(host.len(), 1);
+        let FieldValue::Scratch(ref r) = host[0].value else {
+            panic!("expected scratch value, got {:?}", host[0].value);
+        };
+        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], b"example");
+
+        // The text formatter reads the scratch buffer.
+        let ctx = FormatContext {
+            packet_data: &pkt,
+            scratch: buf.scratch(),
+            layer_range: 0..pkt.len() as u32,
+            field_range: host[0].range.start as u32..host[0].range.end as u32,
+        };
+        let mut out = Vec::new();
+        (host[0].descriptor.format_fn.unwrap())(&host[0].value, &ctx, &mut out).unwrap();
+        assert_eq!(out, b"\"example\"");
+        // The message type between the fragments is still decoded.
+        assert!(!top_fields(&buf, "dhcp_message_type").is_empty());
+    }
+
+    #[test]
+    fn rfc3396_single_instances_are_unchanged() {
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 53, &[1]);
+        push_option(&mut pkt, 12, b"host");
+        push_option(&mut pkt, 121, &[24, 192, 168, 1, 10, 0, 0, 1]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert!(top_fields(&buf, "split_option").is_empty());
+        let host = top_fields(&buf, "hostname")[0];
+        assert_eq!(host.value, FieldValue::Bytes(b"host"));
+        // The text formatter passes non-scratch values through.
+        let ctx = FormatContext {
+            packet_data: &pkt,
+            scratch: buf.scratch(),
+            layer_range: 0..pkt.len() as u32,
+            field_range: host.range.start as u32..host.range.end as u32,
+        };
+        let mut out = Vec::new();
+        (host.descriptor.format_fn.unwrap())(&host.value, &ctx, &mut out).unwrap();
+        assert_eq!(out, b"\"host\"");
+    }
+
+    #[test]
+    fn rfc3396_split_value_over_255_octets() {
+        // A 300-octet Domain Search List (RFC 3397, option 119) split in two.
+        // <https://www.rfc-editor.org/rfc/rfc3397#section-2>
+        let mut value = Vec::new();
+        while value.len() < 290 {
+            value.extend_from_slice(b"\x09abcdefghi\x00");
+        }
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 53, &[1]);
+        push_option(&mut pkt, 119, &value[..200]);
+        push_option(&mut pkt, 119, &value[200..]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let lists = top_fields(&buf, "domain_search");
+        assert_eq!(lists.len(), 1);
+        assert_eq!(direct_children_of(&buf, lists[0]).len(), value.len() / 11);
+    }
+
+    #[test]
+    fn rfc3396_split_unknown_option_keeps_concatenated_data() {
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let first = pkt.len();
+        push_option(&mut pkt, 200, &[1, 2]);
+        push_option(&mut pkt, 200, &[3]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let unknown = top_fields(&buf, "unknown_option");
+        assert_eq!(unknown.len(), 1);
+        let children = direct_children_of(&buf, unknown[0]);
+        assert_eq!(children[0].value, FieldValue::U8(200));
+        assert_eq!(children[0].range, first..first + 1);
+        let FieldValue::Scratch(ref r) = children[1].value else {
+            panic!("expected scratch, got {:?}", children[1].value);
+        };
+        assert_eq!(&buf.scratch()[r.start as usize..r.end as usize], &[1, 2, 3]);
+        assert_eq!(children[1].range, first + 2..first + 7);
+    }
+
+    #[test]
+    fn rfc3396_many_instances_are_concatenated() {
+        // 300 portions of one option: all are concatenated.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        for _ in 0..300 {
+            push_option(&mut pkt, 12, b"h");
+        }
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let split = top_fields(&buf, "split_option");
+        assert_eq!(split.len(), 1);
+        let frags = direct_children_of(&buf, direct_children_of(&buf, split[0])[1]);
+        assert_eq!(frags.len(), 300);
+        let host = top_fields(&buf, "hostname");
+        assert_eq!(host.len(), 1);
+        let FieldValue::Scratch(ref r) = host[0].value else {
+            panic!("expected scratch");
+        };
+        assert_eq!(r.end - r.start, 300);
+    }
+
+    #[test]
+    fn rfc3396_every_octet_split_maps_ranges_to_its_portion() {
+        // 20000 one-octet portions of the Parameter Request List, close to
+        // the largest UDP payload. Every list element must map back to its
+        // own portion; looking portions up by a linear scan per field made
+        // this quadratic.
+        const N: usize = 20_000;
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        let first = pkt.len();
+        for i in 0..N {
+            push_option(&mut pkt, 55, &[(i % 250 + 1) as u8]);
+        }
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let list = top_fields(&buf, "parameter_request_list");
+        assert_eq!(list.len(), 1);
+        let items = direct_children_of(&buf, list[0]);
+        assert_eq!(items.len(), N);
+        for (i, item) in [(0, items[0]), (N - 1, items[N - 1])] {
+            let at = first + 3 * i + 2;
+            assert_eq!(item.range, at..at + 1);
+            assert_eq!(item.value, FieldValue::U8((i % 250 + 1) as u8));
+        }
+    }
+
+    #[test]
+    fn rfc3396_repeated_fixed_length_option_is_decoded_per_portion() {
+        // Two DHCP Message Type options: "01 01" does not fit option 53's
+        // one-octet format, so each portion keeps its typed decoding.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 53, &[1]);
+        push_option(&mut pkt, 53, &[1]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(top_fields(&buf, "split_option").len(), 1);
+        assert_eq!(top_fields(&buf, "dhcp_message_type").len(), 2);
+        assert!(top_fields(&buf, "unknown_option").is_empty());
+        assert_eq!(buf.layers()[0].display_name, None);
+    }
+
+    #[test]
+    fn rfc3396_split_numeric_values_are_reassembled() {
+        // Time Offset (I32), Lease Time (U32) and the Path MTU Plateau
+        // Table (U16 list) split so that values straddle portions; pads
+        // between portions are skipped.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 2, &[0xff, 0xff]);
+        push_option(&mut pkt, 51, &[0x00, 0x00, 0x0e]);
+        push_option(&mut pkt, 25, &[0x02, 0x40, 0x05]);
+        pkt.push(0); // pad
+        push_option(&mut pkt, 2, &[0xf1, 0xf0]);
+        push_option(&mut pkt, 51, &[0x10]);
+        push_option(&mut pkt, 25, &[0xdc]);
+        pkt.push(255);
+        let mut b = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut b, 0).unwrap();
+        assert_eq!(top_fields(&b, "split_option").len(), 3);
+        assert_eq!(
+            top_fields(&b, "time_offset")[0].value,
+            FieldValue::I32(-3600)
+        );
+        assert_eq!(top_fields(&b, "lease_time")[0].value, FieldValue::U32(3600));
+        let mtus: Vec<_> = direct_children_of(&b, top_fields(&b, "path_mtu_plateau_table")[0])
+            .iter()
+            .map(|f| f.value.clone())
+            .collect();
+        assert_eq!(mtus, vec![FieldValue::U16(576), FieldValue::U16(1500)]);
+    }
+
+    #[test]
+    fn rfc3396_split_client_fqdn_formats_scratch_name() {
+        // Client FQDN (RFC 4702) whose name straddles the two portions.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 81, &[0, 0, 0, 4, b'h', b'o']);
+        push_option(&mut pkt, 81, &[b's', b't', 0]);
+        pkt.push(255);
+        let mut b = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut b, 0).unwrap();
+        let fqdn = top_fields(&b, "client_fqdn");
+        let name = direct_children_of(&b, fqdn[0])
+            .into_iter()
+            .find(|f| f.name() == "domain_name")
+            .unwrap();
+        assert!(matches!(name.value, FieldValue::Scratch(_)));
+        let ctx = FormatContext {
+            packet_data: &pkt,
+            scratch: b.scratch(),
+            layer_range: 0..pkt.len() as u32,
+            field_range: name.range.start as u32..name.range.end as u32,
+        };
+        let mut out = Vec::new();
+        (name.descriptor.format_fn.unwrap())(&name.value, &ctx, &mut out).unwrap();
+        assert_eq!(out, b"\"host\"");
+    }
+
+    #[test]
+    fn rfc3396_scan_stops_at_truncated_option() {
+        // A split option followed by a truncated option: the scan stops,
+        // and the parser reports the truncation as before.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 12, b"a");
+        push_option(&mut pkt, 12, b"b");
+        pkt.extend_from_slice(&[15, 9, b'x']);
+        let mut b = DissectBuffer::new();
+        assert!(DhcpDissector.dissect(&pkt, &mut b, 0).is_err());
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 12, b"a");
+        pkt.push(15); // code without a length octet
+        let mut b = DissectBuffer::new();
+        assert!(DhcpDissector.dissect(&pkt, &mut b, 0).is_err());
     }
 }

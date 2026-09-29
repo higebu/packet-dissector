@@ -2,6 +2,14 @@
 //!
 //! ## References
 //! - RFC 2328: <https://www.rfc-editor.org/rfc/rfc2328>
+//! - RFC 3101 (NSSA): <https://www.rfc-editor.org/rfc/rfc3101>
+//! - RFC 3630 (TE): <https://www.rfc-editor.org/rfc/rfc3630>
+//! - RFC 5250 (Opaque LSAs): <https://www.rfc-editor.org/rfc/rfc5250>
+//! - RFC 5613 (LLS): <https://www.rfc-editor.org/rfc/rfc5613>
+//! - RFC 5709 (HMAC-SHA authentication): <https://www.rfc-editor.org/rfc/rfc5709>
+//! - RFC 7684 (Prefix/Link Attributes): <https://www.rfc-editor.org/rfc/rfc7684>
+//! - RFC 7770 (Router Information): <https://www.rfc-editor.org/rfc/rfc7770>
+//! - RFC 8665 (Segment Routing): <https://www.rfc-editor.org/rfc/rfc8665>
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -12,6 +20,12 @@ use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
 use crate::common::{LSR_ENTRY_SIZE, push_lsa_headers, push_lsu_lsas};
+use crate::tlv::UNPARSED_DESCRIPTOR;
+use crate::trailer::{LLS_DESCRIPTOR, push_lls};
+use crate::v2_lsa::{
+    FD_LSA, FD_LSA_HEADER, LSA_CHILD_FIELDS, LSA_HEADER_FIELDS, lsa_type_name, push_lsa,
+    push_lsa_header_fields,
+};
 
 /// OSPFv2 common header size in bytes.
 ///
@@ -27,43 +41,6 @@ const HELLO_BODY_SIZE: usize = 20;
 ///
 /// RFC 2328, Appendix A.3.3 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.3>
 const DD_BODY_SIZE: usize = 8;
-
-/// Field descriptor indices for [`LSA_HEADER_CHILD_FIELDS`].
-const FD_LSA_LS_AGE: usize = 0;
-const FD_LSA_OPTIONS: usize = 1;
-const FD_LSA_LS_TYPE: usize = 2;
-const FD_LSA_LINK_STATE_ID: usize = 3;
-const FD_LSA_ADVERTISING_ROUTER: usize = 4;
-const FD_LSA_LS_SEQUENCE_NUMBER: usize = 5;
-const FD_LSA_LS_CHECKSUM: usize = 6;
-const FD_LSA_LENGTH: usize = 7;
-
-/// Child field descriptors for LSA header entries.
-static LSA_HEADER_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor::new("ls_age", "LS Age", FieldType::U16),
-    FieldDescriptor::new("options", "Options", FieldType::U8),
-    FieldDescriptor {
-        name: "ls_type",
-        display_name: "LS Type",
-        field_type: FieldType::U8,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(t) => lsa_type_name(*t),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("link_state_id", "Link State ID", FieldType::Ipv4Addr),
-    FieldDescriptor::new(
-        "advertising_router",
-        "Advertising Router",
-        FieldType::Ipv4Addr,
-    ),
-    FieldDescriptor::new("ls_sequence_number", "LS Sequence Number", FieldType::U32),
-    FieldDescriptor::new("ls_checksum", "LS Checksum", FieldType::U16),
-    FieldDescriptor::new("length", "Length", FieldType::U16),
-];
 
 /// Field descriptor indices for [`LSR_ENTRY_CHILD_FIELDS`].
 const FD_LSR_LS_TYPE: usize = 0;
@@ -102,80 +79,6 @@ static FD_LSR_ENTRY: FieldDescriptor = FieldDescriptor {
     format_fn: None,
 };
 
-/// Returns a human-readable name for LSA types.
-///
-/// RFC 2328, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.1>
-fn lsa_type_name(v: u8) -> Option<&'static str> {
-    match v {
-        1 => Some("Router-LSA"),
-        2 => Some("Network-LSA"),
-        3 => Some("Summary-LSA (IP network)"),
-        4 => Some("Summary-LSA (ASBR)"),
-        5 => Some("AS-external-LSA"),
-        _ => None,
-    }
-}
-
-/// Pushes fields for a single LSA header (20 bytes) into the buffer.
-///
-/// RFC 2328, Appendix A.4.1 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.4.1>
-fn push_lsa_header_fields<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    data: &'pkt [u8],
-    offset: usize,
-    child_fields: &'static [FieldDescriptor],
-) {
-    let ls_age = read_be_u16(data, 0).unwrap_or_default();
-    let options = data[2];
-    let ls_type = data[3];
-    let link_state_id = [data[4], data[5], data[6], data[7]];
-    let advertising_router = [data[8], data[9], data[10], data[11]];
-    let ls_seq = read_be_u32(data, 12).unwrap_or_default();
-    let ls_checksum = read_be_u16(data, 16).unwrap_or_default();
-    let length = read_be_u16(data, 18).unwrap_or_default();
-
-    buf.push_field(
-        &child_fields[FD_LSA_LS_AGE],
-        FieldValue::U16(ls_age),
-        offset..offset + 2,
-    );
-    buf.push_field(
-        &child_fields[FD_LSA_OPTIONS],
-        FieldValue::U8(options),
-        offset + 2..offset + 3,
-    );
-    buf.push_field(
-        &child_fields[FD_LSA_LS_TYPE],
-        FieldValue::U8(ls_type),
-        offset + 3..offset + 4,
-    );
-    buf.push_field(
-        &child_fields[FD_LSA_LINK_STATE_ID],
-        FieldValue::Ipv4Addr(link_state_id),
-        offset + 4..offset + 8,
-    );
-    buf.push_field(
-        &child_fields[FD_LSA_ADVERTISING_ROUTER],
-        FieldValue::Ipv4Addr(advertising_router),
-        offset + 8..offset + 12,
-    );
-    buf.push_field(
-        &child_fields[FD_LSA_LS_SEQUENCE_NUMBER],
-        FieldValue::U32(ls_seq),
-        offset + 12..offset + 16,
-    );
-    buf.push_field(
-        &child_fields[FD_LSA_LS_CHECKSUM],
-        FieldValue::U16(ls_checksum),
-        offset + 16..offset + 18,
-    );
-    buf.push_field(
-        &child_fields[FD_LSA_LENGTH],
-        FieldValue::U16(length),
-        offset + 18..offset + 20,
-    );
-}
-
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 // Common header fields
 const FD_VERSION: usize = 0;
@@ -205,6 +108,22 @@ const FD_REQUESTS: usize = 20;
 // LSU fields
 const FD_NUM_LSAS: usize = 21;
 const FD_LSAS: usize = 22;
+// Cryptographic authentication (AuType 2) and LLS
+const FD_KEY_ID: usize = 23;
+const FD_AUTH_DATA_LEN: usize = 24;
+const FD_CRYPTO_SEQUENCE_NUMBER: usize = 25;
+const FD_AUTH_DIGEST: usize = 26;
+const FD_LLS: usize = 27;
+
+/// Authentication type for Cryptographic authentication.
+///
+/// RFC 2328, Appendix D — <https://www.rfc-editor.org/rfc/rfc2328#appendix-D>
+const AUTH_TYPE_CRYPTOGRAPHIC: u16 = 2;
+
+/// L-bit in the OSPFv2 Options field.
+///
+/// RFC 5613, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc5613#section-2.1>
+const OPTIONS_L_BIT: u8 = 0x10;
 
 /// Field descriptors for the OSPFv2 dissector.
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -258,7 +177,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("dd_sequence_number", "DD Sequence Number", FieldType::U32).optional(),
     FieldDescriptor::new("lsa_headers", "LSA Headers", FieldType::Array)
         .optional()
-        .with_children(LSA_HEADER_CHILD_FIELDS),
+        .with_children(LSA_HEADER_FIELDS),
     // LSR fields
     FieldDescriptor::new("requests", "Link State Requests", FieldType::Array)
         .optional()
@@ -267,18 +186,71 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("num_lsas", "Number of LSAs", FieldType::U32).optional(),
     FieldDescriptor::new("lsas", "LSAs", FieldType::Array)
         .optional()
-        .with_children(LSA_HEADER_CHILD_FIELDS),
+        .with_children(LSA_CHILD_FIELDS),
+    // Cryptographic authentication — RFC 2328, Appendix D.3
+    // <https://www.rfc-editor.org/rfc/rfc2328>
+    FieldDescriptor::new("key_id", "Key ID", FieldType::U8).optional(),
+    FieldDescriptor::new("auth_data_len", "Auth Data Len", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "crypto_sequence_number",
+        "Cryptographic Sequence Number",
+        FieldType::U32,
+    )
+    .optional(),
+    FieldDescriptor::new("auth_digest", "Authentication Digest", FieldType::Bytes).optional(),
+    // LLS data block — RFC 5613, Section 2.2
+    // <https://www.rfc-editor.org/rfc/rfc5613#section-2.2>
+    LLS_DESCRIPTOR,
+    // Bytes after the last LSA / LSA header that could be delimited.
+    UNPARSED_DESCRIPTOR,
 ];
 
 /// OSPFv2 dissector.
 pub struct Ospfv2Dissector;
 
 /// Specification references for the OSPFv2 dissector.
-static REFERENCES: &[SpecReference] = &[SpecReference::new(
-    "RFC 2328",
-    "OSPF Version 2",
-    "https://www.rfc-editor.org/rfc/rfc2328",
-)];
+static REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "RFC 2328",
+        "OSPF Version 2",
+        "https://www.rfc-editor.org/rfc/rfc2328",
+    ),
+    SpecReference::new(
+        "RFC 3101",
+        "The OSPF Not-So-Stubby Area (NSSA) Option",
+        "https://www.rfc-editor.org/rfc/rfc3101",
+    ),
+    SpecReference::new(
+        "RFC 3630",
+        "Traffic Engineering (TE) Extensions to OSPF Version 2",
+        "https://www.rfc-editor.org/rfc/rfc3630",
+    ),
+    SpecReference::new(
+        "RFC 5250",
+        "The OSPF Opaque LSA Option",
+        "https://www.rfc-editor.org/rfc/rfc5250",
+    ),
+    SpecReference::new(
+        "RFC 5613",
+        "OSPF Link-Local Signaling",
+        "https://www.rfc-editor.org/rfc/rfc5613",
+    ),
+    SpecReference::new(
+        "RFC 7684",
+        "OSPFv2 Prefix/Link Attribute Advertisement",
+        "https://www.rfc-editor.org/rfc/rfc7684",
+    ),
+    SpecReference::new(
+        "RFC 7770",
+        "Extensions to OSPF for Advertising Optional Router Capabilities",
+        "https://www.rfc-editor.org/rfc/rfc7770",
+    ),
+    SpecReference::new(
+        "RFC 8665",
+        "OSPF Extensions for Segment Routing",
+        "https://www.rfc-editor.org/rfc/rfc8665",
+    ),
+];
 
 impl Dissector for Ospfv2Dissector {
     fn name(&self) -> &'static str {
@@ -392,11 +364,32 @@ impl Dissector for Ospfv2Dissector {
             FieldValue::Bytes(&data[16..24]),
             offset + 16..offset + 24,
         );
+        // RFC 2328, Appendix D.3 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-D.3>
+        // Layout: 0 (2 octets), Key ID, Auth Data Len, Cryptographic sequence number.
+        if auth_type == AUTH_TYPE_CRYPTOGRAPHIC {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_KEY_ID],
+                FieldValue::U8(data[18]),
+                offset + 18..offset + 19,
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_AUTH_DATA_LEN],
+                FieldValue::U8(data[19]),
+                offset + 19..offset + 20,
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CRYPTO_SEQUENCE_NUMBER],
+                FieldValue::U32(read_be_u32(data, 20)?),
+                offset + 20..offset + 24,
+            );
+        }
 
         // Type-specific parsing
         let body = &data[HEADER_SIZE..total_len];
         let body_offset = offset + HEADER_SIZE;
 
+        // Options of Hello / DD packets, used for the LLS L-bit.
+        let mut options = None;
         match ospf_type {
             // Hello (Type 1) — RFC 2328, Appendix A.3.2
             // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.2>
@@ -409,7 +402,8 @@ impl Dissector for Ospfv2Dissector {
 
                 let network_mask = [body[0], body[1], body[2], body[3]];
                 let hello_interval = read_be_u16(body, 4)?;
-                let options = body[6];
+                let hello_options = body[6];
+                options = Some(hello_options);
                 let router_priority = body[7];
                 let router_dead_interval = read_be_u32(body, 8)?;
                 let dr = [body[12], body[13], body[14], body[15]];
@@ -427,7 +421,7 @@ impl Dissector for Ospfv2Dissector {
                 );
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_OPTIONS],
-                    FieldValue::U8(options),
+                    FieldValue::U8(hello_options),
                     body_offset + 6..body_offset + 7,
                 );
                 buf.push_field(
@@ -494,6 +488,7 @@ impl Dissector for Ospfv2Dissector {
 
                 let interface_mtu = read_be_u16(body, 0)?;
                 let dd_options = body[2];
+                options = Some(dd_options);
                 let dd_flags = body[3];
                 let dd_seq = read_be_u32(body, 4)?;
 
@@ -521,19 +516,14 @@ impl Dissector for Ospfv2Dissector {
                 // Parse LSA headers
                 let lsa_data = &body[DD_BODY_SIZE..];
                 let lsa_start = body_offset + DD_BODY_SIZE;
-                let array_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_LSA_HEADERS],
-                    FieldValue::Array(0..0),
-                    lsa_start..body_offset + body.len(),
-                );
                 push_lsa_headers(
                     buf,
+                    &FIELD_DESCRIPTORS[FD_LSA_HEADERS],
                     lsa_data,
                     lsa_start,
-                    LSA_HEADER_CHILD_FIELDS,
+                    &FD_LSA_HEADER,
                     push_lsa_header_fields,
                 );
-                buf.end_container(array_idx);
             }
             // Link State Request (Type 3) — RFC 2328, Appendix A.3.4
             // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.4>
@@ -594,46 +584,75 @@ impl Dissector for Ospfv2Dissector {
                     body_offset..body_offset + 4,
                 );
 
-                // Parse LSAs (header only — full LSA body parsing is out of scope)
-                let array_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_LSAS],
-                    FieldValue::Array(0..0),
-                    body_offset + 4..body_offset + body.len(),
-                );
+                // LSAs, each delimited by its own length field.
                 push_lsu_lsas(
                     buf,
+                    &FIELD_DESCRIPTORS[FD_LSAS],
                     body,
                     num_lsas,
                     body_offset,
-                    LSA_HEADER_CHILD_FIELDS,
-                    push_lsa_header_fields,
+                    &FD_LSA,
+                    push_lsa,
                 );
-                buf.end_container(array_idx);
             }
             // Link State Acknowledgment (Type 5) — RFC 2328, Appendix A.3.6
             // <https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.6>
             5 => {
-                let array_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_LSA_HEADERS],
-                    FieldValue::Array(0..0),
-                    body_offset..body_offset + body.len(),
-                );
                 push_lsa_headers(
                     buf,
+                    &FIELD_DESCRIPTORS[FD_LSA_HEADERS],
                     body,
                     body_offset,
-                    LSA_HEADER_CHILD_FIELDS,
+                    &FD_LSA_HEADER,
                     push_lsa_header_fields,
                 );
-                buf.end_container(array_idx);
             }
             // Unknown type — common header only
             _ => {}
         }
 
+        // Data appended after the packet, outside `packet_length`.
+        let mut consumed = total_len;
+
+        // RFC 2328, Appendix D.3 — <https://www.rfc-editor.org/rfc/rfc2328#appendix-D.3>
+        // "the key is used to generate/verify a "message digest" that is
+        // appended to the end of the OSPF packet."
+        // When the digest is not fully present, the LLS block that would
+        // follow it cannot be located either.
+        let mut digest_present = true;
+        if auth_type == AUTH_TYPE_CRYPTOGRAPHIC {
+            let digest_len = data[19] as usize;
+            digest_present = data.len() >= consumed + digest_len;
+            if digest_len > 0 && digest_present {
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_AUTH_DIGEST],
+                    FieldValue::Bytes(&data[consumed..consumed + digest_len]),
+                    offset + consumed..offset + consumed + digest_len,
+                );
+                consumed += digest_len;
+            }
+        }
+
+        // RFC 5613, Section 2 — <https://www.rfc-editor.org/rfc/rfc5613#section-2>
+        // "OSPF routers add a special data block to the end of OSPF packets
+        // or right after the authentication data block when cryptographic
+        // authentication is used." Only Hello and DD packets carry it, and
+        // "the LLS data block is only examined if the L-bit is set."
+        if digest_present && options.is_some_and(|o| o & OPTIONS_L_BIT != 0) {
+            consumed += push_lls(
+                buf,
+                &data[consumed..],
+                offset + consumed,
+                &FIELD_DESCRIPTORS[FD_LLS],
+            );
+        }
+
+        if let Some(layer) = buf.last_layer_mut() {
+            layer.range.end = offset + consumed;
+        }
         buf.end_layer();
 
-        Ok(DissectResult::new(total_len, DispatchHint::End))
+        Ok(DissectResult::new(consumed, DispatchHint::End))
     }
 }
 
@@ -645,16 +664,45 @@ mod tests {
     //
     // RFC 2328: <https://www.rfc-editor.org/rfc/rfc2328>
     //
-    // | RFC Section    | Description             | Test                                    |
-    // |----------------|-------------------------|-----------------------------------------|
-    // | Appendix A.3.1 | Common header           | parse_hello, parse_wrong_version,       |
-    // |                |                         | parse_truncated_header, parse_with_offset |
-    // | Appendix A.3.2 | Hello packet            | parse_hello, parse_hello_with_neighbors |
-    // | Appendix A.3.3 | Database Description    | parse_dd                                |
-    // | Appendix A.3.4 | Link State Request      | parse_lsr                               |
-    // | Appendix A.3.5 | Link State Update       | parse_lsu                               |
-    // | Appendix A.3.6 | Link State Ack          | parse_lsack                             |
-    // | Appendix A.4.1 | LSA header              | parse_dd, parse_lsu, parse_lsack        |
+    // | RFC Section        | Description                  | Test                                     |
+    // |--------------------|------------------------------|------------------------------------------|
+    // | Appendix A.3.1     | Common header                | parse_hello, parse_wrong_version,        |
+    // |                    |                              | parse_truncated_header, parse_with_offset |
+    // | Appendix A.3.2     | Hello packet                 | parse_hello, parse_hello_with_neighbors  |
+    // | Appendix A.3.3     | Database Description         | parse_dd                                 |
+    // | Appendix A.3.4     | Link State Request           | parse_lsr,                               |
+    // |                    |                              | lsr_entry_container_resolves_to_lsa_type_name |
+    // | Appendix A.3.5     | Link State Update            | parse_lsu, parse_lsu_router_lsa_stub_link |
+    // | Appendix A.3.6     | Link State Ack               | parse_lsack, lsa_header_containers_are_labeled |
+    // | Appendix A.4.1     | LSA header, LS type names    | parse_dd, parse_lsu, parse_lsack,        |
+    // |                    |                              | lsa_type_names_cover_registry            |
+    // | Appendix A.4.2     | Router-LSA                   | parse_lsu_router_lsa_stub_link,          |
+    // |                    |                              | parse_router_lsa_flags_and_tos,          |
+    // |                    |                              | parse_router_lsa_truncated_links         |
+    // | Appendix A.4.3     | Network-LSA                  | parse_network_lsa                        |
+    // | Appendix A.4.4     | Summary-LSAs (3, 4)          | parse_summary_lsas                       |
+    // | Appendix A.4.5     | AS-external-LSA              | parse_as_external_and_nssa_lsas          |
+    // | Appendix D.3       | Cryptographic authentication | parse_crypto_auth_digest,                |
+    // |                    |                              | parse_crypto_auth_missing_digest         |
+    // | —                  | Unknown LSA type (raw body)  | parse_unknown_lsa_body_is_raw            |
+    //
+    // | Other RFC          | Description                  | Test                                     |
+    // |--------------------|------------------------------|------------------------------------------|
+    // | RFC 3101 App. C    | NSSA-LSA (type 7)            | parse_as_external_and_nssa_lsas          |
+    // | RFC 5250 Sec. 3    | Opaque LSA type / ID         | parse_router_information_opaque_lsa,     |
+    // |                    |                              | parse_unknown_opaque_type_is_raw         |
+    // | RFC 3630 Sec. 2.4-2.5 | TE LSA TLVs / sub-TLVs    | parse_traffic_engineering_opaque_lsa     |
+    // | RFC 7770 Sec. 2    | Router Information LSA       | parse_router_information_opaque_lsa      |
+    // | RFC 8665 Sec. 3    | SR-Algorithm, SID/Label Range, | parse_router_information_opaque_lsa    |
+    // |                    | SRLB, SRMS Preference        |                                          |
+    // | RFC 7684 Sec. 2.1  | Extended Prefix TLV          | parse_extended_prefix_opaque_lsa         |
+    // | RFC 8665 Sec. 4-5  | Prefix Range, Prefix-SID     | parse_extended_prefix_opaque_lsa         |
+    // | RFC 7684 Sec. 3.1  | Extended Link TLV            | parse_extended_link_opaque_lsa           |
+    // | RFC 8665 Sec. 6    | Adj-SID, LAN Adj-SID         | parse_extended_link_opaque_lsa           |
+    // | RFC 3630 Sec. 2.3.2 | Malformed TLV handling      | parse_opaque_lsa_malformed_tlvs          |
+    // | RFC 5613 Sec. 2    | LLS data block               | parse_lls_block_after_digest,            |
+    // |                    |                              | parse_lls_block_requires_l_bit_and_length, |
+    // |                    |                              | parse_lls_block_after_dd                 |
 
     /// Build an OSPFv2 common header.
     fn build_header(ospf_type: u8, packet_length: u16, router_id: [u8; 4]) -> Vec<u8> {
@@ -986,5 +1034,736 @@ mod tests {
             assert!(reference.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
+    }
+
+    // ---------------------------------------------------------------------
+    // LSA bodies, opaque TLVs and trailers
+    // ---------------------------------------------------------------------
+
+    use crate::common::test_util::{assert_child, child, children, has_child, index_of, range};
+
+    /// Build an LSA: 20-byte header followed by `body`, with the length set.
+    fn build_lsa(ls_type: u8, link_state_id: [u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut lsa = build_lsa_header(ls_type, (20 + body.len()) as u16);
+        lsa[4..8].copy_from_slice(&link_state_id);
+        lsa.extend_from_slice(body);
+        lsa
+    }
+
+    /// Build an LSU packet carrying `lsas`.
+    fn build_lsu(lsas: &[Vec<u8>]) -> Vec<u8> {
+        let total: usize = lsas.iter().map(Vec::len).sum();
+        let mut pkt = build_header(4, (HEADER_SIZE + 4 + total) as u16, [1, 1, 1, 1]);
+        pkt.extend_from_slice(&(lsas.len() as u32).to_be_bytes());
+        for lsa in lsas {
+            pkt.extend_from_slice(lsa);
+        }
+        pkt
+    }
+
+    /// Build a TLV (type, length, value) padded to a 4-octet boundary.
+    fn tlv(t: u16, value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&t.to_be_bytes());
+        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        out.extend_from_slice(value);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// Dissects `pkt` and returns the child range of `lsas[index]`.
+    fn lsa_range(buf: &DissectBuffer<'_>, index: usize) -> core::ops::Range<u32> {
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        let lsas = buf.field_by_name(layer, "lsas").unwrap();
+        let items = children(buf, &range(lsas));
+        range(items[index])
+    }
+
+    /// Returns the child range of `tlvs[index]` inside `parent`.
+    fn tlv_range(
+        buf: &DissectBuffer<'_>,
+        parent: &core::ops::Range<u32>,
+        array: &str,
+        index: usize,
+    ) -> core::ops::Range<u32> {
+        let items = children(buf, &range(child(buf, parent, array)));
+        range(items[index])
+    }
+
+    /// Returns the container display name for `tlvs[index]` inside `parent`.
+    fn tlv_name(
+        buf: &DissectBuffer<'_>,
+        parent: &core::ops::Range<u32>,
+        array: &str,
+        index: usize,
+    ) -> Option<&'static str> {
+        let items = children(buf, &range(child(buf, parent, array)));
+        buf.resolve_container_display_name(index_of(buf, items[index]))
+    }
+
+    /// RFC 2328, Appendix A.4.2 — the reproduction from the issue: one
+    /// Router-LSA with a stub link 192.0.2.0/24, metric 10.
+    /// <https://www.rfc-editor.org/rfc/rfc2328>
+    #[test]
+    fn parse_lsu_router_lsa_stub_link() {
+        let pkt: Vec<u8> = vec![
+            0x02, 0x04, 0x00, 0x40, 0xc0, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x02, 0x01, 0xc0, 0x00, 0x02, 0x01, 0xc0, 0x00, 0x02, 0x01, 0x80, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x01, 0xc0, 0x00, 0x02, 0x00,
+            0xff, 0xff, 0xff, 0x00, 0x03, 0x00, 0x00, 0x0a,
+        ];
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 64);
+
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        let lsas = buf.field_by_name(layer, "lsas").unwrap();
+        let items = children(&buf, &range(lsas));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name(), "lsa");
+        assert_eq!(items[0].display_name(), "LSA");
+        assert_eq!(items[0].range, 28..64);
+        assert_eq!(
+            buf.resolve_container_display_name(index_of(&buf, items[0])),
+            Some("Router-LSA")
+        );
+
+        let lsa = range(items[0]);
+        assert_child(&buf, &lsa, "ls_age", FieldValue::U16(1));
+        assert_child(&buf, &lsa, "length", FieldValue::U16(36));
+        assert_child(&buf, &lsa, "flags", FieldValue::U8(0));
+        assert_child(&buf, &lsa, "num_links", FieldValue::U16(1));
+        let link = tlv_range(&buf, &lsa, "links", 0);
+        assert_child(&buf, &link, "link_id", FieldValue::Ipv4Addr([192, 0, 2, 0]));
+        assert_child(
+            &buf,
+            &link,
+            "link_data",
+            FieldValue::Ipv4Addr([255, 255, 255, 0]),
+        );
+        assert_child(&buf, &link, "link_type", FieldValue::U8(3));
+        assert_eq!(
+            buf.resolve_nested_display_name(&link, "link_type_name"),
+            Some("Stub network")
+        );
+        assert_child(&buf, &link, "num_tos", FieldValue::U8(0));
+        assert_child(&buf, &link, "metric", FieldValue::U16(10));
+        assert!(!has_child(&buf, &link, "tos_metrics"));
+        assert!(!has_child(&buf, &lsa, "unparsed"));
+    }
+
+    /// RFC 2328, Appendix A.4.2 — V/E/B bits, Nt bit (RFC 3101) and TOS metrics.
+    /// <https://www.rfc-editor.org/rfc/rfc2328>
+    /// <https://www.rfc-editor.org/rfc/rfc3101>
+    #[test]
+    fn parse_router_lsa_flags_and_tos() {
+        let mut body = vec![0x17, 0x00, 0x00, 0x01]; // Nt|V|E|B, #links = 1
+        body.extend_from_slice(&[10, 0, 0, 2, 10, 0, 0, 1, 1, 1, 0, 5]); // p2p, 1 TOS
+        body.extend_from_slice(&[8, 0, 0, 7]); // TOS 8, metric 7
+        let pkt = build_lsu(&[build_lsa(1, [1, 1, 1, 1], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_child(&buf, &lsa, "flags", FieldValue::U8(0x17));
+        assert_child(&buf, &lsa, "flag_nt", FieldValue::U8(1));
+        assert_child(&buf, &lsa, "flag_v", FieldValue::U8(1));
+        assert_child(&buf, &lsa, "flag_e", FieldValue::U8(1));
+        assert_child(&buf, &lsa, "flag_b", FieldValue::U8(1));
+        let link = tlv_range(&buf, &lsa, "links", 0);
+        assert_eq!(
+            buf.resolve_nested_display_name(&link, "link_type_name"),
+            Some("Point-to-point")
+        );
+        let tos = tlv_range(&buf, &link, "tos_metrics", 0);
+        assert_child(&buf, &tos, "tos", FieldValue::U8(8));
+        assert_child(&buf, &tos, "metric", FieldValue::U32(7));
+    }
+
+    /// Router-LSA whose `# links` overstates the body: the parsed links are
+    /// kept and the remaining bytes are exposed as `unparsed`.
+    #[test]
+    fn parse_router_lsa_truncated_links() {
+        let mut body = vec![0x00, 0x00, 0x00, 0x02]; // #links = 2
+        body.extend_from_slice(&[10, 0, 0, 0, 255, 0, 0, 0, 3, 0, 0, 1]);
+        body.extend_from_slice(&[10, 1, 0, 0]); // partial second link
+        let pkt = build_lsu(&[build_lsa(1, [1, 1, 1, 1], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        let links = child(&buf, &lsa, "links");
+        assert_eq!(children(&buf, &range(links)).len(), 1);
+        assert_eq!(links.range, 52..64);
+        assert_child(&buf, &lsa, "unparsed", FieldValue::Bytes(&[10, 1, 0, 0]));
+    }
+
+    /// RFC 2328, Appendix A.4.3 — Network-LSA.
+    /// <https://www.rfc-editor.org/rfc/rfc2328>
+    #[test]
+    fn parse_network_lsa() {
+        let body = [255, 255, 255, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+        let pkt = build_lsu(&[build_lsa(2, [10, 0, 0, 1], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_child(
+            &buf,
+            &lsa,
+            "network_mask",
+            FieldValue::Ipv4Addr([255, 255, 255, 0]),
+        );
+        let routers = children(&buf, &range(child(&buf, &lsa, "attached_routers")));
+        assert_eq!(routers.len(), 2);
+        assert_eq!(routers[1].value, FieldValue::Ipv4Addr([2, 2, 2, 2]));
+    }
+
+    /// RFC 2328, Appendix A.4.4 — Summary-LSAs (types 3 and 4) with a TOS entry.
+    /// <https://www.rfc-editor.org/rfc/rfc2328>
+    #[test]
+    fn parse_summary_lsas() {
+        let body = [255, 255, 0, 0, 0, 0x00, 0x01, 0x00, 4, 0x00, 0x00, 0x20];
+        let pkt = build_lsu(&[
+            build_lsa(3, [172, 16, 0, 0], &body),
+            build_lsa(4, [3, 3, 3, 3], &[0, 0, 0, 0, 0, 0, 0, 5]),
+        ]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_child(
+            &buf,
+            &lsa,
+            "network_mask",
+            FieldValue::Ipv4Addr([255, 255, 0, 0]),
+        );
+        assert_child(&buf, &lsa, "metric", FieldValue::U32(256));
+        let tos = tlv_range(&buf, &lsa, "tos_metrics", 0);
+        assert_child(&buf, &tos, "tos", FieldValue::U8(4));
+        assert_child(&buf, &tos, "metric", FieldValue::U32(32));
+
+        let asbr = lsa_range(&buf, 1);
+        assert_child(&buf, &asbr, "metric", FieldValue::U32(5));
+        assert!(!has_child(&buf, &asbr, "tos_metrics"));
+    }
+
+    /// RFC 2328, Appendix A.4.5 — AS-external-LSA; RFC 3101, Appendix C — NSSA-LSA.
+    /// <https://www.rfc-editor.org/rfc/rfc2328>
+    /// <https://www.rfc-editor.org/rfc/rfc3101>
+    #[test]
+    fn parse_as_external_and_nssa_lsas() {
+        let mut body = vec![255, 255, 255, 0];
+        body.extend_from_slice(&[0x80, 0x00, 0x00, 0x14, 10, 0, 0, 9, 0, 0, 0, 42]);
+        body.extend_from_slice(&[0x08, 0x00, 0x00, 0x05, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let nssa = [255, 0, 0, 0, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 7];
+        let pkt = build_lsu(&[
+            build_lsa(5, [198, 51, 100, 0], &body),
+            build_lsa(7, [10, 0, 0, 0], &nssa),
+        ]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_child(&buf, &lsa, "flag_e", FieldValue::U8(1));
+        assert_child(&buf, &lsa, "metric", FieldValue::U32(20));
+        assert_child(
+            &buf,
+            &lsa,
+            "forwarding_address",
+            FieldValue::Ipv4Addr([10, 0, 0, 9]),
+        );
+        assert_child(&buf, &lsa, "external_route_tag", FieldValue::U32(42));
+        let tos = tlv_range(&buf, &lsa, "tos_metrics", 0);
+        assert_child(&buf, &tos, "flag_e", FieldValue::U8(0));
+        assert_child(&buf, &tos, "tos", FieldValue::U8(8));
+        assert_child(&buf, &tos, "metric", FieldValue::U32(5));
+
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        let lsas = children(&buf, &range(buf.field_by_name(layer, "lsas").unwrap()));
+        assert_eq!(
+            buf.resolve_container_display_name(index_of(&buf, lsas[1])),
+            Some("NSSA AS-external LSA")
+        );
+        let nssa = range(lsas[1]);
+        assert_child(&buf, &nssa, "flag_e", FieldValue::U8(0));
+        assert_child(&buf, &nssa, "external_route_tag", FieldValue::U32(7));
+    }
+
+    /// Unknown LSA types keep their body as raw bytes.
+    #[test]
+    fn parse_unknown_lsa_body_is_raw() {
+        let pkt = build_lsu(&[build_lsa(6, [224, 0, 0, 1], &[1, 2, 3, 4])]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let lsa = lsa_range(&buf, 0);
+        assert_child(&buf, &lsa, "body", FieldValue::Bytes(&[1, 2, 3, 4]));
+    }
+
+    /// The DD and LSAck arrays hold `lsa_header` objects, labeled by LS type.
+    #[test]
+    fn lsa_header_containers_are_labeled() {
+        let lsa = build_lsa_header(10, 20);
+        let mut pkt = build_header(5, (HEADER_SIZE + lsa.len()) as u16, [1, 1, 1, 1]);
+        pkt.extend_from_slice(&lsa);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        let headers = children(
+            &buf,
+            &range(buf.field_by_name(layer, "lsa_headers").unwrap()),
+        );
+        assert_eq!(headers[0].name(), "lsa_header");
+        assert_eq!(
+            buf.resolve_container_display_name(index_of(&buf, headers[0])),
+            Some("Area-scoped Opaque LSA")
+        );
+    }
+
+    /// RFC 2328, Appendix A.4.1 and the IANA "OSPFv2 Link State (LS) Type" registry.
+    /// <https://www.rfc-editor.org/rfc/rfc2328>
+    #[test]
+    fn lsa_type_names_cover_registry() {
+        assert_eq!(lsa_type_name(6), Some("Group-membership-LSA"));
+        assert_eq!(lsa_type_name(7), Some("NSSA AS-external LSA"));
+        assert_eq!(lsa_type_name(8), None);
+        assert_eq!(lsa_type_name(9), Some("Link-scoped Opaque LSA"));
+        assert_eq!(lsa_type_name(11), Some("AS-scoped Opaque LSA"));
+    }
+
+    /// RFC 7770, Section 2.1 and RFC 8665, Section 3 — Router Information
+    /// Opaque LSA with SR capability TLVs.
+    /// <https://www.rfc-editor.org/rfc/rfc7770#section-2.1>
+    /// <https://www.rfc-editor.org/rfc/rfc8665#section-3>
+    #[test]
+    fn parse_router_information_opaque_lsa() {
+        let mut body = tlv(1, &[0x60, 0, 0, 0]); // Informational Capabilities
+        body.extend(tlv(7, b"r1")); // Dynamic Hostname (RFC 5642)
+        body.extend(tlv(8, &[0, 1])); // SR-Algorithm
+        let mut range_value = vec![0x00, 0x1f, 0x40, 0x00]; // Range Size 8000
+        range_value.extend(tlv(1, &[0x00, 0x3e, 0x80])); // SID/Label: label 16000
+        body.extend(tlv(9, &range_value)); // SID/Label Range
+        let mut srlb = vec![0x00, 0x03, 0xe8, 0x00]; // Range Size 1000
+        srlb.extend(tlv(1, &[0, 0, 0x3a, 0x98])); // SID 15000
+        body.extend(tlv(14, &srlb)); // SR Local Block
+        body.extend(tlv(15, &[100, 0, 0, 0])); // SRMS Preference
+        body.extend(tlv(12, &[1, 10])); // Node MSD (not decoded)
+        let pkt = build_lsu(&[build_lsa(10, [4, 0, 0, 0], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_child(&buf, &lsa, "opaque_type", FieldValue::U8(4));
+        assert_child(&buf, &lsa, "opaque_id", FieldValue::U32(0));
+        assert_eq!(
+            buf.resolve_nested_display_name(&lsa, "opaque_type_name"),
+            Some("Router Information (RI)")
+        );
+        assert_eq!(
+            tlv_name(&buf, &lsa, "tlvs", 0),
+            Some("Router Informational Capabilities")
+        );
+        let caps = tlv_range(&buf, &lsa, "tlvs", 0);
+        assert_child(&buf, &caps, "type", FieldValue::U16(1));
+        assert_child(&buf, &caps, "length", FieldValue::U16(4));
+        assert_child(
+            &buf,
+            &caps,
+            "informational_capabilities",
+            FieldValue::U32(0x6000_0000),
+        );
+        let host = tlv_range(&buf, &lsa, "tlvs", 1);
+        assert_child(&buf, &host, "hostname", FieldValue::Bytes(b"r1"));
+        let algs = tlv_range(&buf, &lsa, "tlvs", 2);
+        let algs = children(&buf, &range(child(&buf, &algs, "algorithms")));
+        assert_eq!(algs.len(), 2);
+        assert_eq!(algs[1].value, FieldValue::U8(1));
+        let srgb = tlv_range(&buf, &lsa, "tlvs", 3);
+        assert_child(&buf, &srgb, "range_size", FieldValue::U32(8000));
+        assert_eq!(tlv_name(&buf, &srgb, "sub_tlvs", 0), Some("SID/Label"));
+        let sid = tlv_range(&buf, &srgb, "sub_tlvs", 0);
+        assert_child(&buf, &sid, "sid", FieldValue::U32(16000));
+        let srlb = tlv_range(&buf, &lsa, "tlvs", 4);
+        assert_child(&buf, &srlb, "range_size", FieldValue::U32(1000));
+        let sid = tlv_range(&buf, &srlb, "sub_tlvs", 0);
+        assert_child(&buf, &sid, "sid", FieldValue::U32(15000));
+        let pref = tlv_range(&buf, &lsa, "tlvs", 5);
+        assert_child(&buf, &pref, "preference", FieldValue::U8(100));
+        let msd = tlv_range(&buf, &lsa, "tlvs", 6);
+        assert_eq!(tlv_name(&buf, &lsa, "tlvs", 6), Some("Node MSD"));
+        assert_child(&buf, &msd, "value", FieldValue::Bytes(&[1, 10]));
+    }
+
+    /// RFC 3630, Sections 2.4-2.5 — Traffic Engineering LSA.
+    /// <https://www.rfc-editor.org/rfc/rfc3630#section-2.4>
+    #[test]
+    fn parse_traffic_engineering_opaque_lsa() {
+        let mut body = tlv(1, &[1, 1, 1, 1]); // Router Address
+        let mut link = tlv(1, &[1]); // Link type: point-to-point
+        link.extend(tlv(2, &[2, 2, 2, 2])); // Link ID
+        link.extend(tlv(3, &[10, 0, 0, 1, 10, 0, 1, 1])); // Local addresses
+        link.extend(tlv(4, &[10, 0, 0, 2])); // Remote address
+        link.extend(tlv(5, &[0, 0, 0, 10])); // TE metric
+        link.extend(tlv(6, &1.25e8f32.to_bits().to_be_bytes())); // Max BW
+        link.extend(tlv(7, &1.0e8f32.to_bits().to_be_bytes())); // Max reservable
+        let mut unreserved = Vec::new();
+        for _ in 0..8 {
+            unreserved.extend_from_slice(&5.0e7f32.to_bits().to_be_bytes());
+        }
+        link.extend(tlv(8, &unreserved)); // Unreserved BW
+        link.extend(tlv(9, &[0, 0, 0, 0x0f])); // Admin group
+        link.extend(tlv(16, &[0, 0, 0, 1])); // SRLG (not decoded)
+        body.extend(tlv(2, &link));
+        let pkt = build_lsu(&[build_lsa(10, [1, 0, 0, 7], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_child(&buf, &lsa, "opaque_type", FieldValue::U8(1));
+        assert_child(&buf, &lsa, "opaque_id", FieldValue::U32(7));
+        assert_eq!(tlv_name(&buf, &lsa, "tlvs", 0), Some("Router Address"));
+        let ra = tlv_range(&buf, &lsa, "tlvs", 0);
+        assert_child(
+            &buf,
+            &ra,
+            "router_address",
+            FieldValue::Ipv4Addr([1, 1, 1, 1]),
+        );
+        let link = tlv_range(&buf, &lsa, "tlvs", 1);
+        assert_eq!(tlv_name(&buf, &lsa, "tlvs", 1), Some("Link"));
+        let sub = |i| tlv_range(&buf, &link, "sub_tlvs", i);
+        assert_child(&buf, &sub(0), "link_type", FieldValue::U8(1));
+        assert_child(&buf, &sub(1), "link_id", FieldValue::Ipv4Addr([2, 2, 2, 2]));
+        let locals = children(&buf, &range(child(&buf, &sub(2), "local_addresses")));
+        assert_eq!(locals.len(), 2);
+        assert_eq!(locals[1].value, FieldValue::Ipv4Addr([10, 0, 1, 1]));
+        let remotes = children(&buf, &range(child(&buf, &sub(3), "remote_addresses")));
+        assert_eq!(remotes[0].value, FieldValue::Ipv4Addr([10, 0, 0, 2]));
+        assert_child(&buf, &sub(4), "te_metric", FieldValue::U32(10));
+        assert_child(
+            &buf,
+            &sub(5),
+            "max_bandwidth",
+            FieldValue::U32(1.25e8f32.to_bits()),
+        );
+        assert_child(
+            &buf,
+            &sub(6),
+            "max_reservable_bandwidth",
+            FieldValue::U32(1.0e8f32.to_bits()),
+        );
+        let unreserved = children(&buf, &range(child(&buf, &sub(7), "unreserved_bandwidth")));
+        assert_eq!(unreserved.len(), 8);
+        assert_child(&buf, &sub(8), "admin_group", FieldValue::U32(0x0f));
+        assert_eq!(
+            tlv_name(&buf, &link, "sub_tlvs", 9),
+            Some("Shared Risk Link Group")
+        );
+        assert_child(&buf, &sub(9), "value", FieldValue::Bytes(&[0, 0, 0, 1]));
+    }
+
+    /// RFC 7684, Section 2.1 and RFC 8665, Sections 4-5 — Extended Prefix
+    /// Opaque LSA with a Prefix-SID and an Extended Prefix Range TLV.
+    /// <https://www.rfc-editor.org/rfc/rfc7684#section-2.1>
+    /// <https://www.rfc-editor.org/rfc/rfc8665#section-4>
+    #[test]
+    fn parse_extended_prefix_opaque_lsa() {
+        let mut prefix = vec![1, 32, 0, 0x40, 10, 0, 0, 1]; // intra, /32, IPv4, N
+        prefix.extend(tlv(2, &[0x40, 0, 0, 0, 0, 0, 0, 101])); // Prefix-SID idx 101
+        let mut body = tlv(1, &prefix);
+        let mut prange = vec![24, 0, 0, 16, 0x80, 0, 0, 0, 192, 168, 0, 0];
+        prange.extend(tlv(2, &[0x60, 0, 0, 0, 0x00, 0x3e, 0x80])); // V|L label 16000
+        body.extend(tlv(2, &prange));
+        let pkt = build_lsu(&[build_lsa(10, [7, 0, 0, 1], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_eq!(
+            tlv_name(&buf, &lsa, "tlvs", 0),
+            Some("OSPFv2 Extended Prefix")
+        );
+        let p = tlv_range(&buf, &lsa, "tlvs", 0);
+        assert_child(&buf, &p, "route_type", FieldValue::U8(1));
+        assert_child(&buf, &p, "prefix_length", FieldValue::U8(32));
+        assert_child(&buf, &p, "address_family", FieldValue::U8(0));
+        assert_child(&buf, &p, "flags", FieldValue::U8(0x40));
+        assert_child(&buf, &p, "prefix", FieldValue::Ipv4Addr([10, 0, 0, 1]));
+        assert_eq!(tlv_name(&buf, &p, "sub_tlvs", 0), Some("Prefix-SID"));
+        let sid = tlv_range(&buf, &p, "sub_tlvs", 0);
+        assert_child(&buf, &sid, "flags", FieldValue::U8(0x40));
+        assert_child(&buf, &sid, "mt_id", FieldValue::U8(0));
+        assert_child(&buf, &sid, "algorithm", FieldValue::U8(0));
+        assert_child(&buf, &sid, "sid", FieldValue::U32(101));
+
+        let r = tlv_range(&buf, &lsa, "tlvs", 1);
+        assert_eq!(
+            tlv_name(&buf, &lsa, "tlvs", 1),
+            Some("OSPF Extended Prefix Range")
+        );
+        assert_child(&buf, &r, "prefix_length", FieldValue::U8(24));
+        assert_child(&buf, &r, "range_size", FieldValue::U32(16));
+        assert_child(&buf, &r, "flags", FieldValue::U8(0x80));
+        assert_child(&buf, &r, "prefix", FieldValue::Ipv4Addr([192, 168, 0, 0]));
+        let sid = tlv_range(&buf, &r, "sub_tlvs", 0);
+        assert_child(&buf, &sid, "sid", FieldValue::U32(16000));
+    }
+
+    /// RFC 7684, Section 3.1 and RFC 8665, Section 6 — Extended Link Opaque
+    /// LSA with Adj-SID and LAN Adj-SID sub-TLVs.
+    /// <https://www.rfc-editor.org/rfc/rfc7684#section-3.1>
+    /// <https://www.rfc-editor.org/rfc/rfc8665#section-6>
+    #[test]
+    fn parse_extended_link_opaque_lsa() {
+        let mut link = vec![1, 0, 0, 0, 2, 2, 2, 2, 10, 0, 0, 1];
+        link.extend(tlv(2, &[0x60, 0, 0, 5, 0x00, 0x5d, 0xc0])); // Adj-SID label 24000
+        link.extend(tlv(3, &[0x60, 0, 0, 0, 3, 3, 3, 3, 0x00, 0x5d, 0xc1]));
+        link.extend(tlv(1, &[0, 0, 0, 9])); // SID/Label
+        let body = tlv(1, &link);
+        let pkt = build_lsu(&[build_lsa(10, [8, 0, 0, 3], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        assert_eq!(
+            tlv_name(&buf, &lsa, "tlvs", 0),
+            Some("OSPFv2 Extended Link")
+        );
+        let l = tlv_range(&buf, &lsa, "tlvs", 0);
+        assert_child(&buf, &l, "link_type", FieldValue::U8(1));
+        assert_child(&buf, &l, "link_id", FieldValue::Ipv4Addr([2, 2, 2, 2]));
+        assert_child(&buf, &l, "link_data", FieldValue::Ipv4Addr([10, 0, 0, 1]));
+        assert_eq!(tlv_name(&buf, &l, "sub_tlvs", 0), Some("Adj-SID"));
+        let adj = tlv_range(&buf, &l, "sub_tlvs", 0);
+        assert_child(&buf, &adj, "flags", FieldValue::U8(0x60));
+        assert_child(&buf, &adj, "weight", FieldValue::U8(5));
+        assert_child(&buf, &adj, "sid", FieldValue::U32(24000));
+        let lan = tlv_range(&buf, &l, "sub_tlvs", 1);
+        assert_eq!(tlv_name(&buf, &l, "sub_tlvs", 1), Some("LAN Adj-SID/Label"));
+        assert_child(
+            &buf,
+            &lan,
+            "neighbor_id",
+            FieldValue::Ipv4Addr([3, 3, 3, 3]),
+        );
+        assert_child(&buf, &lan, "sid", FieldValue::U32(24001));
+        let sl = tlv_range(&buf, &l, "sub_tlvs", 2);
+        assert_child(&buf, &sl, "sid", FieldValue::U32(9));
+    }
+
+    /// Malformed TLVs: a short fixed part is kept raw, and a TLV whose length
+    /// overruns the LSA stops the walk with the rest exposed as `unparsed`.
+    #[test]
+    fn parse_opaque_lsa_malformed_tlvs() {
+        let mut body = tlv(1, &[1, 1]); // TE Router Address, too short
+        body.extend_from_slice(&[0, 2, 0, 40, 9, 9]); // Link TLV overruns
+        let pkt = build_lsu(&[build_lsa(10, [1, 0, 0, 0], &body)]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let lsa = lsa_range(&buf, 0);
+        let ra = tlv_range(&buf, &lsa, "tlvs", 0);
+        assert_child(&buf, &ra, "value", FieldValue::Bytes(&[1, 1]));
+        assert_child(
+            &buf,
+            &lsa,
+            "unparsed",
+            FieldValue::Bytes(&[0, 2, 0, 40, 9, 9]),
+        );
+    }
+
+    /// Opaque LSA of an opaque type without a TLV decoder keeps a raw body.
+    #[test]
+    fn parse_unknown_opaque_type_is_raw() {
+        let pkt = build_lsu(&[build_lsa(9, [3, 0, 0, 0], &[0, 1, 0, 4, 0, 0, 0, 60])]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let lsa = lsa_range(&buf, 0);
+        assert_eq!(
+            buf.resolve_nested_display_name(&lsa, "opaque_type_name"),
+            Some("grace-LSA")
+        );
+        assert_child(
+            &buf,
+            &lsa,
+            "body",
+            FieldValue::Bytes(&[0, 1, 0, 4, 0, 0, 0, 60]),
+        );
+    }
+
+    /// Build a Hello packet body (20 bytes) with the given Options.
+    fn hello_body(options: u8) -> Vec<u8> {
+        let mut body = vec![255, 255, 255, 0, 0, 10, options, 1, 0, 0, 0, 40];
+        body.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+        body
+    }
+
+    /// RFC 2328, Appendix D.3 — Cryptographic authentication: the
+    /// authentication field is split and the digest after the packet is
+    /// consumed.
+    /// <https://www.rfc-editor.org/rfc/rfc2328>
+    #[test]
+    fn parse_crypto_auth_digest() {
+        let mut pkt = build_header(1, 44, [1, 1, 1, 1]);
+        pkt[14..16].copy_from_slice(&[0, 2]); // AuType 2
+        pkt[16..24].copy_from_slice(&[0, 0, 7, 16, 0, 0, 1, 0]); // Key 7, len 16, seq 256
+        pkt.extend(hello_body(0x02));
+        pkt.extend_from_slice(&[0xAA; 16]); // MD5 digest
+
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 60);
+
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        assert_eq!(layer.range, 0..60);
+        assert_eq!(buf.field_u8(layer, "key_id"), Some(7));
+        assert_eq!(buf.field_u8(layer, "auth_data_len"), Some(16));
+        assert_eq!(buf.field_u32(layer, "crypto_sequence_number"), Some(256));
+        let digest = buf.field_by_name(layer, "auth_digest").unwrap();
+        assert_eq!(digest.value, FieldValue::Bytes(&[0xAA; 16]));
+        assert_eq!(digest.range, 44..60);
+    }
+
+    /// A digest that is not fully present is not consumed.
+    #[test]
+    fn parse_crypto_auth_missing_digest() {
+        let mut pkt = build_header(1, 44, [1, 1, 1, 1]);
+        pkt[14..16].copy_from_slice(&[0, 2]);
+        pkt[16..24].copy_from_slice(&[0, 0, 1, 16, 0, 0, 0, 1]);
+        pkt.extend(hello_body(0x02));
+        pkt.extend_from_slice(&[0xAA; 4]);
+
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 44);
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        assert!(buf.field_by_name(layer, "auth_digest").is_none());
+    }
+
+    /// With the L-bit set but the digest missing, the bytes after the packet
+    /// are not taken as an LLS block.
+    #[test]
+    fn parse_lls_not_read_when_digest_missing() {
+        let mut pkt = build_header(1, 44, [1, 1, 1, 1]);
+        pkt[14..16].copy_from_slice(&[0, 2]);
+        pkt[16..24].copy_from_slice(&[0, 0, 1, 16, 0, 0, 0, 1]);
+        pkt.extend(hello_body(0x12));
+        pkt.extend_from_slice(&[0, 0, 0, 2, 0, 1, 0, 0]); // looks like LLS
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 44);
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        assert!(buf.field_by_name(layer, "lls").is_none());
+    }
+
+    /// Bytes after the last LSA that can be delimited, and a trailing partial
+    /// LSA header in an LSAck, are exposed as `unparsed`; the arrays only
+    /// cover the decoded entries.
+    #[test]
+    fn parse_lsu_and_lsack_trailing_bytes() {
+        let lsa = build_lsa(2, [10, 0, 0, 1], &[255, 255, 255, 0]);
+        let mut pkt = build_lsu(core::slice::from_ref(&lsa));
+        pkt[24..28].copy_from_slice(&[0, 0, 0, 2]); // claims 2 LSAs
+        pkt.extend_from_slice(&[0, 1, 2, 3]);
+        let len = pkt.len() as u16;
+        pkt[2..4].copy_from_slice(&len.to_be_bytes());
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        let lsas = buf.field_by_name(layer, "lsas").unwrap();
+        assert_eq!(lsas.range, 28..28 + lsa.len());
+        let unparsed = buf.field_by_name(layer, "unparsed").unwrap();
+        assert_eq!(unparsed.value, FieldValue::Bytes(&[0, 1, 2, 3]));
+
+        let mut pkt = build_header(5, (HEADER_SIZE + 22) as u16, [1, 1, 1, 1]);
+        pkt.extend_from_slice(&build_lsa_header(1, 20));
+        pkt.extend_from_slice(&[7, 7]);
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "lsa_headers").unwrap().range,
+            24..44
+        );
+        assert_eq!(
+            buf.field_by_name(layer, "unparsed").unwrap().value,
+            FieldValue::Bytes(&[7, 7])
+        );
+    }
+
+    /// RFC 5613, Section 2 — LLS data block after a Hello with the L-bit,
+    /// following the cryptographic digest.
+    /// <https://www.rfc-editor.org/rfc/rfc5613#section-2>
+    #[test]
+    fn parse_lls_block_after_digest() {
+        let mut pkt = build_header(1, 44, [1, 1, 1, 1]);
+        pkt[14..16].copy_from_slice(&[0, 2]);
+        pkt[16..24].copy_from_slice(&[0, 0, 1, 16, 0, 0, 0, 9]);
+        pkt.extend(hello_body(0x12)); // L | E
+        pkt.extend_from_slice(&[0xBB; 16]); // digest
+        let mut tlvs = tlv(1, &[0, 0, 0, 1]); // EOF-TLV: LR bit
+        tlvs.extend(tlv(2, &[0, 0, 0, 9, 0xCC, 0xCC, 0xCC, 0xCC])); // CA-TLV
+        let words = ((4 + tlvs.len()) / 4) as u16;
+        pkt.extend_from_slice(&[0, 0]);
+        pkt.extend_from_slice(&words.to_be_bytes());
+        pkt.extend(tlvs);
+
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, pkt.len());
+
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        let lls = buf.field_by_name(layer, "lls").unwrap();
+        assert_eq!(lls.range, 60..pkt.len());
+        let lls = range(lls);
+        assert_child(&buf, &lls, "checksum", FieldValue::U16(0));
+        assert_child(&buf, &lls, "lls_data_length", FieldValue::U16(words));
+        assert_eq!(
+            tlv_name(&buf, &lls, "tlvs", 0),
+            Some("Extended Options and Flags")
+        );
+        let eof = tlv_range(&buf, &lls, "tlvs", 0);
+        assert_child(&buf, &eof, "extended_options", FieldValue::U32(1));
+        let ca = tlv_range(&buf, &lls, "tlvs", 1);
+        assert_child(&buf, &ca, "sequence_number", FieldValue::U32(9));
+        assert_child(&buf, &ca, "auth_data", FieldValue::Bytes(&[0xCC; 4]));
+    }
+
+    /// The LLS block is only examined when the L-bit is set, and a block whose
+    /// declared length overruns the data is ignored.
+    #[test]
+    fn parse_lls_block_requires_l_bit_and_length() {
+        let mut pkt = build_header(1, 44, [1, 1, 1, 1]);
+        pkt.extend(hello_body(0x02));
+        pkt.extend_from_slice(&[0, 0, 0, 2, 0, 1, 0, 4]);
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 44);
+
+        let mut pkt = build_header(1, 44, [1, 1, 1, 1]);
+        pkt.extend(hello_body(0x10));
+        pkt.extend_from_slice(&[0, 0, 0, 9, 0, 1, 0, 4]); // 9 words > 8 bytes
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 44);
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        assert!(buf.field_by_name(layer, "lls").is_none());
+    }
+
+    /// RFC 5613, Section 2 — LLS may also follow a Database Description packet.
+    /// <https://www.rfc-editor.org/rfc/rfc5613#section-2>
+    #[test]
+    fn parse_lls_block_after_dd() {
+        let mut pkt = build_header(2, 32, [1, 1, 1, 1]);
+        pkt.extend_from_slice(&[0x05, 0xDC, 0x12, 0x07, 0, 0, 0, 1]);
+        pkt.extend_from_slice(&[0, 0, 0, 3]);
+        pkt.extend(tlv(1, &[0, 0, 0, 2]));
+        let mut buf = DissectBuffer::new();
+        let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 44);
     }
 }
