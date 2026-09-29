@@ -1,6 +1,6 @@
 # packet-dissector-gre
 
-GRE (RFC 2784, RFC 2890) dissector for packet-dissector
+GRE (RFC 2784, RFC 2890, RFC 1701, PPTP Enhanced GRE RFC 2637, NVGRE RFC 7637) dissector for packet-dissector
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
 ecosystem. It is used automatically when you enable the `gre` feature flag

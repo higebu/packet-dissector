@@ -65,3 +65,50 @@ fn zero_alloc_dissect_gre_all_options() {
     let fields = buf.layer_fields(&buf.layers()[0]);
     assert_eq!(fields.len(), 10);
 }
+
+#[test]
+fn zero_alloc_dissect_gre_v1_enhanced() {
+    // RFC 2637, Section 4.1 — Enhanced GRE with K=1, S=1, A=1.
+    let raw: &[u8] = &[
+        0x30, 0x81, // K=1 S=1 A=1, ver=1
+        0x88, 0x0B, // Protocol Type: PPP
+        0x00, 0x0A, 0x00, 0x2A, // Payload Length, Call ID
+        0x00, 0x00, 0x00, 0x01, // Sequence Number
+        0x00, 0x00, 0x00, 0x00, // Acknowledgment Number
+    ];
+
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        GreDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "GRE v1 dissect allocated {allocs} times, expected 0"
+    );
+    assert_eq!(buf.layers().len(), 1);
+}
+
+#[test]
+fn zero_alloc_dissect_gre_rfc1701_routing() {
+    // RFC 1701 — R=1 with one SRE and the NULL SRE.
+    let raw: &[u8] = &[
+        0x40, 0x00, 0x08, 0x00, // R=1, IPv4
+        0x00, 0x00, 0x00, 0x04, // Checksum, Offset
+        0x08, 0x00, 0x00, 0x04, 0x0A, 0x00, 0x00, 0x01, // SRE
+        0x00, 0x00, 0x00, 0x00, // NULL SRE
+    ];
+
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        GreDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "GRE RFC 1701 dissect allocated {allocs} times, expected 0"
+    );
+    assert_eq!(buf.layers().len(), 1);
+}
