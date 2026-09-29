@@ -9,7 +9,6 @@
 
 use core::ops::Range;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
-
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u32, read_be_u64};
 

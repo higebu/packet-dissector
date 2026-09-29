@@ -141,7 +141,7 @@ static FD_EXTENSION_HEADER: FieldDescriptor = FieldDescriptor {
     display_name: "Extension Header",
     field_type: FieldType::Object,
     optional: false,
-    children: None,
+    children: Some(EXT_HEADER_FIELD_DESCRIPTORS),
     display_fn: Some(|v, children| match v {
         FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
             ("type", FieldValue::U8(t)) => gtpv1u_ext_header_type_name(*t),
@@ -517,14 +517,10 @@ fn t_pdu_dispatch(t_pdu: &[u8]) -> DispatchHint {
         // RFC 8200, Section 3 — Payload Length is the length of the payload
         // following the 40-octet fixed header.
         // <https://www.rfc-editor.org/rfc/rfc8200#section-3>
-        // RFC 2675, Section 3 — a jumbogram carries Payload Length 0 and a
-        // Hop-by-Hop Options header (Next Header 0).
-        // <https://www.rfc-editor.org/rfc/rfc2675#section-3>
-        6 if t_pdu.len() >= 40
-            && read_be_u16(t_pdu, 4).is_ok_and(|len| {
-                usize::from(len) + 40 == t_pdu.len() || (len == 0 && t_pdu[6] == 0)
-            }) =>
-        {
+        // A jumbogram (RFC 2675) cannot occur: its payload "Must be greater
+        // than 65,535" octets (Section 2), more than the 16-bit GTP Length
+        // (3GPP TS 29.281, Section 5.1) can carry.
+        6 if read_be_u16(t_pdu, 4).is_ok_and(|len| usize::from(len) + 40 == t_pdu.len()) => {
             DispatchHint::ByEtherType(0x86DD)
         }
         _ => DispatchHint::End,
@@ -577,7 +573,8 @@ mod tests {
     // | TS 29.281 6.1               | G-PDU with IPv6 payload              | test_gpdu_ipv6_payload                                     |
     // | TS 29.281 6.1               | Non-IP T-PDU not sent to IP          | test_gpdu_ethernet_tpdu_not_sent_to_ip                     |
     // | TS 29.281 6.1               | T-PDU bounded by the GTP Length      | test_gpdu_payload_len_bounds_t_pdu                         |
-    // | RFC 2675 3                  | IPv6 jumbogram T-PDU                 | test_gpdu_ipv6_jumbogram_dispatches                        |
+    // | TS 29.281 6.1 / RFC 2675 2  | IPv6 Payload Length 0 not dispatched | test_gpdu_ipv6_zero_payload_length_not_dispatched          |
+    // | TS 29.281 5.2.1 / 8         | Field schema lists child fields      | test_field_schema_lists_children                           |
     // | TS 29.281 6.1               | End Marker (type 254)                | test_end_marker                                            |
     // | TS 29.281 6.1               | Message Type Name lookup             | test_message_type_name                                     |
     // | TS 29.281 8.3 / 8.4         | Error Indication IEs                 | test_error_indication_ies                                  |
@@ -1592,14 +1589,39 @@ mod tests {
     }
 
     #[test]
-    fn test_gpdu_ipv6_jumbogram_dispatches() {
-        // RFC 2675 — Payload Length 0 with a Hop-by-Hop Options header.
+    fn test_gpdu_ipv6_zero_payload_length_not_dispatched() {
+        // RFC 2675, Section 2 — a jumbogram's payload "Must be greater than
+        // 65,535" octets, which the 16-bit GTP Length (TS 29.281, Section
+        // 5.1) cannot carry. Payload Length 0 is therefore not an IPv6
+        // packet here.
         let mut tpdu = vec![0x60, 0, 0, 0, 0x00, 0x00, 0x00, 64];
         tpdu.resize(48, 0);
         let pkt = make_pdu(0x30, 0xFF, &tpdu);
         let mut buf = DissectBuffer::new();
         let result = Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
-        assert_eq!(result.next, DispatchHint::ByEtherType(0x86DD));
+        assert_eq!(result.next, DispatchHint::End);
+    }
+
+    #[test]
+    fn test_field_schema_lists_children() {
+        let ext = &FIELD_DESCRIPTORS[FD_EXTENSION_HEADERS];
+        assert_eq!(
+            ext.children.map(<[_]>::len),
+            Some(EXT_HEADER_FIELD_DESCRIPTORS.len())
+        );
+        assert_eq!(
+            FD_EXTENSION_HEADER.children.map(<[_]>::len),
+            Some(EXT_HEADER_FIELD_DESCRIPTORS.len())
+        );
+        let ies = &FIELD_DESCRIPTORS[FD_IES];
+        assert_eq!(
+            ies.children.map(<[_]>::len),
+            Some(ie::IE_FIELD_DESCRIPTORS.len())
+        );
+        assert_eq!(
+            ie::FD_IE.children.map(<[_]>::len),
+            Some(ie::IE_FIELD_DESCRIPTORS.len())
+        );
     }
 
     // -----------------------------------------------------------------------

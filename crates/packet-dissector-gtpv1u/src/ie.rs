@@ -43,12 +43,12 @@ pub(crate) fn gtpv1u_ie_type_name(v: u8) -> Option<&'static str> {
 }
 
 /// Container descriptor for one IE; its label resolves to the IE name.
-static FD_IE: FieldDescriptor = FieldDescriptor {
+pub(crate) static FD_IE: FieldDescriptor = FieldDescriptor {
     name: "ie",
     display_name: "IE",
     field_type: FieldType::Object,
     optional: false,
-    children: None,
+    children: Some(IE_FIELD_DESCRIPTORS),
     display_fn: Some(|v, children| match v {
         FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
             ("type", FieldValue::U8(t)) => gtpv1u_ie_type_name(*t),
