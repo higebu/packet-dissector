@@ -65,6 +65,15 @@ pub enum DispatchHint {
     /// an IEEE 802.3 LLC frame (value ≤ 1500). The DSAP byte identifies
     /// the upper-layer protocol (e.g., `0x42` for STP/RSTP).
     ByLlcSap(u8),
+    /// Look up the next dissector by MPLS Generic Associated Channel (G-ACh)
+    /// Channel Type.
+    ///
+    /// Used after an Associated Channel Header (ACH), whose 16-bit Channel
+    /// Type identifies the message that follows (e.g., `0x0007` for BFD
+    /// without IP/UDP headers, `0x0021` for IPv4). RFC 5586, Section 2.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc5586#section-2.1>; RFC 4385,
+    /// Section 5 — <https://www.rfc-editor.org/rfc/rfc4385#section-5>.
+    ByAchChannelType(u16),
     /// No further dissection is needed.
     End,
 }
@@ -100,6 +109,8 @@ pub enum DissectorTable {
     ContentType(&'static str),
     /// Register by IEEE 802.2 LLC DSAP value (e.g., `0x42` for STP).
     LlcSap(u8),
+    /// Register by MPLS G-ACh Channel Type (e.g., `0x0007` for BFD).
+    AchChannelType(u16),
     /// The fallback dissector for unrecognised IPv6 Routing Header types.
     Ipv6RoutingFallback,
     /// Register by pcap link-layer header type (e.g., `1` for Ethernet, `113` for Linux SLL).
