@@ -26,7 +26,11 @@ fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
 /// and `payload_len` is [`DissectResult::payload_len`]. The result never
 /// exceeds `end`, so a captured buffer shorter than the declared length
 /// (snaplen truncation) keeps its actual end.
-fn bound_payload_end(end: usize, payload_start: usize, payload_len: Option<usize>) -> usize {
+pub(crate) fn bound_payload_end(
+    end: usize,
+    payload_start: usize,
+    payload_len: Option<usize>,
+) -> usize {
     match payload_len {
         Some(len) => end.min(payload_start.saturating_add(len)),
         None => end,
@@ -833,7 +837,7 @@ impl DissectorRegistry {
     ///
     /// Port-based hints try the lower port first, then the higher port,
     /// mirroring Wireshark's dual-port dispatch strategy.
-    fn lookup_dissector(&self, hint: &DispatchHint) -> Option<&dyn Dissector> {
+    pub(crate) fn lookup_dissector(&self, hint: &DispatchHint) -> Option<&dyn Dissector> {
         match hint {
             DispatchHint::End => None,
             DispatchHint::ByEtherType(et) => self.get_by_ethertype(*et),
@@ -1035,39 +1039,14 @@ impl DissectorRegistry {
                         let remaining = end.saturating_sub(offset);
                         let payload_end = offset + ctx.payload_len.min(remaining);
                         let payload = &data[offset..payload_end];
-                        let upper_result = if payload.len() < ctx.payload_len {
-                            // The capture holds fewer bytes than the segment
-                            // occupies in sequence space (snaplen truncation).
-                            // Buffering them would leave a gap before the
-                            // next segment and stall the stream, so dissect
-                            // the captured bytes directly without reassembly.
-                            if payload.is_empty() {
-                                break;
-                            }
-                            Some(upper.dissect(payload, buf, offset)?)
-                        } else {
-                            self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)?
-                        };
-                        match upper_result {
-                            Some(upper_result) => {
-                                // Fast path succeeded — propagate the upper
-                                // dissector's result so chaining can continue.
-                                // Advance by bytes_consumed (not payload_end)
-                                // so partial consumption is handled correctly.
-                                let consumed = upper_result.bytes_consumed.min(payload.len());
-                                offset += consumed;
-                                end = bound_payload_end(end, offset, upper_result.payload_len);
-                                next = upper_result.next;
-                                continue;
-                            }
-                            None => {
-                                // Reassembly in progress or complete via
-                                // buffered path — terminate the chain since
-                                // offset coordinates are no longer consistent
-                                // with the current packet.
-                                break;
-                            }
-                        }
+                        // The capture may hold fewer bytes than the segment
+                        // occupies in sequence space (snaplen truncation).
+                        let captured_all = payload.len() >= ctx.payload_len;
+                        // The middleware dissects every message in the
+                        // segment (and their bodies) itself, so the chain
+                        // ends here.
+                        self.handle_tcp_segment(ctx, payload, captured_all, upper, buf, offset)?;
+                        break;
                     }
                     break;
                 }

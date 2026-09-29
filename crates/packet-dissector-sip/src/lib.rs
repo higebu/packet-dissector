@@ -1028,6 +1028,8 @@ mod tests {
         let result = dissector.dissect(&data, &mut buf, 0).unwrap();
 
         assert_eq!(result.next, DispatchHint::ByContentType("application/sdp"));
+        // RFC 3261, Section 18.3 — the body is Content-Length bytes long.
+        assert_eq!(result.payload_len, Some(cl));
     }
 
     #[test]
