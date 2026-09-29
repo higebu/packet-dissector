@@ -912,6 +912,7 @@ mod tests {
     //! | RFC 792                            | Redirect / Time Exceeded code names    | icmp_code_names_redirect_time_exceeded         |
     //! | RFC 792 / RFC 1108                 | Parameter Problem code names           | icmp_code_names_parameter_problem              |
     //! | —                                  | Unknown code has no name               | icmp_code_name_unknown                         |
+    //! | RFC 4884 §4.3                      | Parameter Problem + Extension Structure| parse_parameter_problem_with_extensions        |
 
     use super::*;
 
@@ -2041,5 +2042,33 @@ mod tests {
     fn icmp_code_name_unknown() {
         assert_eq!(code_name_of(3, 16), None);
         assert_eq!(code_name_of(0, 0), None);
+    }
+
+    #[test]
+    fn icmp_code_names_all_entries() {
+        // Every entry of the IANA code tables resolves to a name.
+        for code in 0..=15u8 {
+            assert!(code_name_of(3, code).is_some(), "type 3 code {code}");
+        }
+        for code in 0..=3u8 {
+            assert!(code_name_of(5, code).is_some(), "type 5 code {code}");
+        }
+        assert_eq!(code_name_of(5, 4), None);
+    }
+
+    #[test]
+    fn parse_parameter_problem_with_extensions() {
+        // RFC 4884, Section 4.3 — Parameter Problem with a Length attribute
+        // (32 words = 128 octets) and an Extension Structure.
+        let mut pkt = vec![12, 0, 0, 0, 20, 32, 0, 0];
+        pkt.extend_from_slice(&[0u8; 128]);
+        pkt.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "extensions").unwrap().range,
+            136..140
+        );
     }
 }

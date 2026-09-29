@@ -66,6 +66,9 @@
 //! | RFC 3971 §6.4.3   | Trust Anchor (Type 15)               | parse_icmpv6_ndp_option_trust_anchor               |
 //! | RFC 3971 §6.4.4   | Certificate (Type 16)                | parse_icmpv6_ndp_option_certificate                |
 //! | RFC 8801 §3.1     | PvD ID (Type 21)                     | parse_icmpv6_ndp_option_pvd_id                     |
+//! | RFC 8801 §3.1     | PvD ID with trailing RA options      | parse_icmpv6_ndp_option_pvd_id_with_options        |
+//! | RFC 8801 §3.1     | PvD ID with a compression pointer    | parse_icmpv6_ndp_option_pvd_id_bad_name            |
+//! | RFC 8910 §2.3     | Captive-Portal URI not UTF-8         | parse_icmpv6_ndp_option_captive_portal_not_utf8    |
 //! | RFC 5175 §4       | RA Flags Extension (Type 26)         | parse_icmpv6_ndp_option_ra_flags_extension         |
 //! | RFC 8505 §4.1     | (Extended) Address Registration (33) | parse_icmpv6_ndp_option_address_registration       |
 //! | RFC 6775 §4.2     | 6LoWPAN Context (Type 34)            | parse_icmpv6_ndp_option_6lowpan_context            |
@@ -98,6 +101,9 @@
 //! | RFC 6550 §6.7.1   | Malformed RPL option                 | parse_icmpv6_rpl_option_malformed                  |
 //! | RFC 6550 §6.1     | Secure RPL message kept raw          | parse_icmpv6_rpl_secure_raw                        |
 //! | —                 | Short bodies do not fail             | parse_icmpv6_short_message_bodies                  |
+//! | RFC 6550 §6.7     | RPL option names                     | parse_icmpv6_rpl_option_names                      |
+//! | RFC 6550 §6.4.1/6.5.1 | D flag without room for DODAGID  | parse_icmpv6_rpl_dao_short_dodag_id                |
+//! | RFC 6550 §6.7.1   | RPL option without Length octet      | parse_icmpv6_rpl_option_missing_length             |
 //!
 //! # RFC 4191 (Route Information Option) Coverage
 //!
@@ -2819,7 +2825,14 @@ fn icmpv6_type_names() {
         (151, "Multicast Router Advertisement"),
         (152, "Multicast Router Solicitation"),
         (153, "Multicast Router Termination"),
+        (
+            150,
+            "ICMP messages utilized by experimental mobility protocols such as Seamoby",
+        ),
+        (154, "FMIPv6 Messages"),
         (155, "RPL Control Message"),
+        (156, "ILNPv6 Locator Update Message"),
+        (159, "MPL Control Message"),
         (157, "Duplicate Address Request"),
         (158, "Duplicate Address Confirmation"),
         (160, "Extended Echo Request"),
@@ -3208,4 +3221,122 @@ fn parse_icmpv6_short_non_rpl_is_truncated() {
             actual: 3
         }
     ));
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_pvd_id_with_options() {
+    // RFC 8801, Section 3.1 — RA options after the padded PvD ID FQDN stay
+    // raw in `value`.
+    let mut opt = vec![21, 3, 0x00, 0x00, 0x00, 0x00];
+    opt.extend_from_slice(b"\x01a\x00");
+    opt.resize(16, 0);
+    opt.extend_from_slice(&[0x05, 0x01, 0, 0, 0, 0, 0x05, 0xDC]);
+    let data = ns_with_options(&opt);
+    let buf = dissect_icmpv6(&data);
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "pvd_id"), Some(&FieldValue::Bytes(b"\x01a\x00")));
+    assert_eq!(
+        child(opt, "value"),
+        Some(&FieldValue::Bytes(&[0x05, 0x01, 0, 0, 0, 0, 0x05, 0xDC]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_pvd_id_bad_name() {
+    // RFC 8801, Section 3.1 — "Domain name compression ... MUST NOT be
+    // used"; a name that cannot be walked stays raw.
+    let data = ns_with_options(&[21, 1, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x0C]);
+    let buf = dissect_icmpv6(&data);
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "pvd_id"), None);
+    assert_eq!(child(opt, "value"), Some(&FieldValue::Bytes(&[0xC0, 0x0C])));
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_captive_portal_not_utf8() {
+    let data = ns_with_options(&[37, 1, 0xFF, 0xFE, 0, 0, 0, 0]);
+    let buf = dissect_icmpv6(&data);
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "uri"), None);
+    assert_eq!(
+        child(opt, "value"),
+        Some(&FieldValue::Bytes(&[0xFF, 0xFE, 0, 0, 0, 0]))
+    );
+}
+
+#[test]
+fn parse_icmpv6_rpl_option_names() {
+    // RFC 6550, Sections 6.7.2-6.7.11.
+    let mut data = build_icmpv6_packet(155, 0x00, [0x00, 0x00, 0x00, 0x01]);
+    data.extend_from_slice(&[0x00]); // PadN length 0
+    for t in [2u8, 3, 4, 5, 6, 7, 8, 9, 0x2A] {
+        data.extend_from_slice(&[t, 0x01, 0xEE]);
+    }
+    let buf = dissect_icmpv6(&data);
+    let names: Vec<_> = buf
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name() == "option")
+        .map(|(i, f)| {
+            let FieldValue::Object(range) = &f.value else {
+                panic!("option must be an object");
+            };
+            let name = buf.resolve_container_display_name(i as u32);
+            assert_eq!(name, buf.resolve_nested_display_name(range, "type_name"));
+            name
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            Some("Pad1"),
+            Some("PadN"),
+            Some("DAG Metric Container"),
+            Some("Route Information"),
+            Some("DODAG Configuration"),
+            Some("RPL Target"),
+            Some("Transit Information"),
+            Some("Solicited Information"),
+            Some("Prefix Information"),
+            Some("RPL Target Descriptor"),
+            None,
+        ]
+    );
+    // Options without a decoder, or with a short body, keep `value`.
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    assert!(opts.iter().any(|f| f.name() == "value"));
+}
+
+#[test]
+fn parse_icmpv6_rpl_dao_short_dodag_id() {
+    // RFC 6550, Sections 6.4.1 / 6.5.1 — the D flag announces a DODAGID
+    // that does not fit: the body stays raw.
+    let data = build_icmpv6_packet(155, 0x02, [0x1E, 0x40, 0x00, 0x01]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert!(buf.field_by_name(layer, "rpl_instance_id").is_none());
+    assert_eq!(
+        buf.field_bytes(layer, "data"),
+        Some(&[0x1E, 0x40, 0x00, 0x01][..])
+    );
+
+    let data = build_icmpv6_packet(155, 0x03, [0x1E, 0x80, 0x01, 0x00]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert!(buf.field_by_name(layer, "dao_sequence").is_none());
+}
+
+#[test]
+fn parse_icmpv6_rpl_option_missing_length() {
+    // A non-Pad1 option in the last octet has no Option Length.
+    let data = build_icmpv6_packet(155, 0x00, [0x00, 0x00, 0x00, 0x04]);
+    let buf = dissect_icmpv6(&data);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    let opts = nested(&buf, buf.field_by_name(layer, "rpl_options").unwrap());
+    let last = opts.iter().rposition(|f| f.name() == "option").unwrap();
+    let opt = nested(&buf, &opts[last]);
+    assert_eq!(child(opt, "type"), Some(&FieldValue::U8(4)));
+    assert_eq!(child(opt, "malformed"), Some(&FieldValue::Bytes(&[])));
 }

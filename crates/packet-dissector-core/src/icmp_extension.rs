@@ -484,7 +484,99 @@ pub fn extension_structure_start(
 
 #[cfg(test)]
 mod tests {
+    //! # RFC 4884 / RFC 5837 / RFC 8335 extension object edge cases
+    //!
+    //! | RFC Section    | Description                               | Test                                   |
+    //! |----------------|-------------------------------------------|----------------------------------------|
+    //! | 4884 §4        | Extension start with 128-octet padding    | extension_structure_start_padding      |
+    //! | 4884 §7        | Structure shorter than the header         | structure_shorter_than_header_is_skipped |
+    //! | 5837 §4        | Truncated Interface Information sub-objects | interface_information_truncated_sub_objects |
+    //! | 5837 §4.2      | Unknown AFI stops parsing                 | interface_information_unknown_afi      |
+    //! | 8335 §2.1      | Interface Identification edge cases       | interface_identification_edge_cases    |
+
     use super::*;
+
+    static FD_TEST_EXTENSIONS: FieldDescriptor =
+        FieldDescriptor::new("extensions", "Extensions", FieldType::Object)
+            .with_children(EXTENSION_CHILDREN);
+
+    /// Parse one object (class, c-type, body) and return the names of the
+    /// fields pushed inside it.
+    fn object_fields(class_num: u8, c_type: u8, body: &[u8]) -> Vec<(&'static str, String)> {
+        let mut data = vec![0x20, 0x00, 0x00, 0x00];
+        let len = (4 + body.len()) as u16;
+        data.extend_from_slice(&len.to_be_bytes());
+        data.push(class_num);
+        data.push(c_type);
+        data.extend_from_slice(body);
+        let mut buf = DissectBuffer::new();
+        push_extension_structure(&mut buf, &FD_TEST_EXTENSIONS, &data, 0);
+        buf.fields()
+            .iter()
+            .skip(5) // container, version, reserved, checksum, objects
+            .filter(|f| !matches!(f.name(), "length" | "class_num" | "c_type"))
+            .filter(|f| !matches!(f.value, FieldValue::Object(_)))
+            .map(|f| (f.name(), format!("{:?}", f.value)))
+            .collect()
+    }
+
+    fn names(fields: &[(&'static str, String)]) -> Vec<&'static str> {
+        fields.iter().map(|(n, _)| *n).collect()
+    }
+
+    #[test]
+    fn structure_shorter_than_header_is_skipped() {
+        let mut buf = DissectBuffer::new();
+        push_extension_structure(&mut buf, &FD_TEST_EXTENSIONS, &[0x20, 0x00], 0);
+        assert!(buf.fields().is_empty());
+    }
+
+    #[test]
+    fn interface_information_truncated_sub_objects() {
+        // RFC 5837, Section 4 — C-Type flags: ifIndex 0x08, IP Address 0x04,
+        // Name 0x02, MTU 0x01. Each truncated sub-object ends parsing.
+        assert_eq!(names(&object_fields(2, 0x08, &[])), ["interface_role"]);
+        assert_eq!(
+            names(&object_fields(2, 0x0C, &[0, 0, 0, 1])),
+            ["interface_role", "if_index"]
+        );
+        assert_eq!(
+            names(&object_fields(2, 0x04, &[0, 1, 0, 0])),
+            ["interface_role", "afi"]
+        );
+        assert_eq!(
+            names(&object_fields(2, 0x04, &[0, 2, 0, 0, 0, 0, 0, 0])),
+            ["interface_role", "afi"]
+        );
+        assert_eq!(names(&object_fields(2, 0x02, &[])), ["interface_role"]);
+        assert_eq!(
+            names(&object_fields(2, 0x02, &[1, 0, 0, 0])),
+            ["interface_role"]
+        );
+        assert_eq!(names(&object_fields(2, 0x01, &[])), ["interface_role"]);
+    }
+
+    #[test]
+    fn interface_information_unknown_afi() {
+        // RFC 5837, Section 4.2 — AFI values other than IPv4 (1) and IPv6
+        // (2) have no known address length, so parsing stops.
+        assert_eq!(
+            names(&object_fields(2, 0x05, &[0, 9, 0, 0, 0, 0, 0, 0])),
+            ["interface_role", "afi"]
+        );
+    }
+
+    #[test]
+    fn interface_identification_edge_cases() {
+        // RFC 8335, Section 2.1 — C-Type 3 needs AFI, Address Length and
+        // Reserved; unknown AFIs and C-Types keep no address fields.
+        assert!(object_fields(3, 3, &[0, 1]).is_empty());
+        assert_eq!(
+            names(&object_fields(3, 3, &[0, 4, 4, 0, 1, 2, 3, 4])),
+            ["afi", "address_length"]
+        );
+        assert!(object_fields(3, 9, &[0, 0, 0, 0]).is_empty());
+    }
 
     #[test]
     fn extension_structure_start_padding() {
