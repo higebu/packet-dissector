@@ -2453,7 +2453,7 @@ fn push_gtpv1u_with_ext(pkt: &mut Vec<u8>, teid: u32) -> usize {
     pkt.push(0x85);
     // Extension header: PDU Session Container (4 bytes)
     pkt.push(0x01); // Length = 1 (4 bytes)
-    pkt.extend_from_slice(&[0x09, 0x00]); // Content
+    pkt.extend_from_slice(&[0x00, 0x09]); // DL PDU SESSION INFORMATION, QFI 9
     pkt.push(0x00); // Next Extension Header Type = 0 (no more)
     start
 }
@@ -2637,6 +2637,19 @@ fn integration_ethernet_ipv4_udp_gtpv1u_ext_ipv4() {
         .len(),
         1
     );
+    // 3GPP TS 38.415, Section 5.5.2.1 — QFI decoded from the container
+    let FieldValue::Array(ref ext_range) = ext.value else {
+        panic!("expected Array")
+    };
+    let FieldValue::Object(ref obj) = direct_children(&buf, ext_range)[0].value else {
+        panic!("expected Object")
+    };
+    let qfi = buf
+        .nested_fields(obj)
+        .iter()
+        .find(|f| f.name() == "qfi")
+        .unwrap();
+    assert_eq!(qfi.value, FieldValue::U8(9));
 }
 
 /// Verify that `DissectorRegistry` implements `Send`, allowing it to be moved
