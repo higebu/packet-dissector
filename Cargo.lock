@@ -982,6 +982,7 @@ dependencies = [
  "packet-dissector-isis",
  "packet-dissector-mdns",
  "packet-dissector-ntp",
+ "packet-dissector-ospf",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",

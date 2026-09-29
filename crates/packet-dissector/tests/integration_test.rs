@@ -5779,6 +5779,58 @@ fn integration_ethernet_ipv6_ospfv3_hello() {
 }
 
 // ---------------------------------------------------------------------------
+// Ethernet → IPv4 → OSPFv2 LSU (Router-LSA) with cryptographic authentication
+// ---------------------------------------------------------------------------
+
+/// The OSPFv2 layer covers the message digest that follows `packet_length`
+/// (RFC 2328, Appendix D.3), and the LSA body is decoded (RFC 2328,
+/// Appendix A.4.2).
+#[test]
+fn integration_ethernet_ipv4_ospfv2_lsu_with_digest() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x01, 0x00, 0x5e, 0x00, 0x00, 0x05],
+        [0xaa; 6],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 89, [10, 0, 0, 1], [224, 0, 0, 5]);
+
+    let ospf_start = pkt.len();
+    pkt.extend_from_slice(&[2, 4, 0, 64]); // v2, LSU, length 64
+    pkt.extend_from_slice(&[1, 1, 1, 1, 0, 0, 0, 0]); // Router ID, Area ID
+    pkt.extend_from_slice(&[0, 0, 0, 2]); // Checksum, AuType 2
+    pkt.extend_from_slice(&[0, 0, 1, 16, 0, 0, 0, 5]); // Key ID 1, len 16, seq 5
+    pkt.extend_from_slice(&[0, 0, 0, 1]); // # LSAs
+    pkt.extend_from_slice(&[0, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1]); // Router-LSA header
+    pkt.extend_from_slice(&[0x80, 0, 0, 1, 0, 0, 0, 36]);
+    pkt.extend_from_slice(&[0, 0, 0, 1]); // flags, #links = 1
+    pkt.extend_from_slice(&[192, 0, 2, 0, 255, 255, 255, 0, 3, 0, 0, 10]);
+    assert_eq!(pkt.len() - ospf_start, 64);
+    pkt.extend_from_slice(&[0x5a; 16]); // MD5 digest
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let ospf = buf.layer_by_name("OSPFv2").unwrap();
+    assert_eq!(ospf.range, ospf_start..pkt.len());
+    assert_eq!(
+        buf.field_by_name(ospf, "auth_digest").unwrap().value,
+        FieldValue::Bytes(&[0x5a; 16])
+    );
+    assert_eq!(
+        buf.field_by_name(ospf, "link_id").unwrap().value,
+        FieldValue::Ipv4Addr([192, 0, 2, 0])
+    );
+    assert_eq!(
+        buf.field_by_name(ospf, "num_links").unwrap().value,
+        FieldValue::U16(1)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // IS-IS over IEEE 802.2 LLC
 // ---------------------------------------------------------------------------
 
