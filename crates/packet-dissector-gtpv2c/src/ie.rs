@@ -185,6 +185,7 @@ pub fn ie_type_name(ie_type: u8) -> &'static str {
         2 => "Cause",
         3 => "Recovery",
         51 => "STN-SR",
+        56 => "SRVCC Cause",
         71 => "APN",
         72 => "AMBR",
         73 => "EBI",
@@ -323,7 +324,15 @@ pub fn ie_type_name(ie_type: u8) -> &'static str {
         212 => "PC5 QoS Flow",
         213 => "SGi PtP Tunnel Address",
         214 => "PGW Change Info",
-        215 => "PGW Set FQDN",
+        215 => "PGW FQDN",
+        216 => "Group Id",
+        217 => "PSCell ID",
+        218 => "UP Security Policy",
+        219 => "Alternative IMSI",
+        220 => "NF Instance ID",
+        221 => "Timer in Seconds",
+        222 => "MDT Configuration NR",
+        223 => "URI",
         254 => "IE Type Extension",
         255 => "Private Extension",
         _ => "Unknown",
@@ -699,7 +708,18 @@ mod tests {
         assert_eq!(ie_type_name(212), "PC5 QoS Flow");
         assert_eq!(ie_type_name(213), "SGi PtP Tunnel Address");
         assert_eq!(ie_type_name(214), "PGW Change Info");
-        assert_eq!(ie_type_name(215), "PGW Set FQDN");
+        // 3GPP TS 29.274 v19.6.0, Table 8.1-1
+        assert_eq!(ie_type_name(56), "SRVCC Cause");
+        assert_eq!(ie_type_name(215), "PGW FQDN");
+        assert_eq!(ie_type_name(216), "Group Id");
+        assert_eq!(ie_type_name(217), "PSCell ID");
+        assert_eq!(ie_type_name(218), "UP Security Policy");
+        assert_eq!(ie_type_name(219), "Alternative IMSI");
+        assert_eq!(ie_type_name(220), "NF Instance ID");
+        assert_eq!(ie_type_name(221), "Timer in Seconds");
+        assert_eq!(ie_type_name(222), "MDT Configuration NR");
+        assert_eq!(ie_type_name(223), "URI");
+        assert_eq!(ie_type_name(224), "Unknown");
         assert_eq!(ie_type_name(254), "IE Type Extension");
         assert_eq!(ie_type_name(255), "Private Extension");
     }

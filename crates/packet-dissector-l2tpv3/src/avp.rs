@@ -8,9 +8,9 @@
 //! - IANA L2TP Control Message Attribute Value Pairs:
 //!   <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-1>
 
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{Field, FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::read_be_u16;
+use packet_dissector_core::util::{read_be_u16, read_be_u32, read_be_u64};
 
 static FD_INLINE_ATTRIBUTE_TYPE: FieldDescriptor =
     FieldDescriptor::new("attribute_type", "Attribute Type", FieldType::U16);
@@ -26,6 +26,245 @@ static FD_INLINE_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value",
 
 static FD_INLINE_VENDOR_ID: FieldDescriptor =
     FieldDescriptor::new("vendor_id", "Vendor ID", FieldType::U16);
+
+/// Return the `U16` value of the sibling field called `name`.
+fn sibling_u16(siblings: &[Field<'_>], name: &str) -> Option<u16> {
+    siblings.iter().find_map(|f| match (f.name(), &f.value) {
+        (n, FieldValue::U16(v)) if n == name => Some(*v),
+        _ => None,
+    })
+}
+
+/// Name of an enumerated AVP value, keyed by the sibling Attribute Type.
+fn typed_value_name(v: &FieldValue<'_>, siblings: &[Field<'_>]) -> Option<&'static str> {
+    let FieldValue::U16(value) = v else {
+        return None;
+    };
+    match sibling_u16(siblings, "attribute_type")? {
+        ATTR_MESSAGE_TYPE => crate::l2tpv3_message_type_name(*value),
+        ATTR_PSEUDOWIRE_TYPE => pseudowire_type_name(*value),
+        ATTR_L2_SPECIFIC_SUBLAYER => l2_specific_sublayer_name(*value),
+        ATTR_DATA_SEQUENCING => data_sequencing_name(*value),
+        _ => None,
+    }
+}
+
+/// IANA "L2TPv3 Pseudowire Types" registry.
+/// <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-34>
+pub(crate) fn pseudowire_type_name(v: u16) -> Option<&'static str> {
+    match v {
+        0x0001 => Some("Frame Relay DLCI Pseudowire Type"),
+        0x0002 => Some("ATM AAL5 SDU VCC transport"),
+        0x0003 => Some("ATM Cell transparent Port Mode"),
+        0x0004 => Some("Ethernet VLAN Pseudowire Type"),
+        0x0005 => Some("Ethernet Pseudowire Type"),
+        0x0006 => Some("HDLC Pseudowire Type"),
+        0x0009 => Some("ATM Cell transport VCC Mode"),
+        0x000A => Some("ATM Cell transport VPC Mode"),
+        0x000C => Some("MPEG-TS Payload Type (MPTPW)"),
+        0x000D => Some("Packet Streaming Protocol (PSPPW)"),
+        0x0011 => Some("Structure-agnostic E1 circuit"),
+        0x0012 => Some("Structure-agnostic T1 (DS1) circuit"),
+        0x0013 => Some("Structure-agnostic E3 circuit"),
+        0x0014 => Some("Structure-agnostic T3 (DS3) circuit"),
+        0x0015 => Some("CESoPSN basic mode"),
+        0x0017 => Some("CESoPSN TDM with CAS"),
+        _ => None,
+    }
+}
+
+/// IANA "L2-Specific Sublayer Type" registry (RFC 3931, Section 5.4.4).
+/// <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.4>
+/// <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-37>
+fn l2_specific_sublayer_name(v: u16) -> Option<&'static str> {
+    match v {
+        0 => Some("No L2-Specific Sublayer"),
+        1 => Some("Default L2-Specific Sublayer present"),
+        2 => Some("ATM-Specific Sublayer present"),
+        3 => Some("MPT-Specific Sublayer"),
+        4 => Some("PSP-Specific Sublayer"),
+        _ => None,
+    }
+}
+
+/// IANA "Data Sequencing Level" registry (RFC 3931, Section 5.4.4).
+/// <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.4>
+/// <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-38>
+fn data_sequencing_name(v: u16) -> Option<&'static str> {
+    match v {
+        0 => Some("No incoming data packets require sequencing."),
+        1 => Some("Only non-IP data packets require sequencing."),
+        2 => Some("All incoming data packets require sequencing."),
+        _ => None,
+    }
+}
+
+// Attribute Types with typed values (RFC 3931, Section 5.4).
+// <https://www.rfc-editor.org/rfc/rfc3931#section-5.4>
+const ATTR_MESSAGE_TYPE: u16 = 0;
+const ATTR_RESULT_CODE: u16 = 1;
+const ATTR_FIRMWARE_REVISION: u16 = 6;
+const ATTR_HOST_NAME: u16 = 7;
+const ATTR_VENDOR_NAME: u16 = 8;
+const ATTR_RECEIVE_WINDOW_SIZE: u16 = 10;
+const ATTR_SERIAL_NUMBER: u16 = 15;
+const ATTR_ROUTER_ID: u16 = 60;
+const ATTR_ASSIGNED_CCID: u16 = 61;
+const ATTR_PW_CAPABILITIES: u16 = 62;
+const ATTR_LOCAL_SESSION_ID: u16 = 63;
+const ATTR_REMOTE_SESSION_ID: u16 = 64;
+const ATTR_PSEUDOWIRE_TYPE: u16 = 68;
+const ATTR_L2_SPECIFIC_SUBLAYER: u16 = 69;
+const ATTR_DATA_SEQUENCING: u16 = 70;
+const ATTR_CIRCUIT_STATUS: u16 = 71;
+const ATTR_PREFERRED_LANGUAGE: u16 = 72;
+const ATTR_TX_CONNECT_SPEED: u16 = 74;
+const ATTR_RX_CONNECT_SPEED: u16 = 75;
+
+// Indices into [`AVP_CHILD_FIELDS`] of the decoded-value fields.
+const AFD_TYPED_VALUE: usize = 6;
+const AFD_RESULT_CODE: usize = 7;
+const AFD_ERROR_CODE: usize = 8;
+const AFD_ERROR_MESSAGE: usize = 9;
+const AFD_CIRCUIT_NEW: usize = 10;
+const AFD_CIRCUIT_ACTIVE: usize = 11;
+const AFD_PW_TYPES: usize = 12;
+
+// RFC 3931, Section 5.4.3 — https://www.rfc-editor.org/rfc/rfc3931#section-5.4.3
+static FD_PW_TYPE_ITEM: FieldDescriptor =
+    FieldDescriptor::new("pw_type", "Pseudowire Type", FieldType::U16).with_display_fn(|v, _| {
+        match v {
+            FieldValue::U16(t) => pseudowire_type_name(*t),
+            _ => None,
+        }
+    });
+
+/// Decode the Attribute Value of an IETF (Vendor ID 0), non-hidden AVP.
+///
+/// RFC 3931, Section 5.4 — <https://www.rfc-editor.org/rfc/rfc3931#section-5.4>.
+/// Values whose length does not match the AVP definition are left raw.
+fn decode_value<'pkt>(buf: &mut DissectBuffer<'pkt>, attr: u16, value: &'pkt [u8], off: usize) {
+    let range = off..off + value.len();
+    match (attr, value.len()) {
+        (
+            ATTR_MESSAGE_TYPE
+            | ATTR_FIRMWARE_REVISION
+            | ATTR_RECEIVE_WINDOW_SIZE
+            | ATTR_PSEUDOWIRE_TYPE
+            | ATTR_L2_SPECIFIC_SUBLAYER
+            | ATTR_DATA_SEQUENCING,
+            2,
+        ) => {
+            let v = read_be_u16(value, 0).unwrap_or_default();
+            buf.push_field(
+                &AVP_CHILD_FIELDS[AFD_TYPED_VALUE],
+                FieldValue::U16(v),
+                range,
+            );
+        }
+        (
+            ATTR_SERIAL_NUMBER
+            | ATTR_ROUTER_ID
+            | ATTR_ASSIGNED_CCID
+            | ATTR_LOCAL_SESSION_ID
+            | ATTR_REMOTE_SESSION_ID,
+            4,
+        ) => {
+            let v = read_be_u32(value, 0).unwrap_or_default();
+            buf.push_field(
+                &AVP_CHILD_FIELDS[AFD_TYPED_VALUE],
+                FieldValue::U32(v),
+                range,
+            );
+        }
+        // RFC 3931, Section 5.4.4 — "Connect Speed in bps (64 bits)".
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.4>
+        (ATTR_TX_CONNECT_SPEED | ATTR_RX_CONNECT_SPEED, 8) => {
+            let v = read_be_u64(value, 0).unwrap_or_default();
+            buf.push_field(
+                &AVP_CHILD_FIELDS[AFD_TYPED_VALUE],
+                FieldValue::U64(v),
+                range,
+            );
+        }
+        (ATTR_HOST_NAME | ATTR_VENDOR_NAME | ATTR_PREFERRED_LANGUAGE, 1..) => {
+            if let Ok(s) = core::str::from_utf8(value) {
+                buf.push_field(
+                    &AVP_CHILD_FIELDS[AFD_TYPED_VALUE],
+                    FieldValue::Str(s),
+                    range,
+                );
+            }
+        }
+        // RFC 3931, Section 5.4.2 — Result Code (2), optional Error Code
+        // (2) and optional Error Message.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.2>
+        (ATTR_RESULT_CODE, 2..) => {
+            let rc = read_be_u16(value, 0).unwrap_or_default();
+            buf.push_field(
+                &AVP_CHILD_FIELDS[AFD_RESULT_CODE],
+                FieldValue::U16(rc),
+                off..off + 2,
+            );
+            if value.len() >= 4 {
+                let ec = read_be_u16(value, 2).unwrap_or_default();
+                buf.push_field(
+                    &AVP_CHILD_FIELDS[AFD_ERROR_CODE],
+                    FieldValue::U16(ec),
+                    off + 2..off + 4,
+                );
+                if value.len() > 4 {
+                    if let Ok(msg) = core::str::from_utf8(&value[4..]) {
+                        buf.push_field(
+                            &AVP_CHILD_FIELDS[AFD_ERROR_MESSAGE],
+                            FieldValue::Str(msg),
+                            off + 4..off + value.len(),
+                        );
+                    }
+                }
+            }
+        }
+        // RFC 3931, Section 5.4.3 — a list of 2-octet Pseudowire Types.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.3>
+        (ATTR_PW_CAPABILITIES, n) if n > 0 && n % 2 == 0 => {
+            let idx = buf.begin_container(
+                &AVP_CHILD_FIELDS[AFD_PW_TYPES],
+                FieldValue::Array(0..0),
+                range,
+            );
+            for (i, c) in value.chunks_exact(2).enumerate() {
+                let at = off + 2 * i;
+                buf.push_field(
+                    &FD_PW_TYPE_ITEM,
+                    FieldValue::U16(u16::from_be_bytes([c[0], c[1]])),
+                    at..at + 2,
+                );
+            }
+            buf.end_container(idx);
+        }
+        // RFC 3931, Section 5.4.5 — "|         Reserved          |N|A|".
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.5>
+        (ATTR_CIRCUIT_STATUS, 2) => {
+            let v = read_be_u16(value, 0).unwrap_or_default();
+            buf.push_field(
+                &AVP_CHILD_FIELDS[AFD_TYPED_VALUE],
+                FieldValue::U16(v),
+                range.clone(),
+            );
+            buf.push_field(
+                &AVP_CHILD_FIELDS[AFD_CIRCUIT_NEW],
+                FieldValue::U8(((v >> 1) & 1) as u8),
+                range.clone(),
+            );
+            buf.push_field(
+                &AVP_CHILD_FIELDS[AFD_CIRCUIT_ACTIVE],
+                FieldValue::U8((v & 1) as u8),
+                range,
+            );
+        }
+        _ => {}
+    }
+}
 
 /// Map an IETF (Vendor ID=0) Attribute Type to its AVP name.
 ///
@@ -221,6 +460,23 @@ pub(crate) static AVP_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("vendor_id", "Vendor ID", FieldType::U16),
     FieldDescriptor::new("attribute_type", "Attribute Type", FieldType::U16),
     FieldDescriptor::new("value", "Value", FieldType::Bytes),
+    FieldDescriptor {
+        name: "typed_value",
+        display_name: "Typed Value",
+        field_type: FieldType::Any,
+        optional: true,
+        children: None,
+        display_fn: Some(typed_value_name),
+        format_fn: None,
+    },
+    FieldDescriptor::new("result_code", "Result Code", FieldType::U16).optional(),
+    FieldDescriptor::new("error_code", "Error Code", FieldType::U16).optional(),
+    FieldDescriptor::new("error_message", "Error Message", FieldType::Str).optional(),
+    FieldDescriptor::new("new", "New (N)", FieldType::U8).optional(),
+    FieldDescriptor::new("active", "Active (A)", FieldType::U8).optional(),
+    FieldDescriptor::new("pw_types", "Pseudowire Capabilities", FieldType::Array)
+        .optional()
+        .with_children(core::slice::from_ref(&FD_PW_TYPE_ITEM)),
 ];
 
 /// Parse a sequence of L2TPv3 AVPs from the given buffer.
@@ -294,6 +550,12 @@ pub(crate) fn parse_avps<'pkt>(data: &'pkt [u8], buf_offset: usize, buf: &mut Di
             FieldValue::Bytes(value_data),
             abs + MIN_AVP_SIZE..abs + length,
         );
+        // RFC 3931, Section 5.3 — a hidden value is encrypted; vendor AVPs
+        // have vendor-defined formats. Both stay raw.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.3>
+        if h_flag == 0 && vendor_id == 0 {
+            decode_value(buf, attribute_type, value_data, abs + MIN_AVP_SIZE);
+        }
         buf.end_container(obj_idx);
 
         pos += length;
@@ -347,6 +609,13 @@ mod tests {
     // | 5.4.1       | Non-message-type AVP   | extract_message_type_wrong |
     // | 5.4, 10.1   | AVP names (IANA)       | avp_name_matches_iana_registry |
     // | 5.4.4       | Session AVP names      | avp_container_resolves_l2tpv3_session_avps |
+    // | 5.4.1       | Message Type value (FSQ, RFC 4951) | typed_message_type_and_names |
+    // | 5.4.2       | Result Code / Error Code / Message | typed_result_code |
+    // | 5.4.3-5.4.4 | CCID, Session IDs, Router ID       | typed_session_and_connection_ids |
+    // | 5.4.3-5.4.4 | Host Name, Tx/Rx Connect Speed     | typed_strings_and_speeds |
+    // | 5.4.3-5.4.4 | PW Type, L2SS, Data Sequencing, PW Capabilities | typed_pseudowire_and_sublayer |
+    // | 5.4.5       | Circuit Status A/N bits            | typed_circuit_status |
+    // | 5.3         | Hidden / vendor AVPs stay raw      | hidden_and_vendor_avps_are_not_typed |
 
     #[test]
     fn parse_avp_basic() {
@@ -357,17 +626,18 @@ mod tests {
         buf.end_layer();
 
         let fields = buf.fields();
-        // Should have 1 Object container + 6 children = 7 fields
+        // 1 Object container + 6 header/value children + typed Message Type
         assert!(fields[0].value.is_object());
         let obj_range = fields[0].value.as_container_range().unwrap();
         let children = buf.nested_fields(obj_range);
-        assert_eq!(children.len(), 6);
+        assert_eq!(children.len(), 7);
         assert_eq!(children[0].value, FieldValue::U8(0)); // mandatory
         assert_eq!(children[1].value, FieldValue::U8(0)); // hidden
         assert_eq!(children[2].value, FieldValue::U16(8)); // length
         assert_eq!(children[3].value, FieldValue::U16(0)); // vendor_id
         assert_eq!(children[4].value, FieldValue::U16(0)); // attribute_type
         assert_eq!(children[5].value, FieldValue::Bytes(&[0x00, 0x01])); // value
+        assert_eq!(children[6].value, FieldValue::U16(1)); // typed_value
     }
 
     #[test]
@@ -637,5 +907,228 @@ mod tests {
     #[test]
     fn extract_message_type_empty() {
         assert_eq!(extract_message_type(&[]), None);
+    }
+
+    /// Build an AVP (M=1, Vendor ID 0, not hidden).
+    fn avp(attr: u16, value: &[u8]) -> Vec<u8> {
+        let len = (6 + value.len()) as u16;
+        let mut v = (0x8000 | len).to_be_bytes().to_vec();
+        v.extend_from_slice(&0u16.to_be_bytes());
+        v.extend_from_slice(&attr.to_be_bytes());
+        v.extend_from_slice(value);
+        v
+    }
+
+    /// Parse `data` and return the (flat) fields of the first AVP Object.
+    fn first_avp(data: &[u8]) -> (DissectBuffer<'_>, core::ops::Range<u32>) {
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("test", None, &[], 0..data.len());
+        parse_avps(data, 0, &mut buf);
+        buf.end_layer();
+        let r = buf.fields()[0].value.as_container_range().unwrap().clone();
+        (buf, r)
+    }
+
+    fn get<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        r: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Option<&'a FieldValue<'pkt>> {
+        buf.nested_fields(r)
+            .iter()
+            .find(|f| f.name() == name)
+            .map(|f| &f.value)
+    }
+
+    #[test]
+    fn typed_message_type_and_names() {
+        // RFC 4951, Sections 4.1-4.2 — FSQ (21) / FSR (22).
+        // <https://www.rfc-editor.org/rfc/rfc4951#section-4.1>
+        let data = avp(0, &[0, 21]);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(get(&buf, &r, "typed_value"), Some(&FieldValue::U16(21)));
+        assert_eq!(
+            buf.resolve_nested_display_name(&r, "typed_value_name"),
+            Some("FSQ")
+        );
+    }
+
+    #[test]
+    fn typed_result_code() {
+        // RFC 3931, Section 5.4.2 — Result Code, Error Code, Error Message.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.2>
+        let data = avp(1, &[0, 2, 0, 6, b'b', b'a', b'd']);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(get(&buf, &r, "result_code"), Some(&FieldValue::U16(2)));
+        assert_eq!(get(&buf, &r, "error_code"), Some(&FieldValue::U16(6)));
+        assert_eq!(
+            get(&buf, &r, "error_message"),
+            Some(&FieldValue::Str("bad"))
+        );
+        // Result Code only.
+        let data = avp(1, &[0, 1]);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(get(&buf, &r, "result_code"), Some(&FieldValue::U16(1)));
+        assert!(get(&buf, &r, "error_code").is_none());
+    }
+
+    #[test]
+    fn typed_session_and_connection_ids() {
+        for (attr, v) in [(61u16, 0x1122_3344u32), (63, 7), (64, 8), (60, 9), (15, 10)] {
+            let data = avp(attr, &v.to_be_bytes());
+            let (buf, r) = first_avp(&data);
+            assert_eq!(
+                get(&buf, &r, "typed_value"),
+                Some(&FieldValue::U32(v)),
+                "{attr}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_strings_and_speeds() {
+        let data = avp(7, b"lac");
+        let (buf, r) = first_avp(&data);
+        assert_eq!(get(&buf, &r, "typed_value"), Some(&FieldValue::Str("lac")));
+        // RFC 3931, Section 5.4.4 — 64-bit Tx/Rx Connect Speed.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.4>
+        let data = avp(74, &1_000_000_000u64.to_be_bytes());
+        let (buf, r) = first_avp(&data);
+        assert_eq!(
+            get(&buf, &r, "typed_value"),
+            Some(&FieldValue::U64(1_000_000_000))
+        );
+        // Wrong length: no typed value.
+        let data = avp(74, &[0, 1]);
+        let (buf, r) = first_avp(&data);
+        assert!(get(&buf, &r, "typed_value").is_none());
+        // Invalid UTF-8 host name: no typed value.
+        let data = avp(7, &[0xff]);
+        let (buf, r) = first_avp(&data);
+        assert!(get(&buf, &r, "typed_value").is_none());
+    }
+
+    #[test]
+    fn typed_pseudowire_and_sublayer() {
+        let data = avp(68, &[0, 5]);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(
+            buf.resolve_nested_display_name(&r, "typed_value_name"),
+            Some("Ethernet Pseudowire Type")
+        );
+        let data = avp(69, &[0, 1]);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(
+            buf.resolve_nested_display_name(&r, "typed_value_name"),
+            Some("Default L2-Specific Sublayer present")
+        );
+        let data = avp(70, &[0, 2]);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(
+            buf.resolve_nested_display_name(&r, "typed_value_name"),
+            Some("All incoming data packets require sequencing.")
+        );
+        // RFC 3931, Section 5.4.3 — Pseudowire Capabilities List.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.3>
+        let data = avp(62, &[0, 4, 0, 5]);
+        let (buf, r) = first_avp(&data);
+        let FieldValue::Array(a) = get(&buf, &r, "pw_types").unwrap() else {
+            panic!("pw_types");
+        };
+        let items = buf.nested_fields(a);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].value, FieldValue::U16(5));
+    }
+
+    #[test]
+    fn typed_circuit_status() {
+        // RFC 3931, Section 5.4.5 — N (bit 14) and A (bit 15).
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.5>
+        let data = avp(71, &[0, 3]);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(get(&buf, &r, "active"), Some(&FieldValue::U8(1)));
+        assert_eq!(get(&buf, &r, "new"), Some(&FieldValue::U8(1)));
+        let data = avp(71, &[0, 1]);
+        let (buf, r) = first_avp(&data);
+        assert_eq!(get(&buf, &r, "new"), Some(&FieldValue::U8(0)));
+    }
+
+    #[test]
+    fn hidden_and_vendor_avps_are_not_typed() {
+        // Hidden (H=1): RFC 3931, Section 5.3 — value is encrypted.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.3>
+        let mut data = avp(61, &[0, 0, 0, 1]);
+        data[0] |= 0x40;
+        let (buf, r) = first_avp(&data);
+        assert!(get(&buf, &r, "typed_value").is_none());
+        // Vendor-specific.
+        let mut data = avp(61, &[0, 0, 0, 1]);
+        data[3] = 9;
+        let (buf, r) = first_avp(&data);
+        assert!(get(&buf, &r, "typed_value").is_none());
+    }
+
+    #[test]
+    fn enumerated_value_names() {
+        // IANA "L2TPv3 Pseudowire Types" registry.
+        // <https://www.iana.org/assignments/l2tp-parameters/l2tp-parameters.xhtml#l2tp-parameters-34>
+        for (v, name) in [
+            (0x0001, "Frame Relay DLCI Pseudowire Type"),
+            (0x0002, "ATM AAL5 SDU VCC transport"),
+            (0x0003, "ATM Cell transparent Port Mode"),
+            (0x0004, "Ethernet VLAN Pseudowire Type"),
+            (0x0005, "Ethernet Pseudowire Type"),
+            (0x0006, "HDLC Pseudowire Type"),
+            (0x0009, "ATM Cell transport VCC Mode"),
+            (0x000A, "ATM Cell transport VPC Mode"),
+            (0x000C, "MPEG-TS Payload Type (MPTPW)"),
+            (0x000D, "Packet Streaming Protocol (PSPPW)"),
+            (0x0011, "Structure-agnostic E1 circuit"),
+            (0x0012, "Structure-agnostic T1 (DS1) circuit"),
+            (0x0013, "Structure-agnostic E3 circuit"),
+            (0x0014, "Structure-agnostic T3 (DS3) circuit"),
+            (0x0015, "CESoPSN basic mode"),
+            (0x0017, "CESoPSN TDM with CAS"),
+        ] {
+            assert_eq!(pseudowire_type_name(v), Some(name));
+        }
+        assert_eq!(pseudowire_type_name(0x0007), None);
+        // RFC 3931, Section 5.4.4 — L2-Specific Sublayer / Data Sequencing.
+        // <https://www.rfc-editor.org/rfc/rfc3931#section-5.4.4>
+        for v in 0..=4 {
+            assert!(l2_specific_sublayer_name(v).is_some());
+        }
+        assert_eq!(l2_specific_sublayer_name(5), None);
+        for v in 0..=2 {
+            assert!(data_sequencing_name(v).is_some());
+        }
+        assert_eq!(data_sequencing_name(3), None);
+    }
+
+    #[test]
+    fn display_fns_resolve_names() {
+        let siblings = [Field {
+            descriptor: &AVP_CHILD_FIELDS[4],
+            value: FieldValue::U16(ATTR_PSEUDOWIRE_TYPE),
+            range: 0..2,
+        }];
+        assert_eq!(
+            typed_value_name(&FieldValue::U16(5), &siblings),
+            Some("Ethernet Pseudowire Type")
+        );
+        assert_eq!(typed_value_name(&FieldValue::U8(5), &siblings), None);
+        let other = [Field {
+            descriptor: &AVP_CHILD_FIELDS[4],
+            value: FieldValue::U16(ATTR_HOST_NAME),
+            range: 0..2,
+        }];
+        assert_eq!(typed_value_name(&FieldValue::U16(5), &other), None);
+
+        let display = FD_PW_TYPE_ITEM.display_fn.unwrap();
+        assert_eq!(
+            display(&FieldValue::U16(4), &[]),
+            Some("Ethernet VLAN Pseudowire Type")
+        );
+        assert_eq!(display(&FieldValue::U8(4), &[]), None);
     }
 }

@@ -12,6 +12,7 @@
 //! | Ethernet → IPv4 → TCP (SYN)             | integration_ethernet_ipv4_tcp_syn             |
 //! | Ethernet → ARP                           | integration_ethernet_arp                      |
 //! | Ethernet → LLDP                          | integration_ethernet_lldp                     |
+//! | Ethernet → LLDP (IEEE 802.1 Port VLAN ID TLV)   | integration_ethernet_lldp_org_port_vlan_id    |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -56,6 +57,7 @@
 //! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
+//! | Ethernet → IPv4 → UDP → GTPv2-C + piggyback      | integration_ethernet_ipv4_udp_gtpv2c_piggyback      |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
@@ -113,6 +115,7 @@
 //! | Ethernet → IPv4 → UDP → L2TP(L) → PPP → IPv4 → UDP      | ethernet_ipv4_udp_l2tp_length_ppp_ipv4_udp       |
 //! | Ethernet → IPv4 → UDP → L2TP (control)                   | ethernet_ipv4_udp_l2tp_control                   |
 //! | Ethernet → IPv4 → L2TPv3 (IP, data)                       | integration_ethernet_ipv4_l2tpv3_ip_data             |
+//! | Ethernet → IPv4 → L2TPv3 (IP, data) → Ethernet → IPv4     | integration_ethernet_ipv4_l2tpv3_ethernet_pw         |
 //! | Ethernet → IPv4 → L2TPv3 (IP, control SCCRQ)              | integration_ethernet_ipv4_l2tpv3_ip_control          |
 //! | Ethernet → IPv4 → UDP → L2TPv3-UDP (control SCCRP)        | integration_ethernet_ipv4_udp_l2tpv3_control         |
 //! | Ethernet → IPv4 → UDP → L2TPv3-UDP (data)                 | integration_ethernet_ipv4_udp_l2tpv3_data            |
@@ -3483,6 +3486,37 @@ fn integration_ethernet_ipv4_udp_gtpv2c_create_session() {
     assert!(buf.field_by_name(gtpv2c, "ies").is_some());
 }
 
+/// Ethernet → IPv4 → UDP → GTPv2-C Create Session Response with a
+/// piggybacked Create Bearer Request (3GPP TS 29.274, Section 5.5.1)
+#[test]
+fn integration_ethernet_ipv4_udp_gtpv2c_piggyback() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+
+    push_ethernet(&mut pkt, [0xAA; 6], [0xBB; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 2123, 2123);
+    let first = push_gtpv2c_with_teid(&mut pkt, 33, 0x11, 1, &[3, 0, 1, 0, 5]);
+    pkt[first] |= 0x10; // P flag
+    push_gtpv2c_with_teid(&mut pkt, 95, 0x22, 2, &[]);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 5);
+    assert_eq!(buf.layers()[3].name, "GTPv2-C");
+    assert_eq!(buf.layers()[4].name, "GTPv2-C");
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[4].range.end, pkt.len());
+    let piggybacked = &buf.layers()[4];
+    assert_eq!(
+        display_name_for(&buf, piggybacked, "message_type"),
+        Some("Create Bearer Request")
+    );
+}
+
 /// Ethernet → IPv4 → UDP → GTPv2-C (Echo Request, no TEID)
 #[test]
 fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
@@ -4440,6 +4474,44 @@ fn build_eth_lldp() -> Vec<u8> {
     // End Of LLDPDU
     pkt.extend_from_slice(&0x0000u16.to_be_bytes());
     pkt
+}
+
+/// Ethernet → LLDP with an IEEE 802.1 Port VLAN ID TLV decoded into `org`
+/// (IEEE 802.1AB-2005 Annex F.2).
+#[test]
+fn integration_ethernet_lldp_org_port_vlan_id() {
+    let reg = DissectorRegistry::default();
+    let mut data = build_eth_lldp();
+    data.truncate(data.len() - 2); // drop End Of LLDPDU
+    data.extend_from_slice(&[0xFE, 0x06, 0x00, 0x80, 0xC2, 0x01, 0x00, 0x64]);
+    data.extend_from_slice(&[0x00, 0x00]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+
+    // tlvs[4] (after Chassis ID, Port ID, TTL, System Name) → org → pvid.
+    let lldp = buf.layer_by_name("LLDP").unwrap();
+    let FieldValue::Array(tlvs) = &buf.field_by_name(lldp, "tlvs").unwrap().value else {
+        panic!("tlvs")
+    };
+    let org_tlv = buf
+        .nested_fields(tlvs)
+        .iter()
+        .filter_map(|f| match &f.value {
+            FieldValue::Object(r) => Some(buf.nested_fields(r)),
+            _ => None,
+        })
+        .nth(4)
+        .unwrap();
+    let FieldValue::Object(org) = &org_tlv.iter().find(|f| f.name() == "org").unwrap().value else {
+        panic!("org")
+    };
+    let pvid = buf
+        .nested_fields(org)
+        .iter()
+        .find(|f| f.name() == "pvid")
+        .unwrap();
+    assert_eq!(pvid.value, FieldValue::U16(100));
 }
 
 #[test]
@@ -6255,6 +6327,34 @@ fn integration_ethernet_ipv4_l2tpv3_ip_data() {
         buf.field_by_name(l2tp, "is_control").unwrap().value,
         FieldValue::U8(0)
     );
+}
+
+/// Ethernet → IPv4 → L2TPv3 (IP, data) → Ethernet → IPv4 (RFC 4719
+/// Ethernet pseudowire, no cookie, no L2-Specific Sublayer).
+/// <https://www.rfc-editor.org/rfc/rfc4719>
+#[test]
+fn integration_ethernet_ipv4_l2tpv3_ethernet_pw() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 115, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x12, 0x34]);
+    push_ethernet(&mut pkt, [0x02; 6], [0x03; 6], 0x0800);
+    let inner_ip = pkt.len();
+    push_ipv4(&mut pkt, 17, [192, 168, 0, 1], [192, 168, 0, 2]);
+    fixup_ipv4_length(&mut pkt, inner_ip);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names[..5],
+        ["Ethernet", "IPv4", "L2TPv3", "Ethernet", "IPv4"]
+    );
+    assert_layers_contiguous(&buf);
 }
 
 /// Ethernet → IPv4 → L2TPv3 (IP, control SCCRQ)
