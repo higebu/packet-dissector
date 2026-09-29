@@ -31,6 +31,8 @@
 //! | 3.5         | Stream ID kept on simultaneous open            | tcp_stream_id_kept_on_simultaneous_open |
 //! | 3.5         | Stream ID rotates on SYN after mid-stream data | tcp_stream_id_rotates_on_syn_after_data |
 //! | 3.1         | Reassembly context carries flags and ISN+1     | tcp_stream_context_syn_seq_and_flags    |
+//! | 3.1         | ISN+1 carried per direction (stream_start)     | tcp_stream_context_stream_start_per_direction |
+//! | —           | Oldest connection evicted past the table limit | tcp_stream_id_table_evicts_oldest       |
 
 use packet_dissector::dissector::{DispatchHint, Dissector};
 use packet_dissector::field::FieldValue;
@@ -577,6 +579,7 @@ fn tcp_stream_context_syn_seq_and_flags() {
     let ctx = result.tcp_stream_context.unwrap();
     assert_eq!(ctx.seq, 1001);
     assert_eq!(ctx.flags, 0x02);
+    assert_eq!(ctx.stream_start, Some(1001));
     assert!(ctx.is_syn());
     assert!(!ctx.is_fin());
     assert!(!ctx.is_rst());
@@ -599,4 +602,48 @@ fn tcp_stream_id_rotates_on_syn_after_data() {
     let d = TcpDissector::new();
     let first = stream_id_of(&d, false, 1000, 0x18);
     assert_ne!(stream_id_of(&d, false, 90000, 0x02), first);
+}
+
+/// The ISN of each direction is carried to later segments as stream_start.
+#[test]
+fn tcp_stream_context_stream_start_per_direction() {
+    let d = TcpDissector::new();
+    let ctx_of = |reverse: bool, seq: u32, flags: u8| {
+        let (sport, dport, src, dst) = if reverse {
+            (80, 40000, [10, 0, 0, 2], [10, 0, 0, 1])
+        } else {
+            (40000, 80, [10, 0, 0, 1], [10, 0, 0, 2])
+        };
+        let tcp_data = build_tcp_packet(sport, dport, seq, 0, flags);
+        let mut buf = DissectBuffer::new();
+        add_ipv4_layer(&mut buf, src, dst);
+        d.dissect(&tcp_data, &mut buf, 20)
+            .unwrap()
+            .tcp_stream_context
+            .unwrap()
+    };
+    assert_eq!(ctx_of(false, 1000, 0x18).stream_start, None);
+    ctx_of(false, 2000, 0x02);
+    ctx_of(true, 7000, 0x12);
+    assert_eq!(ctx_of(false, 2001, 0x18).stream_start, Some(2001));
+    assert_eq!(ctx_of(true, 7001, 0x18).stream_start, Some(7001));
+}
+
+/// The stream-ID table is bounded: past 65,536 connections the oldest one
+/// is forgotten and gets a new ID when seen again.
+#[test]
+fn tcp_stream_id_table_evicts_oldest() {
+    let d = TcpDissector::new();
+    let first = stream_id_of(&d, false, 1, 0x10);
+    let tcp_data = build_tcp_packet(1, 2, 1, 0, 0x10);
+    for i in 0..65_536u32 {
+        let mut buf = DissectBuffer::new();
+        add_ipv4_layer(
+            &mut buf,
+            [11, (i >> 16) as u8, (i >> 8) as u8, i as u8],
+            [10, 0, 0, 2],
+        );
+        d.dissect(&tcp_data, &mut buf, 20).unwrap();
+    }
+    assert_ne!(stream_id_of(&d, false, 2, 0x10), first);
 }

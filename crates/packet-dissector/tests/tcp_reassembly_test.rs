@@ -15,10 +15,13 @@
 //! | RFC 9293 3.10        | Reordered earlier data is inserted before the buffer     | reordered_earlier_segment_is_inserted_after_syn         |
 //! | RFC 9293 3.10        | Reordered earlier data after a delivered message         | reordered_earlier_segment_is_inserted_after_delivered_message |
 //! | RFC 9293 3.10        | Earlier data with unknown delivery position is dropped   | earlier_segment_with_unknown_delivery_position_is_dropped |
+//! | RFC 9293 3.10        | Reordering after a SYN that reuses a 4-tuple             | reordered_segment_after_reused_tuple_syn                |
 //! | RFC 9293 3.10        | Retransmitted delivered data is not inserted             | retransmission_of_delivered_data_is_not_inserted        |
 //! | —                    | Stream eviction is reported on the TCP layer             | eviction_is_reported_on_tcp_layer                       |
 //! | RFC 9293 3.10        | Overlapping retransmission contributes only new bytes    | overlapping_retransmission_is_trimmed                   |
 //! | RFC 9293 3.10        | Old data separated from the buffer by a gap is ignored   | old_segment_before_gap_is_ignored                       |
+//! | —                    | Zero-length success from the upper dissector is an error | zero_length_upper_result_is_error                       |
+//! | —                    | Body dispatcher that never consumes does not loop         | stalled_body_dispatch_terminates                        |
 //! | —                    | Body parse error still consumes the body                 | body_parse_error_does_not_desync_stream                 |
 
 use packet_dissector::dissector::{DispatchHint, DissectResult, Dissector};
@@ -610,4 +613,81 @@ fn fin_before_missing_data_keeps_reassembly_state() {
     let mut buf = DissectBuffer::new();
     reg.dissect(&pkt, &mut buf).unwrap();
     assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+#[test]
+fn reordered_segment_after_reused_tuple_syn() {
+    let reg = DissectorRegistry::default();
+    let first = sip_invite_with_sdp();
+    let (a, b) = options_split();
+
+    // An earlier connection delivered data far ahead in sequence space.
+    let pkt = c2s(5060, 900_000, PSH_ACK, &first);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    // New connection on the same 4-tuple; its first two segments swap.
+    let isn = 100u32;
+    let pkt = c2s(5060, isn, SYN, &[]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let pkt = c2s(5060, isn + 1 + a.len() as u32, PSH_ACK, b);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let pkt = c2s(5060, isn + 1, PSH_ACK, a);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+/// Returns success without consuming anything, with a fixed hint.
+struct Stall(DispatchHint);
+
+impl Dissector for Stall {
+    fn name(&self) -> &'static str {
+        "Stall"
+    }
+    fn short_name(&self) -> &'static str {
+        "Stall"
+    }
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        &[]
+    }
+    fn dissect<'pkt>(
+        &self,
+        _data: &'pkt [u8],
+        _buf: &mut DissectBuffer<'pkt>,
+        _offset: usize,
+    ) -> Result<DissectResult, PacketError> {
+        Ok(DissectResult::new(0, self.0.clone()))
+    }
+}
+
+#[test]
+fn zero_length_upper_result_is_error() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_tcp_port(7001, Box::new(Stall(DispatchHint::End)))
+        .unwrap();
+    let pkt = c2s(7001, 1, PSH_ACK, b"abc");
+    let mut buf = DissectBuffer::new();
+    assert_eq!(
+        reg.dissect(&pkt, &mut buf),
+        Err(PacketError::InvalidHeader(
+            "upper-layer dissector returned zero bytes_consumed on success"
+        ))
+    );
+}
+
+#[test]
+fn stalled_body_dispatch_terminates() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_tcp_port(7000, Box::new(LenPrefixed))
+        .unwrap();
+    reg.register_by_udp_port(9, Box::new(Stall(DispatchHint::ByUdpPort(9, 9))))
+        .unwrap();
+    let pkt = c2s(7000, 1, PSH_ACK, &[2, b'a', b'b', 1, b'c']);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let lp = buf.layers().iter().filter(|l| l.name == "LP").count();
+    assert_eq!(lp, 2);
 }

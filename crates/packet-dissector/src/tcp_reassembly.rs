@@ -66,7 +66,7 @@ pub(crate) struct TcpReassemblyService {
     /// Insertion order for eviction. The front of the deque is the oldest.
     pub(crate) order: VecDeque<StreamKey>,
     /// Per direction: the sequence number right after the last byte handed
-    /// to the upper-layer dissector, or ISN+1 after a SYN. Bytes before it
+    /// to the upper-layer dissector. Bytes before it
     /// have been dissected, so a segment carrying them is a retransmission;
     /// bytes after it that precede a buffered stream are reordered data.
     ///
@@ -312,9 +312,10 @@ impl DissectorRegistry {
     /// ones when the segment was captured in full), including any body a
     /// message announces with a non-`End` dispatch hint.
     ///
-    /// - SYN starts the direction afresh: stale buffered data is dropped and
-    ///   the stream begins at ISN+1 (RFC 9293, Section 3.5 —
-    ///   <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>).
+    /// - SYN starts the direction afresh: stale buffered data is dropped
+    ///   (RFC 9293, Section 3.5 —
+    ///   <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>). The stream
+    ///   start (ISN+1) arrives in [`TcpStreamContext::stream_start`].
     /// - FIN ("No more data from sender", RFC 9293, Section 3.1 —
     ///   <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>) releases the
     ///   direction's state after the segment's data, unless the buffer
@@ -336,16 +337,11 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<(), PacketError> {
-        let evicted = {
+        if ctx.is_syn() {
             let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
-            if ctx.is_syn() {
-                service.forget(&ctx.stream_key);
-                service.set_delivered(ctx.stream_key, ctx.seq);
+            if !service.streams.is_empty() {
+                service.remove_stream(&ctx.stream_key);
             }
-            service.evict_to_limits(&ctx.stream_key)
-        };
-        if evicted > 0 {
-            Self::add_eviction_field(buf, offset, payload.len(), evicted);
         }
 
         let result = if payload.is_empty() {
@@ -496,12 +492,14 @@ impl DissectorRegistry {
         // try the upper dissector directly on the payload slice to avoid an
         // allocation+copy. Only fall through to the buffered path when the
         // upper dissector reports Truncated.
-        let no_buffered_data = !self
-            .tcp_reassembly
-            .lock()
-            .map_err(lock_poisoned)?
-            .streams
-            .contains_key(&key);
+        let (no_buffered_data, evicted) = {
+            let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
+            let evicted = service.evict_to_limits(&key);
+            (!service.streams.contains_key(&key), evicted)
+        };
+        if evicted > 0 {
+            Self::add_eviction_field(buf, offset, payload.len(), evicted);
+        }
         if no_buffered_data {
             let (consumed, result) = self.dissect_stream_messages(upper, payload, buf, offset);
             if consumed > 0 {
@@ -564,13 +562,18 @@ impl DissectorRegistry {
             // <https://www.rfc-editor.org/rfc/rfc9293#section-3.10>.
             //
             // Bytes before `base_seq` but at or after the delivery position
-            // (ISN+1 after a SYN, or the end of the last dissected message)
+            // (the end of the last dissected message, or ISN+1 from the SYN)
             // were never handed to the upper layer: they are reordered data
             // and start the stream. Bytes already delivered, or any bytes
             // when the delivery position is unknown (the capture started
             // mid-connection), are treated as a retransmission and dropped.
-            let undelivered = service
-                .delivered_seq(&key)
+            let start = match (service.delivered_seq(&key), ctx.stream_start) {
+                // A delivery position outside [stream start, base] belongs to
+                // an earlier connection on the same 4-tuple.
+                (Some(d), Some(s)) if d.wrapping_sub(s) > base_seq.wrapping_sub(s) => Some(s),
+                (d, s) => d.or(s),
+            };
+            let undelivered = start
                 .map(|d| base_seq.wrapping_sub(d) as usize)
                 .filter(|&n| n <= MAX_STREAM_WINDOW)
                 .unwrap_or(0);
@@ -778,5 +781,134 @@ impl DissectorRegistry {
             range,
         );
         buf.end_layer();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(port: u16) -> StreamKey {
+        ([0; 16], [1; 16], port, 80)
+    }
+
+    fn add_stream(service: &mut TcpReassemblyService, k: StreamKey, data: &[u8]) {
+        service.order.push_back(k);
+        service.streams.insert(
+            k,
+            TcpStreamState {
+                buffer: ReassemblyBuffer::new(),
+                base_seq: 0,
+                segment_count: 0,
+                min_needed: None,
+            },
+        );
+        service.insert_segment(&k, 0, data, 0);
+    }
+
+    #[test]
+    fn eviction_skips_the_stream_being_processed() {
+        let mut service = TcpReassemblyService::new();
+        for port in 0..=MAX_REASSEMBLY_STREAMS as u16 {
+            add_stream(&mut service, key(port), b"x");
+        }
+        // The oldest stream is the one being processed: the next one goes.
+        assert_eq!(service.evict_to_limits(&key(0)), 1);
+        assert!(service.streams.contains_key(&key(0)));
+        assert!(!service.streams.contains_key(&key(1)));
+    }
+
+    #[test]
+    fn eviction_stops_when_only_the_kept_stream_remains() {
+        let mut service = TcpReassemblyService::new();
+        add_stream(&mut service, key(0), b"x");
+        assert!(!service.evict_oldest(&key(0)));
+        assert!(service.streams.contains_key(&key(0)));
+    }
+
+    #[test]
+    fn delivered_positions_are_bounded_and_generation_checked() {
+        let mut service = TcpReassemblyService::new();
+        // Forget + re-record leaves a stale deque entry for key(0).
+        service.record_delivered(key(0), 10);
+        service.forget(&key(0));
+        service.record_delivered(key(0), 20);
+        for port in 1..MAX_TRACKED_DIRECTIONS as u32 {
+            let k = ([0; 16], [2; 16], (port >> 16) as u16, port as u16);
+            service.set_delivered(k, port);
+        }
+        assert_eq!(service.delivered.len(), MAX_TRACKED_DIRECTIONS);
+        // The stale entry is popped without removing the live key(0) entry;
+        // the live entry is the oldest and is evicted next.
+        service.set_delivered(key(1), 1);
+        assert_eq!(service.delivered.len(), MAX_TRACKED_DIRECTIONS);
+        assert_eq!(service.delivered_seq(&key(0)), None);
+        assert_eq!(service.delivered_seq(&key(1)), Some(1));
+    }
+
+    #[test]
+    fn delivered_position_only_moves_forward() {
+        let mut service = TcpReassemblyService::new();
+        service.record_delivered(key(0), 1000);
+        service.record_delivered(key(0), 900);
+        assert_eq!(service.delivered_seq(&key(0)), Some(1000));
+        service.record_delivered(key(0), 1100);
+        assert_eq!(service.delivered_seq(&key(0)), Some(1100));
+    }
+
+    #[test]
+    fn forget_compacts_delivered_order() {
+        let mut service = TcpReassemblyService::new();
+        for port in 0..200 {
+            service.record_delivered(key(port), 1);
+        }
+        for port in 0..200 {
+            service.forget(&key(port));
+        }
+        assert!(service.delivered.is_empty());
+        assert!(service.delivered_order.len() <= 64);
+    }
+
+    #[test]
+    fn remove_stream_compacts_order() {
+        let mut service = TcpReassemblyService::new();
+        for port in 0..200 {
+            add_stream(&mut service, key(port), b"x");
+        }
+        for port in 0..200 {
+            service.remove_stream(&key(port));
+        }
+        assert_eq!(service.total_bytes, 0);
+        assert!(service.order.len() <= 64);
+    }
+
+    #[test]
+    fn insert_overflow_resets_stream() {
+        let mut service = TcpReassemblyService::new();
+        add_stream(&mut service, key(0), b"abc");
+        service.insert_segment(&key(0), usize::MAX, b"de", 77);
+        let state = &service.streams[&key(0)];
+        assert_eq!(state.base_seq, 77);
+        assert_eq!(state.buffer.contiguous_len(), 2);
+        assert_eq!(service.total_bytes, 2);
+    }
+
+    #[test]
+    fn operations_on_unknown_stream_are_noops() {
+        let mut service = TcpReassemblyService::new();
+        service.insert_segment(&key(0), 0, b"x", 0);
+        service.prepend_segment(&key(0), b"x", b"");
+        service.consume_from_stream(&key(0), 1);
+        service.reset_stream(&key(0), 5);
+        assert!(service.streams.is_empty());
+        assert_eq!(service.total_bytes, 0);
+    }
+
+    #[test]
+    fn lock_poisoned_error() {
+        assert_eq!(
+            lock_poisoned(()),
+            PacketError::InvalidHeader("tcp reassembly lock poisoned")
+        );
     }
 }

@@ -278,6 +278,9 @@ struct Connection {
     syn: Option<(bool, u32)>,
     /// Whether a FIN or RST has been seen on the connection.
     closed: bool,
+    /// ISN of each direction, indexed by whether the sender is the
+    /// canonical-first endpoint (`[other, canonical-first]`).
+    isn: [Option<u32>; 2],
 }
 
 /// State for the stream ID mapping, protected by a Mutex.
@@ -476,13 +479,16 @@ impl Dissector for TcpDissector {
         // peer's SYN of a simultaneous open (Section 3.5, Figure 8), keep the
         // ID. A RST or FIN does not end the mapping, so late packets of a
         // closed connection keep their ID.
+        let mut stream_start = None;
         if let Some(key) = extract_stream_key(buf, src_port, dst_port) {
             let canonical = canonicalize_key(key);
             let initial_syn =
                 (flags & (FLAG_SYN | FLAG_ACK) == FLAG_SYN).then_some((canonical == key, seq));
+            let from_first = usize::from(canonical == key);
+            let is_syn = flags & FLAG_SYN != 0;
             let mut state = self.streams.lock().unwrap_or_else(|e| e.into_inner());
 
-            let sid = match state.map.get_mut(&canonical) {
+            let (sid, isn) = match state.map.get_mut(&canonical) {
                 Some(conn) => {
                     if let Some(syn) = initial_syn {
                         let new_connection = match conn.syn {
@@ -495,12 +501,16 @@ impl Dissector for TcpDissector {
                             conn.id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
                             conn.syn = Some(syn);
                             conn.closed = false;
+                            conn.isn = [None; 2];
                         }
                     }
                     if flags & (TcpStreamContext::FLAG_FIN | TcpStreamContext::FLAG_RST) != 0 {
                         conn.closed = true;
                     }
-                    conn.id
+                    if is_syn {
+                        conn.isn[from_first] = Some(seq);
+                    }
+                    (conn.id, conn.isn[from_first])
                 }
                 None => {
                     while state.map.len() >= MAX_TRACKED_STREAMS {
@@ -511,6 +521,10 @@ impl Dissector for TcpDissector {
                         }
                     }
                     let id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
+                    let mut isn = [None; 2];
+                    if is_syn {
+                        isn[from_first] = Some(seq);
+                    }
                     state.map.insert(
                         canonical,
                         Connection {
@@ -519,12 +533,14 @@ impl Dissector for TcpDissector {
                             closed: flags
                                 & (TcpStreamContext::FLAG_FIN | TcpStreamContext::FLAG_RST)
                                 != 0,
+                            isn,
                         },
                     );
                     state.order.push_back(canonical);
-                    id
+                    (id, isn[from_first])
                 }
             };
+            stream_start = isn.map(|isn| isn.wrapping_add(1));
 
             drop(state);
 
@@ -553,7 +569,8 @@ impl Dissector for TcpDissector {
                     seq.wrapping_add(u32::from(flags & FLAG_SYN != 0)),
                     payload_len,
                     flags,
-                ),
+                )
+                .with_stream_start(stream_start),
             )),
             None => Ok(DissectResult::new(
                 header_len,

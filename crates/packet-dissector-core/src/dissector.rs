@@ -141,6 +141,12 @@ pub struct TcpStreamContext {
     /// reassembly state (RFC 9293, Sections 3.5 and 3.6 —
     /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>).
     pub flags: u8,
+    /// Sequence number of the first data octet of this direction (ISN+1),
+    /// when the direction's SYN has been seen.
+    ///
+    /// Data at or after it that was never handed to the upper layer can be
+    /// placed in front of a buffered stream when it arrives late.
+    pub stream_start: Option<u32>,
 }
 
 impl TcpStreamContext {
@@ -165,7 +171,14 @@ impl TcpStreamContext {
             seq,
             payload_len,
             flags,
+            stream_start: None,
         }
+    }
+
+    /// Set [`TcpStreamContext::stream_start`].
+    pub fn with_stream_start(mut self, stream_start: Option<u32>) -> Self {
+        self.stream_start = stream_start;
+        self
     }
 
     /// Whether the SYN control bit is set.
