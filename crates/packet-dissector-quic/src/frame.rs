@@ -538,6 +538,9 @@ mod tests {
     // | RFC Section   | Description                        | Test                              |
     // |---------------|------------------------------------|-----------------------------------|
     // | 9000 §12.4    | Frame type names                   | test_frame_type_names             |
+    // | 9000 §12.4    | Frame type display function        | test_frame_type_display           |
+    // | 9000 §19.3.1  | ACK Ranges cut short               | test_ack_ranges_truncated         |
+    // | 9000 §19.15   | NEW_CONNECTION_ID token cut short  | test_new_connection_id_truncated_token |
     // | 9000 §19.1    | PADDING (run collapsed)            | test_padding_and_ping             |
     // | 9000 §19.2    | PING                               | test_padding_and_ping             |
     // | 9000 §19.3    | ACK with ACK Ranges                | test_ack                          |
@@ -626,16 +629,89 @@ mod tests {
     #[test]
     fn test_frame_type_names() {
         // RFC 9000, Section 12.4, Table 3 — https://www.rfc-editor.org/rfc/rfc9000#section-12.4
-        assert_eq!(frame_type_name(0x00), Some("PADDING"));
-        assert_eq!(frame_type_name(0x03), Some("ACK"));
-        assert_eq!(frame_type_name(0x06), Some("CRYPTO"));
-        assert_eq!(frame_type_name(0x0d), Some("STREAM"));
-        assert_eq!(frame_type_name(0x13), Some("MAX_STREAMS"));
-        assert_eq!(frame_type_name(0x1d), Some("CONNECTION_CLOSE"));
-        assert_eq!(frame_type_name(0x1e), Some("HANDSHAKE_DONE"));
-        // RFC 9221, Section 4 — https://www.rfc-editor.org/rfc/rfc9221#section-4
-        assert_eq!(frame_type_name(0x31), Some("DATAGRAM"));
+        let table: &[(u64, &str)] = &[
+            (0x00, "PADDING"),
+            (0x01, "PING"),
+            (0x02, "ACK"),
+            (0x03, "ACK"),
+            (0x04, "RESET_STREAM"),
+            (0x05, "STOP_SENDING"),
+            (0x06, "CRYPTO"),
+            (0x07, "NEW_TOKEN"),
+            (0x08, "STREAM"),
+            (0x0f, "STREAM"),
+            (0x10, "MAX_DATA"),
+            (0x11, "MAX_STREAM_DATA"),
+            (0x12, "MAX_STREAMS"),
+            (0x13, "MAX_STREAMS"),
+            (0x14, "DATA_BLOCKED"),
+            (0x15, "STREAM_DATA_BLOCKED"),
+            (0x16, "STREAMS_BLOCKED"),
+            (0x17, "STREAMS_BLOCKED"),
+            (0x18, "NEW_CONNECTION_ID"),
+            (0x19, "RETIRE_CONNECTION_ID"),
+            (0x1a, "PATH_CHALLENGE"),
+            (0x1b, "PATH_RESPONSE"),
+            (0x1c, "CONNECTION_CLOSE"),
+            (0x1d, "CONNECTION_CLOSE"),
+            (0x1e, "HANDSHAKE_DONE"),
+            // RFC 9221, Section 4 — https://www.rfc-editor.org/rfc/rfc9221#section-4
+            (0x30, "DATAGRAM"),
+            (0x31, "DATAGRAM"),
+        ];
+        for &(frame_type, name) in table {
+            assert_eq!(frame_type_name(frame_type), Some(name), "{frame_type:#x}");
+        }
         assert_eq!(frame_type_name(0x21), None);
+    }
+
+    #[test]
+    fn test_frame_type_display() {
+        // The `frame_type` and `error_frame_type` fields resolve names
+        // through the same display function.
+        assert_eq!(
+            frame_type_display(&FieldValue::U64(0x06), &[]),
+            Some("CRYPTO")
+        );
+        assert_eq!(frame_type_display(&FieldValue::U64(0x21), &[]), None);
+        assert_eq!(frame_type_display(&FieldValue::U8(0x06), &[]), None);
+    }
+
+    #[test]
+    fn test_new_connection_id_truncated_token() {
+        // RFC 9000, Section 19.15 — the 128-bit Stateless Reset Token is cut
+        // short: the fields read so far are kept and the rest is data.
+        // https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+        let mut plain = vec![0x18, 0x01, 0x00, 0x02, 0xc1, 0xc2];
+        plain.extend_from_slice(&[0x5a; 5]);
+        let buf = parse(&plain);
+        let f = frames(&buf);
+        assert_eq!(f.len(), 1);
+        assert_eq!(bytes_of(&buf, f[0].1, "connection_id"), &[0xc1, 0xc2]);
+        assert!(!has(f[0].1, "stateless_reset_token"));
+        assert_eq!(bytes_of(&buf, f[0].1, "data"), &[0x5a; 5]);
+    }
+
+    #[test]
+    fn test_ack_ranges_truncated() {
+        // RFC 9000, Section 19.3.1 — ACK Range Count says 2 but the data
+        // ends inside the ranges. Case 1: the second Gap is missing.
+        // https://www.rfc-editor.org/rfc/rfc9000#section-19.3.1
+        let buf = parse(&[0x02, 0x10, 0x00, 0x02, 0x00, 0x01, 0x01]);
+        let f = frames(&buf);
+        assert_eq!(f.len(), 1);
+        assert_eq!(u64_of(f[0].1, "ack_range_count"), 2);
+        assert_eq!(u64_of(f[0].1, "gap"), 1);
+        assert_eq!(u64_of(f[0].1, "ack_range_length"), 1);
+        let ranges = f[0].1.iter().find(|x| x.name() == "ack_ranges").unwrap();
+        assert_eq!(ranges.range, BASE + 5..BASE + 7);
+
+        // Case 2: the ACK Range Length of the only range is missing.
+        let buf = parse(&[0x02, 0x10, 0x00, 0x01, 0x00, 0x01]);
+        let f = frames(&buf);
+        assert_eq!(u64_of(f[0].1, "gap"), 1);
+        assert!(!has(f[0].1, "ack_range_length"));
+        assert_eq!(f[0].0.range, BASE..BASE + 6);
     }
 
     #[test]
