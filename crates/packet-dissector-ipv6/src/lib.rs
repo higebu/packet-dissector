@@ -21,10 +21,20 @@
 //!   <https://www.rfc-editor.org/rfc/rfc6275#section-6.1>
 //! - RFC 2675, Section 3: Jumbo Payload option (Payload Length = 0):
 //!   <https://www.rfc-editor.org/rfc/rfc2675#section-3>
+//! - Hop-by-Hop / Destination options: RFC 2711, RFC 2675, RFC 2473,
+//!   RFC 6275 (Section 6.3), RFC 5570, RFC 6553, RFC 9008, RFC 7731,
+//!   RFC 9486, RFC 8250, RFC 4782 — see <https://www.rfc-editor.org/rfc/rfc8200#section-4.2>
+//! - Routing Types 0, 2 and 3: RFC 2460 (Section 4.4), RFC 5095,
+//!   RFC 6275 (Section 6.4), RFC 6554:
+//!   <https://www.rfc-editor.org/rfc/rfc6554#section-3>
+//! - Mobility Header messages and options: RFC 6275, Sections 6.1-6.2:
+//!   <https://www.rfc-editor.org/rfc/rfc6275#section-6.2>
 
 #![deny(missing_docs)]
 
 mod ext;
+mod mobility;
+mod options;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,

@@ -5,7 +5,10 @@
 //!
 //! ## Supported Applications
 //! - Diameter Base Protocol (RFC 6733, Application-ID 0)
-//! - Diameter Credit-Control (RFC 4006, Application-ID 4)
+//! - NASREQ (RFC 7155, Application-ID 1)
+//! - Diameter Credit-Control (RFC 8506, which obsoletes RFC 4006, Application-ID 4)
+//! - Diameter EAP (RFC 4072, Application-ID 5)
+//! - 3GPP STa (TS 29.273, Application-ID 16777250)
 //! - 3GPP Cx (TS 29.229, Application-ID 16777216) — IMS HSS
 //! - 3GPP Sh (TS 29.329, Application-ID 16777217) — User Profile
 //! - 3GPP Zh (TS 29.109, Application-ID 16777221) — GBA
@@ -21,6 +24,13 @@
 //! ## References
 //! - RFC 6733: <https://www.rfc-editor.org/rfc/rfc6733>
 //! - RFC 4006: <https://www.rfc-editor.org/rfc/rfc4006>
+//! - RFC 8506: <https://www.rfc-editor.org/rfc/rfc8506>
+//! - RFC 7155: <https://www.rfc-editor.org/rfc/rfc7155>
+//! - RFC 4072: <https://www.rfc-editor.org/rfc/rfc4072>
+//! - RFC 5905 (NTP; referenced by RFC 6733 for `Time`): <https://www.rfc-editor.org/rfc/rfc5905>
+//! - RFC 4330, Section 3 (SNTP era rule for `Time`, obsoleted by RFC 5905): <https://www.rfc-editor.org/rfc/rfc4330#section-3>
+//! - IANA AAA Parameters: <https://www.iana.org/assignments/aaa-parameters/aaa-parameters.xhtml>
+//! - 3GPP TS 29.061: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.061/>
 //! - 3GPP TS 29.212: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.212/>
 //! - 3GPP TS 29.214: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.214/>
 //! - 3GPP TS 29.229: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.229/>
@@ -28,6 +38,9 @@
 //! - 3GPP TS 29.273: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.273/>
 //! - 3GPP TS 29.329: <https://www.3gpp.org/ftp/Specs/archive/29_series/29.329/>
 //! - 3GPP TS 32.299: <https://www.3gpp.org/ftp/Specs/archive/32_series/32.299/>
+//!
+//! `Integer64`, `Float32` and `Float64` AVP values are emitted as raw bytes
+//! because `FieldValue` has no signed 64-bit or floating-point variant.
 
 #![deny(missing_docs)]
 
@@ -37,7 +50,9 @@ use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
+use packet_dissector_core::field::{
+    Field, FieldDescriptor, FieldType, FieldValue, FormatContext, format_utf8_lossy,
+};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{
     read_be_i32, read_be_u16, read_be_u24, read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr,
@@ -45,7 +60,7 @@ use packet_dissector_core::util::{
 
 use avp::{
     AVP_CODE_EXPERIMENTAL_RESULT_CODE, AVP_CODE_RESULT_CODE, AvpType, application_name,
-    command_name, experimental_result_code_name, lookup_avp, result_code_name,
+    command_name, enum_value_name, experimental_result_code_name, lookup_avp, result_code_name,
 };
 
 /// Diameter message header size (RFC 6733, Section 3).
@@ -64,7 +79,15 @@ const FLAG_RETRANSMIT: u8 = 0x10;
 const MIN_AVP_HEADER: usize = 8;
 
 /// AVP Flags bit: Vendor-ID present (V).
+///
+/// RFC 6733, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc6733#section-4.1>
 const AVP_FLAG_VENDOR: u8 = 0x80;
+/// AVP Flags bit: Mandatory (M).
+const AVP_FLAG_MANDATORY: u8 = 0x40;
+/// AVP Flags bit: Protected (P). RFC 6733, Section 4.1 — "The 'P' bit has
+/// been reserved for future usage of end-to-end security."
+/// <https://www.rfc-editor.org/rfc/rfc6733#section-4.1>
+const AVP_FLAG_PROTECTED: u8 = 0x20;
 
 /// Maximum recursion depth for Grouped AVPs (stack overflow guard).
 const MAX_GROUPED_DEPTH: usize = 8;
@@ -93,6 +116,110 @@ const FD_AVP_LENGTH: usize = 2;
 const FD_AVP_VENDOR_ID: usize = 3;
 const FD_AVP_NAME: usize = 4;
 const FD_AVP_VALUE: usize = 5;
+const FD_AVP_FLAG_VENDOR: usize = 6;
+const FD_AVP_FLAG_MANDATORY: usize = 7;
+const FD_AVP_FLAG_PROTECTED: usize = 8;
+
+/// Return the `U32` value of the AVP header field called `name`.
+///
+/// `fields` is the flat child slice of an AVP Object, which also contains
+/// the descendants of a Grouped value. The AVP's own header fields come
+/// before its first nested container, so the scan stops there; otherwise a
+/// `vendor_id` of a nested AVP would be picked up for a vendor-less parent.
+fn child_u32(fields: &[Field<'_>], name: &str) -> Option<u32> {
+    fields
+        .iter()
+        .take_while(|f| !matches!(f.value, FieldValue::Array(_) | FieldValue::Object(_)))
+        .find_map(|f| match (f.name(), &f.value) {
+            (n, FieldValue::U32(v)) if n == name => Some(*v),
+            _ => None,
+        })
+}
+
+/// Resolve the display name of an AVP `value` from its sibling `code` and
+/// optional `vendor_id`.
+fn avp_value_name(v: &FieldValue<'_>, siblings: &[Field<'_>]) -> Option<&'static str> {
+    let code = child_u32(siblings, "code")?;
+    let vendor_id = child_u32(siblings, "vendor_id").unwrap_or(0);
+    match v {
+        FieldValue::U32(rc) if vendor_id == 0 && code == AVP_CODE_RESULT_CODE => {
+            Some(result_code_name(*rc))
+        }
+        FieldValue::U32(rc) if vendor_id == 0 && code == AVP_CODE_EXPERIMENTAL_RESULT_CODE => {
+            let name = experimental_result_code_name(*rc);
+            if name != "Unknown" { Some(name) } else { None }
+        }
+        // RFC 6733, Section 4.3.1 — Enumerated is derived from Integer32.
+        // <https://www.rfc-editor.org/rfc/rfc6733#section-4.3.1>
+        FieldValue::I32(e) => enum_value_name(vendor_id, code, *e),
+        _ => None,
+    }
+}
+
+/// Seconds between the NTP era 0 epoch (1900-01-01) and the Unix epoch.
+const NTP_UNIX_OFFSET: i64 = 2_208_988_800;
+
+/// Format a Diameter `Time` value (NTP seconds) as an RFC 3339 UTC string.
+///
+/// RFC 6733, Section 4.3.1 — "The string MUST contain four octets, in the
+/// same format as the first four bytes are in the NTP timestamp format."
+/// "On 6h 28m 16s UTC, 7 February 2036, the time value will overflow.
+/// Simple Network Time Protocol (SNTP) [RFC5905] describes a procedure to
+/// extend the time to 2104. This procedure MUST be supported by all
+/// Diameter nodes."
+/// <https://www.rfc-editor.org/rfc/rfc6733#section-4.3.1>
+///
+/// The SNTP procedure is the era rule of RFC 4330, Section 3 (carried into
+/// RFC 5905): if the most significant bit is 0, the time is in the range
+/// 2036-2104, counted from 6h 28m 16s UTC on 7 February 2036.
+/// <https://www.rfc-editor.org/rfc/rfc4330#section-3>
+fn format_ntp_time(
+    value: &FieldValue<'_>,
+    _ctx: &FormatContext<'_>,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let FieldValue::U32(secs) = value else {
+        return w.write_all(b"\"\"");
+    };
+    let era = if secs & 0x8000_0000 != 0 {
+        0
+    } else {
+        1i64 << 32
+    };
+    let unix = i64::from(*secs) + era - NTP_UNIX_OFFSET;
+    let days = unix.div_euclid(86_400);
+    let rem = unix.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    write!(
+        w,
+        "\"{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z\"",
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
+    )
+}
+
+/// Convert days since 1970-01-01 to a proleptic Gregorian (year, month, day).
+///
+/// Howard Hinnant's `civil_from_days` algorithm —
+/// <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// `value` descriptor used for `Time` AVPs, rendering NTP seconds as an
+/// RFC 3339 timestamp at serialization time. The raw `U32` is kept.
+static FD_AVP_VALUE_TIME: FieldDescriptor =
+    FieldDescriptor::new("value", "Value", FieldType::U32).with_format_fn(format_ntp_time);
 
 /// Container descriptor for a parsed AVP entry.
 ///
@@ -109,17 +236,8 @@ static FD_AVP: FieldDescriptor = FieldDescriptor {
         let FieldValue::Object(_) = v else {
             return None;
         };
-        let code = children.iter().find_map(|f| match (f.name(), &f.value) {
-            ("code", FieldValue::U32(c)) => Some(*c),
-            _ => None,
-        })?;
-        let vendor_id = children
-            .iter()
-            .find_map(|f| match (f.name(), &f.value) {
-                ("vendor_id", FieldValue::U32(v)) => Some(*v),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let code = child_u32(children, "code")?;
+        let vendor_id = child_u32(children, "vendor_id").unwrap_or(0);
         lookup_avp(vendor_id, code).map(|def| def.name)
     }),
     format_fn: None,
@@ -144,27 +262,14 @@ static AVP_CHILD_FIELDS: &[FieldDescriptor] = &[
         field_type: FieldType::Bytes,
         optional: false,
         children: None,
-        display_fn: Some(|v, siblings| {
-            let FieldValue::U32(rc) = v else { return None };
-            let code =
-                siblings
-                    .iter()
-                    .find(|f| f.name() == "code")
-                    .and_then(|f| match &f.value {
-                        FieldValue::U32(v) => Some(*v),
-                        _ => None,
-                    })?;
-            if code == AVP_CODE_RESULT_CODE {
-                Some(result_code_name(*rc))
-            } else if code == AVP_CODE_EXPERIMENTAL_RESULT_CODE {
-                let name = experimental_result_code_name(*rc);
-                if name != "Unknown" { Some(name) } else { None }
-            } else {
-                None
-            }
-        }),
+        display_fn: Some(avp_value_name),
         format_fn: None,
     },
+    // RFC 6733, Section 4.1 — AVP Flags "V", "M" and "P" bits.
+    // <https://www.rfc-editor.org/rfc/rfc6733#section-4.1>
+    FieldDescriptor::new("flag_vendor", "Vendor-Specific Flag", FieldType::U8),
+    FieldDescriptor::new("flag_mandatory", "Mandatory Flag", FieldType::U8),
+    FieldDescriptor::new("flag_protected", "Protected Flag", FieldType::U8),
 ];
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -232,7 +337,8 @@ fn parse_avp_value<'pkt>(
         AvpType::Integer32 | AvpType::Enumerated if data.len() == 4 => {
             FieldValue::I32(read_be_i32(data, 0).unwrap_or_default())
         }
-        // RFC 6733, Section 4.2 — Unsigned32; Section 4.3.1 — Time (NTP seconds, same wire format).
+        // RFC 6733, Section 4.2 — Unsigned32; Section 4.3.1 — Time (NTP
+        // seconds, same wire format, rendered by `format_ntp_time`).
         AvpType::Unsigned32 | AvpType::Time if data.len() == 4 => {
             FieldValue::U32(read_be_u32(data, 0).unwrap_or_default())
         }
@@ -273,7 +379,13 @@ fn parse_avp_value<'pkt>(
             // The caller should NOT push this return value.
             FieldValue::Array(0..0) // sentinel
         }
-        // Integer64, Float32, Float64: no corresponding FieldValue variant yet — raw bytes.
+        // RFC 7155, Section 4.4.10.5.1 — Framed-IP-Address: an IPv4 address
+        // carried in an OctetString.
+        // <https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.1>
+        AvpType::Ipv4OctetString if data.len() == 4 => {
+            FieldValue::Ipv4Addr(read_ipv4_addr(data, 0).unwrap_or_default())
+        }
+        // Integer64 and unexpected lengths stay raw bytes.
         _ => FieldValue::Bytes(data),
     }
 }
@@ -329,6 +441,17 @@ fn parse_avps<'pkt>(
             FieldValue::U8(avp_flags),
             abs + 4..abs + 5,
         );
+        for (fd, bit) in [
+            (FD_AVP_FLAG_VENDOR, AVP_FLAG_VENDOR),
+            (FD_AVP_FLAG_MANDATORY, AVP_FLAG_MANDATORY),
+            (FD_AVP_FLAG_PROTECTED, AVP_FLAG_PROTECTED),
+        ] {
+            buf.push_field(
+                &AVP_CHILD_FIELDS[fd],
+                FieldValue::U8(u8::from(avp_flags & bit != 0)),
+                abs + 4..abs + 5,
+            );
+        }
         buf.push_field(
             &AVP_CHILD_FIELDS[FD_AVP_LENGTH],
             FieldValue::U32(avp_length as u32),
@@ -381,7 +504,14 @@ fn parse_avps<'pkt>(
                     )
                 })
                 .unwrap_or_else(|| FieldValue::Bytes(data_slice));
-            buf.push_field(&AVP_CHILD_FIELDS[FD_AVP_VALUE], typed_value, data_range);
+            let descriptor = if avp_def.is_some_and(|d| d.avp_type == AvpType::Time)
+                && matches!(typed_value, FieldValue::U32(_))
+            {
+                &FD_AVP_VALUE_TIME
+            } else {
+                &AVP_CHILD_FIELDS[FD_AVP_VALUE]
+            };
+            buf.push_field(descriptor, typed_value, data_range);
         }
 
         buf.end_container(obj_idx);
@@ -407,6 +537,26 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 4006",
         "Diameter Credit-Control Application",
         "https://www.rfc-editor.org/rfc/rfc4006",
+    ),
+    SpecReference::new(
+        "RFC 8506",
+        "Diameter Credit-Control Application",
+        "https://www.rfc-editor.org/rfc/rfc8506",
+    ),
+    SpecReference::new(
+        "RFC 7155",
+        "Diameter Network Access Server Application",
+        "https://www.rfc-editor.org/rfc/rfc7155",
+    ),
+    SpecReference::new(
+        "RFC 4072",
+        "Diameter Extensible Authentication Protocol (EAP) Application",
+        "https://www.rfc-editor.org/rfc/rfc4072",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.061",
+        "Interworking between the Public Land Mobile Network (PLMN) supporting packet based services and Packet Data Networks (PDN)",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.061/",
     ),
     SpecReference::new(
         "3GPP TS 29.212",
@@ -619,6 +769,28 @@ impl Dissector for DiameterDissector {
 
 #[cfg(test)]
 mod tests {
+    //! # RFC 6733 (Diameter) Coverage
+    //!
+    //! | Spec Section         | Description                          | Test                                     |
+    //! |----------------------|--------------------------------------|------------------------------------------|
+    //! | RFC 6733 §3          | Header fields and command flags      | parse_cer_basic, parse_command_flags     |
+    //! | RFC 6733 §3          | Version / length validation          | parse_invalid_version, parse_message_length_* |
+    //! | RFC 6733 §3.1        | Command codes                        | parse_all_command_codes                  |
+    //! | RFC 6733 §4.1        | AVP header, padding, Vendor-ID       | parse_avp_no_vendor, parse_avp_padding, parse_avp_with_vendor |
+    //! | RFC 6733 §4.1        | AVP flags V/M/P split                | parse_avp_flag_bits                      |
+    //! | RFC 6733 §4.2        | Basic AVP data formats               | parse_avp_unsigned32, parse_avp_unsigned64, parse_avp_integer32, parse_avp_octet_string |
+    //! | RFC 6733 §4.3.1      | Address / UTF8String                 | parse_avp_address_ipv4, parse_avp_address_ipv6, parse_avp_utf8_string |
+    //! | RFC 6733 §4.3.1      | Time (NTP seconds, RFC 3339 output)  | parse_avp_time, parse_avp_time_formatted |
+    //! | RFC 6733 §4.3.1      | Enumerated value names               | parse_enumerated_value_names             |
+    //! | RFC 6733 §4.4        | Grouped AVPs                         | parse_avp_grouped, parse_avp_grouped_nested |
+    //! | RFC 6733 §7.1        | Result-Code names                    | parse_avp_result_code_name               |
+    //! | RFC 8506 §8          | Credit-Control AVP names             | parse_new_base_avp_names                 |
+    //! | RFC 7155 §4.4.10.5.1 | Framed-IP-Address                    | parse_nasreq_framed_ip_address           |
+    //! | RFC 4072 §3, §4.1    | Diameter-EAP command, EAP AVPs       | parse_diameter_eap_command_and_applications, parse_new_base_avp_names |
+    //! | TS 29.061 §16a.5     | Gi/SGi 3GPP AVPs                     | parse_3gpp_gi_avps                       |
+    //! | TS 29.272 §7.4       | Experimental-Result-Code names       | parse_experimental_result_code_annotation |
+    //! | —                    | Truncated / malformed AVPs           | parse_truncated_avp, parse_avp_length_too_small |
+
     use super::*;
 
     /// Build a minimal valid Diameter header with no AVPs.
@@ -1417,6 +1589,283 @@ mod tests {
                 Some("DIAMETER_ERROR_UNKNOWN_EPS_SUBSCRIPTION")
             );
         }
+    }
+
+    /// Return the Object range of the `index`-th top-level AVP.
+    fn avp_obj_range(buf: &DissectBuffer<'_>, index: usize) -> core::ops::Range<u32> {
+        let avps = get_avps_range(buf).unwrap().clone();
+        let mut count = 0;
+        let mut idx = avps.start;
+        while idx < avps.end {
+            if let FieldValue::Object(ref r) = buf.fields()[idx as usize].value {
+                if count == index {
+                    return r.clone();
+                }
+                count += 1;
+                idx = r.end;
+            } else {
+                idx += 1;
+            }
+        }
+        panic!("AVP {index} not found");
+    }
+
+    /// Run the `format_fn` of the `value` field of the first AVP.
+    fn format_first_value(buf: &DissectBuffer<'_>) -> String {
+        let obj = avp_obj_range(buf, 0);
+        let field = buf
+            .nested_fields(&obj)
+            .iter()
+            .find(|f| f.name() == "value")
+            .unwrap();
+        let ctx = packet_dissector_core::field::FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        let mut out = Vec::new();
+        (field.descriptor.format_fn.expect("format_fn"))(&field.value, &ctx, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn parse_avp_flag_bits() {
+        // RFC 6733, Section 4.1 — V (0x80), M (0x40), P (0x20).
+        // <https://www.rfc-editor.org/rfc/rfc6733#section-4.1>
+        let avp = make_vendor_avp(1407, 0x40 | 0x20, 10415, b"\x09\xF1\x07");
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "flags"),
+            Some(&FieldValue::U8(0xE0))
+        );
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "flag_vendor"),
+            Some(&FieldValue::U8(1))
+        );
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "flag_mandatory"),
+            Some(&FieldValue::U8(1))
+        );
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "flag_protected"),
+            Some(&FieldValue::U8(1))
+        );
+
+        let avp = make_avp(264, 0x00, b"test");
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        for name in ["flag_vendor", "flag_mandatory", "flag_protected"] {
+            assert_eq!(avp_field_at(&buf, avps, 0, name), Some(&FieldValue::U8(0)));
+        }
+    }
+
+    #[test]
+    fn parse_avp_time_formatted() {
+        // RFC 6733, Section 4.3.1 — NTP seconds since 1900-01-01.
+        // <https://www.rfc-editor.org/rfc/rfc6733#section-4.3.1>
+        // 3_913_056_000 = 2024-01-01T00:00:00Z.
+        let avp = make_avp(55, 0x40, &3_913_056_000u32.to_be_bytes());
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        assert_eq!(format_first_value(&buf), "\"2024-01-01T00:00:00Z\"");
+
+        // MSB clear: era 1, counted from 2036-02-07T06:28:16Z (RFC 4330,
+        // Section 3, referenced by RFC 6733, Section 4.3.1).
+        // <https://www.rfc-editor.org/rfc/rfc4330#section-3>
+        let avp = make_avp(55, 0x40, &1u32.to_be_bytes());
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        assert_eq!(format_first_value(&buf), "\"2036-02-07T06:28:17Z\"");
+    }
+
+    #[test]
+    fn parse_enumerated_value_names() {
+        // RFC 8506, Section 8.3 — CC-Request-Type (416) = INITIAL_REQUEST (1).
+        // <https://www.rfc-editor.org/rfc/rfc8506#section-8.3>
+        let avp = make_avp(416, 0x40, &1u32.to_be_bytes());
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let obj = avp_obj_range(&buf, 0);
+        assert_eq!(
+            avp_field_at(&buf, get_avps_range(&buf).unwrap(), 0, "value"),
+            Some(&FieldValue::I32(1))
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "value_name"),
+            Some("INITIAL_REQUEST")
+        );
+
+        // RFC 6733, Section 8.11 — Auth-Session-State (277) = NO_STATE_MAINTAINED (1).
+        // <https://www.rfc-editor.org/rfc/rfc6733#section-8.11>
+        let avp = make_avp(277, 0x40, &1u32.to_be_bytes());
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let obj = avp_obj_range(&buf, 0);
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "value_name"),
+            Some("NO_STATE_MAINTAINED")
+        );
+
+        // 3GPP TS 29.212, clause 5.3.31 — RAT-Type (1032) = EUTRAN (1004).
+        let avp = make_vendor_avp(1032, 0x80, 10415, &1004u32.to_be_bytes());
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let obj = avp_obj_range(&buf, 0);
+        assert_eq!(
+            buf.resolve_nested_display_name(&obj, "value_name"),
+            Some("EUTRAN")
+        );
+
+        // Unknown enumeration value: no name.
+        let avp = make_avp(416, 0x40, &99u32.to_be_bytes());
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let obj = avp_obj_range(&buf, 0);
+        assert_eq!(buf.resolve_nested_display_name(&obj, "value_name"), None);
+    }
+
+    #[test]
+    fn grouped_avp_name_ignores_nested_vendor_id() {
+        // RFC 8506, Section 8.16 — Multiple-Services-Credit-Control (456,
+        // vendor 0) carrying a 3GPP AVP (RAT-Type, vendor 10415). The parent
+        // label and value names must come from the parent's own header.
+        // <https://www.rfc-editor.org/rfc/rfc8506#section-8.16>
+        let inner = make_vendor_avp(1032, 0x80, 10415, &1004u32.to_be_bytes());
+        let avp = make_avp(456, 0x40, &inner);
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps_range = get_avps_range(&buf).unwrap().clone();
+        let children = buf.nested_fields(&avps_range);
+        let offset = children.iter().position(|f| f.value.is_object()).unwrap();
+        assert_eq!(
+            buf.resolve_container_display_name(avps_range.start + offset as u32),
+            Some("Multiple-Services-Credit-Control")
+        );
+    }
+
+    #[test]
+    fn parse_nasreq_framed_ip_address() {
+        // RFC 7155, Section 4.4.10.5.1 — Framed-IP-Address (8), IPv4 in an
+        // OctetString.
+        // <https://www.rfc-editor.org/rfc/rfc7155#section-4.4.10.5.1>
+        let avp = make_avp(8, 0x40, &[10, 0, 0, 1]);
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "name"),
+            Some(&FieldValue::Str("Framed-IP-Address"))
+        );
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "value"),
+            Some(&FieldValue::Ipv4Addr([10, 0, 0, 1]))
+        );
+        // Not 4 octets: raw bytes.
+        let avp = make_avp(8, 0x40, &[10, 0, 0, 1, 2, 3, 4, 5]);
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "value"),
+            Some(&FieldValue::Bytes(&[10, 0, 0, 1, 2, 3, 4, 5]))
+        );
+    }
+
+    #[test]
+    fn parse_new_base_avp_names() {
+        let cases: &[(u32, &str)] = &[
+            (30, "Called-Station-Id"),
+            (31, "Calling-Station-Id"),
+            (413, "CC-Money"),
+            (430, "Final-Unit-Indication"),
+            (431, "Granted-Service-Unit"),
+            (445, "Unit-Value"),
+            (446, "Used-Service-Unit"),
+            (448, "Validity-Time"),
+            (449, "Final-Unit-Action"),
+            (456, "Multiple-Services-Credit-Control"),
+            (458, "User-Equipment-Info"),
+            (462, "EAP-Payload"),
+            (463, "EAP-Reissued-Payload"),
+            (464, "EAP-Master-Session-Key"),
+            (465, "Accounting-EAP-Auth-Method"),
+        ];
+        for (code, name) in cases {
+            let avp = make_avp(*code, 0x40, &[0, 0, 0, 1]);
+            let data = make_message_with_avp(&avp);
+            let (_, buf) = dissect(&data).unwrap();
+            let avps = get_avps_range(&buf).unwrap();
+            assert_eq!(
+                avp_field_at(&buf, avps, 0, "name"),
+                Some(&FieldValue::Str(name)),
+                "AVP {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_3gpp_gi_avps() {
+        // TS 29.061, clause 16a.5 — 3GPP-RAT-Type (21, vendor 10415).
+        let avp = make_vendor_avp(21, 0x80, 10415, &[0x06]);
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "name"),
+            Some(&FieldValue::Str("3GPP-RAT-Type"))
+        );
+        // 3GPP-IMSI (1) is a UTF8String.
+        let avp = make_vendor_avp(1, 0x80, 10415, b"001010123456789");
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "name"),
+            Some(&FieldValue::Str("3GPP-IMSI"))
+        );
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "value"),
+            Some(&FieldValue::Str("001010123456789"))
+        );
+    }
+
+    #[test]
+    fn parse_diameter_eap_command_and_applications() {
+        // RFC 4072, Section 3.1 / 3.2 — Diameter-EAP-Request/Answer (268).
+        // <https://www.rfc-editor.org/rfc/rfc4072#section-3>
+        let data = make_header(FLAG_REQUEST | FLAG_PROXIABLE, 268, 5, 1, 2);
+        let (_, buf) = dissect(&data).unwrap();
+        let layer = buf.layers().first().unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "command_code_name"),
+            Some("Diameter-EAP-Request")
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "application_id_name"),
+            Some("Diameter EAP")
+        );
+        let data = make_header(FLAG_PROXIABLE, 268, 16777250, 1, 2);
+        let (_, buf) = dissect(&data).unwrap();
+        let layer = buf.layers().first().unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "command_code_name"),
+            Some("Diameter-EAP-Answer")
+        );
+        assert_eq!(
+            buf.resolve_display_name(layer, "application_id_name"),
+            Some("3GPP STa")
+        );
+        let data = make_header(FLAG_REQUEST, 265, 1, 1, 2);
+        let (_, buf) = dissect(&data).unwrap();
+        let layer = buf.layers().first().unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "application_id_name"),
+            Some("NASREQ")
+        );
     }
 
     /// Every dissector in this crate must cite the specifications it

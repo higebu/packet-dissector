@@ -5,6 +5,8 @@
 //! - RFC 950 (updates RFC 792 — Address Mask): <https://www.rfc-editor.org/rfc/rfc950>
 //! - RFC 1191 (Path MTU Discovery — updates Type 3 Code 4): <https://www.rfc-editor.org/rfc/rfc1191>
 //! - RFC 1256 (Router Discovery): <https://www.rfc-editor.org/rfc/rfc1256>
+//! - RFC 1122, Section 3.2.2.1 (Destination Unreachable codes 6-12): <https://www.rfc-editor.org/rfc/rfc1122#section-3.2.2.1>
+//! - RFC 1812, Section 5.2.7.1 (Destination Unreachable codes 13-15): <https://www.rfc-editor.org/rfc/rfc1812#section-5.2.7.1>
 //! - RFC 2521 (ICMP Security Failures / Photuris): <https://www.rfc-editor.org/rfc/rfc2521>
 //! - RFC 4065 (Seamoby Experimental Mobility): <https://www.rfc-editor.org/rfc/rfc4065>
 //! - RFC 4884 (Extended ICMP — adds Length at offset 5 for Types 3/11/12): <https://www.rfc-editor.org/rfc/rfc4884>
@@ -21,6 +23,7 @@ use packet_dissector_core::dissector::{
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::icmp_extension;
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
@@ -88,15 +91,69 @@ static REFERENCES: &[SpecReference] = &[
     ),
 ];
 
-/// Returns a human-readable name for well-known ICMP type values.
+/// Returns a human-readable name for ICMP type values.
+///
+/// Names follow the IANA "ICMP Type Numbers" registry.
+/// <https://www.iana.org/assignments/icmp-parameters>
 fn icmp_type_name(v: u8) -> Option<&'static str> {
     match v {
         0 => Some("Echo Reply"),
         3 => Some("Destination Unreachable"),
+        4 => Some("Source Quench (Deprecated)"),
         5 => Some("Redirect"),
         8 => Some("Echo Request"),
+        9 => Some("Router Advertisement"),
+        10 => Some("Router Solicitation"),
         11 => Some("Time Exceeded"),
         12 => Some("Parameter Problem"),
+        13 => Some("Timestamp"),
+        14 => Some("Timestamp Reply"),
+        15 => Some("Information Request (Deprecated)"),
+        16 => Some("Information Reply (Deprecated)"),
+        17 => Some("Address Mask Request (Deprecated)"),
+        18 => Some("Address Mask Reply (Deprecated)"),
+        40 => Some("Photuris"),
+        41 => Some("ICMP messages utilized by experimental mobility protocols such as Seamoby"),
+        42 => Some("Extended Echo Request"),
+        43 => Some("Extended Echo Reply"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for an ICMP code of the given type.
+///
+/// Names follow the IANA "Code Fields" registry for Types 3, 5, 11 and 12
+/// (RFC 792; RFC 1122, Section 3.2.2.1; RFC 1812, Section 5.2.7.1;
+/// RFC 1108).
+/// <https://www.iana.org/assignments/icmp-parameters>
+/// <https://www.rfc-editor.org/rfc/rfc1812#section-5.2.7.1>
+fn icmp_code_name(icmp_type: u8, code: u8) -> Option<&'static str> {
+    match (icmp_type, code) {
+        (3, 0) => Some("Net Unreachable"),
+        (3, 1) => Some("Host Unreachable"),
+        (3, 2) => Some("Protocol Unreachable"),
+        (3, 3) => Some("Port Unreachable"),
+        (3, 4) => Some("Fragmentation Needed and Don't Fragment was Set"),
+        (3, 5) => Some("Source Route Failed"),
+        (3, 6) => Some("Destination Network Unknown"),
+        (3, 7) => Some("Destination Host Unknown"),
+        (3, 8) => Some("Source Host Isolated"),
+        (3, 9) => Some("Communication with Destination Network is Administratively Prohibited"),
+        (3, 10) => Some("Communication with Destination Host is Administratively Prohibited"),
+        (3, 11) => Some("Destination Network Unreachable for Type of Service"),
+        (3, 12) => Some("Destination Host Unreachable for Type of Service"),
+        (3, 13) => Some("Communication Administratively Prohibited"),
+        (3, 14) => Some("Host Precedence Violation"),
+        (3, 15) => Some("Precedence cutoff in effect"),
+        (5, 0) => Some("Redirect Datagram for the Network (or subnet)"),
+        (5, 1) => Some("Redirect Datagram for the Host"),
+        (5, 2) => Some("Redirect Datagram for the Type of Service and Network"),
+        (5, 3) => Some("Redirect Datagram for the Type of Service and Host"),
+        (11, 0) => Some("Time to Live exceeded in Transit"),
+        (11, 1) => Some("Fragment Reassembly Time Exceeded"),
+        (12, 0) => Some("Pointer indicates the error"),
+        (12, 1) => Some("Missing a Required Option"),
+        (12, 2) => Some("Bad Length"),
         _ => None,
     }
 }
@@ -139,42 +196,6 @@ const FD_PHOTURIS_RESERVED: usize = 25;
 const FD_PHOTURIS_POINTER: usize = 26;
 const FD_EXTENSIONS: usize = 27;
 
-// Minimum ICMP Extension Header size per RFC 4884, Section 7.
-// <https://www.rfc-editor.org/rfc/rfc4884#section-7>
-const EXT_HEADER_SIZE: usize = 4;
-// Minimum ICMP Extension Object header size per RFC 4884, Section 7.
-const EXT_OBJECT_HEADER_SIZE: usize = 4;
-// Minimum padded original datagram length when extensions are present, per
-// RFC 4884, Section 5.5. <https://www.rfc-editor.org/rfc/rfc4884#section-5.5>
-const EXT_COMPAT_MIN_ORIG_DATAGRAM: usize = 128;
-
-// EXTENSION_CHILDREN indices
-const EXT_VERSION: usize = 0;
-const EXT_RESERVED: usize = 1;
-const EXT_CHECKSUM: usize = 2;
-const EXT_OBJECTS: usize = 3;
-
-// EXTENSION_OBJECT_CHILDREN indices
-const EOBJ_LENGTH: usize = 0;
-const EOBJ_CLASS_NUM: usize = 1;
-const EOBJ_C_TYPE: usize = 2;
-const EOBJ_PAYLOAD: usize = 3;
-const EOBJ_MPLS_LABELS: usize = 4;
-const EOBJ_INTERFACE_ROLE: usize = 5;
-const EOBJ_IF_INDEX: usize = 6;
-const EOBJ_AFI: usize = 7;
-const EOBJ_ADDRESS_LENGTH: usize = 8;
-const EOBJ_IPV4_ADDRESS: usize = 9;
-const EOBJ_IPV6_ADDRESS: usize = 10;
-const EOBJ_INTERFACE_NAME: usize = 11;
-const EOBJ_MTU: usize = 12;
-
-// MPLS_LABEL_CHILDREN indices
-const MPLS_LABEL: usize = 0;
-const MPLS_TC: usize = 1;
-const MPLS_S: usize = 2;
-const MPLS_TTL: usize = 3;
-
 const IPC_VERSION: usize = 0;
 const IPC_IHL: usize = 1;
 const IPC_TOTAL_LENGTH: usize = 2;
@@ -209,48 +230,6 @@ static ROUTER_ENTRY_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("preference_level", "Preference Level", FieldType::I32),
 ];
 
-// RFC 4950, Section 3 — MPLS Label Stack Entry (4 octets).
-// <https://www.rfc-editor.org/rfc/rfc4950#section-3>
-static MPLS_LABEL_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("label", "Label", FieldType::U32),
-    FieldDescriptor::new("tc", "Traffic Class", FieldType::U8),
-    FieldDescriptor::new("s", "Bottom of Stack", FieldType::U8),
-    FieldDescriptor::new("ttl", "Time to Live", FieldType::U8),
-];
-
-// RFC 4884, Section 7.1 — ICMP Extension Object Header, plus per-class payload
-// fields parsed out by this dissector (RFC 4950 Class 1, RFC 5837 Class 2,
-// RFC 8335 Section 2.1 Class 3). Only the first three entries are always present;
-// the remainder are conditional on class/c_type.
-// <https://www.rfc-editor.org/rfc/rfc4884#section-7.1>
-static EXTENSION_OBJECT_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("length", "Length", FieldType::U16),
-    FieldDescriptor::new("class_num", "Class-Num", FieldType::U8),
-    FieldDescriptor::new("c_type", "C-Type", FieldType::U8),
-    FieldDescriptor::new("payload", "Payload", FieldType::Bytes).optional(),
-    FieldDescriptor::new("mpls_labels", "MPLS Label Stack", FieldType::Array)
-        .optional()
-        .with_children(MPLS_LABEL_CHILDREN),
-    FieldDescriptor::new("interface_role", "Interface Role", FieldType::U8).optional(),
-    FieldDescriptor::new("if_index", "ifIndex", FieldType::U32).optional(),
-    FieldDescriptor::new("afi", "Address Family Identifier", FieldType::U16).optional(),
-    FieldDescriptor::new("address_length", "Address Length", FieldType::U8).optional(),
-    FieldDescriptor::new("ipv4_address", "IPv4 Address", FieldType::Ipv4Addr).optional(),
-    FieldDescriptor::new("ipv6_address", "IPv6 Address", FieldType::Ipv6Addr).optional(),
-    FieldDescriptor::new("interface_name", "Interface Name", FieldType::Bytes).optional(),
-    FieldDescriptor::new("mtu", "MTU", FieldType::U32).optional(),
-];
-
-// RFC 4884, Section 7 — ICMP Extension Header fields.
-// <https://www.rfc-editor.org/rfc/rfc4884#section-7>
-static EXTENSION_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("version", "Version", FieldType::U8),
-    FieldDescriptor::new("reserved", "Reserved", FieldType::U16),
-    FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
-    FieldDescriptor::new("objects", "Objects", FieldType::Array)
-        .with_children(EXTENSION_OBJECT_CHILDREN),
-];
-
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor {
         name: "type",
@@ -264,7 +243,21 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         }),
         format_fn: None,
     },
-    FieldDescriptor::new("code", "Code", FieldType::U8),
+    FieldDescriptor {
+        name: "code",
+        display_name: "Code",
+        field_type: FieldType::U8,
+        optional: false,
+        children: None,
+        display_fn: Some(|v, siblings| match v {
+            FieldValue::U8(c) => siblings.iter().find_map(|f| match (f.name(), &f.value) {
+                ("type", FieldValue::U8(t)) => icmp_code_name(*t, *c),
+                _ => None,
+            }),
+            _ => None,
+        }),
+        format_fn: None,
+    },
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
     FieldDescriptor::new("identifier", "Identifier", FieldType::U16).optional(),
     FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U16).optional(),
@@ -303,7 +296,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // <https://www.rfc-editor.org/rfc/rfc4884#section-7>
     FieldDescriptor::new("extensions", "ICMP Extension Structure", FieldType::Object)
         .optional()
-        .with_children(EXTENSION_CHILDREN),
+        .with_children(icmp_extension::EXTENSION_CHILDREN),
 ];
 
 /// ICMP dissector.
@@ -400,352 +393,6 @@ fn push_invoking_packet<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], o
     }
 }
 
-/// Parse an ICMP Extension Structure (RFC 4884, Section 7) starting at `data[0..]`.
-///
-/// The caller is responsible for locating the start of the Extension Structure
-/// (after the padded original datagram for Types 3/11/12, or immediately after
-/// the 8-byte header for Type 42 per RFC 8335, Section 2).
-///
-/// Silently stops on malformed input (length fields out of range, truncated
-/// objects) per Postel's Law — the ICMP message itself remains valid.
-///
-/// RFC 4884, Section 7 — <https://www.rfc-editor.org/rfc/rfc4884#section-7>
-fn push_extensions<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
-    if data.len() < EXT_HEADER_SIZE {
-        return;
-    }
-    // RFC 4884, Section 7 — Version (4 bits) + Reserved (12 bits) + Checksum (16 bits).
-    let version = data[0] >> 4;
-    let reserved = (u16::from(data[0] & 0x0F) << 8) | u16::from(data[1]);
-    let checksum = read_be_u16(data, 2).unwrap_or_default();
-
-    let ext_idx = buf.begin_container(
-        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
-        FieldValue::Object(0..0),
-        offset..offset + data.len(),
-    );
-    buf.push_field(
-        &EXTENSION_CHILDREN[EXT_VERSION],
-        FieldValue::U8(version),
-        offset..offset + 1,
-    );
-    buf.push_field(
-        &EXTENSION_CHILDREN[EXT_RESERVED],
-        FieldValue::U16(reserved),
-        offset..offset + 2,
-    );
-    buf.push_field(
-        &EXTENSION_CHILDREN[EXT_CHECKSUM],
-        FieldValue::U16(checksum),
-        offset + 2..offset + 4,
-    );
-
-    let objects_idx = buf.begin_container(
-        &EXTENSION_CHILDREN[EXT_OBJECTS],
-        FieldValue::Array(0..0),
-        offset + EXT_HEADER_SIZE..offset + data.len(),
-    );
-    let mut pos = EXT_HEADER_SIZE;
-    while pos + EXT_OBJECT_HEADER_SIZE <= data.len() {
-        // RFC 4884, Section 7.1 — Object header: Length(u16) + Class-Num(u8) + C-Type(u8).
-        let obj_len = read_be_u16(data, pos).unwrap_or_default() as usize;
-        let class_num = data[pos + 2];
-        let c_type = data[pos + 3];
-        // Length covers the whole Object header plus payload (minimum 4 octets).
-        if obj_len < EXT_OBJECT_HEADER_SIZE || pos + obj_len > data.len() {
-            break;
-        }
-        let body = &data[pos + EXT_OBJECT_HEADER_SIZE..pos + obj_len];
-        let body_offset = offset + pos + EXT_OBJECT_HEADER_SIZE;
-        let c_type_offset = offset + pos + 3;
-
-        let obj_idx = buf.begin_container(
-            &EXTENSION_CHILDREN[EXT_OBJECTS],
-            FieldValue::Object(0..0),
-            offset + pos..offset + pos + obj_len,
-        );
-        buf.push_field(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_LENGTH],
-            FieldValue::U16(obj_len as u16),
-            offset + pos..offset + pos + 2,
-        );
-        buf.push_field(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_CLASS_NUM],
-            FieldValue::U8(class_num),
-            offset + pos + 2..offset + pos + 3,
-        );
-        buf.push_field(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_C_TYPE],
-            FieldValue::U8(c_type),
-            offset + pos + 3..offset + pos + 4,
-        );
-
-        match (class_num, c_type) {
-            // RFC 4950, Section 3 — MPLS Label Stack (Class-Num 1, C-Type 1).
-            // <https://www.rfc-editor.org/rfc/rfc4950#section-3>
-            (1, 1) => push_mpls_labels(buf, body, body_offset),
-            // RFC 5837, Section 4 — Interface Information (Class-Num 2).
-            // C-Type itself encodes Role + sub-object presence flags.
-            // <https://www.rfc-editor.org/rfc/rfc5837#section-4>
-            (2, _) => push_interface_info(buf, body, body_offset, c_type, c_type_offset),
-            // RFC 8335, Section 2.1 — Interface Identification (Class-Num 3).
-            // <https://www.rfc-editor.org/rfc/rfc8335#section-2.1>
-            (3, _) => push_interface_id(buf, body, body_offset, c_type),
-            _ => {
-                if !body.is_empty() {
-                    buf.push_field(
-                        &EXTENSION_OBJECT_CHILDREN[EOBJ_PAYLOAD],
-                        FieldValue::Bytes(body),
-                        body_offset..body_offset + body.len(),
-                    );
-                }
-            }
-        }
-        buf.end_container(obj_idx);
-        pos += obj_len;
-    }
-    buf.end_container(objects_idx);
-    buf.end_container(ext_idx);
-}
-
-/// Parse an RFC 4950 MPLS Label Stack Object body as an array of 4-octet LSEs.
-///
-/// Each entry: Label (20 bits) | TC (3 bits) | S (1 bit) | TTL (8 bits).
-/// <https://www.rfc-editor.org/rfc/rfc4950#section-3>
-fn push_mpls_labels<'pkt>(buf: &mut DissectBuffer<'pkt>, body: &'pkt [u8], offset: usize) {
-    let arr_idx = buf.begin_container(
-        &EXTENSION_OBJECT_CHILDREN[EOBJ_MPLS_LABELS],
-        FieldValue::Array(0..0),
-        offset..offset + body.len(),
-    );
-    let mut p = 0usize;
-    while p + 4 <= body.len() {
-        let b0 = u32::from(body[p]);
-        let b1 = u32::from(body[p + 1]);
-        let b2 = u32::from(body[p + 2]);
-        // Label occupies the high 20 bits of octets 0..3.
-        let label = (b0 << 12) | (b1 << 4) | (b2 >> 4);
-        let tc = (body[p + 2] >> 1) & 0x07;
-        let s = body[p + 2] & 0x01;
-        let ttl = body[p + 3];
-
-        let entry_idx = buf.begin_container(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_MPLS_LABELS],
-            FieldValue::Object(0..0),
-            offset + p..offset + p + 4,
-        );
-        buf.push_field(
-            &MPLS_LABEL_CHILDREN[MPLS_LABEL],
-            FieldValue::U32(label),
-            offset + p..offset + p + 3,
-        );
-        buf.push_field(
-            &MPLS_LABEL_CHILDREN[MPLS_TC],
-            FieldValue::U8(tc),
-            offset + p + 2..offset + p + 3,
-        );
-        buf.push_field(
-            &MPLS_LABEL_CHILDREN[MPLS_S],
-            FieldValue::U8(s),
-            offset + p + 2..offset + p + 3,
-        );
-        buf.push_field(
-            &MPLS_LABEL_CHILDREN[MPLS_TTL],
-            FieldValue::U8(ttl),
-            offset + p + 3..offset + p + 4,
-        );
-        buf.end_container(entry_idx);
-        p += 4;
-    }
-    buf.end_container(arr_idx);
-}
-
-/// Parse an RFC 5837 Interface Information Object body.
-///
-/// The C-Type byte itself encodes the Interface Role (bits 0-1) and four
-/// presence flags: ifIndex (bit 4), IP Address (bit 5), Interface Name (bit 6),
-/// MTU (bit 7). Sub-objects appear in that fixed order.
-///
-/// RFC 5837, Section 4 — <https://www.rfc-editor.org/rfc/rfc5837#section-4>
-fn push_interface_info<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    body: &'pkt [u8],
-    body_offset: usize,
-    c_type: u8,
-    c_type_offset: usize,
-) {
-    // RFC 5837, Section 4.1 — Interface Role: bits 0-1 of the C-Type byte
-    // (bit 0 = MSB; i.e. (c_type >> 6) & 0x03).
-    let role = (c_type >> 6) & 0x03;
-    let has_ifindex = (c_type & 0x08) != 0;
-    let has_addr = (c_type & 0x04) != 0;
-    let has_name = (c_type & 0x02) != 0;
-    let has_mtu = (c_type & 0x01) != 0;
-
-    buf.push_field(
-        &EXTENSION_OBJECT_CHILDREN[EOBJ_INTERFACE_ROLE],
-        FieldValue::U8(role),
-        c_type_offset..c_type_offset + 1,
-    );
-
-    let mut p = 0usize;
-    if has_ifindex {
-        if p + 4 > body.len() {
-            return;
-        }
-        let ifindex = read_be_u32(body, p).unwrap_or_default();
-        buf.push_field(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_IF_INDEX],
-            FieldValue::U32(ifindex),
-            body_offset + p..body_offset + p + 4,
-        );
-        p += 4;
-    }
-    if has_addr {
-        // RFC 5837, Section 4.2 — IP Address Sub-Object: AFI(u16) + Reserved(u16) + Address.
-        if p + 4 > body.len() {
-            return;
-        }
-        let afi = read_be_u16(body, p).unwrap_or_default();
-        buf.push_field(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_AFI],
-            FieldValue::U16(afi),
-            body_offset + p..body_offset + p + 2,
-        );
-        p += 4; // skip AFI + Reserved
-        match afi {
-            // IANA Address Family Numbers: 1 = IPv4, 2 = IPv6.
-            1 => {
-                if p + 4 > body.len() {
-                    return;
-                }
-                let addr = [body[p], body[p + 1], body[p + 2], body[p + 3]];
-                buf.push_field(
-                    &EXTENSION_OBJECT_CHILDREN[EOBJ_IPV4_ADDRESS],
-                    FieldValue::Ipv4Addr(addr),
-                    body_offset + p..body_offset + p + 4,
-                );
-                p += 4;
-            }
-            2 => {
-                if p + 16 > body.len() {
-                    return;
-                }
-                let mut addr = [0u8; 16];
-                addr.copy_from_slice(&body[p..p + 16]);
-                buf.push_field(
-                    &EXTENSION_OBJECT_CHILDREN[EOBJ_IPV6_ADDRESS],
-                    FieldValue::Ipv6Addr(addr),
-                    body_offset + p..body_offset + p + 16,
-                );
-                p += 16;
-            }
-            _ => return,
-        }
-    }
-    if has_name {
-        // RFC 5837, Section 4.5 — Interface Name Sub-Object: 1-octet Length
-        // (including itself, multiple of 4, max 64), then name bytes padded with NULs.
-        if p >= body.len() {
-            return;
-        }
-        let name_total = body[p] as usize;
-        if name_total < 2 || p + name_total > body.len() {
-            return;
-        }
-        let name_bytes = &body[p + 1..p + name_total];
-        buf.push_field(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_INTERFACE_NAME],
-            FieldValue::Bytes(name_bytes),
-            body_offset + p + 1..body_offset + p + name_total,
-        );
-        p += name_total;
-    }
-    if has_mtu {
-        // RFC 5837, Section 4.6 — MTU Sub-Object: 32-bit unsigned MTU.
-        if p + 4 > body.len() {
-            return;
-        }
-        let mtu = read_be_u32(body, p).unwrap_or_default();
-        buf.push_field(
-            &EXTENSION_OBJECT_CHILDREN[EOBJ_MTU],
-            FieldValue::U32(mtu),
-            body_offset + p..body_offset + p + 4,
-        );
-    }
-}
-
-/// Parse an RFC 8335 Interface Identification Object body (Class-Num 3).
-///
-/// - C-Type 1: interface name (raw bytes, NUL-padded to 32-bit boundary).
-/// - C-Type 2: 32-bit ifIndex.
-/// - C-Type 3: AFI(u16) + AddrLen(u8) + Reserved(u8) + Address (NUL-padded).
-///
-/// <https://www.rfc-editor.org/rfc/rfc8335#section-2.1>
-fn push_interface_id<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    body: &'pkt [u8],
-    body_offset: usize,
-    c_type: u8,
-) {
-    match c_type {
-        1 if !body.is_empty() => {
-            buf.push_field(
-                &EXTENSION_OBJECT_CHILDREN[EOBJ_INTERFACE_NAME],
-                FieldValue::Bytes(body),
-                body_offset..body_offset + body.len(),
-            );
-        }
-        2 if body.len() >= 4 => {
-            let ifindex = read_be_u32(body, 0).unwrap_or_default();
-            buf.push_field(
-                &EXTENSION_OBJECT_CHILDREN[EOBJ_IF_INDEX],
-                FieldValue::U32(ifindex),
-                body_offset..body_offset + 4,
-            );
-        }
-        3 => {
-            if body.len() < 4 {
-                return;
-            }
-            let afi = read_be_u16(body, 0).unwrap_or_default();
-            let addr_len = body[2];
-            buf.push_field(
-                &EXTENSION_OBJECT_CHILDREN[EOBJ_AFI],
-                FieldValue::U16(afi),
-                body_offset..body_offset + 2,
-            );
-            buf.push_field(
-                &EXTENSION_OBJECT_CHILDREN[EOBJ_ADDRESS_LENGTH],
-                FieldValue::U8(addr_len),
-                body_offset + 2..body_offset + 3,
-            );
-            match afi {
-                // IANA AFI: 1 = IPv4 (4 octets), 2 = IPv6 (16 octets).
-                1 if addr_len as usize >= 4 && body.len() >= 8 => {
-                    let a = [body[4], body[5], body[6], body[7]];
-                    buf.push_field(
-                        &EXTENSION_OBJECT_CHILDREN[EOBJ_IPV4_ADDRESS],
-                        FieldValue::Ipv4Addr(a),
-                        body_offset + 4..body_offset + 8,
-                    );
-                }
-                2 if addr_len as usize >= 16 && body.len() >= 20 => {
-                    let mut a = [0u8; 16];
-                    a.copy_from_slice(&body[4..20]);
-                    buf.push_field(
-                        &EXTENSION_OBJECT_CHILDREN[EOBJ_IPV6_ADDRESS],
-                        FieldValue::Ipv6Addr(a),
-                        body_offset + 4..body_offset + 20,
-                    );
-                }
-                _ => {}
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Compute where the RFC 4884 Extension Structure starts for an error message
 /// (Types 3, 11, 12). Returns `Some(offset)` when the Length field indicates
 /// extensions follow, or `None` when there are no extensions to parse.
@@ -754,17 +401,10 @@ fn push_interface_id<'pkt>(
 /// datagram MUST be padded to at least 128 octets before the extensions.
 /// <https://www.rfc-editor.org/rfc/rfc4884#section-5.5>
 fn rfc4884_extension_offset(data_len: usize, length: u8) -> Option<usize> {
-    if length == 0 {
-        return None;
-    }
-    let orig_len = (length as usize) * 4;
-    let padded = orig_len.max(EXT_COMPAT_MIN_ORIG_DATAGRAM);
-    let ext_start = HEADER_SIZE + padded;
-    if ext_start + EXT_HEADER_SIZE <= data_len {
-        Some(ext_start)
-    } else {
-        None
-    }
+    // RFC 4884, Section 4 — for ICMPv4 "the length attribute represents
+    // 32-bit words".
+    // <https://www.rfc-editor.org/rfc/rfc4884#section-4>
+    icmp_extension::extension_structure_start(HEADER_SIZE, length as usize * 4, data_len)
 }
 
 impl Dissector for IcmpDissector {
@@ -877,7 +517,12 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
                 if let Some(ext_start) = rfc4884_extension_offset(data.len(), length) {
-                    push_extensions(buf, &data[ext_start..], offset + ext_start);
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[ext_start..],
+                        offset + ext_start,
+                    );
                 }
             }
             // RFC 792 / RFC 6633 — Source Quench (4), deprecated.
@@ -903,7 +548,12 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
                 if let Some(ext_start) = rfc4884_extension_offset(data.len(), length) {
-                    push_extensions(buf, &data[ext_start..], offset + ext_start);
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[ext_start..],
+                        offset + ext_start,
+                    );
                 }
             }
             // RFC 792 — Redirect (5)
@@ -943,7 +593,12 @@ impl Dissector for IcmpDissector {
                     push_invoking_packet(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
                 }
                 if let Some(ext_start) = rfc4884_extension_offset(data.len(), length) {
-                    push_extensions(buf, &data[ext_start..], offset + ext_start);
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[ext_start..],
+                        offset + ext_start,
+                    );
                 }
             }
             // RFC 1256 — Router Advertisement (9)
@@ -1154,7 +809,12 @@ impl Dissector for IcmpDissector {
                     offset + 7..offset + 8,
                 );
                 if data.len() > HEADER_SIZE {
-                    push_extensions(buf, &data[HEADER_SIZE..], offset + HEADER_SIZE);
+                    icmp_extension::push_extension_structure(
+                        buf,
+                        &FIELD_DESCRIPTORS[FD_EXTENSIONS],
+                        &data[HEADER_SIZE..],
+                        offset + HEADER_SIZE,
+                    );
                 }
             }
             // RFC 8335, Section 3 — Extended Echo Reply (43)
@@ -1247,6 +907,12 @@ mod tests {
     //! | RFC 8335 §2.1 Interface ID         | Class 3 C-Type 3 (by IPv4 Address)     | parse_extension_interface_id_class3_by_address_ipv4 |
     //! | RFC 8335 §2.1 Interface ID         | Class 3 C-Type 3 (by IPv6 Address)     | parse_extension_interface_id_class3_by_address_ipv6 |
     //! | RFC 8335 §2 + RFC 4884             | Type 42 body IS Extension Structure    | parse_extended_echo_request_with_interface_id_extension |
+    //! | IANA ICMP Type Numbers             | Names for every parsed type            | icmp_type_names                                |
+    //! | RFC 792 / RFC 1122 / RFC 1812      | Destination Unreachable code names     | icmp_code_names_destination_unreachable        |
+    //! | RFC 792                            | Redirect / Time Exceeded code names    | icmp_code_names_redirect_time_exceeded         |
+    //! | RFC 792 / RFC 1108                 | Parameter Problem code names           | icmp_code_names_parameter_problem              |
+    //! | —                                  | Unknown code has no name               | icmp_code_name_unknown                         |
+    //! | RFC 4884 §4.3                      | Parameter Problem + Extension Structure| parse_parameter_problem_with_extensions        |
 
     use super::*;
 
@@ -2288,5 +1954,121 @@ mod tests {
             assert!(r.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Network));
+    }
+
+    fn code_name_of(icmp_type: u8, code: u8) -> Option<&'static str> {
+        let mut pkt = vec![icmp_type, code, 0, 0, 0, 0, 0, 0];
+        pkt.resize(20, 0);
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        buf.resolve_display_name(layer, "code_name")
+    }
+
+    #[test]
+    fn icmp_type_names() {
+        // IANA "ICMP Type Numbers" registry.
+        let cases: &[(u8, &str)] = &[
+            (4, "Source Quench (Deprecated)"),
+            (9, "Router Advertisement"),
+            (10, "Router Solicitation"),
+            (13, "Timestamp"),
+            (14, "Timestamp Reply"),
+            (15, "Information Request (Deprecated)"),
+            (16, "Information Reply (Deprecated)"),
+            (17, "Address Mask Request (Deprecated)"),
+            (18, "Address Mask Reply (Deprecated)"),
+            (40, "Photuris"),
+            (
+                41,
+                "ICMP messages utilized by experimental mobility protocols such as Seamoby",
+            ),
+            (42, "Extended Echo Request"),
+            (43, "Extended Echo Reply"),
+        ];
+        for &(t, name) in cases {
+            let mut pkt = vec![t, 0, 0, 0, 0, 0, 0, 0];
+            pkt.resize(20, 0);
+            let mut buf = DissectBuffer::new();
+            IcmpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert_eq!(
+                buf.resolve_display_name(layer, "type_name"),
+                Some(name),
+                "type {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn icmp_code_names_destination_unreachable() {
+        // RFC 792 (codes 0-5), RFC 1122 Section 3.2.2.1 (6-12), RFC 1812
+        // Section 5.2.7.1 (13-15).
+        assert_eq!(code_name_of(3, 0), Some("Net Unreachable"));
+        assert_eq!(code_name_of(3, 3), Some("Port Unreachable"));
+        assert_eq!(
+            code_name_of(3, 4),
+            Some("Fragmentation Needed and Don't Fragment was Set")
+        );
+        assert_eq!(code_name_of(3, 7), Some("Destination Host Unknown"));
+        assert_eq!(
+            code_name_of(3, 13),
+            Some("Communication Administratively Prohibited")
+        );
+        assert_eq!(code_name_of(3, 15), Some("Precedence cutoff in effect"));
+    }
+
+    #[test]
+    fn icmp_code_names_redirect_time_exceeded() {
+        assert_eq!(code_name_of(5, 1), Some("Redirect Datagram for the Host"));
+        assert_eq!(
+            code_name_of(11, 0),
+            Some("Time to Live exceeded in Transit")
+        );
+        assert_eq!(
+            code_name_of(11, 1),
+            Some("Fragment Reassembly Time Exceeded")
+        );
+    }
+
+    #[test]
+    fn icmp_code_names_parameter_problem() {
+        assert_eq!(code_name_of(12, 0), Some("Pointer indicates the error"));
+        assert_eq!(code_name_of(12, 1), Some("Missing a Required Option"));
+        assert_eq!(code_name_of(12, 2), Some("Bad Length"));
+    }
+
+    #[test]
+    fn icmp_code_name_unknown() {
+        assert_eq!(code_name_of(3, 16), None);
+        assert_eq!(code_name_of(0, 0), None);
+    }
+
+    #[test]
+    fn icmp_code_names_all_entries() {
+        // Every entry of the IANA code tables resolves to a name.
+        for code in 0..=15u8 {
+            assert!(code_name_of(3, code).is_some(), "type 3 code {code}");
+        }
+        for code in 0..=3u8 {
+            assert!(code_name_of(5, code).is_some(), "type 5 code {code}");
+        }
+        assert_eq!(code_name_of(5, 4), None);
+    }
+
+    #[test]
+    fn parse_parameter_problem_with_extensions() {
+        // RFC 4884, Section 4.3 — Parameter Problem with a Length attribute
+        // (32 words = 128 octets) and an Extension Structure.
+        let mut pkt = vec![12, 0, 0, 0, 20, 32, 0, 0];
+        pkt.extend_from_slice(&[0u8; 128]);
+        pkt.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]);
+        let mut buf = DissectBuffer::new();
+        IcmpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert_eq!(
+            buf.field_by_name(layer, "extensions").unwrap().range,
+            136..140
+        );
     }
 }

@@ -20,3 +20,20 @@ fn zero_alloc_dissect_http_request() {
     });
     assert_eq!(allocs, 0, "HTTP dissect allocated {allocs} times");
 }
+
+#[test]
+fn zero_alloc_dissect_http_chunked_many_headers() {
+    let mut raw = b"HTTP/1.1 200 OK\r\n".to_vec();
+    for _ in 0..100 {
+        raw.extend_from_slice(b"X-H: caf\xe9\r\n");
+    }
+    raw.extend_from_slice(b"Transfer-Encoding: chunked\r\n\r\n5;x=y\r\nhello\r\n0\r\nT: 1\r\n\r\n");
+    let mut buf = DissectBuffer::new();
+    HttpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        HttpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "HTTP chunked dissect allocated {allocs} times");
+}

@@ -1,6 +1,6 @@
 # packet-dissector-vxlan
 
-VXLAN (RFC 7348) dissector for packet-dissector
+VXLAN (RFC 7348, VXLAN-GBP) and VXLAN-GPE dissectors for packet-dissector
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
 ecosystem. It is used automatically when you enable the `vxlan` feature flag

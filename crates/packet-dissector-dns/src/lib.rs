@@ -17,45 +17,179 @@
 //! - RFC 5155 (NSEC3): <https://www.rfc-editor.org/rfc/rfc5155>
 //! - RFC 7344 (CDS/CDNSKEY records): <https://www.rfc-editor.org/rfc/rfc7344>
 //! - RFC 9460 (SVCB/HTTPS records): <https://www.rfc-editor.org/rfc/rfc9460>
+//! - RFC 9461 (SVCB "dohpath"): <https://www.rfc-editor.org/rfc/rfc9461>
+//! - RFC 9848 (SVCB "ech"): <https://www.rfc-editor.org/rfc/rfc9848>
+//! - RFC 5001 (EDNS NSID): <https://www.rfc-editor.org/rfc/rfc5001>
+//! - RFC 6975 (EDNS DAU/DHU/N3U): <https://www.rfc-editor.org/rfc/rfc6975>
+//! - RFC 7314 (EDNS EXPIRE): <https://www.rfc-editor.org/rfc/rfc7314>
+//! - RFC 7830 (EDNS Padding): <https://www.rfc-editor.org/rfc/rfc7830>
+//! - RFC 7871 (EDNS Client Subnet): <https://www.rfc-editor.org/rfc/rfc7871>
+//! - RFC 7873 (DNS Cookies): <https://www.rfc-editor.org/rfc/rfc7873>
+//! - RFC 8145 (EDNS edns-key-tag): <https://www.rfc-editor.org/rfc/rfc8145>
+//! - RFC 8914 (Extended DNS Errors): <https://www.rfc-editor.org/rfc/rfc8914>
+//! - RFC 9567 (DNS Error Reporting, Report-Channel): <https://www.rfc-editor.org/rfc/rfc9567>
+//! - RFC 9660 (EDNS ZONEVERSION): <https://www.rfc-editor.org/rfc/rfc9660>
+//! - RFC 4034 (DNSSEC RR formats, type bit maps): <https://www.rfc-editor.org/rfc/rfc4034>
+//! - RFC 1876 (LOC record): <https://www.rfc-editor.org/rfc/rfc1876>
+//! - RFC 2930 (TKEY record): <https://www.rfc-editor.org/rfc/rfc2930>
+//! - RFC 4025 (IPSECKEY record): <https://www.rfc-editor.org/rfc/rfc4025>
+//! - RFC 4398 (CERT record): <https://www.rfc-editor.org/rfc/rfc4398>
+//! - RFC 4701 (DHCID record): <https://www.rfc-editor.org/rfc/rfc4701>
+//! - RFC 7043 (EUI48/EUI64 records): <https://www.rfc-editor.org/rfc/rfc7043>
+//! - RFC 7477 (CSYNC record): <https://www.rfc-editor.org/rfc/rfc7477>
+//! - RFC 7553 (URI record): <https://www.rfc-editor.org/rfc/rfc7553>
+//! - RFC 7929 (OPENPGPKEY record): <https://www.rfc-editor.org/rfc/rfc7929>
+//! - RFC 8482 (HINFO answers to ANY): <https://www.rfc-editor.org/rfc/rfc8482>
+//! - RFC 8945 (TSIG record): <https://www.rfc-editor.org/rfc/rfc8945>
+//! - RFC 8976 (ZONEMD record): <https://www.rfc-editor.org/rfc/rfc8976>
+//! - RFC 8490 (DNS Stateful Operations): <https://www.rfc-editor.org/rfc/rfc8490>
+//! - RFC 2136 (DNS UPDATE): <https://www.rfc-editor.org/rfc/rfc2136>
+//! - IANA DNS Parameters: <https://www.iana.org/assignments/dns-parameters/>
+//!
+//! ## UPDATE messages
+//!
+//! For opcode 5 (UPDATE), RFC 2136, Section 2 —
+//! <https://www.rfc-editor.org/rfc/rfc2136#section-2> — renames the four
+//! sections to Zone, Prerequisite, Update and Additional Data. The
+//! dissector keeps the RFC 1035 field names, so in an UPDATE message
+//! `questions` holds the Zone section, `answers` the Prerequisite section,
+//! `authorities` the Update section and `additionals` the Additional Data
+//! section.
 
 #![deny(missing_docs)]
+
+mod bitmap;
+mod edns;
+mod svcb;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
+use packet_dissector_core::field::{
+    FieldDescriptor, FieldType, FieldValue, FormatContext, MacAddr, format_utf8_lossy,
+};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+
+use bitmap::{FD_BITMAP_TYPE, push_type_bitmap};
+#[cfg(test)]
+use edns::{EDNS_OPT_TCP_KEEPALIVE, ede_info_code_name, edns_option_code_name};
+use edns::{EDNS_OPTION_CHILD_FIELDS, parse_edns_options};
+#[cfg(test)]
+use svcb::svc_param_key_name;
+use svcb::{SVC_PARAM_CHILD_FIELDS, push_svc_params};
 
 /// DNS header size (fixed 12 bytes).
 const HEADER_SIZE: usize = 12;
 
 /// Returns a human-readable name for DNS QTYPE / TYPE values.
 ///
-/// RFC 1035, Section 3.2.2; RFC 3596 (AAAA); RFC 2782 (SRV); RFC 6891 (OPT); RFC 9460 (HTTPS).
+/// Names follow the IANA "Resource Record (RR) TYPEs" registry
+/// (RFC 6895, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc6895#section-3.1>;
+/// <https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-4>).
+/// QTYPE 255 ("*") is named "ANY".
 pub fn dns_type_name(v: u16) -> Option<&'static str> {
     match v {
         1 => Some("A"),
         2 => Some("NS"),
+        3 => Some("MD"),
+        4 => Some("MF"),
         5 => Some("CNAME"),
         6 => Some("SOA"),
+        7 => Some("MB"),
+        8 => Some("MG"),
+        9 => Some("MR"),
+        10 => Some("NULL"),
+        11 => Some("WKS"),
         12 => Some("PTR"),
+        13 => Some("HINFO"),
+        14 => Some("MINFO"),
         15 => Some("MX"),
         16 => Some("TXT"),
+        17 => Some("RP"),
+        18 => Some("AFSDB"),
+        19 => Some("X25"),
+        20 => Some("ISDN"),
+        21 => Some("RT"),
+        22 => Some("NSAP"),
+        23 => Some("NSAP-PTR"),
+        24 => Some("SIG"),
+        25 => Some("KEY"),
+        26 => Some("PX"),
+        27 => Some("GPOS"),
         28 => Some("AAAA"),
         29 => Some("LOC"),
+        30 => Some("NXT"),
+        31 => Some("EID"),
+        32 => Some("NIMLOC"),
         33 => Some("SRV"),
+        34 => Some("ATMA"),
         35 => Some("NAPTR"),
+        36 => Some("KX"),
+        37 => Some("CERT"),
+        38 => Some("A6"),
+        39 => Some("DNAME"),
+        40 => Some("SINK"),
         41 => Some("OPT"),
+        42 => Some("APL"),
         43 => Some("DS"),
+        44 => Some("SSHFP"),
+        45 => Some("IPSECKEY"),
         46 => Some("RRSIG"),
         47 => Some("NSEC"),
         48 => Some("DNSKEY"),
+        49 => Some("DHCID"),
         50 => Some("NSEC3"),
+        51 => Some("NSEC3PARAM"),
         52 => Some("TLSA"),
+        53 => Some("SMIMEA"),
+        55 => Some("HIP"),
+        56 => Some("NINFO"),
+        57 => Some("RKEY"),
+        58 => Some("TALINK"),
+        59 => Some("CDS"),
+        60 => Some("CDNSKEY"),
+        61 => Some("OPENPGPKEY"),
+        62 => Some("CSYNC"),
+        63 => Some("ZONEMD"),
+        64 => Some("SVCB"),
         65 => Some("HTTPS"),
+        66 => Some("DSYNC"),
+        67 => Some("HHIT"),
+        68 => Some("BRID"),
+        69 => Some("UNECE"),
+        70 => Some("ISO"),
+        99 => Some("SPF"),
+        100 => Some("UINFO"),
+        101 => Some("UID"),
+        102 => Some("GID"),
+        103 => Some("UNSPEC"),
+        104 => Some("NID"),
+        105 => Some("L32"),
+        106 => Some("L64"),
+        107 => Some("LP"),
+        108 => Some("EUI48"),
+        109 => Some("EUI64"),
+        128 => Some("NXNAME"),
+        249 => Some("TKEY"),
+        250 => Some("TSIG"),
+        251 => Some("IXFR"),
+        252 => Some("AXFR"),
+        253 => Some("MAILB"),
+        254 => Some("MAILA"),
         255 => Some("ANY"),
+        256 => Some("URI"),
+        257 => Some("CAA"),
+        258 => Some("AVC"),
+        259 => Some("DOA"),
+        260 => Some("AMTRELAY"),
+        261 => Some("RESINFO"),
+        262 => Some("WALLET"),
+        263 => Some("CLA"),
+        264 => Some("IPN"),
+        32768 => Some("TA"),
+        32769 => Some("DLV"),
         _ => None,
     }
 }
@@ -75,7 +209,10 @@ fn dns_class_name(v: u16) -> Option<&'static str> {
 
 /// Returns a human-readable name for DNS opcode values.
 ///
-/// RFC 1035, Section 4.1.1; RFC 1996 (NOTIFY); RFC 2136 (UPDATE).
+/// RFC 1035, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc1035#section-4.1.1>;
+/// RFC 1996 (NOTIFY) — <https://www.rfc-editor.org/rfc/rfc1996>;
+/// RFC 2136 (UPDATE) — <https://www.rfc-editor.org/rfc/rfc2136>;
+/// RFC 8490, Section 10.1 (DSO) — <https://www.rfc-editor.org/rfc/rfc8490#section-10.1>.
 fn dns_opcode_name(v: u8) -> Option<&'static str> {
     match v {
         0 => Some("QUERY"),
@@ -83,13 +220,21 @@ fn dns_opcode_name(v: u8) -> Option<&'static str> {
         2 => Some("STATUS"),
         4 => Some("NOTIFY"),
         5 => Some("UPDATE"),
+        OPCODE_DSO => Some("DSO"),
         _ => None,
     }
 }
 
 /// Returns a human-readable name for DNS RCODE values.
 ///
-/// RFC 1035, Section 4.1.1.
+/// Covers the 4-bit header RCODE (RFC 1035, Section 4.1.1 —
+/// <https://www.rfc-editor.org/rfc/rfc1035#section-4.1.1>) and the 12-bit
+/// extended RCODE formed with the OPT pseudo-RR (RFC 6891, Section 6.1.3 —
+/// <https://www.rfc-editor.org/rfc/rfc6891#section-6.1.3>). Names follow the
+/// IANA "DNS RCODEs" registry
+/// (<https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-6>).
+/// Value 16 is BADVERS in the OPT RR and BADSIG in TSIG / TKEY RRs; this
+/// function returns "BADVERS", the meaning for message RCODEs.
 pub fn dns_rcode_name(v: u8) -> Option<&'static str> {
     match v {
         0 => Some("NOERROR"),
@@ -98,12 +243,65 @@ pub fn dns_rcode_name(v: u8) -> Option<&'static str> {
         3 => Some("NXDOMAIN"),
         4 => Some("NOTIMP"),
         5 => Some("REFUSED"),
+        6 => Some("YXDOMAIN"),
+        7 => Some("YXRRSET"),
+        8 => Some("NXRRSET"),
+        9 => Some("NOTAUTH"),
+        10 => Some("NOTZONE"),
+        11 => Some("DSOTYPENI"),
+        16 => Some("BADVERS"),
+        17 => Some("BADKEY"),
+        18 => Some("BADTIME"),
+        19 => Some("BADMODE"),
+        20 => Some("BADNAME"),
+        21 => Some("BADALG"),
+        22 => Some("BADTRUNC"),
+        23 => Some("BADCOOKIE"),
         _ => None,
+    }
+}
+
+/// Returns the name of a 12-bit extended RCODE (see [`dns_rcode_name`]).
+fn dns_extended_rcode_name(v: u16) -> Option<&'static str> {
+    u8::try_from(v).ok().and_then(dns_rcode_name)
+}
+
+/// Returns the name of the Error field of a TSIG or TKEY RR.
+///
+/// RFC 8945, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc8945#section-4.2>
+/// and the IANA "DNS RCODEs" registry: in these RRs, 16 is BADSIG.
+fn tsig_rcode_name(v: u16) -> Option<&'static str> {
+    match v {
+        16 => Some("BADSIG"),
+        _ => dns_extended_rcode_name(v),
     }
 }
 
 /// Maximum pointer follow depth to prevent infinite loops.
 const MAX_POINTER_DEPTH: usize = 128;
+
+/// Length of an uncompressed domain name at the start of `data`.
+///
+/// Returns the number of octets up to and including the root label, or
+/// `None` if the name uses a compression pointer or a reserved label type,
+/// exceeds 255 octets (RFC 1035, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc1035#section-3.1>), or is truncated.
+pub(crate) fn uncompressed_name_len(data: &[u8]) -> Option<usize> {
+    let mut pos = 0;
+    loop {
+        let len = *data.get(pos)? as usize;
+        if len & 0xC0 != 0 {
+            return None;
+        }
+        pos += 1 + len;
+        if pos > 255 || pos > data.len() {
+            return None;
+        }
+        if len == 0 {
+            return Some(pos);
+        }
+    }
+}
 // RFC 1035, Section 3.2.2 — TYPE values
 const TYPE_A: u16 = 1;
 const TYPE_NS: u16 = 2;
@@ -142,6 +340,36 @@ const TYPE_SVCB: u16 = 64;
 const TYPE_HTTPS: u16 = 65;
 // RFC 8659 — CAA record
 const TYPE_CAA: u16 = 257;
+// RFC 1035, Section 3.3.2 — <https://www.rfc-editor.org/rfc/rfc1035#section-3.3.2>
+const TYPE_HINFO: u16 = 13;
+// RFC 1876, Section 2 — <https://www.rfc-editor.org/rfc/rfc1876#section-2>
+const TYPE_LOC: u16 = 29;
+// RFC 4398, Section 2 — <https://www.rfc-editor.org/rfc/rfc4398#section-2>
+const TYPE_CERT: u16 = 37;
+// RFC 4025, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc4025#section-2.1>
+const TYPE_IPSECKEY: u16 = 45;
+// RFC 4701, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc4701#section-3.1>
+const TYPE_DHCID: u16 = 49;
+// RFC 7929, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc7929#section-2.1>
+const TYPE_OPENPGPKEY: u16 = 61;
+// RFC 7477, Section 2.1.1 — <https://www.rfc-editor.org/rfc/rfc7477#section-2.1.1>
+const TYPE_CSYNC: u16 = 62;
+// RFC 8976, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc8976#section-2.2>
+const TYPE_ZONEMD: u16 = 63;
+// RFC 7043, Sections 3.1 / 4.1 — <https://www.rfc-editor.org/rfc/rfc7043#section-3.1>
+const TYPE_EUI48: u16 = 108;
+const TYPE_EUI64: u16 = 109;
+// RFC 2930, Section 2 — <https://www.rfc-editor.org/rfc/rfc2930#section-2>
+const TYPE_TKEY: u16 = 249;
+// RFC 8945, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc8945#section-4.2>
+const TYPE_TSIG: u16 = 250;
+// RFC 7553, Section 4.5 — <https://www.rfc-editor.org/rfc/rfc7553#section-4.5>
+const TYPE_URI: u16 = 256;
+
+/// DNS Stateful Operations opcode.
+///
+/// RFC 8490, Section 5.4.1 — <https://www.rfc-editor.org/rfc/rfc8490#section-5.4.1>
+const OPCODE_DSO: u8 = 6;
 
 // -- Field descriptor index constants for dns_field_descriptors! (main array) --
 const FD_ID: usize = 1;
@@ -163,6 +391,7 @@ const FD_QUESTIONS: usize = 16;
 const FD_ANSWERS: usize = 17;
 const FD_AUTHORITIES: usize = 18;
 const FD_ADDITIONALS: usize = 19;
+const FD_DSO_TLVS: usize = 20;
 
 // -- Field descriptor index constants for QUESTION_CHILD_FIELDS --
 const QFD_NAME: usize = 0;
@@ -173,13 +402,6 @@ const QFD_CLASS: usize = 2;
 // mode; the DNS dissector leaves this descriptor unused.
 const QFD_QU: usize = 3;
 // NOTE: type/class have display_fn for dns_type_name/dns_class_name; no separate _name fields.
-
-// -- Field descriptor index constants for EDNS_OPTION_CHILD_FIELDS --
-const EOFD_CODE: usize = 0;
-const EOFD_LENGTH: usize = 1;
-const EOFD_DATA: usize = 2;
-const EOFD_TIMEOUT: usize = 3;
-// NOTE: code has display_fn for edns_option_code_name; no separate code_name field.
 
 // -- Field descriptor index constants for RR_CHILD_FIELDS --
 // NOTE: type/class have display_fn for dns_type_name/dns_class_name; no separate _name fields.
@@ -246,6 +468,44 @@ const RRFD_RDATA_PARAMS: usize = 58;
 // Emitted only in mDNS mode for non-OPT records; the DNS dissector leaves
 // this descriptor unused.
 const RRFD_CACHE_FLUSH: usize = 59;
+// RFC 6891, Section 6.1.3 — <https://www.rfc-editor.org/rfc/rfc6891#section-6.1.3>:
+// 12-bit RCODE combined from the OPT TTL and the header.
+const RRFD_RCODE: usize = 60;
+const RRFD_RDATA_TYPES: usize = 61;
+const RRFD_RDATA_SVC_PARAMS: usize = 62;
+const RRFD_RDATA_CPU: usize = 63;
+const RRFD_RDATA_OS: usize = 64;
+const RRFD_RDATA_VERSION: usize = 65;
+const RRFD_RDATA_SIZE: usize = 66;
+const RRFD_RDATA_HORIZ_PRE: usize = 67;
+const RRFD_RDATA_VERT_PRE: usize = 68;
+const RRFD_RDATA_LATITUDE: usize = 69;
+const RRFD_RDATA_LONGITUDE: usize = 70;
+const RRFD_RDATA_ALTITUDE: usize = 71;
+const RRFD_RDATA_CERT_TYPE: usize = 72;
+const RRFD_RDATA_CERTIFICATE: usize = 73;
+const RRFD_RDATA_PRECEDENCE: usize = 74;
+const RRFD_RDATA_GATEWAY_TYPE: usize = 75;
+const RRFD_RDATA_GATEWAY_IPV4: usize = 76;
+const RRFD_RDATA_GATEWAY_IPV6: usize = 77;
+const RRFD_RDATA_GATEWAY_NAME: usize = 78;
+const RRFD_RDATA_IDENTIFIER_TYPE: usize = 79;
+const RRFD_RDATA_SCHEME: usize = 80;
+const RRFD_RDATA_ALGORITHM_NAME: usize = 81;
+const RRFD_RDATA_INCEPTION: usize = 82;
+const RRFD_RDATA_EXPIRATION: usize = 83;
+const RRFD_RDATA_MODE: usize = 84;
+const RRFD_RDATA_ERROR: usize = 85;
+const RRFD_RDATA_KEY_SIZE: usize = 86;
+const RRFD_RDATA_KEY_DATA: usize = 87;
+const RRFD_RDATA_OTHER_LENGTH: usize = 88;
+const RRFD_RDATA_OTHER_DATA: usize = 89;
+const RRFD_RDATA_TIME_SIGNED: usize = 90;
+const RRFD_RDATA_FUDGE: usize = 91;
+const RRFD_RDATA_MAC_SIZE: usize = 92;
+const RRFD_RDATA_MAC: usize = 93;
+const RRFD_RDATA_ORIGINAL_ID: usize = 94;
+const RRFD_RDATA_URI: usize = 95;
 
 /// DNS dissector.
 pub struct DnsDissector;
@@ -443,6 +703,34 @@ fn parse_final_rdata_name(
 ) -> Option<usize> {
     parse_rdata_name(msg, rdata_offset, rdata_len, rel_pos)
         .filter(|&consumed| rel_pos + consumed == rdata_len)
+}
+
+/// Push an RR child field whose range is `start..end` relative to RDATA.
+fn push_rr<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    idx: usize,
+    value: FieldValue<'pkt>,
+    abs_offset: usize,
+    start: usize,
+    end: usize,
+) {
+    buf.push_field(
+        &RR_CHILD_FIELDS[idx],
+        value,
+        abs_offset + start..abs_offset + end,
+    );
+}
+
+/// Locate the <character-string> at `pos` in `rdata`.
+///
+/// RFC 1035, Section 3.3 — <https://www.rfc-editor.org/rfc/rfc1035#section-3.3>:
+/// "<character-string> is a single length octet followed by that number of
+/// characters."  Returns the range of the characters (without the length
+/// octet), or `None` if the string runs past `rdata`.
+fn character_string(rdata: &[u8], pos: usize) -> Option<(usize, usize)> {
+    let len = *rdata.get(pos)? as usize;
+    let end = pos + 1 + len;
+    (end <= rdata.len()).then_some((pos + 1, end))
 }
 
 /// Parse RDATA into typed fields based on the record type.
@@ -812,6 +1100,12 @@ fn parse_rdata<'pkt>(
                     FieldValue::Bytes(&rdata[name_len..]),
                     abs_offset + name_len..abs_offset + rdata.len(),
                 );
+                push_type_bitmap(
+                    buf,
+                    &RR_CHILD_FIELDS[RRFD_RDATA_TYPES],
+                    &rdata[name_len..],
+                    abs_offset + name_len,
+                );
                 return;
             }
         }
@@ -893,6 +1187,13 @@ fn parse_rdata<'pkt>(
                         FieldValue::Bytes(&rdata[hash_end..]),
                         abs_offset + hash_end..abs_offset + rdata.len(),
                     );
+                    // RFC 5155, Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc5155#section-3.2.1>
+                    push_type_bitmap(
+                        buf,
+                        &RR_CHILD_FIELDS[RRFD_RDATA_TYPES],
+                        &rdata[hash_end..],
+                        abs_offset + hash_end,
+                    );
                     return;
                 }
             }
@@ -952,6 +1253,12 @@ fn parse_rdata<'pkt>(
                     FieldValue::Bytes(&rdata[params_start..]),
                     abs_offset + params_start..abs_offset + rdata.len(),
                 );
+                push_svc_params(
+                    buf,
+                    &RR_CHILD_FIELDS[RRFD_RDATA_SVC_PARAMS],
+                    &rdata[params_start..],
+                    abs_offset + params_start,
+                );
                 return;
             }
         }
@@ -978,6 +1285,555 @@ fn parse_rdata<'pkt>(
                 return;
             }
         }
+        // RFC 1035, Section 3.3.2 — <https://www.rfc-editor.org/rfc/rfc1035#section-3.3.2>
+        // HINFO: CPU and OS character-strings (also used by RFC 8482,
+        // Section 4.2 — <https://www.rfc-editor.org/rfc/rfc8482#section-4.2> — to answer ANY).
+        TYPE_HINFO => {
+            if let Some((cpu_start, cpu_end)) = character_string(rdata, 0) {
+                if let Some((os_start, os_end)) = character_string(rdata, cpu_end) {
+                    if os_end == rdata.len() {
+                        push_rr(
+                            buf,
+                            RRFD_RDATA_CPU,
+                            FieldValue::Bytes(&rdata[cpu_start..cpu_end]),
+                            abs_offset,
+                            cpu_start,
+                            cpu_end,
+                        );
+                        push_rr(
+                            buf,
+                            RRFD_RDATA_OS,
+                            FieldValue::Bytes(&rdata[os_start..os_end]),
+                            abs_offset,
+                            os_start,
+                            os_end,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        // RFC 1876, Section 2 — <https://www.rfc-editor.org/rfc/rfc1876#section-2>
+        // LOC version 0: VERSION, SIZE, HORIZ PRE, VERT PRE (1 octet each),
+        // LATITUDE, LONGITUDE, ALTITUDE (4 octets each).
+        TYPE_LOC if rdata.len() == 16 && rdata[0] == 0 => {
+            push_rr(
+                buf,
+                RRFD_RDATA_VERSION,
+                FieldValue::U8(rdata[0]),
+                abs_offset,
+                0,
+                1,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_SIZE,
+                FieldValue::U8(rdata[1]),
+                abs_offset,
+                1,
+                2,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_HORIZ_PRE,
+                FieldValue::U8(rdata[2]),
+                abs_offset,
+                2,
+                3,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_VERT_PRE,
+                FieldValue::U8(rdata[3]),
+                abs_offset,
+                3,
+                4,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_LATITUDE,
+                FieldValue::U32(read_be_u32(rdata, 4).unwrap_or_default()),
+                abs_offset,
+                4,
+                8,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_LONGITUDE,
+                FieldValue::U32(read_be_u32(rdata, 8).unwrap_or_default()),
+                abs_offset,
+                8,
+                12,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_ALTITUDE,
+                FieldValue::U32(read_be_u32(rdata, 12).unwrap_or_default()),
+                abs_offset,
+                12,
+                16,
+            );
+            return;
+        }
+        // RFC 4398, Section 2 — <https://www.rfc-editor.org/rfc/rfc4398#section-2>
+        // CERT: type(2) + key tag(2) + algorithm(1) + certificate
+        TYPE_CERT if rdata.len() >= 5 => {
+            push_rr(
+                buf,
+                RRFD_RDATA_CERT_TYPE,
+                FieldValue::U16(read_be_u16(rdata, 0).unwrap_or_default()),
+                abs_offset,
+                0,
+                2,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_KEY_TAG,
+                FieldValue::U16(read_be_u16(rdata, 2).unwrap_or_default()),
+                abs_offset,
+                2,
+                4,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_ALGORITHM,
+                FieldValue::U8(rdata[4]),
+                abs_offset,
+                4,
+                5,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_CERTIFICATE,
+                FieldValue::Bytes(&rdata[5..]),
+                abs_offset,
+                5,
+                rdata.len(),
+            );
+            return;
+        }
+        // RFC 4025, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc4025#section-2.1>
+        // IPSECKEY: precedence(1) + gateway type(1) + algorithm(1) + gateway + public key
+        TYPE_IPSECKEY if rdata.len() >= 3 => {
+            // RFC 4025, Section 2.3 / 2.5 — gateway type 0: no gateway,
+            // 1: 32-bit IPv4 address, 2: 128-bit IPv6 address, 3: an
+            // uncompressed wire-encoded domain name.
+            // <https://www.rfc-editor.org/rfc/rfc4025#section-2.5>
+            let rest = &rdata[3..];
+            let gateway = match rdata[1] {
+                0 => Some((0, None)),
+                1 if rest.len() >= 4 => Some((
+                    4,
+                    Some((
+                        RRFD_RDATA_GATEWAY_IPV4,
+                        FieldValue::Ipv4Addr([rest[0], rest[1], rest[2], rest[3]]),
+                    )),
+                )),
+                2 if rest.len() >= 16 => {
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&rest[..16]);
+                    Some((16, Some((RRFD_RDATA_GATEWAY_IPV6, FieldValue::Ipv6Addr(a)))))
+                }
+                3 => uncompressed_name_len(rest).map(|n| {
+                    (
+                        n,
+                        Some((RRFD_RDATA_GATEWAY_NAME, FieldValue::Bytes(&rest[..n]))),
+                    )
+                }),
+                _ => None,
+            };
+            if let Some((gw_len, gw_field)) = gateway {
+                push_rr(
+                    buf,
+                    RRFD_RDATA_PRECEDENCE,
+                    FieldValue::U8(rdata[0]),
+                    abs_offset,
+                    0,
+                    1,
+                );
+                push_rr(
+                    buf,
+                    RRFD_RDATA_GATEWAY_TYPE,
+                    FieldValue::U8(rdata[1]),
+                    abs_offset,
+                    1,
+                    2,
+                );
+                push_rr(
+                    buf,
+                    RRFD_RDATA_ALGORITHM,
+                    FieldValue::U8(rdata[2]),
+                    abs_offset,
+                    2,
+                    3,
+                );
+                if let Some((idx, value)) = gw_field {
+                    push_rr(buf, idx, value, abs_offset, 3, 3 + gw_len);
+                }
+                push_rr(
+                    buf,
+                    RRFD_RDATA_PUBLIC_KEY,
+                    FieldValue::Bytes(&rdata[3 + gw_len..]),
+                    abs_offset,
+                    3 + gw_len,
+                    rdata.len(),
+                );
+                return;
+            }
+        }
+        // RFC 4701, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc4701#section-3.1>
+        // DHCID: identifier type(2) + digest type(1) + digest
+        TYPE_DHCID if rdata.len() >= 3 => {
+            push_rr(
+                buf,
+                RRFD_RDATA_IDENTIFIER_TYPE,
+                FieldValue::U16(read_be_u16(rdata, 0).unwrap_or_default()),
+                abs_offset,
+                0,
+                2,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_DIGEST_TYPE,
+                FieldValue::U8(rdata[2]),
+                abs_offset,
+                2,
+                3,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_DIGEST,
+                FieldValue::Bytes(&rdata[3..]),
+                abs_offset,
+                3,
+                rdata.len(),
+            );
+            return;
+        }
+        // RFC 7929, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc7929#section-2.1>
+        // OPENPGPKEY: a single OpenPGP Transferable Public Key.
+        TYPE_OPENPGPKEY if !rdata.is_empty() => {
+            push_rr(
+                buf,
+                RRFD_RDATA_PUBLIC_KEY,
+                FieldValue::Bytes(rdata),
+                abs_offset,
+                0,
+                rdata.len(),
+            );
+            return;
+        }
+        // RFC 7477, Section 2.1.1 — <https://www.rfc-editor.org/rfc/rfc7477#section-2.1.1>
+        // CSYNC: SOA serial(4) + flags(2) + type bit map
+        TYPE_CSYNC if rdata.len() >= 6 => {
+            push_rr(
+                buf,
+                RRFD_RDATA_SERIAL,
+                FieldValue::U32(read_be_u32(rdata, 0).unwrap_or_default()),
+                abs_offset,
+                0,
+                4,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_FLAGS,
+                FieldValue::U16(read_be_u16(rdata, 4).unwrap_or_default()),
+                abs_offset,
+                4,
+                6,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_TYPE_BITMAPS,
+                FieldValue::Bytes(&rdata[6..]),
+                abs_offset,
+                6,
+                rdata.len(),
+            );
+            push_type_bitmap(
+                buf,
+                &RR_CHILD_FIELDS[RRFD_RDATA_TYPES],
+                &rdata[6..],
+                abs_offset + 6,
+            );
+            return;
+        }
+        // RFC 8976, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc8976#section-2.2>
+        // ZONEMD: serial(4) + scheme(1) + hash algorithm(1) + digest
+        TYPE_ZONEMD if rdata.len() >= 6 => {
+            push_rr(
+                buf,
+                RRFD_RDATA_SERIAL,
+                FieldValue::U32(read_be_u32(rdata, 0).unwrap_or_default()),
+                abs_offset,
+                0,
+                4,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_SCHEME,
+                FieldValue::U8(rdata[4]),
+                abs_offset,
+                4,
+                5,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_HASH_ALGORITHM,
+                FieldValue::U8(rdata[5]),
+                abs_offset,
+                5,
+                6,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_DIGEST,
+                FieldValue::Bytes(&rdata[6..]),
+                abs_offset,
+                6,
+                rdata.len(),
+            );
+            return;
+        }
+        // RFC 7043, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc7043#section-3.1>
+        // EUI48: a 6-octet address.
+        TYPE_EUI48 if rdata.len() == 6 => {
+            let mut a = [0u8; 6];
+            a.copy_from_slice(rdata);
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA],
+                FieldValue::MacAddr(MacAddr(a)),
+                rdata_range,
+            );
+            return;
+        }
+        // RFC 7043, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc7043#section-4.1>
+        // EUI64: an 8-octet address, shown as raw bytes (there is no 8-octet
+        // address value type).
+        TYPE_EUI64 if rdata.len() == 8 => {
+            buf.push_field(
+                &RR_CHILD_FIELDS[RRFD_RDATA],
+                FieldValue::Bytes(rdata),
+                rdata_range,
+            );
+            return;
+        }
+        // RFC 2930, Section 2 — <https://www.rfc-editor.org/rfc/rfc2930#section-2>
+        // TKEY: algorithm(name) + inception(4) + expiration(4) + mode(2)
+        //   + error(2) + key size(2) + key data + other size(2) + other data
+        // RFC 3597, Section 4 — <https://www.rfc-editor.org/rfc/rfc3597#section-4>:
+        // only the RR types defined in RFC 1035 are "well-known", and servers
+        // "MUST NOT compress domain names embedded in the RDATA of types that
+        // are class-specific or not well-known", so the TKEY Algorithm name
+        // is uncompressed.
+        TYPE_TKEY => {
+            if let Some(n) = uncompressed_name_len(rdata) {
+                let key_size = read_be_u16(rdata, n + 12).map(usize::from);
+                if let Ok(key_size) = key_size {
+                    let key_end = n + 14 + key_size;
+                    if let Ok(other) = read_be_u16(rdata, key_end) {
+                        let other_end = key_end + 2 + other as usize;
+                        if other_end == rdata.len() {
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_ALGORITHM_NAME,
+                                FieldValue::Bytes(&rdata[..n]),
+                                abs_offset,
+                                0,
+                                n,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_INCEPTION,
+                                FieldValue::U32(read_be_u32(rdata, n).unwrap_or_default()),
+                                abs_offset,
+                                n,
+                                n + 4,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_EXPIRATION,
+                                FieldValue::U32(read_be_u32(rdata, n + 4).unwrap_or_default()),
+                                abs_offset,
+                                n + 4,
+                                n + 8,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_MODE,
+                                FieldValue::U16(read_be_u16(rdata, n + 8).unwrap_or_default()),
+                                abs_offset,
+                                n + 8,
+                                n + 10,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_ERROR,
+                                FieldValue::U16(read_be_u16(rdata, n + 10).unwrap_or_default()),
+                                abs_offset,
+                                n + 10,
+                                n + 12,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_KEY_SIZE,
+                                FieldValue::U16(key_size as u16),
+                                abs_offset,
+                                n + 12,
+                                n + 14,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_KEY_DATA,
+                                FieldValue::Bytes(&rdata[n + 14..key_end]),
+                                abs_offset,
+                                n + 14,
+                                key_end,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_OTHER_LENGTH,
+                                FieldValue::U16(other),
+                                abs_offset,
+                                key_end,
+                                key_end + 2,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_OTHER_DATA,
+                                FieldValue::Bytes(&rdata[key_end + 2..]),
+                                abs_offset,
+                                key_end + 2,
+                                other_end,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // RFC 8945, Section 4.2 — <https://www.rfc-editor.org/rfc/rfc8945#section-4.2>
+        // TSIG: algorithm(name) + time signed(6) + fudge(2) + MAC size(2) + MAC
+        //   + original ID(2) + error(2) + other len(2) + other data
+        // Algorithm Name: "As per [RFC3597], this name MUST NOT be compressed."
+        TYPE_TSIG => {
+            if let Some(n) = uncompressed_name_len(rdata) {
+                if let Ok(mac_size) = read_be_u16(rdata, n + 8) {
+                    let mac_end = n + 10 + mac_size as usize;
+                    if let Ok(other) = read_be_u16(rdata, mac_end + 4) {
+                        let other_end = mac_end + 6 + other as usize;
+                        if other_end == rdata.len() {
+                            let time_hi = read_be_u16(rdata, n).unwrap_or_default() as u64;
+                            let time_lo = read_be_u32(rdata, n + 2).unwrap_or_default() as u64;
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_ALGORITHM_NAME,
+                                FieldValue::Bytes(&rdata[..n]),
+                                abs_offset,
+                                0,
+                                n,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_TIME_SIGNED,
+                                FieldValue::U64((time_hi << 32) | time_lo),
+                                abs_offset,
+                                n,
+                                n + 6,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_FUDGE,
+                                FieldValue::U16(read_be_u16(rdata, n + 6).unwrap_or_default()),
+                                abs_offset,
+                                n + 6,
+                                n + 8,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_MAC_SIZE,
+                                FieldValue::U16(mac_size),
+                                abs_offset,
+                                n + 8,
+                                n + 10,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_MAC,
+                                FieldValue::Bytes(&rdata[n + 10..mac_end]),
+                                abs_offset,
+                                n + 10,
+                                mac_end,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_ORIGINAL_ID,
+                                FieldValue::U16(read_be_u16(rdata, mac_end).unwrap_or_default()),
+                                abs_offset,
+                                mac_end,
+                                mac_end + 2,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_ERROR,
+                                FieldValue::U16(
+                                    read_be_u16(rdata, mac_end + 2).unwrap_or_default(),
+                                ),
+                                abs_offset,
+                                mac_end + 2,
+                                mac_end + 4,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_OTHER_LENGTH,
+                                FieldValue::U16(other),
+                                abs_offset,
+                                mac_end + 4,
+                                mac_end + 6,
+                            );
+                            push_rr(
+                                buf,
+                                RRFD_RDATA_OTHER_DATA,
+                                FieldValue::Bytes(&rdata[mac_end + 6..]),
+                                abs_offset,
+                                mac_end + 6,
+                                other_end,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // RFC 7553, Section 4.5 — <https://www.rfc-editor.org/rfc/rfc7553#section-4.5>
+        // URI: priority(2) + weight(2) + target (the rest, at least one octet)
+        TYPE_URI if rdata.len() > 4 => {
+            push_rr(
+                buf,
+                RRFD_RDATA_PRIORITY,
+                FieldValue::U16(read_be_u16(rdata, 0).unwrap_or_default()),
+                abs_offset,
+                0,
+                2,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_WEIGHT,
+                FieldValue::U16(read_be_u16(rdata, 2).unwrap_or_default()),
+                abs_offset,
+                2,
+                4,
+            );
+            push_rr(
+                buf,
+                RRFD_RDATA_URI,
+                FieldValue::Bytes(&rdata[4..]),
+                abs_offset,
+                4,
+                rdata.len(),
+            );
+            return;
+        }
         _ => {}
     }
 
@@ -988,131 +1844,6 @@ fn parse_rdata<'pkt>(
         rdata_range,
     );
 }
-
-/// EDNS0 option code for TCP Keepalive.
-///
-/// RFC 7828, Section 3 — <https://www.rfc-editor.org/rfc/rfc7828#section-3>
-const EDNS_OPT_TCP_KEEPALIVE: u16 = 11;
-
-/// Returns a human-readable name for EDNS0 option codes.
-///
-/// RFC 6891, Section 6.1.2 — <https://www.rfc-editor.org/rfc/rfc6891#section-6.1.2>
-fn edns_option_code_name(code: u16) -> Option<&'static str> {
-    match code {
-        3 => Some("NSID"),
-        8 => Some("CLIENT-SUBNET"),
-        10 => Some("COOKIE"),
-        EDNS_OPT_TCP_KEEPALIVE => Some("TCP-KEEPALIVE"),
-        15 => Some("EXTENDED-DNS-ERROR"),
-        _ => None,
-    }
-}
-
-/// Parse EDNS0 options from OPT RDATA.
-///
-/// Each option is: code(2) + length(2) + data(length).
-///
-/// Known options are decoded with structured sub-fields:
-/// - TCP Keepalive (code 11): RFC 7828 — <https://www.rfc-editor.org/rfc/rfc7828>
-fn parse_edns_options<'pkt>(buf: &mut DissectBuffer<'pkt>, rdata: &'pkt [u8], abs_offset: usize) {
-    let mut pos = 0;
-    while pos + 4 <= rdata.len() {
-        let code = read_be_u16(rdata, pos).unwrap_or_default();
-        let length = read_be_u16(rdata, pos + 2).unwrap_or_default() as usize;
-        if pos + 4 + length > rdata.len() {
-            break;
-        }
-        let option_data = &rdata[pos + 4..pos + 4 + length];
-        let option_start = abs_offset + pos;
-        let option_end = option_start + 4 + length;
-
-        let obj_idx = buf.begin_container(
-            &FD_EDNS_OPTION,
-            FieldValue::Object(0..0),
-            option_start..option_end,
-        );
-
-        buf.push_field(
-            &EDNS_OPTION_CHILD_FIELDS[EOFD_CODE],
-            FieldValue::U16(code),
-            option_start..option_start + 2,
-        );
-        buf.push_field(
-            &EDNS_OPTION_CHILD_FIELDS[EOFD_LENGTH],
-            FieldValue::U16(length as u16),
-            option_start + 2..option_start + 4,
-        );
-
-        // RFC 7828, Section 3 — edns-tcp-keepalive option
-        // <https://www.rfc-editor.org/rfc/rfc7828#section-3>
-        // Format: optional 2-byte timeout in units of 100 milliseconds.
-        // Length is 0 (query, no timeout) or 2 (response, with timeout).
-        if code == EDNS_OPT_TCP_KEEPALIVE && length == 2 {
-            let timeout = read_be_u16(option_data, 0).unwrap_or_default();
-            buf.push_field(
-                &EDNS_OPTION_CHILD_FIELDS[EOFD_TIMEOUT],
-                FieldValue::U16(timeout),
-                option_start + 4..option_end,
-            );
-        } else if code == EDNS_OPT_TCP_KEEPALIVE && length == 0 {
-            // Query form: no timeout field, no data to emit.
-        } else {
-            buf.push_field(
-                &EDNS_OPTION_CHILD_FIELDS[EOFD_DATA],
-                FieldValue::Bytes(option_data),
-                option_start + 4..option_end,
-            );
-        }
-
-        buf.end_container(obj_idx);
-        pos += 4 + length;
-    }
-}
-
-/// Descriptor for the EDNS0 option Object container itself.
-///
-/// `display_fn` is invoked by
-/// [`DissectBuffer::resolve_container_display_name`] with the container's
-/// children, so the outer label resolves to the option name (e.g.
-/// "COOKIE") instead of colliding with the inner `Code` field.
-static FD_EDNS_OPTION: FieldDescriptor = FieldDescriptor {
-    name: "edns_option",
-    display_name: "EDNS Option",
-    field_type: FieldType::Object,
-    optional: false,
-    children: None,
-    display_fn: Some(|v, children| match v {
-        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
-            ("code", FieldValue::U16(c)) => edns_option_code_name(*c),
-            _ => None,
-        }),
-        _ => None,
-    }),
-    format_fn: None,
-};
-
-/// Child field descriptors for EDNS0 option entries.
-///
-/// RFC 6891, Section 6.1.2 — <https://www.rfc-editor.org/rfc/rfc6891#section-6.1.2>
-/// RFC 7828 (TCP Keepalive option) — <https://www.rfc-editor.org/rfc/rfc7828>
-static EDNS_OPTION_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor {
-        name: "code",
-        display_name: "Code",
-        field_type: FieldType::U16,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U16(c) => edns_option_code_name(*c),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("length", "Length", FieldType::U16),
-    FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
-    // RFC 7828, Section 3 — TCP Keepalive timeout (in 100ms units).
-    FieldDescriptor::new("timeout", "Timeout", FieldType::U16).optional(),
-];
 
 /// Child field descriptors for question section entries.
 ///
@@ -1282,7 +2013,218 @@ static RR_CHILD_FIELDS: &[FieldDescriptor] = &[
     // RFC 6762, Section 18.13 / 10.2 — <https://www.rfc-editor.org/rfc/rfc6762#section-10.2>
     // Emitted by the mDNS parsing path for non-OPT records only.
     FieldDescriptor::new("cache_flush", "Cache Flush", FieldType::U8).optional(),
+    // -- OPT: combined 12-bit RCODE --
+    // RFC 6891, Section 6.1.3 — <https://www.rfc-editor.org/rfc/rfc6891#section-6.1.3>
+    FieldDescriptor {
+        name: "rcode",
+        display_name: "Response Code",
+        field_type: FieldType::U16,
+        optional: true,
+        children: None,
+        display_fn: Some(|v, _siblings| match v {
+            FieldValue::U16(r) => dns_extended_rcode_name(*r),
+            _ => None,
+        }),
+        format_fn: None,
+    },
+    // -- NSEC / NSEC3 / CSYNC: decoded type bit maps --
+    // RFC 4034, Section 4.1.2 — <https://www.rfc-editor.org/rfc/rfc4034#section-4.1.2>
+    FieldDescriptor::new("rdata_types", "Types", FieldType::Array)
+        .optional()
+        .with_children(core::slice::from_ref(&FD_BITMAP_TYPE)),
+    // -- SVCB / HTTPS: decoded SvcParams --
+    // RFC 9460, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc9460#section-2.2>
+    FieldDescriptor::new("rdata_svc_params", "SvcParams", FieldType::Array)
+        .optional()
+        .with_children(SVC_PARAM_CHILD_FIELDS),
+    // -- HINFO: RFC 1035, Section 3.3.2 — <https://www.rfc-editor.org/rfc/rfc1035#section-3.3.2> --
+    FieldDescriptor::new("rdata_cpu", "CPU", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_utf8_lossy),
+    FieldDescriptor::new("rdata_os", "OS", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_utf8_lossy),
+    // -- LOC: RFC 1876, Section 2 — <https://www.rfc-editor.org/rfc/rfc1876#section-2> --
+    FieldDescriptor::new("rdata_version", "Version", FieldType::U8).optional(),
+    FieldDescriptor::new("rdata_size", "Size", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "rdata_horizontal_precision",
+        "Horizontal Precision",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "rdata_vertical_precision",
+        "Vertical Precision",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("rdata_latitude", "Latitude", FieldType::U32).optional(),
+    FieldDescriptor::new("rdata_longitude", "Longitude", FieldType::U32).optional(),
+    FieldDescriptor::new("rdata_altitude", "Altitude", FieldType::U32).optional(),
+    // -- CERT: RFC 4398, Section 2 — <https://www.rfc-editor.org/rfc/rfc4398#section-2> --
+    FieldDescriptor::new("rdata_cert_type", "Certificate Type", FieldType::U16).optional(),
+    FieldDescriptor::new("rdata_certificate", "Certificate", FieldType::Bytes).optional(),
+    // -- IPSECKEY: RFC 4025, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc4025#section-2.1> --
+    FieldDescriptor::new("rdata_precedence", "Precedence", FieldType::U8).optional(),
+    FieldDescriptor::new("rdata_gateway_type", "Gateway Type", FieldType::U8).optional(),
+    FieldDescriptor::new("rdata_gateway_ipv4", "Gateway", FieldType::Ipv4Addr).optional(),
+    FieldDescriptor::new("rdata_gateway_ipv6", "Gateway", FieldType::Ipv6Addr).optional(),
+    FieldDescriptor::new("rdata_gateway_name", "Gateway", FieldType::Bytes)
+        .optional()
+        .with_format_fn(write_dns_name),
+    // -- DHCID: RFC 4701, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc4701#section-3.1> --
+    FieldDescriptor::new("rdata_identifier_type", "Identifier Type", FieldType::U16).optional(),
+    // -- ZONEMD: RFC 8976, Section 2.2 — <https://www.rfc-editor.org/rfc/rfc8976#section-2.2> --
+    FieldDescriptor::new("rdata_scheme", "Scheme", FieldType::U8).optional(),
+    // -- TKEY: <https://www.rfc-editor.org/rfc/rfc2930#section-2> / TSIG: <https://www.rfc-editor.org/rfc/rfc8945#section-4.2> --
+    FieldDescriptor::new("rdata_algorithm_name", "Algorithm Name", FieldType::Bytes)
+        .optional()
+        .with_format_fn(write_dns_name),
+    FieldDescriptor::new("rdata_inception", "Inception", FieldType::U32).optional(),
+    FieldDescriptor::new("rdata_expiration", "Expiration", FieldType::U32).optional(),
+    FieldDescriptor::new("rdata_mode", "Mode", FieldType::U16).optional(),
+    FieldDescriptor {
+        name: "rdata_error",
+        display_name: "Error",
+        field_type: FieldType::U16,
+        optional: true,
+        children: None,
+        display_fn: Some(|v, _siblings| match v {
+            FieldValue::U16(e) => tsig_rcode_name(*e),
+            _ => None,
+        }),
+        format_fn: None,
+    },
+    FieldDescriptor::new("rdata_key_size", "Key Size", FieldType::U16).optional(),
+    FieldDescriptor::new("rdata_key_data", "Key Data", FieldType::Bytes).optional(),
+    FieldDescriptor::new("rdata_other_length", "Other Length", FieldType::U16).optional(),
+    FieldDescriptor::new("rdata_other_data", "Other Data", FieldType::Bytes).optional(),
+    FieldDescriptor::new("rdata_time_signed", "Time Signed", FieldType::U64).optional(),
+    FieldDescriptor::new("rdata_fudge", "Fudge", FieldType::U16).optional(),
+    FieldDescriptor::new("rdata_mac_size", "MAC Size", FieldType::U16).optional(),
+    FieldDescriptor::new("rdata_mac", "MAC", FieldType::Bytes).optional(),
+    FieldDescriptor::new("rdata_original_id", "Original ID", FieldType::U16).optional(),
+    // -- URI: RFC 7553, Section 4.5 — <https://www.rfc-editor.org/rfc/rfc7553#section-4.5> --
+    FieldDescriptor::new("rdata_uri", "Target", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_utf8_lossy),
 ];
+
+/// Returns the name of a DSO-TYPE.
+///
+/// IANA "DSO Type Codes" registry (RFC 8490, Section 10.3 —
+/// <https://www.rfc-editor.org/rfc/rfc8490#section-10.3>; RFC 8765,
+/// Section 8 — <https://www.rfc-editor.org/rfc/rfc8765#section-8>).
+fn dso_type_name(t: u16) -> Option<&'static str> {
+    match t {
+        1 => Some("KeepAlive"),
+        2 => Some("RetryDelay"),
+        3 => Some("EncryptionPadding"),
+        0x40 => Some("SUBSCRIBE"),
+        0x41 => Some("PUSH"),
+        0x42 => Some("UNSUBSCRIBE"),
+        0x43 => Some("RECONFIRM"),
+        _ => None,
+    }
+}
+
+/// Child field descriptors for DSO TLVs.
+///
+/// RFC 8490, Section 5.4.4 — <https://www.rfc-editor.org/rfc/rfc8490#section-5.4.4>
+static DSO_TLV_CHILD_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor {
+        name: "type",
+        display_name: "DSO-TYPE",
+        field_type: FieldType::U16,
+        optional: false,
+        children: None,
+        display_fn: Some(|v, _siblings| match v {
+            FieldValue::U16(t) => dso_type_name(*t),
+            _ => None,
+        }),
+        format_fn: None,
+    },
+    FieldDescriptor::new("length", "DSO-LENGTH", FieldType::U16),
+    FieldDescriptor::new("data", "DSO-DATA", FieldType::Bytes),
+];
+
+/// Descriptor for one DSO TLV Object; its label resolves to the DSO-TYPE name.
+static FD_DSO_TLV: FieldDescriptor = FieldDescriptor {
+    name: "dso_tlv",
+    display_name: "DSO TLV",
+    field_type: FieldType::Object,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, children| match v {
+        FieldValue::Object(_) => children.iter().find_map(|f| match (f.name(), &f.value) {
+            ("type", FieldValue::U16(t)) => dso_type_name(*t),
+            _ => None,
+        }),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
+/// Parse the DSO Data (a sequence of TLVs) that follows the sections of a
+/// DSO message, returning the new read position.
+///
+/// RFC 8490, Section 5.4.4 — <https://www.rfc-editor.org/rfc/rfc8490#section-5.4.4>.
+/// The DSO-DATA is kept opaque: "The generic DSO machinery treats the
+/// DSO-DATA as an opaque "blob" without attempting to interpret it."
+fn parse_dso_tlvs<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    mut pos: usize,
+    offset: usize,
+) -> Result<usize, PacketError> {
+    let arr = buf.begin_container(
+        &DNS_FIELD_DESCRIPTORS[FD_DSO_TLVS],
+        FieldValue::Array(0..0),
+        offset + pos..offset + data.len(),
+    );
+    while pos < data.len() {
+        if pos + 4 > data.len() {
+            return Err(PacketError::Truncated {
+                expected: pos + 4,
+                actual: data.len(),
+            });
+        }
+        let tlv_type = read_be_u16(data, pos)?;
+        let len = read_be_u16(data, pos + 2)? as usize;
+        let end = pos + 4 + len;
+        if end > data.len() {
+            return Err(PacketError::Truncated {
+                expected: end,
+                actual: data.len(),
+            });
+        }
+        let obj = buf.begin_container(
+            &FD_DSO_TLV,
+            FieldValue::Object(0..0),
+            offset + pos..offset + end,
+        );
+        buf.push_field(
+            &DSO_TLV_CHILD_FIELDS[0],
+            FieldValue::U16(tlv_type),
+            offset + pos..offset + pos + 2,
+        );
+        buf.push_field(
+            &DSO_TLV_CHILD_FIELDS[1],
+            FieldValue::U16(len as u16),
+            offset + pos + 2..offset + pos + 4,
+        );
+        buf.push_field(
+            &DSO_TLV_CHILD_FIELDS[2],
+            FieldValue::Bytes(&data[pos + 4..end]),
+            offset + pos + 4..offset + end,
+        );
+        buf.end_container(obj);
+        pos = end;
+    }
+    buf.end_container(arr);
+    Ok(pos)
+}
 
 /// Generates the common DNS header + section field descriptors shared by both
 /// the UDP and TCP variants.  The `$tcp_length_optional` parameter controls
@@ -1361,6 +2303,10 @@ macro_rules! dns_field_descriptors {
             FieldDescriptor::new("additionals", "Additional Records", FieldType::Array)
                 .optional()
                 .with_children(RR_CHILD_FIELDS),
+            // RFC 8490, Section 5.4.2 — <https://www.rfc-editor.org/rfc/rfc8490#section-5.4.2>
+            FieldDescriptor::new("dso_tlvs", "DSO TLVs", FieldType::Array)
+                .optional()
+                .with_children(DSO_TLV_CHILD_FIELDS),
         ]
     };
 }
@@ -1458,6 +2404,141 @@ static REFERENCES: &[SpecReference] = &[
         "Service Binding and Parameter Specification via the DNS (SVCB and HTTPS Resource Records)",
         "https://www.rfc-editor.org/rfc/rfc9460",
     ),
+    SpecReference::new(
+        "RFC 9461",
+        "Service Binding Mapping for DNS Servers",
+        "https://www.rfc-editor.org/rfc/rfc9461",
+    ),
+    SpecReference::new(
+        "RFC 9848",
+        "Bootstrapping TLS Encrypted ClientHello with DNS Service Bindings",
+        "https://www.rfc-editor.org/rfc/rfc9848",
+    ),
+    SpecReference::new(
+        "RFC 5001",
+        "DNS Name Server Identifier (NSID) Option",
+        "https://www.rfc-editor.org/rfc/rfc5001",
+    ),
+    SpecReference::new(
+        "RFC 6975",
+        "Signaling Cryptographic Algorithm Understanding in DNS Security Extensions (DNSSEC)",
+        "https://www.rfc-editor.org/rfc/rfc6975",
+    ),
+    SpecReference::new(
+        "RFC 7314",
+        "Extension Mechanisms for DNS (EDNS) EXPIRE Option",
+        "https://www.rfc-editor.org/rfc/rfc7314",
+    ),
+    SpecReference::new(
+        "RFC 7830",
+        "The EDNS(0) Padding Option",
+        "https://www.rfc-editor.org/rfc/rfc7830",
+    ),
+    SpecReference::new(
+        "RFC 7871",
+        "Client Subnet in DNS Queries",
+        "https://www.rfc-editor.org/rfc/rfc7871",
+    ),
+    SpecReference::new(
+        "RFC 7873",
+        "Domain Name System (DNS) Cookies",
+        "https://www.rfc-editor.org/rfc/rfc7873",
+    ),
+    SpecReference::new(
+        "RFC 8145",
+        "Signaling Trust Anchor Knowledge in DNS Security Extensions (DNSSEC)",
+        "https://www.rfc-editor.org/rfc/rfc8145",
+    ),
+    SpecReference::new(
+        "RFC 8914",
+        "Extended DNS Errors",
+        "https://www.rfc-editor.org/rfc/rfc8914",
+    ),
+    SpecReference::new(
+        "RFC 9567",
+        "DNS Error Reporting",
+        "https://www.rfc-editor.org/rfc/rfc9567",
+    ),
+    SpecReference::new(
+        "RFC 9660",
+        "The DNS Zone Version (ZONEVERSION) Option",
+        "https://www.rfc-editor.org/rfc/rfc9660",
+    ),
+    SpecReference::new(
+        "RFC 4034",
+        "Resource Records for the DNS Security Extensions",
+        "https://www.rfc-editor.org/rfc/rfc4034",
+    ),
+    SpecReference::new(
+        "RFC 1876",
+        "A Means for Expressing Location Information in the Domain Name System",
+        "https://www.rfc-editor.org/rfc/rfc1876",
+    ),
+    SpecReference::new(
+        "RFC 2930",
+        "Secret Key Establishment for DNS (TKEY RR)",
+        "https://www.rfc-editor.org/rfc/rfc2930",
+    ),
+    SpecReference::new(
+        "RFC 4025",
+        "A Method for Storing IPsec Keying Material in DNS",
+        "https://www.rfc-editor.org/rfc/rfc4025",
+    ),
+    SpecReference::new(
+        "RFC 4398",
+        "Storing Certificates in the Domain Name System (DNS)",
+        "https://www.rfc-editor.org/rfc/rfc4398",
+    ),
+    SpecReference::new(
+        "RFC 4701",
+        "A DNS Resource Record (RR) for Encoding Dynamic Host Configuration Protocol (DHCP) Information (DHCID RR)",
+        "https://www.rfc-editor.org/rfc/rfc4701",
+    ),
+    SpecReference::new(
+        "RFC 7043",
+        "Resource Records for EUI-48 and EUI-64 Addresses in the DNS",
+        "https://www.rfc-editor.org/rfc/rfc7043",
+    ),
+    SpecReference::new(
+        "RFC 7477",
+        "Child-to-Parent Synchronization in DNS",
+        "https://www.rfc-editor.org/rfc/rfc7477",
+    ),
+    SpecReference::new(
+        "RFC 7553",
+        "The Uniform Resource Identifier (URI) DNS Resource Record",
+        "https://www.rfc-editor.org/rfc/rfc7553",
+    ),
+    SpecReference::new(
+        "RFC 7929",
+        "DNS-Based Authentication of Named Entities (DANE) Bindings for OpenPGP",
+        "https://www.rfc-editor.org/rfc/rfc7929",
+    ),
+    SpecReference::new(
+        "RFC 8482",
+        "Providing Minimal-Sized Responses to DNS Queries That Have QTYPE=ANY",
+        "https://www.rfc-editor.org/rfc/rfc8482",
+    ),
+    SpecReference::new(
+        "RFC 8945",
+        "Secret Key Transaction Authentication for DNS (TSIG)",
+        "https://www.rfc-editor.org/rfc/rfc8945",
+    ),
+    SpecReference::new(
+        "RFC 8976",
+        "Message Digest for DNS Zones",
+        "https://www.rfc-editor.org/rfc/rfc8976",
+    ),
+    SpecReference::new(
+        "RFC 8490",
+        "DNS Stateful Operations",
+        "https://www.rfc-editor.org/rfc/rfc8490",
+    ),
+    SpecReference::new(
+        "RFC 2136",
+        "Dynamic Updates in the Domain Name System (DNS UPDATE)",
+        "https://www.rfc-editor.org/rfc/rfc2136",
+    ),
 ];
 
 impl Dissector for DnsDissector {
@@ -1488,7 +2569,7 @@ impl Dissector for DnsDissector {
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
         // DNS (RFC 1035) — standard parsing without mDNS bit reinterpretation.
-        dissect_dns_core(data, buf, offset, self.short_name(), false)
+        dissect_dns_core(data, buf, offset, self.short_name(), false, false)
     }
 }
 
@@ -1515,7 +2596,7 @@ pub fn dissect_as_mdns<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
 ) -> Result<DissectResult, PacketError> {
-    dissect_dns_core(data, buf, offset, "mDNS", true)
+    dissect_dns_core(data, buf, offset, "mDNS", true, false)
 }
 
 /// Shared DNS / mDNS message parser.
@@ -1525,12 +2606,19 @@ pub fn dissect_as_mdns<'pkt>(
 /// qclass is emitted as a separate `qu` field, and the top bit of each
 /// non-OPT record's rrclass is emitted as a separate `cache_flush` field,
 /// per RFC 6762, Sections 18.12, 18.13 and 10.2.
+///
+/// `stream_transport` is true for DNS over TCP. Only then is the DSO Data of
+/// an opcode 6 message parsed: RFC 8490, Section 4.2 —
+/// <https://www.rfc-editor.org/rfc/rfc8490#section-4.2> — "Only DNS-over-TCP
+/// and DNS-over-TLS are currently defined for use with DNS Stateful
+/// Operations."
 fn dissect_dns_core<'pkt>(
     data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
     layer_name: &'static str,
     mdns_mode: bool,
+    stream_transport: bool,
 ) -> Result<DissectResult, PacketError> {
     if data.len() < HEADER_SIZE {
         return Err(PacketError::Truncated {
@@ -1801,6 +2889,15 @@ fn dissect_dns_core<'pkt>(
                     FieldValue::U8(extended_rcode),
                     offset + pos + 4..offset + pos + 8,
                 );
+                // RFC 6891, Section 6.1.3 — <https://www.rfc-editor.org/rfc/rfc6891#section-6.1.3>:
+                // "EXTENDED-RCODE
+                //     Forms the upper 8 bits of extended 12-bit RCODE (together
+                //     with the 4 bits defined in [RFC1035]."
+                buf.push_field(
+                    &RR_CHILD_FIELDS[RRFD_RCODE],
+                    FieldValue::U16(((extended_rcode as u16) << 4) | rcode as u16),
+                    offset + pos + 4..offset + pos + 8,
+                );
                 buf.push_field(
                     &RR_CHILD_FIELDS[RRFD_EDNS_VERSION],
                     FieldValue::U8(edns_version),
@@ -1879,6 +2976,12 @@ fn dissect_dns_core<'pkt>(
         }
     }
 
+    // RFC 8490, Section 5.4.2 — <https://www.rfc-editor.org/rfc/rfc8490#section-5.4.2>:
+    // in a DSO message, the DSO Data (TLVs) follows the (empty) sections.
+    if stream_transport && opcode == OPCODE_DSO && pos < data.len() {
+        pos = parse_dso_tlvs(buf, data, pos, offset)?;
+    }
+
     // Update layer range to actual consumed bytes
     if let Some(layer) = buf.last_layer_mut() {
         layer.range = offset..offset + pos;
@@ -1915,14 +3018,20 @@ fn dissect_dns_tcp_message<'pkt>(
     // RFC 1035, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc1035#section-4.2.2>:
     // the length prefix delimits the message, so a message that needs more
     // octets than it declares is malformed, not a truncated capture.
-    let result = DnsDissector
-        .dissect(&msg_data[2..2 + msg_len], buf, offset + 2)
-        .map_err(|e| match e {
-            PacketError::Truncated { .. } => {
-                PacketError::InvalidHeader("DNS message overruns TCP length prefix")
-            }
-            other => other,
-        })?;
+    let result = dissect_dns_core(
+        &msg_data[2..2 + msg_len],
+        buf,
+        offset + 2,
+        "DNS",
+        false,
+        true,
+    )
+    .map_err(|e| match e {
+        PacketError::Truncated { .. } => {
+            PacketError::InvalidHeader("DNS message overruns TCP length prefix")
+        }
+        other => other,
+    })?;
 
     // Extend the DNS layer range to include the 2-byte TCP length prefix
     // and the tcp_length field we pushed before the DNS dissect call.
@@ -2045,6 +3154,32 @@ mod tests {
     // | RFC 7828 §3            | EDNS0 TCP Keepalive option          | parse_edns_tcp_keepalive          |
     // | RFC 8659 §4.1          | CAA record RDATA layout             | parse_caa_record                  |
     // | RFC 9460 §2.2          | SVCB / HTTPS record                 | parse_svcb_record                 |
+    // | RFC 9460 §2.2/§7/§8, App. D.2 | SvcParams: mandatory, alpn, ipv4hint | svcb_params_rfc9460_figure9_mandatory_alpn_ipv4hint |
+    // | RFC 9460 §7.2/§7.3, App. D.2 | SvcParams: port, ipv6hint   | svcb_params_rfc9460_figure4_port_and_figure7_ipv6hint |
+    // | RFC 9460 §7.1          | HTTPS alpn=h2 (issue reproduction)  | svcb_params_issue_repro_https_alpn_h2 |
+    // | RFC 9848 §3 / RFC 9461 §5 / RFC 9460 §7.1 | ech, dohpath, no-default-alpn, unknown key | svcb_params_ech_dohpath_no_default_alpn_and_unknown_key |
+    // | RFC 9460 §7            | Malformed SvcParamValues kept raw   | svcb_params_malformed_values_fall_back_to_raw_value |
+    // | RFC 9460 §2.2          | RDATA ends inside a SvcParam        | svcb_params_truncated_list_keeps_only_raw_params |
+    // | RFC 6891 §6.1.3        | Combined 12-bit RCODE (BADVERS)     | opt_combined_rcode_badvers        |
+    // | IANA DNS Parameters    | RCODE / opcode / TYPE / option names | rcode_opcode_and_type_names_follow_iana |
+    // | RFC 5001 §2.3          | EDNS NSID                           | edns_nsid_exposes_text_when_printable |
+    // | RFC 6975 §3            | EDNS DAU / DHU / N3U                | edns_dau_dhu_n3u_algorithm_lists  |
+    // | RFC 7871 §6            | EDNS Client Subnet                  | edns_client_subnet_ipv4_and_ipv6  |
+    // | RFC 7873 §4            | EDNS COOKIE                         | edns_cookie_client_and_server     |
+    // | RFC 7830 §3 / RFC 7314 §3 / RFC 8145 §4.1 | Padding, EXPIRE, edns-key-tag | edns_padding_expire_key_tag |
+    // | RFC 8914 §2            | Extended DNS Error                  | edns_extended_dns_error           |
+    // | RFC 9567 §5            | Report-Channel agent domain         | edns_report_channel_agent_domain  |
+    // | RFC 9660 §2.1          | ZONEVERSION                         | edns_zoneversion                  |
+    // | RFC 4034 §4.1.2/§4.3   | NSEC type bit map                   | nsec_type_bitmap_rfc4034_example  |
+    // | RFC 5155 §3.2.1        | NSEC3 type bit map                  | nsec3_type_bitmap_a_ns_soa_rrsig_nsec_dnskey |
+    // | RFC 4034 §4.1.2        | Malformed type bit maps             | malformed_type_bitmaps_have_no_type_list |
+    // | RFC 8945 §4.2          | TSIG record (uncompressed name)     | parse_tsig_record                 |
+    // | RFC 2930 §2            | TKEY record                         | parse_tkey_record                 |
+    // | RFC 8976 §2.2 / RFC 7477 §2.1.1 / RFC 7553 §4.5 | ZONEMD, CSYNC, URI | parse_zonemd_csync_uri_records |
+    // | RFC 1035 §3.3.2 / RFC 1876 §2 | HINFO, LOC                   | parse_hinfo_loc_records           |
+    // | RFC 4025 §2.1-§2.5     | IPSECKEY gateway types              | parse_ipseckey_record_gateway_types |
+    // | RFC 4398 §2 / RFC 4701 §3.1 / RFC 7929 §2.1 / RFC 7043 §3.1, §4.1 | CERT, DHCID, OPENPGPKEY, EUI48/64 | parse_cert_dhcid_openpgpkey_eui_records |
+    // | RFC 8490 §4.2/§5.4.2/§5.4.4 | DSO message TLVs (TCP only)    | dso_message_tlvs                  |
     // | —                      | Opcode / RCODE / TYPE / CLASS names | type_class_opcode_rcode_names     |
     // | —                      | Dispatch hint is End                | dispatch_hint_is_end              |
     // | —                      | `write_dns_name` formats output     | write_dns_name_formats_output     |
@@ -3432,5 +4567,1108 @@ mod tests {
 
         assert_layer_and_references(&DnsDissector);
         assert_layer_and_references(&DnsTcpDissector);
+    }
+
+    // ---- Helpers for the structured-decoding tests below -----------------
+
+    /// Return the direct children of an Object / Array field (skipping the
+    /// flattened grandchildren that `nested_fields` also yields).
+    fn direct_children<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        parent: &Field<'pkt>,
+    ) -> Vec<&'a Field<'pkt>> {
+        let range = match &parent.value {
+            FieldValue::Object(r) | FieldValue::Array(r) => r.clone(),
+            _ => panic!("expected container"),
+        };
+        let fields = buf.fields();
+        let mut out = Vec::new();
+        let mut i = range.start;
+        while i < range.end {
+            let f = &fields[i as usize];
+            out.push(f);
+            i = match &f.value {
+                FieldValue::Object(r) | FieldValue::Array(r) => r.end,
+                _ => i + 1,
+            };
+        }
+        out
+    }
+
+    /// Build a response with a single answer RR of `rtype` carrying `rdata`.
+    fn single_answer(rtype: u16, rdata: &[u8]) -> Vec<u8> {
+        let mut data = header(0, 1, 0, 0);
+        data.extend_from_slice(&wire_name("ex.test"));
+        data.extend_from_slice(&rtype.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&300u32.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(rdata);
+        data
+    }
+
+    /// Build a message with a single OPT RR (additional section) carrying
+    /// `rdata`, with the given header RCODE and OPT TTL.
+    fn single_opt(header_rcode: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
+        let mut data = header(0, 0, 0, 1);
+        data[2..4].copy_from_slice(&(0x8000 | header_rcode).to_be_bytes());
+        data.push(0);
+        data.extend_from_slice(&TYPE_OPT.to_be_bytes());
+        data.extend_from_slice(&1232u16.to_be_bytes());
+        data.extend_from_slice(&ttl.to_be_bytes());
+        data.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        data.extend_from_slice(rdata);
+        data
+    }
+
+    /// Dissect `data` and return the buffer.
+    fn dissect(data: &[u8]) -> DissectBuffer<'_> {
+        let mut b = DissectBuffer::new();
+        DnsDissector.dissect(data, &mut b, 0).unwrap();
+        b
+    }
+
+    /// First RR object of the named section.
+    fn first_rr<'a, 'pkt>(b: &'a DissectBuffer<'pkt>, section: &str) -> &'a Field<'pkt> {
+        let layer = &b.layers()[0];
+        let arr = b.field_by_name(layer, section).unwrap();
+        first_array_entry(b, arr)
+    }
+
+    /// Direct child of `parent` with `name`.
+    fn child<'a, 'pkt>(
+        b: &'a DissectBuffer<'pkt>,
+        parent: &Field<'pkt>,
+        name: &str,
+    ) -> &'a Field<'pkt> {
+        direct_children(b, parent)
+            .into_iter()
+            .find(|f| f.name() == name)
+            .unwrap_or_else(|| panic!("no child {name}"))
+    }
+
+    /// Whether `parent` has a direct child with `name`.
+    fn has_child(b: &DissectBuffer<'_>, parent: &Field<'_>, name: &str) -> bool {
+        direct_children(b, parent).iter().any(|f| f.name() == name)
+    }
+
+    /// The first EDNS option object of the single OPT RR in `b`.
+    fn first_edns_option<'a, 'pkt>(b: &'a DissectBuffer<'pkt>) -> &'a Field<'pkt> {
+        let rr = first_rr(b, "additionals");
+        let opts = child(b, rr, "edns_options");
+        direct_children(b, opts)[0]
+    }
+
+    /// Wrap an EDNS option in OPT RDATA.
+    fn edns_opt(code: u16, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&code.to_be_bytes());
+        v.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        v.extend_from_slice(data);
+        v
+    }
+
+    // ---- RFC 9460 §2.2 / §7, Appendix D.2 — SvcParams --------------------
+
+    #[test]
+    fn svcb_params_rfc9460_figure9_mandatory_alpn_ipv4hint() {
+        // RFC 9460, Appendix D.2, Figure 9.
+        let rdata: &[u8] = &[
+            0x00, 0x10, 0x03, b'f', b'o', b'o', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+            0x03, b'o', b'r', b'g', 0x00, // priority, target
+            0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x04, // mandatory=alpn,ipv4hint
+            0x00, 0x01, 0x00, 0x09, 0x02, b'h', b'2', 0x05, b'h', b'3', b'-', b'1',
+            b'9', // alpn
+            0x00, 0x04, 0x00, 0x04, 0xc0, 0x00, 0x02, 0x01, // ipv4hint
+        ];
+        let data = single_answer(TYPE_SVCB, rdata);
+        let rdata_abs = data.len() - rdata.len();
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        // Raw SvcParams are kept for compatibility.
+        assert_eq!(
+            child(&b, rr, "rdata_params").value,
+            FieldValue::Bytes(&rdata[19..])
+        );
+        let params = child(&b, rr, "rdata_svc_params");
+        let entries = direct_children(&b, params);
+        assert_eq!(entries.len(), 3);
+
+        // mandatory
+        let p0 = entries[0];
+        assert_eq!(p0.range, rdata_abs + 19..rdata_abs + 27);
+        assert_eq!(child(&b, p0, "key").value, FieldValue::U16(0));
+        assert_eq!(child(&b, p0, "length").value, FieldValue::U16(4));
+        let keys: Vec<_> = direct_children(&b, child(&b, p0, "mandatory"))
+            .iter()
+            .map(|f| f.value.clone())
+            .collect();
+        assert_eq!(keys, vec![FieldValue::U16(1), FieldValue::U16(4)]);
+
+        // alpn
+        let p1 = entries[1];
+        assert_eq!(child(&b, p1, "key").value, FieldValue::U16(1));
+        let ids = direct_children(&b, child(&b, p1, "alpn"));
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].value, FieldValue::Bytes(b"h2"));
+        assert_eq!(ids[0].range, rdata_abs + 32..rdata_abs + 34);
+        assert_eq!(ids[1].value, FieldValue::Bytes(b"h3-19"));
+
+        // ipv4hint
+        let p2 = entries[2];
+        let addrs = direct_children(&b, child(&b, p2, "ipv4hint"));
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].value, FieldValue::Ipv4Addr([192, 0, 2, 1]));
+
+        // Container label and key names resolve to the registered key name.
+        let idx = b
+            .fields()
+            .iter()
+            .position(|f| core::ptr::eq(f, p1))
+            .unwrap();
+        assert_eq!(b.resolve_container_display_name(idx as u32), Some("alpn"));
+        assert_eq!(svc_param_key_name(4), Some("ipv4hint"));
+    }
+
+    #[test]
+    fn svcb_params_rfc9460_figure4_port_and_figure7_ipv6hint() {
+        // Figure 4: port=53.
+        let mut rdata = vec![0x00, 0x10];
+        rdata.extend_from_slice(&wire_name("foo.example.com"));
+        rdata.extend_from_slice(&[0x00, 0x03, 0x00, 0x02, 0x00, 0x35]);
+        let data = single_answer(TYPE_SVCB, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let p = direct_children(&b, child(&b, rr, "rdata_svc_params"))[0];
+        assert_eq!(child(&b, p, "port").value, FieldValue::U16(53));
+
+        // Figure 7: two IPv6 hints.
+        let mut rdata = vec![0x00, 0x01];
+        rdata.extend_from_slice(&wire_name("foo.example.com"));
+        rdata.extend_from_slice(&[0x00, 0x06, 0x00, 0x20]);
+        let a1: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let a2: [u8; 16] = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53, 0, 1,
+        ];
+        rdata.extend_from_slice(&a1);
+        rdata.extend_from_slice(&a2);
+        let data = single_answer(TYPE_HTTPS, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let p = direct_children(&b, child(&b, rr, "rdata_svc_params"))[0];
+        let addrs: Vec<_> = direct_children(&b, child(&b, p, "ipv6hint"))
+            .iter()
+            .map(|f| f.value.clone())
+            .collect();
+        assert_eq!(
+            addrs,
+            vec![FieldValue::Ipv6Addr(a1), FieldValue::Ipv6Addr(a2)]
+        );
+    }
+
+    #[test]
+    fn svcb_params_issue_repro_https_alpn_h2() {
+        // HTTPS RR, priority 1, target ".", alpn=h2 (issue reproduction).
+        let rdata: &[u8] = &[0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x03, 0x02, b'h', b'2'];
+        let data = single_answer(TYPE_HTTPS, rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let p = direct_children(&b, child(&b, rr, "rdata_svc_params"))[0];
+        assert_eq!(child(&b, p, "key").value, FieldValue::U16(1));
+        let ids = direct_children(&b, child(&b, p, "alpn"));
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].value, FieldValue::Bytes(b"h2"));
+    }
+
+    #[test]
+    fn svcb_params_ech_dohpath_no_default_alpn_and_unknown_key() {
+        let mut rdata = vec![0x00, 0x01, 0x00];
+        rdata.extend_from_slice(&[0x00, 0x02, 0x00, 0x00]); // no-default-alpn
+        rdata.extend_from_slice(&[0x00, 0x05, 0x00, 0x04, 0x00, 0x02, 0xfe, 0x0d]); // ech
+        rdata.extend_from_slice(&[0x00, 0x07, 0x00, 0x0b]); // dohpath
+        rdata.extend_from_slice(b"/q{?dns}xyz");
+        rdata.extend_from_slice(&[0x02, 0x9b, 0x00, 0x05]); // key667 (Figure 5)
+        rdata.extend_from_slice(b"hello");
+        let data = single_answer(TYPE_SVCB, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let entries = direct_children(&b, child(&b, rr, "rdata_svc_params"));
+        assert_eq!(entries.len(), 4);
+        // no-default-alpn: key + length only.
+        assert_eq!(direct_children(&b, entries[0]).len(), 2);
+        assert_eq!(
+            child(&b, entries[1], "ech").value,
+            FieldValue::Bytes(&[0x00, 0x02, 0xfe, 0x0d])
+        );
+        assert_eq!(
+            child(&b, entries[2], "dohpath").value,
+            FieldValue::Bytes(b"/q{?dns}xyz")
+        );
+        assert_eq!(child(&b, entries[3], "key").value, FieldValue::U16(667));
+        assert_eq!(
+            child(&b, entries[3], "value").value,
+            FieldValue::Bytes(b"hello")
+        );
+    }
+
+    #[test]
+    fn svcb_params_malformed_values_fall_back_to_raw_value() {
+        // port with 1 octet, empty ipv4hint, alpn not exactly filled,
+        // ipv6hint of 15 octets, mandatory of odd length.
+        let mut rdata = vec![0x00, 0x01, 0x00];
+        rdata.extend_from_slice(&[0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00]); // mandatory
+        rdata.extend_from_slice(&[0x00, 0x01, 0x00, 0x02, 0x05, b'h']); // alpn
+        rdata.extend_from_slice(&[0x00, 0x02, 0x00, 0x01, 0x00]); // no-default-alpn, len 1
+        rdata.extend_from_slice(&[0x00, 0x03, 0x00, 0x01, 0x35]); // port
+        rdata.extend_from_slice(&[0x00, 0x04, 0x00, 0x00]); // ipv4hint
+        rdata.extend_from_slice(&[0x00, 0x06, 0x00, 0x0f]); // ipv6hint
+        rdata.extend_from_slice(&[0u8; 15]);
+        let data = single_answer(TYPE_SVCB, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let entries = direct_children(&b, child(&b, rr, "rdata_svc_params"));
+        assert_eq!(entries.len(), 6);
+        for e in entries {
+            let names: Vec<_> = direct_children(&b, e).iter().map(|f| f.name()).collect();
+            assert_eq!(names, vec!["key", "length", "value"], "{names:?}");
+        }
+    }
+
+    #[test]
+    fn svcb_params_truncated_list_keeps_only_raw_params() {
+        // RFC 9460 §2.2: the end of RDATA inside a SvcParam is malformed.
+        let rdata: &[u8] = &[0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00];
+        let data = single_answer(TYPE_SVCB, rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert!(has_child(&b, rr, "rdata_params"));
+        assert!(!has_child(&b, rr, "rdata_svc_params"));
+    }
+
+    // ---- RFC 6891 §6.1.3 — extended RCODE ---------------------------------
+
+    #[test]
+    fn opt_combined_rcode_badvers() {
+        // Header RCODE 0, OPT TTL 01 00 00 00 → RCODE 16 (BADVERS).
+        let data = single_opt(0, 0x0100_0000, &[]);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "additionals");
+        assert_eq!(child(&b, rr, "extended_rcode").value, FieldValue::U8(1));
+        let rcode = child(&b, rr, "rcode");
+        assert_eq!(rcode.value, FieldValue::U16(16));
+        assert_eq!(
+            (rcode.descriptor.display_fn.unwrap())(&rcode.value, &[]),
+            Some("BADVERS")
+        );
+        // Low nibble comes from the header.
+        let data = single_opt(3, 0x0100_0000, &[]);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "additionals");
+        assert_eq!(child(&b, rr, "rcode").value, FieldValue::U16(19));
+    }
+
+    #[test]
+    fn rcode_opcode_and_type_names_follow_iana() {
+        for (v, n) in [
+            (6, "YXDOMAIN"),
+            (7, "YXRRSET"),
+            (8, "NXRRSET"),
+            (9, "NOTAUTH"),
+            (10, "NOTZONE"),
+            (11, "DSOTYPENI"),
+            (16, "BADVERS"),
+            (17, "BADKEY"),
+            (18, "BADTIME"),
+            (19, "BADMODE"),
+            (20, "BADNAME"),
+            (21, "BADALG"),
+            (22, "BADTRUNC"),
+            (23, "BADCOOKIE"),
+        ] {
+            assert_eq!(dns_rcode_name(v), Some(n), "rcode {v}");
+        }
+        assert_eq!(dns_rcode_name(12), None);
+        assert_eq!(dns_rcode_name(24), None);
+        assert_eq!(tsig_rcode_name(16), Some("BADSIG"));
+        assert_eq!(tsig_rcode_name(3), Some("NXDOMAIN"));
+        assert_eq!(dns_opcode_name(6), Some("DSO"));
+        for (v, n) in [
+            (13, "HINFO"),
+            (37, "CERT"),
+            (39, "DNAME"),
+            (44, "SSHFP"),
+            (45, "IPSECKEY"),
+            (49, "DHCID"),
+            (51, "NSEC3PARAM"),
+            (59, "CDS"),
+            (60, "CDNSKEY"),
+            (61, "OPENPGPKEY"),
+            (62, "CSYNC"),
+            (63, "ZONEMD"),
+            (64, "SVCB"),
+            (108, "EUI48"),
+            (109, "EUI64"),
+            (249, "TKEY"),
+            (250, "TSIG"),
+            (251, "IXFR"),
+            (252, "AXFR"),
+            (256, "URI"),
+            (257, "CAA"),
+        ] {
+            assert_eq!(dns_type_name(v), Some(n), "type {v}");
+        }
+        for (v, n) in [
+            (3, "NSID"),
+            (5, "DAU"),
+            (6, "DHU"),
+            (7, "N3U"),
+            (9, "EXPIRE"),
+            (12, "PADDING"),
+            (14, "KEY-TAG"),
+            (18, "REPORT-CHANNEL"),
+            (19, "ZONEVERSION"),
+        ] {
+            assert_eq!(edns_option_code_name(v), Some(n), "option {v}");
+        }
+        assert_eq!(ede_info_code_name(18), Some("Prohibited"));
+        assert_eq!(ede_info_code_name(49151), None);
+        // Every assigned code in the IANA registries has a name.
+        assert!((1..=26).all(|c| c == 4 || edns_option_code_name(c).is_some()));
+        assert_eq!(edns_option_code_name(4), None);
+        assert!((0..=35).all(|c| ede_info_code_name(c).is_some()));
+        assert!((0..=12).all(|k| svc_param_key_name(k).is_some()));
+        assert_eq!(svc_param_key_name(13), None);
+        assert_eq!(dso_type_name(0x41), Some("PUSH"));
+        assert_eq!(dso_type_name(0), None);
+        assert_eq!(tsig_rcode_name(300), None);
+    }
+
+    // ---- RFC 6891 §6.1.2 — EDNS options -----------------------------------
+
+    #[test]
+    fn edns_nsid_exposes_text_when_printable() {
+        let data = single_opt(0, 0, &edns_opt(3, b"ns1.example"));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(
+            child(&b, opt, "data").value,
+            FieldValue::Bytes(b"ns1.example")
+        );
+        assert_eq!(child(&b, opt, "nsid").value, FieldValue::Str("ns1.example"));
+
+        let data = single_opt(0, 0, &edns_opt(3, &[0x00, 0xff]));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert!(has_child(&b, opt, "data"));
+        assert!(!has_child(&b, opt, "nsid"));
+    }
+
+    #[test]
+    fn edns_dau_dhu_n3u_algorithm_lists() {
+        for code in [5u16, 6, 7] {
+            let data = single_opt(0, 0, &edns_opt(code, &[8, 13, 15]));
+            let b = dissect(&data);
+            let opt = first_edns_option(&b);
+            let algs: Vec<_> = direct_children(&b, child(&b, opt, "algorithms"))
+                .iter()
+                .map(|f| f.value.clone())
+                .collect();
+            assert_eq!(
+                algs,
+                vec![FieldValue::U8(8), FieldValue::U8(13), FieldValue::U8(15)]
+            );
+        }
+    }
+
+    #[test]
+    fn edns_client_subnet_ipv4_and_ipv6() {
+        // FAMILY 1, /24 source, /0 scope, 3 address octets.
+        let data = single_opt(0, 0, &edns_opt(8, &[0, 1, 24, 0, 192, 0, 2]));
+        let opt_abs = data.len() - 7;
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(child(&b, opt, "family").value, FieldValue::U16(1));
+        assert_eq!(
+            child(&b, opt, "source_prefix_length").value,
+            FieldValue::U8(24)
+        );
+        assert_eq!(
+            child(&b, opt, "scope_prefix_length").value,
+            FieldValue::U8(0)
+        );
+        let addr = child(&b, opt, "address");
+        assert_eq!(addr.value, FieldValue::Ipv4Addr([192, 0, 2, 0]));
+        assert_eq!(addr.range, opt_abs + 4..opt_abs + 7);
+
+        // FAMILY 2, /56 source → 7 octets.
+        let data = single_opt(
+            0,
+            0,
+            &edns_opt(8, &[0, 2, 56, 48, 0x20, 0x01, 0x0d, 0xb8, 0, 1, 2]),
+        );
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        let mut expected = [0u8; 16];
+        expected[..7].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 1, 2]);
+        assert_eq!(
+            child(&b, opt, "address").value,
+            FieldValue::Ipv6Addr(expected)
+        );
+        assert_eq!(
+            child(&b, opt, "scope_prefix_length").value,
+            FieldValue::U8(48)
+        );
+
+        // Unknown family: raw address bytes.
+        let data = single_opt(0, 0, &edns_opt(8, &[0, 9, 8, 0, 0xaa]));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(child(&b, opt, "address").value, FieldValue::Bytes(&[0xaa]));
+
+        // Too short for FAMILY + prefix lengths: raw data.
+        let data = single_opt(0, 0, &edns_opt(8, &[0, 1, 24]));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert!(has_child(&b, opt, "data"));
+        assert!(!has_child(&b, opt, "family"));
+    }
+
+    #[test]
+    fn edns_cookie_client_and_server() {
+        let client = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let data = single_opt(0, 0, &edns_opt(10, &client));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(
+            child(&b, opt, "client_cookie").value,
+            FieldValue::Bytes(&client)
+        );
+        assert!(!has_child(&b, opt, "server_cookie"));
+
+        let mut both = client.to_vec();
+        both.extend_from_slice(&[9u8; 16]);
+        let data = single_opt(0, 0, &edns_opt(10, &both));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(
+            child(&b, opt, "server_cookie").value,
+            FieldValue::Bytes(&[9u8; 16])
+        );
+
+        // RFC 7873 §4: 9..15 and > 40 octets are malformed → raw data.
+        for len in [9usize, 15, 41] {
+            let data = single_opt(0, 0, &edns_opt(10, &vec![0u8; len]));
+            let b = dissect(&data);
+            let opt = first_edns_option(&b);
+            assert!(has_child(&b, opt, "data"), "len {len}");
+            assert!(!has_child(&b, opt, "client_cookie"), "len {len}");
+        }
+    }
+
+    #[test]
+    fn edns_padding_expire_key_tag() {
+        // Padding: length only.
+        let data = single_opt(0, 0, &edns_opt(12, &[0u8; 6]));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        let names: Vec<_> = direct_children(&b, opt).iter().map(|f| f.name()).collect();
+        assert_eq!(names, vec!["code", "length"]);
+
+        // EXPIRE (RFC 7314 §3): 4-octet value in responses.
+        let data = single_opt(0, 0, &edns_opt(9, &3600u32.to_be_bytes()));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(child(&b, opt, "expire").value, FieldValue::U32(3600));
+
+        // edns-key-tag (RFC 8145 §4.1): list of 16-bit key tags.
+        let data = single_opt(0, 0, &edns_opt(14, &[0x4f, 0x66, 0x9e, 0xb7]));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        let tags: Vec<_> = direct_children(&b, child(&b, opt, "key_tags"))
+            .iter()
+            .map(|f| f.value.clone())
+            .collect();
+        assert_eq!(tags, vec![FieldValue::U16(0x4f66), FieldValue::U16(0x9eb7)]);
+
+        // Odd key-tag length: raw.
+        let data = single_opt(0, 0, &edns_opt(14, &[1, 2, 3]));
+        let b = dissect(&data);
+        assert!(has_child(&b, first_edns_option(&b), "data"));
+    }
+
+    #[test]
+    fn edns_extended_dns_error() {
+        let mut v = 18u16.to_be_bytes().to_vec();
+        v.extend_from_slice(b"blocked by policy");
+        let data = single_opt(0, 0, &edns_opt(15, &v));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        let info = child(&b, opt, "info_code");
+        assert_eq!(info.value, FieldValue::U16(18));
+        assert_eq!(
+            (info.descriptor.display_fn.unwrap())(&info.value, &[]),
+            Some("Prohibited")
+        );
+        assert_eq!(
+            child(&b, opt, "extra_text").value,
+            FieldValue::Bytes(b"blocked by policy")
+        );
+
+        // No EXTRA-TEXT.
+        let data = single_opt(0, 0, &edns_opt(15, &0u16.to_be_bytes()));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert!(has_child(&b, opt, "info_code"));
+        assert!(!has_child(&b, opt, "extra_text"));
+
+        // Too short: raw.
+        let data = single_opt(0, 0, &edns_opt(15, &[1]));
+        let b = dissect(&data);
+        assert!(has_child(&b, first_edns_option(&b), "data"));
+    }
+
+    #[test]
+    fn edns_report_channel_agent_domain() {
+        let name = wire_name("a01.agent-domain.example");
+        let data = single_opt(0, 0, &edns_opt(18, &name));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(
+            child(&b, opt, "agent_domain").value,
+            FieldValue::Bytes(&name)
+        );
+
+        // Compression pointer or a name not filling the option: raw.
+        for bad in [vec![0xc0, 0x0c], {
+            let mut v = wire_name("x");
+            v.push(0);
+            v
+        }] {
+            let data = single_opt(0, 0, &edns_opt(18, &bad));
+            let b = dissect(&data);
+            let opt = first_edns_option(&b);
+            assert!(has_child(&b, opt, "data"));
+            assert!(!has_child(&b, opt, "agent_domain"));
+        }
+    }
+
+    #[test]
+    fn edns_zoneversion() {
+        // Query form: empty.
+        let data = single_opt(0, 0, &edns_opt(19, &[]));
+        let b = dissect(&data);
+        let names: Vec<_> = direct_children(&b, first_edns_option(&b))
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert_eq!(names, vec!["code", "length"]);
+
+        // Response: LABELCOUNT 2, TYPE 0 (SOA-SERIAL), VERSION 4 octets.
+        let data = single_opt(0, 0, &edns_opt(19, &[2, 0, 0, 0, 0x30, 0x39]));
+        let b = dissect(&data);
+        let opt = first_edns_option(&b);
+        assert_eq!(child(&b, opt, "label_count").value, FieldValue::U8(2));
+        let t = child(&b, opt, "version_type");
+        assert_eq!(t.value, FieldValue::U8(0));
+        assert_eq!(
+            (t.descriptor.display_fn.unwrap())(&t.value, &[]),
+            Some("SOA-SERIAL")
+        );
+        assert_eq!(
+            child(&b, opt, "version").value,
+            FieldValue::Bytes(&[0, 0, 0x30, 0x39])
+        );
+
+        // One octet: raw.
+        let data = single_opt(0, 0, &edns_opt(19, &[2]));
+        let b = dissect(&data);
+        assert!(has_child(&b, first_edns_option(&b), "data"));
+    }
+
+    // ---- RFC 4034 §4.1.2 — type bit maps ----------------------------------
+
+    /// RFC 4034 §4.3 example bitmap: A, MX, RRSIG, NSEC, TYPE1234.
+    fn rfc4034_bitmap() -> Vec<u8> {
+        let mut v = vec![0x00, 0x06, 0x40, 0x01, 0x00, 0x00, 0x00, 0x03, 0x04, 0x1b];
+        v.extend_from_slice(&[0u8; 26]);
+        v.push(0x20);
+        v
+    }
+
+    fn types_of(b: &DissectBuffer<'_>, rr: &Field<'_>) -> Vec<FieldValue<'static>> {
+        direct_children(b, child(b, rr, "rdata_types"))
+            .iter()
+            .map(|f| match f.value {
+                FieldValue::U16(v) => FieldValue::U16(v),
+                _ => panic!("type must be U16"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nsec_type_bitmap_rfc4034_example() {
+        let mut rdata = wire_name("host.example.com");
+        let bitmap = rfc4034_bitmap();
+        rdata.extend_from_slice(&bitmap);
+        let data = single_answer(TYPE_NSEC, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(
+            types_of(&b, rr),
+            vec![
+                FieldValue::U16(1),
+                FieldValue::U16(15),
+                FieldValue::U16(46),
+                FieldValue::U16(47),
+                FieldValue::U16(1234)
+            ]
+        );
+        // Raw bitmap bytes are kept.
+        assert_eq!(
+            child(&b, rr, "rdata_type_bitmaps").value,
+            FieldValue::Bytes(&bitmap)
+        );
+    }
+
+    #[test]
+    fn nsec3_type_bitmap_a_ns_soa_rrsig_nsec_dnskey() {
+        // A(1) NS(2) SOA(6) RRSIG(46) NSEC(47) DNSKEY(48) in window 0.
+        let bitmap = [0x00, 0x07, 0x62, 0, 0, 0, 0, 0x03, 0x80];
+        let mut rdata = vec![1u8, 0, 0, 0, 0, 20];
+        rdata.extend_from_slice(&[0xab; 20]);
+        rdata.extend_from_slice(&bitmap);
+        let data = single_answer(TYPE_NSEC3, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(
+            types_of(&b, rr),
+            vec![
+                FieldValue::U16(1),
+                FieldValue::U16(2),
+                FieldValue::U16(6),
+                FieldValue::U16(46),
+                FieldValue::U16(47),
+                FieldValue::U16(48)
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_type_bitmaps_have_no_type_list() {
+        // Bitmap length 0, length > 32, truncated, and decreasing windows.
+        let cases: [&[u8]; 4] = [
+            &[0x00, 0x00],
+            &[0x00, 0x21],
+            &[0x00, 0x02, 0x40],
+            &[0x01, 0x01, 0x40, 0x00, 0x01, 0x40],
+        ];
+        for bm in cases {
+            let mut rdata = wire_name("n.example");
+            rdata.extend_from_slice(bm);
+            let data = single_answer(TYPE_NSEC, &rdata);
+            let b = dissect(&data);
+            let rr = first_rr(&b, "answers");
+            assert!(has_child(&b, rr, "rdata_type_bitmaps"), "{bm:?}");
+            assert!(!has_child(&b, rr, "rdata_types"), "{bm:?}");
+        }
+    }
+
+    // ---- Additional RR types ----------------------------------------------
+
+    #[test]
+    fn parse_tsig_record() {
+        // RFC 8945 §4.2
+        let mut rdata = wire_name("hmac-sha256");
+        let name_len = rdata.len();
+        rdata.extend_from_slice(&[0x00, 0x00, 0x5f, 0x5e, 0x10, 0x00]); // time signed
+        rdata.extend_from_slice(&300u16.to_be_bytes()); // fudge
+        rdata.extend_from_slice(&4u16.to_be_bytes()); // mac size
+        rdata.extend_from_slice(&[0xaa; 4]); // mac
+        rdata.extend_from_slice(&0x1234u16.to_be_bytes()); // original id
+        rdata.extend_from_slice(&16u16.to_be_bytes()); // error BADSIG
+        rdata.extend_from_slice(&6u16.to_be_bytes()); // other len
+        rdata.extend_from_slice(&[0, 0, 0x5f, 0x5e, 0x10, 0x01]); // other data
+        let data = single_answer(TYPE_TSIG, &rdata);
+        let rdata_abs = data.len() - rdata.len();
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let alg = child(&b, rr, "rdata_algorithm_name");
+        assert_eq!(alg.value, FieldValue::Bytes(&rdata[..name_len]));
+        assert_eq!(alg.range, rdata_abs..rdata_abs + name_len);
+        assert_eq!(
+            child(&b, rr, "rdata_time_signed").value,
+            FieldValue::U64(0x5f5e_1000)
+        );
+        assert_eq!(child(&b, rr, "rdata_fudge").value, FieldValue::U16(300));
+        assert_eq!(child(&b, rr, "rdata_mac_size").value, FieldValue::U16(4));
+        assert_eq!(
+            child(&b, rr, "rdata_mac").value,
+            FieldValue::Bytes(&[0xaa; 4])
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_original_id").value,
+            FieldValue::U16(0x1234)
+        );
+        let err = child(&b, rr, "rdata_error");
+        assert_eq!(err.value, FieldValue::U16(16));
+        assert_eq!(
+            (err.descriptor.display_fn.unwrap())(&err.value, &[]),
+            Some("BADSIG")
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_other_length").value,
+            FieldValue::U16(6)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_other_data").value,
+            FieldValue::Bytes(&[0, 0, 0x5f, 0x5e, 0x10, 0x01])
+        );
+
+        // Truncated MAC → raw rdata.
+        let mut short = rdata.clone();
+        short.truncate(name_len + 12);
+        let data = single_answer(TYPE_TSIG, &short);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert!(has_child(&b, rr, "rdata"));
+        assert!(!has_child(&b, rr, "rdata_mac"));
+
+        // RFC 8945 §4.2: a compressed Algorithm Name is malformed → raw.
+        let mut compressed = vec![0xc0, 0x0c];
+        compressed.extend_from_slice(&rdata[name_len..]);
+        let data = single_answer(TYPE_TSIG, &compressed);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert!(has_child(&b, rr, "rdata"));
+        assert!(!has_child(&b, rr, "rdata_algorithm_name"));
+    }
+
+    #[test]
+    fn parse_tkey_record() {
+        // RFC 2930 §2
+        let mut rdata = wire_name("gss-tsig");
+        rdata.extend_from_slice(&1u32.to_be_bytes()); // inception
+        rdata.extend_from_slice(&2u32.to_be_bytes()); // expiration
+        rdata.extend_from_slice(&3u16.to_be_bytes()); // mode
+        rdata.extend_from_slice(&0u16.to_be_bytes()); // error
+        rdata.extend_from_slice(&2u16.to_be_bytes()); // key size
+        rdata.extend_from_slice(&[0xde, 0xad]);
+        rdata.extend_from_slice(&0u16.to_be_bytes()); // other size
+        let data = single_answer(TYPE_TKEY, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(child(&b, rr, "rdata_inception").value, FieldValue::U32(1));
+        assert_eq!(child(&b, rr, "rdata_expiration").value, FieldValue::U32(2));
+        assert_eq!(child(&b, rr, "rdata_mode").value, FieldValue::U16(3));
+        assert_eq!(child(&b, rr, "rdata_error").value, FieldValue::U16(0));
+        assert_eq!(child(&b, rr, "rdata_key_size").value, FieldValue::U16(2));
+        assert_eq!(
+            child(&b, rr, "rdata_key_data").value,
+            FieldValue::Bytes(&[0xde, 0xad])
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_other_length").value,
+            FieldValue::U16(0)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_other_data").value,
+            FieldValue::Bytes(&[])
+        );
+
+        // Trailing octet after Other Data → raw rdata.
+        let mut bad = rdata.clone();
+        bad.push(0);
+        let data = single_answer(TYPE_TKEY, &bad);
+        let b = dissect(&data);
+        assert!(has_child(&b, first_rr(&b, "answers"), "rdata"));
+    }
+
+    #[test]
+    fn parse_zonemd_csync_uri_records() {
+        // ZONEMD (RFC 8976 §2.2)
+        let mut rdata = 2018031500u32.to_be_bytes().to_vec();
+        rdata.extend_from_slice(&[1, 1]);
+        rdata.extend_from_slice(&[0x55; 48]);
+        let data = single_answer(TYPE_ZONEMD, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(
+            child(&b, rr, "rdata_serial").value,
+            FieldValue::U32(2018031500)
+        );
+        assert_eq!(child(&b, rr, "rdata_scheme").value, FieldValue::U8(1));
+        assert_eq!(
+            child(&b, rr, "rdata_hash_algorithm").value,
+            FieldValue::U8(1)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_digest").value,
+            FieldValue::Bytes(&[0x55; 48])
+        );
+
+        // CSYNC (RFC 7477 §2.1.1): serial, flags, type bitmap (A NS AAAA).
+        let mut rdata = 66u32.to_be_bytes().to_vec();
+        rdata.extend_from_slice(&3u16.to_be_bytes());
+        rdata.extend_from_slice(&[0x00, 0x04, 0x60, 0x00, 0x00, 0x08]);
+        let data = single_answer(TYPE_CSYNC, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(child(&b, rr, "rdata_serial").value, FieldValue::U32(66));
+        assert_eq!(child(&b, rr, "rdata_flags").value, FieldValue::U16(3));
+        assert_eq!(
+            types_of(&b, rr),
+            vec![FieldValue::U16(1), FieldValue::U16(2), FieldValue::U16(28)]
+        );
+
+        // URI (RFC 7553 §4.5)
+        let mut rdata = vec![0, 10, 0, 1];
+        rdata.extend_from_slice(b"ftp://ftp1.example.com/public");
+        let data = single_answer(TYPE_URI, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(child(&b, rr, "rdata_priority").value, FieldValue::U16(10));
+        assert_eq!(child(&b, rr, "rdata_weight").value, FieldValue::U16(1));
+        assert_eq!(
+            child(&b, rr, "rdata_uri").value,
+            FieldValue::Bytes(b"ftp://ftp1.example.com/public")
+        );
+        // Empty target is malformed.
+        let data = single_answer(TYPE_URI, &[0, 10, 0, 1]);
+        let b = dissect(&data);
+        assert!(has_child(&b, first_rr(&b, "answers"), "rdata"));
+    }
+
+    #[test]
+    fn parse_hinfo_loc_records() {
+        // HINFO (RFC 1035 §3.3.2; RFC 8482 §4.2 "RFC8482")
+        let rdata = [7, b'R', b'F', b'C', b'8', b'4', b'8', b'2', 0];
+        let data = single_answer(TYPE_HINFO, &rdata);
+        let rdata_abs = data.len() - rdata.len();
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let cpu = child(&b, rr, "rdata_cpu");
+        assert_eq!(cpu.value, FieldValue::Bytes(b"RFC8482"));
+        assert_eq!(cpu.range, rdata_abs + 1..rdata_abs + 8);
+        assert_eq!(child(&b, rr, "rdata_os").value, FieldValue::Bytes(b""));
+        // Trailing octet → raw.
+        let data = single_answer(TYPE_HINFO, &[1, b'a', 1, b'b', 0]);
+        let b = dissect(&data);
+        assert!(has_child(&b, first_rr(&b, "answers"), "rdata"));
+
+        // LOC (RFC 1876 §2), version 0.
+        let mut rdata = vec![0, 0x12, 0x16, 0x13];
+        rdata.extend_from_slice(&0x8b0d_2c2cu32.to_be_bytes());
+        rdata.extend_from_slice(&0x7f8c_9a8cu32.to_be_bytes());
+        rdata.extend_from_slice(&0x0098_9680u32.to_be_bytes());
+        let data = single_answer(TYPE_LOC, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(child(&b, rr, "rdata_version").value, FieldValue::U8(0));
+        assert_eq!(child(&b, rr, "rdata_size").value, FieldValue::U8(0x12));
+        assert_eq!(
+            child(&b, rr, "rdata_horizontal_precision").value,
+            FieldValue::U8(0x16)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_vertical_precision").value,
+            FieldValue::U8(0x13)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_latitude").value,
+            FieldValue::U32(0x8b0d_2c2c)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_longitude").value,
+            FieldValue::U32(0x7f8c_9a8c)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_altitude").value,
+            FieldValue::U32(0x0098_9680)
+        );
+        // Unknown version → raw.
+        rdata[0] = 1;
+        let data = single_answer(TYPE_LOC, &rdata);
+        let b = dissect(&data);
+        assert!(has_child(&b, first_rr(&b, "answers"), "rdata"));
+    }
+
+    #[test]
+    fn parse_ipseckey_record_gateway_types() {
+        // RFC 4025 §2.1: precedence, gateway type, algorithm, gateway, key.
+        let key = [0x01, 0x03, 0x51, 0x53];
+        let mut rdata = vec![10, 1, 2, 192, 0, 2, 38];
+        rdata.extend_from_slice(&key);
+        let data = single_answer(TYPE_IPSECKEY, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(child(&b, rr, "rdata_precedence").value, FieldValue::U8(10));
+        assert_eq!(child(&b, rr, "rdata_gateway_type").value, FieldValue::U8(1));
+        assert_eq!(child(&b, rr, "rdata_algorithm").value, FieldValue::U8(2));
+        assert_eq!(
+            child(&b, rr, "rdata_gateway_ipv4").value,
+            FieldValue::Ipv4Addr([192, 0, 2, 38])
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_public_key").value,
+            FieldValue::Bytes(&key)
+        );
+
+        // No gateway.
+        let data = single_answer(TYPE_IPSECKEY, &[10, 0, 2, 0xaa]);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert!(!has_child(&b, rr, "rdata_gateway_ipv4"));
+        assert_eq!(
+            child(&b, rr, "rdata_public_key").value,
+            FieldValue::Bytes(&[0xaa])
+        );
+
+        // IPv6 gateway.
+        let mut rdata = vec![10, 2, 2];
+        rdata.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let data = single_answer(TYPE_IPSECKEY, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert!(matches!(
+            child(&b, rr, "rdata_gateway_ipv6").value,
+            FieldValue::Ipv6Addr(_)
+        ));
+
+        // Domain-name gateway.
+        let gw = wire_name("gw.example");
+        let mut rdata = vec![10, 3, 2];
+        rdata.extend_from_slice(&gw);
+        rdata.push(0xbb);
+        let data = single_answer(TYPE_IPSECKEY, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(
+            child(&b, rr, "rdata_gateway_name").value,
+            FieldValue::Bytes(&gw)
+        );
+        assert_eq!(
+            child(&b, rr, "rdata_public_key").value,
+            FieldValue::Bytes(&[0xbb])
+        );
+
+        // Unknown gateway type / short IPv4 gateway → raw.
+        for bad in [&[10u8, 4, 2, 0][..], &[10, 1, 2, 192, 0][..]] {
+            let data = single_answer(TYPE_IPSECKEY, bad);
+            let b = dissect(&data);
+            assert!(has_child(&b, first_rr(&b, "answers"), "rdata"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn parse_cert_dhcid_openpgpkey_eui_records() {
+        // CERT (RFC 4398 §2)
+        let mut rdata = 1u16.to_be_bytes().to_vec();
+        rdata.extend_from_slice(&12345u16.to_be_bytes());
+        rdata.push(8);
+        rdata.extend_from_slice(&[0x30, 0x82]);
+        let data = single_answer(TYPE_CERT, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(child(&b, rr, "rdata_cert_type").value, FieldValue::U16(1));
+        assert_eq!(child(&b, rr, "rdata_key_tag").value, FieldValue::U16(12345));
+        assert_eq!(child(&b, rr, "rdata_algorithm").value, FieldValue::U8(8));
+        assert_eq!(
+            child(&b, rr, "rdata_certificate").value,
+            FieldValue::Bytes(&[0x30, 0x82])
+        );
+
+        // DHCID (RFC 4701 §3.1)
+        let mut rdata = 2u16.to_be_bytes().to_vec();
+        rdata.push(1);
+        rdata.extend_from_slice(&[0x77; 32]);
+        let data = single_answer(TYPE_DHCID, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(
+            child(&b, rr, "rdata_identifier_type").value,
+            FieldValue::U16(2)
+        );
+        assert_eq!(child(&b, rr, "rdata_digest_type").value, FieldValue::U8(1));
+        assert_eq!(
+            child(&b, rr, "rdata_digest").value,
+            FieldValue::Bytes(&[0x77; 32])
+        );
+
+        // OPENPGPKEY (RFC 7929 §2.1)
+        let data = single_answer(TYPE_OPENPGPKEY, &[0x99, 0x01]);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(
+            child(&b, rr, "rdata_public_key").value,
+            FieldValue::Bytes(&[0x99, 0x01])
+        );
+
+        // EUI48 / EUI64 (RFC 7043 §3.1, §4.1)
+        let data = single_answer(TYPE_EUI48, &[0x00, 0x00, 0x5e, 0x00, 0x53, 0x2a]);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(
+            child(&b, rr, "rdata").value,
+            FieldValue::MacAddr(packet_dissector_core::field::MacAddr([
+                0x00, 0x00, 0x5e, 0x00, 0x53, 0x2a
+            ]))
+        );
+        let eui64 = [0x00, 0x00, 0x5e, 0xef, 0x10, 0x00, 0x00, 0x2a];
+        let data = single_answer(TYPE_EUI64, &eui64);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        assert_eq!(child(&b, rr, "rdata").value, FieldValue::Bytes(&eui64));
+        // Wrong length → raw.
+        let data = single_answer(TYPE_EUI48, &[0; 5]);
+        let b = dissect(&data);
+        assert!(has_child(&b, first_rr(&b, "answers"), "rdata"));
+    }
+
+    // ---- RFC 8490 §5.4 — DSO messages --------------------------------------
+
+    #[test]
+    fn dso_message_tlvs() {
+        // Opcode 6, all counts zero, Keepalive TLV (type 1, length 8), over TCP.
+        let mut msg = header(0, 0, 0, 0);
+        msg[2..4].copy_from_slice(&(6u16 << 11).to_be_bytes());
+        msg.extend_from_slice(&[0x00, 0x01, 0x00, 0x08]);
+        msg.extend_from_slice(&15000u32.to_be_bytes());
+        msg.extend_from_slice(&3600000u32.to_be_bytes());
+        let mut data = (msg.len() as u16).to_be_bytes().to_vec();
+        data.extend_from_slice(&msg);
+        let mut b = DissectBuffer::new();
+        let res = DnsTcpDissector.dissect(&data, &mut b, 0).unwrap();
+        assert_eq!(res.bytes_consumed, data.len());
+        let layer = &b.layers()[0];
+        assert_eq!(layer.range, 0..data.len());
+        let tlvs = b.field_by_name(layer, "dso_tlvs").unwrap();
+        let tlv = direct_children(&b, tlvs)[0];
+        let t = child(&b, tlv, "type");
+        assert_eq!(t.value, FieldValue::U16(1));
+        assert_eq!(
+            (t.descriptor.display_fn.unwrap())(&t.value, &[]),
+            Some("KeepAlive")
+        );
+        assert_eq!(child(&b, tlv, "length").value, FieldValue::U16(8));
+        assert_eq!(
+            child(&b, tlv, "data").value,
+            FieldValue::Bytes(&data[18..26])
+        );
+        assert_eq!(child(&b, tlv, "data").range, 18..26);
+
+        // A TLV overrunning the length-delimited message is malformed.
+        let mut bad = msg.clone();
+        bad.truncate(20);
+        let mut data = (bad.len() as u16).to_be_bytes().to_vec();
+        data.extend_from_slice(&bad);
+        let mut b = DissectBuffer::new();
+        assert!(DnsTcpDissector.dissect(&data, &mut b, 0).is_err());
+
+        // RFC 8490 §4.2: DSO is not defined over UDP, so the DNS (UDP)
+        // dissector does not parse DSO Data (and does not fail on it).
+        let mut b = DissectBuffer::new();
+        let res = DnsDissector.dissect(&bad, &mut b, 0).unwrap();
+        assert_eq!(res.bytes_consumed, 12);
+        assert!(b.field_by_name(&b.layers()[0], "dso_tlvs").is_none());
     }
 }
