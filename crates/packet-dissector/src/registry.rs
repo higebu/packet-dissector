@@ -769,9 +769,64 @@ impl DissectorRegistry {
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
     {
-        let result = entry.dissect(data, buf, 0)?;
+        let payloads_base = buf.embedded_payloads().len();
+        let result = match entry.dissect(data, buf, 0) {
+            Ok(result) => result,
+            Err(e) => {
+                buf.truncate_embedded_payloads(payloads_base);
+                return Err(e);
+            }
+        };
+        if buf.embedded_payloads().len() > payloads_base {
+            if stop(buf, &result.next) {
+                buf.truncate_embedded_payloads(payloads_base);
+                return Ok(());
+            }
+            return self.dispatch_embedded_payloads(data, buf, payloads_base, data.len(), stop);
+        }
         let end = bound_payload_end(data.len(), result.bytes_consumed, result.payload_len);
         self.dispatch_loop(data, buf, result.bytes_consumed, end, result.next, stop)
+    }
+
+    /// Dispatch the payloads a dissector recorded with
+    /// [`DissectBuffer::push_embedded_payload`] (entries from index `base`
+    /// on), each through its own dispatch chain, then drop those entries.
+    ///
+    /// `end` is the exclusive end of the recording layer's input; payload
+    /// ranges are clipped to it. Every payload is dispatched even if an
+    /// earlier one fails: the layers of all chains are kept (a failed chain
+    /// keeps what it parsed before the error, as elsewhere in the registry)
+    /// and the first error is returned once all payloads have been tried.
+    ///
+    /// RFC 9260, Section 6.10 — each DATA chunk bundled in an SCTP packet
+    /// carries its own user message —
+    /// <https://www.rfc-editor.org/rfc/rfc9260#section-6.10>.
+    fn dispatch_embedded_payloads<'pkt, F>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        base: usize,
+        end: usize,
+        stop: &mut F,
+    ) -> Result<(), PacketError>
+    where
+        F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
+    {
+        let count = buf.embedded_payloads().len();
+        let mut first_err = None;
+        for i in base..count {
+            let payload = buf.embedded_payloads()[i].clone();
+            let start = payload.range.start;
+            let payload_end = payload.range.end.min(end);
+            if start >= payload_end {
+                continue;
+            }
+            if let Err(e) = self.dispatch_loop(data, buf, start, payload_end, payload.next, stop) {
+                first_err.get_or_insert(e);
+            }
+        }
+        buf.truncate_embedded_payloads(base);
+        first_err.map_or(Ok(()), Err)
     }
 
     /// Look up the dissector responsible for a dispatch hint.
@@ -858,7 +913,15 @@ impl DissectorRegistry {
                 break;
             }
 
-            let result = dissector.dissect(&data[offset..end], buf, offset)?;
+            let payloads_base = buf.embedded_payloads().len();
+            let layer_end = end;
+            let result = match dissector.dissect(&data[offset..end], buf, offset) {
+                Ok(result) => result,
+                Err(e) => {
+                    buf.truncate_embedded_payloads(payloads_base);
+                    return Err(e);
+                }
+            };
 
             // Guard against infinite loops: if a dissector consumed zero bytes
             // two iterations in a row, break.  A single zero-consumption
@@ -867,6 +930,7 @@ impl DissectorRegistry {
             // input.
             if result.bytes_consumed == 0 && !matches!(result.next, DispatchHint::End) {
                 if stalled {
+                    buf.truncate_embedded_payloads(payloads_base);
                     break;
                 }
                 stalled = true;
@@ -882,7 +946,15 @@ impl DissectorRegistry {
             // lets `dissect_summary` stop right after the transport layer
             // without paying for TCP reassembly or inner-packet dissection.
             if stop(buf, &result.next) {
+                buf.truncate_embedded_payloads(payloads_base);
                 break;
+            }
+
+            // Embedded payload list middleware: a dissector that carries
+            // several upper-layer messages (e.g. bundled SCTP DATA chunks)
+            // records each one in the buffer, and each gets its own chain.
+            if buf.embedded_payloads().len() > payloads_base {
+                return self.dispatch_embedded_payloads(data, buf, payloads_base, layer_end, stop);
             }
 
             // Embedded payload middleware: when a dissector signals that the
@@ -2386,6 +2458,307 @@ mod tests {
         ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
             Ok(DissectResult::new(0, DispatchHint::End))
         }
+    }
+
+    static MSG_FIELD: FieldDescriptor =
+        FieldDescriptor::new("id", "Id", packet_dissector_core::field::FieldType::U8);
+
+    /// Entry dissector that splits its input into 2-byte messages after a
+    /// 2-byte header and records each one as an embedded payload, like
+    /// bundled SCTP DATA chunks.
+    struct BundleDissector;
+
+    impl Dissector for BundleDissector {
+        fn name(&self) -> &'static str {
+            "Bundle"
+        }
+        fn short_name(&self) -> &'static str {
+            "Bundle"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.begin_layer("Bundle", None, &[], offset..offset + data.len());
+            buf.end_layer();
+            let mut pos = 2;
+            while pos + 2 <= data.len() {
+                buf.push_embedded_payload(
+                    offset + pos..offset + pos + 2,
+                    DispatchHint::ByLlcSap(0x42),
+                );
+                pos += 2;
+            }
+            Ok(DissectResult::new(data.len(), DispatchHint::End))
+        }
+    }
+
+    /// Message dissector that fails after pushing a partial layer when the
+    /// first byte is `0xFF`.
+    struct MsgDissector;
+
+    impl Dissector for MsgDissector {
+        fn name(&self) -> &'static str {
+            "Msg"
+        }
+        fn short_name(&self) -> &'static str {
+            "Msg"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.begin_layer("Msg", None, &[], offset..offset + data.len());
+            buf.push_field(&MSG_FIELD, FieldValue::U8(data[0]), offset..offset + 1);
+            if data[0] == 0xFF {
+                return Err(PacketError::InvalidHeader("bad message"));
+            }
+            buf.end_layer();
+            Ok(DissectResult::new(data.len(), DispatchHint::End))
+        }
+    }
+
+    fn bundle_registry() -> DissectorRegistry {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(BundleDissector));
+        reg.register_by_llc_sap(0x42, Box::new(MsgDissector))
+            .unwrap();
+        reg
+    }
+
+    #[test]
+    fn embedded_payloads_each_dispatched() {
+        let reg = bundle_registry();
+        let data = [0x00, 0x00, 0x01, 0xAA, 0x02, 0xBB, 0x03, 0xCC];
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&data, &mut buf).unwrap();
+
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["Bundle", "Msg", "Msg", "Msg"]);
+        assert_eq!(buf.layers()[2].range, 4..6);
+        assert!(buf.embedded_payloads().is_empty());
+    }
+
+    #[test]
+    fn embedded_payload_error_does_not_stop_other_payloads() {
+        let reg = bundle_registry();
+        // Second message fails after pushing a layer and a field.
+        let data = [0x00, 0x00, 0x01, 0xAA, 0xFF, 0xBB, 0x03, 0xCC];
+        let mut buf = DissectBuffer::new();
+        let err = reg.dissect(&data, &mut buf).unwrap_err();
+        assert!(matches!(err, PacketError::InvalidHeader("bad message")));
+
+        // The failed message keeps what it parsed before the error, and the
+        // third message is still dissected.
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["Bundle", "Msg", "Msg", "Msg"]);
+        assert_eq!(buf.layers()[2].range, 4..6);
+        assert_eq!(buf.layers()[3].range, 6..8);
+        let third = &buf.layers()[3];
+        assert_eq!(
+            buf.field_by_name(third, "id").unwrap().value,
+            FieldValue::U8(0x03)
+        );
+        assert!(buf.embedded_payloads().is_empty());
+    }
+
+    /// Consumes nothing and hands off to LLC SAP `self.0`, like a thin
+    /// dispatcher.
+    struct ZeroStep(u8);
+
+    impl Dissector for ZeroStep {
+        fn name(&self) -> &'static str {
+            "ZeroStep"
+        }
+        fn short_name(&self) -> &'static str {
+            "ZeroStep"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            _data: &'pkt [u8],
+            _buf: &mut DissectBuffer<'pkt>,
+            _offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            Ok(DissectResult::new(0, DispatchHint::ByLlcSap(self.0)))
+        }
+    }
+
+    /// Records one payload and consumes nothing.
+    struct RecordThenStall;
+
+    impl Dissector for RecordThenStall {
+        fn name(&self) -> &'static str {
+            "RecordThenStall"
+        }
+        fn short_name(&self) -> &'static str {
+            "RecordThenStall"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            _data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.push_embedded_payload(offset..offset + 1, DispatchHint::End);
+            Ok(DissectResult::new(0, DispatchHint::ByLlcSap(0x43)))
+        }
+    }
+
+    #[test]
+    fn stalled_dispatch_drops_recorded_payloads() {
+        // Entry → 0x43 (zero progress) → 0x44 records a payload with zero
+        // progress again, so the stall guard ends the loop.
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(ZeroStep(0x43)));
+        reg.register_by_llc_sap(0x43, Box::new(ZeroStep(0x44)))
+            .unwrap();
+        reg.register_by_llc_sap(0x44, Box::new(RecordThenStall))
+            .unwrap();
+        let data = [0x00, 0x01];
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&data, &mut buf).unwrap();
+        assert!(buf.embedded_payloads().is_empty());
+    }
+
+    struct FailingRecorder;
+
+    impl Dissector for FailingRecorder {
+        fn name(&self) -> &'static str {
+            "FailingRecorder"
+        }
+        fn short_name(&self) -> &'static str {
+            "FailingRecorder"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            _data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.push_embedded_payload(offset..offset + 1, DispatchHint::End);
+            Err(PacketError::InvalidHeader("recorder failed"))
+        }
+    }
+
+    #[test]
+    fn failing_dissector_drops_recorded_payloads() {
+        // Entry dissector fails after recording a payload.
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(FailingRecorder));
+        let data = [0x00, 0x01];
+        let mut buf = DissectBuffer::new();
+        assert!(reg.dissect(&data, &mut buf).is_err());
+        assert!(buf.embedded_payloads().is_empty());
+
+        // Same dissector reached through the dispatch loop.
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(ZeroStep(0x43)));
+        reg.register_by_llc_sap(0x43, Box::new(FailingRecorder))
+            .unwrap();
+        let mut buf = DissectBuffer::new();
+        assert!(reg.dissect(&data, &mut buf).is_err());
+        assert!(buf.embedded_payloads().is_empty());
+    }
+
+    /// Records a payload that starts past the end of its input.
+    struct OutOfRangeRecorder;
+
+    impl Dissector for OutOfRangeRecorder {
+        fn name(&self) -> &'static str {
+            "OutOfRangeRecorder"
+        }
+        fn short_name(&self) -> &'static str {
+            "OutOfRangeRecorder"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.begin_layer("OutOfRangeRecorder", None, &[], offset..offset + data.len());
+            buf.end_layer();
+            let past_end = offset + data.len();
+            buf.push_embedded_payload(past_end..past_end + 4, DispatchHint::ByLlcSap(0x42));
+            Ok(DissectResult::new(data.len(), DispatchHint::End))
+        }
+    }
+
+    #[test]
+    fn embedded_payload_past_input_end_is_skipped() {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(OutOfRangeRecorder));
+        reg.register_by_llc_sap(0x42, Box::new(MsgDissector))
+            .unwrap();
+        let data = [0x00, 0x01];
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&data, &mut buf).unwrap();
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["OutOfRangeRecorder"]);
+        assert!(buf.embedded_payloads().is_empty());
+    }
+
+    #[test]
+    fn embedded_payload_test_dissectors_metadata() {
+        let dissectors: [&dyn Dissector; 6] = [
+            &BundleDissector,
+            &MsgDissector,
+            &ZeroStep(0x43),
+            &RecordThenStall,
+            &FailingRecorder,
+            &OutOfRangeRecorder,
+        ];
+        for d in dissectors {
+            assert_eq!(d.name(), d.short_name());
+            assert!(d.field_descriptors().is_empty());
+        }
+    }
+
+    #[test]
+    fn summary_stop_drops_recorded_payloads() {
+        // A stop on the entry dissector's hint drops its recorded payloads.
+        let mut reg = bundle_registry();
+        reg.register_by_llc_sap_or_replace(0x42, Box::new(MsgDissector));
+        let data = [0x00, 0x00, 0x01, 0xAA];
+        let mut buf = DissectBuffer::new();
+        reg.dissect_from_entry(&BundleDissector, &data, &mut buf, &mut |_, _| true)
+            .unwrap();
+        assert_eq!(buf.layers().len(), 1);
+        assert!(buf.embedded_payloads().is_empty());
+    }
+
+    #[test]
+    fn embedded_payload_without_dissector_is_skipped() {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(BundleDissector));
+        let data = [0x00, 0x00, 0x01, 0xAA];
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&data, &mut buf).unwrap();
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["Bundle"]);
+        assert!(buf.embedded_payloads().is_empty());
     }
 
     #[test]
