@@ -3066,6 +3066,9 @@ mod tests {
     // | 7           | Unknown split option                | rfc3396_split_unknown_option_keeps_concatenated_data |
     // | —           | Instance table overflow             | rfc3396_too_many_instances_are_decoded_one_by_one |
     // | 7           | Repeated fixed-length option        | rfc3396_repeated_fixed_length_option_is_decoded_per_portion |
+    // | 7           | Numeric values straddling portions  | rfc3396_split_numeric_values_are_reassembled |
+    // | 7           | FQDN straddling portions (scratch)  | rfc3396_split_client_fqdn_formats_scratch_name |
+    // | —           | Truncated option ends the scan      | rfc3396_scan_stops_at_truncated_option      |
     // | 9.7         | Server Identifier                   | parse_dhcp_offer                            |
     // | 9.8         | Parameter Request List              | parse_dhcp_parameter_request_list           |
     // | 9.9         | Message                             | parse_dhcp_message_option                   |
@@ -6161,10 +6164,18 @@ mod tests {
         let mut buf = DissectBuffer::new();
         DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
         assert!(top_fields(&buf, "split_option").is_empty());
-        assert_eq!(
-            top_fields(&buf, "hostname")[0].value,
-            FieldValue::Bytes(b"host")
-        );
+        let host = top_fields(&buf, "hostname")[0];
+        assert_eq!(host.value, FieldValue::Bytes(b"host"));
+        // The text formatter passes non-scratch values through.
+        let ctx = FormatContext {
+            packet_data: &pkt,
+            scratch: buf.scratch(),
+            layer_range: 0..pkt.len() as u32,
+            field_range: host.range.start as u32..host.range.end as u32,
+        };
+        let mut out = Vec::new();
+        (host.descriptor.format_fn.unwrap())(&host.value, &ctx, &mut out).unwrap();
+        assert_eq!(out, b"\"host\"");
     }
 
     #[test]
@@ -6236,5 +6247,77 @@ mod tests {
         assert_eq!(top_fields(&buf, "dhcp_message_type").len(), 2);
         assert!(top_fields(&buf, "unknown_option").is_empty());
         assert_eq!(buf.layers()[0].display_name, None);
+    }
+
+    #[test]
+    fn rfc3396_split_numeric_values_are_reassembled() {
+        // Time Offset (I32), Lease Time (U32) and the Path MTU Plateau
+        // Table (U16 list) split so that values straddle portions; pads
+        // between portions are skipped.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 2, &[0xff, 0xff]);
+        push_option(&mut pkt, 51, &[0x00, 0x00, 0x0e]);
+        push_option(&mut pkt, 25, &[0x02, 0x40, 0x05]);
+        pkt.push(0); // pad
+        push_option(&mut pkt, 2, &[0xf1, 0xf0]);
+        push_option(&mut pkt, 51, &[0x10]);
+        push_option(&mut pkt, 25, &[0xdc]);
+        pkt.push(255);
+        let mut b = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut b, 0).unwrap();
+        assert_eq!(top_fields(&b, "split_option").len(), 3);
+        assert_eq!(
+            top_fields(&b, "time_offset")[0].value,
+            FieldValue::I32(-3600)
+        );
+        assert_eq!(top_fields(&b, "lease_time")[0].value, FieldValue::U32(3600));
+        let mtus: Vec<_> = direct_children_of(&b, top_fields(&b, "path_mtu_plateau_table")[0])
+            .iter()
+            .map(|f| f.value.clone())
+            .collect();
+        assert_eq!(mtus, vec![FieldValue::U16(576), FieldValue::U16(1500)]);
+    }
+
+    #[test]
+    fn rfc3396_split_client_fqdn_formats_scratch_name() {
+        // Client FQDN (RFC 4702) whose name straddles the two portions.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 81, &[0, 0, 0, 4, b'h', b'o']);
+        push_option(&mut pkt, 81, &[b's', b't', 0]);
+        pkt.push(255);
+        let mut b = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut b, 0).unwrap();
+        let fqdn = top_fields(&b, "client_fqdn");
+        let name = direct_children_of(&b, fqdn[0])
+            .into_iter()
+            .find(|f| f.name() == "domain_name")
+            .unwrap();
+        assert!(matches!(name.value, FieldValue::Scratch(_)));
+        let ctx = FormatContext {
+            packet_data: &pkt,
+            scratch: b.scratch(),
+            layer_range: 0..pkt.len() as u32,
+            field_range: name.range.start as u32..name.range.end as u32,
+        };
+        let mut out = Vec::new();
+        (name.descriptor.format_fn.unwrap())(&name.value, &ctx, &mut out).unwrap();
+        assert_eq!(out, b"\"host\"");
+    }
+
+    #[test]
+    fn rfc3396_scan_stops_at_truncated_option() {
+        // A split option followed by a truncated option: the scan stops,
+        // and the parser reports the truncation as before.
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 12, b"a");
+        push_option(&mut pkt, 12, b"b");
+        pkt.extend_from_slice(&[15, 9, b'x']);
+        let mut b = DissectBuffer::new();
+        assert!(DhcpDissector.dissect(&pkt, &mut b, 0).is_err());
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 12, b"a");
+        pkt.push(15); // code without a length octet
+        let mut b = DissectBuffer::new();
+        assert!(DhcpDissector.dissect(&pkt, &mut b, 0).is_err());
     }
 }
