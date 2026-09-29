@@ -992,4 +992,15 @@ mod tests {
             FieldValue::Bytes(&[0x07])
         );
     }
+
+    #[test]
+    fn type_display_fns_ignore_other_values() {
+        for fd in [&FD_INLINE_TYPE, &FD_IE, &IE_CHILD_FIELDS[0]] {
+            assert_eq!((fd.display_fn.unwrap())(&FieldValue::U8(0), &[]), None);
+        }
+        assert_eq!(
+            (IE_CHILD_FIELDS[0].display_fn.unwrap())(&FieldValue::U32(32768), &[]),
+            Some("Vendor-Specific")
+        );
+    }
 }

@@ -1249,6 +1249,8 @@ mod tests {
     // | 8.2.101  | User ID                                   | user_id                               |
     // | 8.2.118  | 3GPP Interface Type                       | pdn_type_and_interface_type           |
     // | 8.2.x    | Short values fall back to raw             | short_values_fall_back_to_raw         |
+    // | 8.2.x    | Value name tables                         | name_tables_and_display_fns           |
+    // | 8.2.x    | Missing length octets, long TBCD          | missing_length_octets_are_raw_and_long_tbcd_is_bytes |
 
     fn parse(ie_type: u16, data: &[u8]) -> (FieldValue<'_>, DissectBuffer<'_>) {
         let mut buf = DissectBuffer::new();
@@ -1690,5 +1692,52 @@ mod tests {
             assert_eq!(v, FieldValue::Bytes(data), "IE {ie_type}");
             assert!(buf.fields().is_empty(), "IE {ie_type}");
         }
+    }
+
+    #[test]
+    fn name_tables_and_display_fns() {
+        use super::*;
+        assert_eq!(gate_name(4), None);
+        assert!((1..=5).all(|v| pdn_type_name(v).is_some()));
+        assert_eq!(pdn_type_name(0), None);
+        assert!((0..=31).all(|v| interface_type_name(v).is_some()));
+        assert_eq!(interface_type_name(32), None);
+        assert!((0..=2).all(|v| node_id_type_name(v).is_some()));
+        assert_eq!(node_id_type_name(3), None);
+        assert!((0..=5).all(|v| node_type_name(v).is_some()));
+        assert_eq!(node_type_name(6), None);
+        assert!((0..=8).all(|v| redirect_address_type_name(v).is_some()));
+        assert_eq!(redirect_address_type_name(9), None);
+        for fd in [
+            &FD_UL_GATE,
+            &FD_DL_GATE,
+            &FD_PDN_TYPE,
+            &FD_INTERFACE_TYPE,
+            &FD_NODE_ID_TYPE,
+            &FD_NODE_TYPE,
+            &FD_REDIRECT_ADDRESS_TYPE,
+            &FD_OFFENDING_IE_TYPE,
+        ] {
+            assert_eq!((fd.display_fn.unwrap())(&FieldValue::U32(0), &[]), None);
+        }
+        let (_, buf) = parse(65, &[0x01, 1, 2, 3, 4, 0, 9, 3]);
+        assert_eq!(display(&buf, "node_id_type"), Some("IPv4"));
+    }
+
+    #[test]
+    fn missing_length_octets_are_raw_and_long_tbcd_is_bytes() {
+        // SDF Filter with FD set but no Length of Flow Description
+        let data = [0x01, 0x00, 0x00];
+        assert_eq!(parse(23, &data).0, FieldValue::Bytes(&data));
+        // User ID with IMSIF and IMEIF set but no IMEI length octet
+        let data = [0x03, 1, 0x21];
+        assert_eq!(parse(141, &data).0, FieldValue::Bytes(&data));
+        // Outer Header Creation with no octets
+        assert_eq!(parse(84, &[]).0, FieldValue::Bytes(&[]));
+        // A TBCD identity longer than 16 octets is kept as bytes.
+        let mut data = vec![0x01, 17];
+        data.extend_from_slice(&[0x21; 17]);
+        let (_, buf) = parse(141, &data);
+        assert_eq!(*val(&buf, "imsi"), FieldValue::Bytes(&[0x21; 17]));
     }
 }
