@@ -15,6 +15,7 @@
 pub mod dissector;
 pub mod error;
 pub mod field;
+pub mod icmp_extension;
 pub mod lookup;
 pub mod packet;
 pub mod util;
