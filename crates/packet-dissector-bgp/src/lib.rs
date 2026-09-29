@@ -42,6 +42,7 @@
 //! - RFC 9015 (BGP Control Plane for the Network Service Header / SFP attribute): <https://www.rfc-editor.org/rfc/rfc9015>
 //! - RFC 9026 (Multicast VPN Fast Upstream Failover / BFD Discriminator): <https://www.rfc-editor.org/rfc/rfc9026>
 //! - RFC 9552 (BGP-LS): <https://www.rfc-editor.org/rfc/rfc9552>
+//! - RFC 9830 (Advertising Segment Routing Policies in BGP): <https://www.rfc-editor.org/rfc/rfc9830>
 //! - RFC 4760 (Multiprotocol Extensions): <https://www.rfc-editor.org/rfc/rfc4760>
 //! - RFC 5492 (Capabilities Advertisement with BGP-4): <https://www.rfc-editor.org/rfc/rfc5492>
 //! - RFC 5065 (AS Confederations): <https://www.rfc-editor.org/rfc/rfc5065>
@@ -244,7 +245,7 @@
 //! | 3/4 | Plain IPv4 unicast UPDATE (no MP attribute) has no top-level afi/safi | `parse_bgp_update_plain_ipv4_unicast_has_no_top_level_afi_safi` |
 //! | 5 | Plain prefix NLRI for SAFI 2 (multicast) | `parse_bgp_update_mp_reach_ipv4_multicast_prefixes` |
 //! | 3 | Non-prefix SAFI of AFI 1 (MDT) NLRI kept as raw bytes | `parse_bgp_update_mp_reach_unsupported_ip_safi_is_raw` |
-//! | 4 | Non-prefix SAFI of AFI 1 (SR Policy) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw` |
+//! | 4 | Non-prefix SAFI of AFI 1 (MDT) withdrawn routes kept as raw bytes | `parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw` |
 //! | 5 | Malformed tail of a prefix NLRI block kept as raw bytes | `parse_bgp_update_mp_reach_prefix_tail_is_raw` |
 //! | 5 | Prefix withdrawn routes that do not decode kept as raw bytes | `parse_bgp_update_mp_unreach_invalid_prefixes_are_raw` |
 //!
@@ -293,6 +294,13 @@
 //! |-------------|-------------|------|
 //! | §4 | Default route target, origin AS, partial and full Route Target; IPv4 and IPv6 next hops; AFI 2 kept raw | `parse_bgp_update_mp_reach_rt_constraint` |
 //! | §4; RFC 7911 §3 | Lengths of 1-31 or over 96 bits and truncated prefixes kept raw; withdrawn NLRI; ADD-PATH block, including a zero Path Identifier | `parse_bgp_update_rt_constraint_malformed_withdrawn_add_path` |
+//!
+//! # SR Policy NLRI Coverage (RFC 9830)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | §2.1 | Distinguisher, Color, IPv4 / IPv6 Endpoint; IPv4 and IPv6 + link-local next hops independent of the NLRI AFI | `parse_bgp_update_mp_reach_sr_policy` |
+//! | §2.1; RFC 7911 §3 | NLRI Length other than 96 (AFI 1) / 192 (AFI 2) and truncated NLRI kept raw; withdrawn NLRI; ADD-PATH blocks; malformed tail kept plain | `parse_bgp_update_sr_policy_malformed_withdrawn_add_path` |
 //!
 //! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
 //!
@@ -482,6 +490,9 @@ const SAFI_BGP_LS_VPN: u8 = 72;
 /// SAFI for Route Target membership NLRI (RFC 4684, Section 4 —
 /// <https://www.rfc-editor.org/rfc/rfc4684#section-4>).
 const SAFI_RT_CONSTRAINT: u8 = 132;
+/// SAFI for SR Policy (RFC 9830, Section 2.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>).
+const SAFI_SR_POLICY: u8 = 73;
 /// Size of a Route Distinguisher (RFC 4364, Section 4.2 —
 /// <https://www.rfc-editor.org/rfc/rfc4364#section-4.2>).
 const RD_SIZE: usize = 8;
@@ -5422,6 +5433,9 @@ enum MpNlriEncoding {
     /// Route Target membership NLRI (RFC 4684, Section 4 —
     /// <https://www.rfc-editor.org/rfc/rfc4684#section-4>).
     RtConstraint,
+    /// SR Policy NLRI (RFC 9830, Section 2.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>).
+    SrPolicy { ipv6: bool },
 }
 
 /// Shape of a labeled NLRI block.
@@ -6994,6 +7008,122 @@ fn parse_rt_constraint_nlri<'pkt>(
     consumed
 }
 
+/// Distinguisher (4) + Color (4) octets of an SR Policy NLRI (RFC 9830,
+/// Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>).
+const SR_POLICY_FIXED_SIZE: usize = 8;
+
+/// Returns the only NLRI Length an SR Policy NLRI of the given AFI may
+/// carry, in bits: "When AFI = 1, the value MUST be 96; when AFI = 2, the
+/// value MUST be 192." (RFC 9830, Section 2.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>).
+fn sr_policy_nlri_bits(ipv6: bool) -> u8 {
+    if ipv6 { 192 } else { 96 }
+}
+
+/// Returns the size of an SR Policy NLRI of the given AFI preceded by
+/// `path_id_len` octets of Path Identifier.
+fn sr_policy_entry_len(path_id_len: usize, ipv6: bool) -> usize {
+    path_id_len + 1 + usize::from(sr_policy_nlri_bits(ipv6) / 8)
+}
+
+/// Returns how many leading octets of `data` frame as SR Policy NLRI of the
+/// given AFI, each preceded by `path_id_len` octets of Path Identifier.
+fn sr_policy_block_framed_len(data: &[u8], path_id_len: usize, ipv6: bool) -> usize {
+    let bits = sr_policy_nlri_bits(ipv6);
+    let entry_len = sr_policy_entry_len(path_id_len, ipv6);
+    let mut pos = 0;
+    while pos + entry_len <= data.len() && data[pos + path_id_len] == bits {
+        pos += entry_len;
+    }
+    pos
+}
+
+/// Returns `true` when an SR Policy NLRI block carries RFC 7911 ADD-PATH
+/// Path Identifiers: its first NLRI does not frame without them — the first
+/// octet of a Path Identifier is rarely the NLRI Length 96 / 192 — and does
+/// with them. A block whose first NLRI frames is plain, even with a
+/// malformed tail.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_sr_policy(data: &[u8], ipv6: bool) -> bool {
+    sr_policy_block_framed_len(data, 0, ipv6) == 0
+        && sr_policy_block_framed_len(data, PATH_ID_SIZE, ipv6) != 0
+}
+
+/// Parses an SR Policy NLRI block (AFI 1 / 2, SAFI 73) into one object per
+/// NLRI and returns the number of octets consumed.
+///
+/// RFC 9830, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>
+///
+/// Each NLRI is NLRI Length (in bits), Distinguisher (4 octets), Color (4
+/// octets) and Endpoint ("an IPv4 (4-octet) address or an IPv6 (16-octet)
+/// address according to the AFI of the NLRI"). The framing stops at the
+/// first NLRI Length other than 96 (AFI 1) / 192 (AFI 2), and the rest
+/// stays raw.
+fn parse_sr_policy_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+    ipv6: bool,
+) -> usize {
+    let f = &SR_POLICY_NLRI_FIELDS;
+    let id_len = if detect_add_path_sr_policy(data, ipv6) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
+    let consumed = sr_policy_block_framed_len(data, id_len, ipv6);
+    let entry_len = sr_policy_entry_len(id_len, ipv6);
+    let mut pos = 0;
+    while pos < consumed {
+        let abs = base_offset + pos;
+        let len_pos = pos + id_len;
+        let fixed = len_pos + 1;
+        let endpoint = fixed + SR_POLICY_FIXED_SIZE;
+        let end = pos + entry_len;
+        let obj_idx = buf.begin_container(
+            &SR_POLICY_NLRI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + end,
+        );
+        if id_len != 0 {
+            buf.push_field(
+                &f[FD_SRP_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+        buf.push_field(
+            &f[FD_SRP_NLRI_LENGTH],
+            FieldValue::U8(data[len_pos]),
+            base_offset + len_pos..base_offset + fixed,
+        );
+        buf.push_field(
+            &f[FD_SRP_DISTINGUISHER],
+            FieldValue::U32(read_be_u32(data, fixed).unwrap_or_default()),
+            base_offset + fixed..base_offset + fixed + 4,
+        );
+        buf.push_field(
+            &f[FD_SRP_COLOR],
+            FieldValue::U32(read_be_u32(data, fixed + 4).unwrap_or_default()),
+            base_offset + fixed + 4..base_offset + endpoint,
+        );
+        let endpoint_value = if ipv6 {
+            FieldValue::Ipv6Addr(read_ipv6_addr(data, endpoint).unwrap_or_default())
+        } else {
+            FieldValue::Ipv4Addr(read_ipv4_addr(data, endpoint).unwrap_or_default())
+        };
+        buf.push_field(
+            &f[FD_SRP_ENDPOINT],
+            endpoint_value,
+            base_offset + endpoint..base_offset + end,
+        );
+        buf.end_container(obj_idx);
+        pos = end;
+    }
+    consumed
+}
+
 /// Selects the NLRI encoding for an (AFI, SAFI) pair.
 ///
 /// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
@@ -7019,6 +7149,7 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
         (AFI_BGP_LS, SAFI_BGP_LS) => Some(MpNlriEncoding::BgpLs { vpn: false }),
         (AFI_BGP_LS, SAFI_BGP_LS_VPN) => Some(MpNlriEncoding::BgpLs { vpn: true }),
         (AFI_IPV4, SAFI_RT_CONSTRAINT) => Some(MpNlriEncoding::RtConstraint),
+        (AFI_IPV4 | AFI_IPV6, SAFI_SR_POLICY) => Some(MpNlriEncoding::SrPolicy { ipv6 }),
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC) => Some(MpNlriEncoding::FlowSpec { ipv6, vpn: false }),
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC_VPN) => {
             Some(MpNlriEncoding::FlowSpec { ipv6, vpn: true })
@@ -7071,6 +7202,7 @@ fn parse_mp_nlri_block<'pkt>(
             }
             MpNlriEncoding::BgpLs { vpn } => parse_bgp_ls_nlri(buf, data, offset, vpn),
             MpNlriEncoding::RtConstraint => parse_rt_constraint_nlri(buf, data, offset),
+            MpNlriEncoding::SrPolicy { ipv6 } => parse_sr_policy_nlri(buf, data, offset, ipv6),
         };
         if buf.field_count() == before {
             buf.pop_field(); // remove empty array placeholder
@@ -7106,6 +7238,8 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 ///   for AFI 2 (RFC 7432, Section 9.2.1).
 /// - AFI 16388 (BGP-LS): as AFI 1 / 2, with SAFI 72 as the VPN SAFI
 ///   (RFC 9552, Section 5.5).
+/// - SAFI 73 (SR Policy): 4, 16 or 32 octets as above for AFI 1 and 2
+///   alike, "independent of the SR Policy AFI" (RFC 9830, Section 2.1).
 /// - AFI 1 or 2, non-VPN SAFI, length 16 or 32: IPv6 global address,
 ///   optionally followed by a link-local address (RFC 2545, Section 3; for
 ///   AFI 1 RFC 8950, Section 3).
@@ -7125,6 +7259,7 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 /// RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>
 /// RFC 7432, Section 9.2.1 — <https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1>
 /// RFC 9552, Section 5.5 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.5>
+/// RFC 9830, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>
 fn parse_mp_next_hop<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     afi: u16,
@@ -7144,9 +7279,14 @@ fn parse_mp_next_hop<'pkt>(
     // Subsequent Address Family Identifier (SAFI), as per custom, an 8-byte
     // Route Distinguisher set to all zero is prepended to the next hop"
     // (RFC 9552, Section 5.5 — https://www.rfc-editor.org/rfc/rfc9552#section-5.5).
+    // SR Policy: "The next-hop network address field in SR Policy SAFI (73)
+    // updates may be either a 4-octet IPv4 address or a 16-octet IPv6
+    // address, independent of the SR Policy AFI." (RFC 9830, Section 2.1 —
+    // https://www.rfc-editor.org/rfc/rfc9830#section-2.1).
     let bgp_ls = afi == AFI_BGP_LS;
+    let sr_policy = ip_afi && safi == SAFI_SR_POLICY;
     let vpn = is_vpn_next_hop_safi(safi) || (bgp_ls && safi == SAFI_BGP_LS_VPN);
-    let other_afi = (afi == AFI_L2VPN || bgp_ls) && !vpn;
+    let other_afi = (afi == AFI_L2VPN || bgp_ls || sr_policy) && !vpn;
     // Length of the Route Distinguisher preceding each address, if any.
     let rd_len = match (vpn, nh.len()) {
         (false, 4) if afi == AFI_IPV4 || other_afi => 0,
@@ -7548,7 +7688,8 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// The element shape depends on the SAFI: SAFI 70 (EVPN) yields EVPN entries,
 /// SAFI 85 (BGP-MUP) yields MUP entries, SAFI 133 / 134 yield Flow
 /// Specification entries, SAFI 71 / 72 yield Link-State NLRI entries,
-/// SAFI 132 yields Route Target membership entries,
+/// SAFI 132 yields Route Target membership entries, SAFI 73 yields SR
+/// Policy entries,
 /// SAFI 4 / 128 yield labeled entries (`label_stack` or `compatibility`, `rd`
 /// for SAFI 128, `prefix`), and SAFI 1 / 2 yield plain prefix entries. All
 /// fields are therefore optional.
@@ -7559,9 +7700,10 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// RFC 8955, Section 4 — <https://www.rfc-editor.org/rfc/rfc8955#section-4>
 /// RFC 9552, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>
 /// RFC 4684, Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>
+/// RFC 9830, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 38] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 42] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
@@ -7633,6 +7775,13 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 38] = [
     RTC_NLRI_FIELDS[FD_RTC_PREFIX_LENGTH],
     RTC_NLRI_FIELDS[FD_RTC_ORIGIN_AS],
     RTC_NLRI_FIELDS[FD_RTC_ROUTE_TARGET],
+    // SR Policy NLRI fields (RFC 9830, Section 2.1 —
+    // https://www.rfc-editor.org/rfc/rfc9830#section-2.1); `path_id` is
+    // listed above.
+    SR_POLICY_NLRI_FIELDS[FD_SRP_NLRI_LENGTH],
+    SR_POLICY_NLRI_FIELDS[FD_SRP_DISTINGUISHER],
+    SR_POLICY_NLRI_FIELDS[FD_SRP_COLOR],
+    SR_POLICY_NLRI_FIELDS[FD_SRP_ENDPOINT],
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
@@ -7868,6 +8017,29 @@ static RTC_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor = FieldDescriptor::new(
     FieldType::Object,
 )
 .with_children(&RTC_NLRI_FIELDS);
+
+/// Field descriptor indices for [`SR_POLICY_NLRI_FIELDS`].
+const FD_SRP_PATH_ID: usize = 0;
+const FD_SRP_NLRI_LENGTH: usize = 1;
+const FD_SRP_DISTINGUISHER: usize = 2;
+const FD_SRP_COLOR: usize = 3;
+const FD_SRP_ENDPOINT: usize = 4;
+
+/// Child field descriptors of an SR Policy NLRI entry.
+///
+/// RFC 9830, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>
+const SR_POLICY_NLRI_FIELDS: [FieldDescriptor; 5] = [
+    PATH_ID_FIELD,
+    FieldDescriptor::new("nlri_length_bits", "NLRI Length (bits)", FieldType::U8).optional(),
+    FieldDescriptor::new("distinguisher", "Distinguisher", FieldType::U32).optional(),
+    FieldDescriptor::new("color", "Color", FieldType::U32).optional(),
+    FieldDescriptor::new("endpoint", "Endpoint", FieldType::Any).optional(),
+];
+
+/// Object descriptor for SR Policy NLRI entries.
+static SR_POLICY_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("sr_policy_nlri", "SR Policy NLRI", FieldType::Object)
+        .with_children(&SR_POLICY_NLRI_FIELDS);
 
 /// Field descriptor indices for [`BGP_LS_DESCRIPTOR_FIELDS`].
 const FD_LSD_SUB_TLVS: usize = 2;
@@ -9759,6 +9931,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 9494",
         "Long-Lived Graceful Restart for BGP",
         "https://www.rfc-editor.org/rfc/rfc9494",
+    ),
+    SpecReference::new(
+        "RFC 9830",
+        "Advertising Segment Routing Policies in BGP",
+        "https://www.rfc-editor.org/rfc/rfc9830",
     ),
     SpecReference::new(
         "IANA Capability Codes",
@@ -13426,9 +13603,14 @@ mod tests {
 
     #[test]
     fn parse_bgp_update_mp_unreach_unsupported_ip_safi_is_raw() {
-        // SR Policy (AFI 1, SAFI 73): not a plain prefix list.
-        let wr = [0x60, 0, 0, 0, 1, 0, 0, 0, 5, 0xc0, 0, 2, 1];
-        let val = build_mp_unreach(1, 73, &wr);
+        // MDT (AFI 1, SAFI 66; RFC 6037, Section 4.4.1 —
+        // https://www.rfc-editor.org/rfc/rfc6037#section-4.4.1): "the
+        // 8-byte-RD:IPv4-address followed by the MDT group address", not a
+        // plain prefix list.
+        let wr = [
+            128, 0, 0, 0xfd, 0xe8, 0, 0, 0, 1, 192, 0, 2, 1, 232, 1, 1, 1,
+        ];
+        let val = build_mp_unreach(1, 66, &wr);
         let data = build_single_attr_update(15, &val);
         let mut buf = DissectBuffer::new();
         BgpDissector.dissect(&data, &mut buf, 0).unwrap();
@@ -17461,6 +17643,173 @@ mod tests {
             assert_eq!(
                 *nested_field_value(buf, &entries[0], "origin_as"),
                 FieldValue::U32(65000)
+            );
+        });
+    }
+
+    /// Helper: an SR Policy NLRI (distinguisher 1, color 100) for `endpoint`.
+    fn sr_policy_nlri(endpoint: &[u8]) -> Vec<u8> {
+        let mut raw = vec![u8::try_from((8 + endpoint.len()) * 8).unwrap()];
+        raw.extend_from_slice(&1u32.to_be_bytes());
+        raw.extend_from_slice(&100u32.to_be_bytes());
+        raw.extend_from_slice(endpoint);
+        raw
+    }
+
+    const SR_POLICY_V6_ENDPOINT: [u8; 16] =
+        [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+    #[test]
+    fn parse_bgp_update_mp_reach_sr_policy() {
+        // RFC 9830, Section 2.1 (https://www.rfc-editor.org/rfc/rfc9830#section-2.1):
+        // NLRI Length (96 for AFI 1, 192 for AFI 2), Distinguisher, Color,
+        // Endpoint.
+        let data = build_single_attr_update(
+            14,
+            &build_mp_reach(1, 73, &[192, 0, 2, 254], &sr_policy_nlri(&[192, 0, 2, 1])),
+        );
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri_raw").is_none());
+        let entries = array_objs(&buf, &mp, "nlri");
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(
+            *nested_field_value(&buf, e, "nlri_length_bits"),
+            FieldValue::U8(96)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e, "distinguisher"),
+            FieldValue::U32(1)
+        );
+        assert_eq!(*nested_field_value(&buf, e, "color"), FieldValue::U32(100));
+        assert_eq!(
+            *nested_field_value(&buf, e, "endpoint"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+
+        // "The next-hop network address field in SR Policy SAFI (73) updates
+        // may be either a 4-octet IPv4 address or a 16-octet IPv6 address,
+        // independent of the SR Policy AFI."
+        let data = build_single_attr_update(
+            14,
+            &build_mp_reach(
+                2,
+                73,
+                &[192, 0, 2, 254],
+                &sr_policy_nlri(&SR_POLICY_V6_ENDPOINT),
+            ),
+        );
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv4Addr([192, 0, 2, 254])
+        );
+        let entries = array_objs(&buf, &mp, "nlri");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "nlri_length_bits"),
+            FieldValue::U8(192)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "endpoint"),
+            FieldValue::Ipv6Addr(SR_POLICY_V6_ENDPOINT)
+        );
+
+        // "If the next-hop length is 32, then it has a global IPv6 address
+        // followed by a link-local IPv6 address", also for AFI 1.
+        let mut nh = SR_POLICY_V6_ENDPOINT.to_vec();
+        nh.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let data = build_single_attr_update(
+            14,
+            &build_mp_reach(1, 73, &nh, &sr_policy_nlri(&[192, 0, 2, 1])),
+        );
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv6Addr(SR_POLICY_V6_ENDPOINT)
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "next_hop_link_local").is_some());
+        assert_eq!(array_objs(&buf, &mp, "nlri").len(), 1);
+    }
+
+    #[test]
+    fn parse_bgp_update_sr_policy_malformed_withdrawn_add_path() {
+        // RFC 9830, Section 2.1 (https://www.rfc-editor.org/rfc/rfc9830#section-2.1):
+        // "When AFI = 1, the value MUST be 96; when AFI = 2, the value MUST be
+        // 192." Entries from the first other length on stay raw, as does a
+        // truncated NLRI.
+        let v4 = sr_policy_nlri(&[192, 0, 2, 1]);
+        for bad in [sr_policy_nlri(&SR_POLICY_V6_ENDPOINT), v4[..9].to_vec()] {
+            let mut nlri = v4.clone();
+            nlri.extend(&bad);
+            with_mp_reach_nlri(1, 73, &nlri, |buf, mp, entries| {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(
+                    *nested_field_value(buf, mp, "nlri_raw"),
+                    FieldValue::Bytes(&bad)
+                );
+            });
+        }
+
+        // Withdrawn SR Policy NLRI.
+        let data = build_single_attr_update(
+            15,
+            &build_mp_unreach(2, 73, &sr_policy_nlri(&SR_POLICY_V6_ENDPOINT)),
+        );
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let withdrawn = array_objs(&buf, &mp, "withdrawn_routes");
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &withdrawn[0], "color"),
+            FieldValue::U32(100)
+        );
+
+        // A 96-bit NLRI under AFI 2 stays raw.
+        with_mp_reach_nlri(2, 73, &v4, |buf, mp, entries| {
+            assert!(entries.is_empty());
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&v4)
+            );
+        });
+
+        // RFC 7911, Section 3 (https://www.rfc-editor.org/rfc/rfc7911#section-3).
+        let mut add_path = 7u32.to_be_bytes().to_vec();
+        add_path.extend(&v4);
+        assert!(detect_add_path_sr_policy(&add_path, false));
+        assert!(!detect_add_path_sr_policy(&v4, false));
+        // A plain NLRI whose Distinguisher starts with the NLRI Length,
+        // followed by a malformed tail, stays plain.
+        let mut tail = vec![96, 0, 0, 0, 96, 0, 0, 0, 100, 192, 0, 2, 1];
+        tail.extend_from_slice(&[1, 2, 3, 4]);
+        assert!(!detect_add_path_sr_policy(&tail, false));
+        let mut add_path_v6 = 7u32.to_be_bytes().to_vec();
+        add_path_v6.extend(sr_policy_nlri(&SR_POLICY_V6_ENDPOINT));
+        with_mp_reach_nlri(2, 73, &add_path_v6, |buf, mp, entries| {
+            assert!(nested_field_by_name_opt(buf, mp, "nlri_raw").is_none());
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "endpoint"),
+                FieldValue::Ipv6Addr(SR_POLICY_V6_ENDPOINT)
+            );
+        });
+        with_mp_reach_nlri(1, 73, &add_path, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(7)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "distinguisher"),
+                FieldValue::U32(1)
             );
         });
     }
