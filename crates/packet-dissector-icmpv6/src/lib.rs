@@ -14,6 +14,18 @@
 //! - RFC 8335 (Extended Echo — types 160-161): <https://www.rfc-editor.org/rfc/rfc8335>
 //! - RFC 4884 (Extended ICMP Multi-Part Messages — updates RFC 4443, adds Length field
 //!   to Types 1 and 3): <https://www.rfc-editor.org/rfc/rfc4884>
+//! - RFC 2894 (Router Renumbering — type 138): <https://www.rfc-editor.org/rfc/rfc2894>
+//! - RFC 4620 (Node Information — types 139-140): <https://www.rfc-editor.org/rfc/rfc4620>
+//! - RFC 3122 (Inverse ND — types 141-142, options 9-10): <https://www.rfc-editor.org/rfc/rfc3122>
+//! - RFC 3971 (SEND — types 148-149, options 11-16): <https://www.rfc-editor.org/rfc/rfc3971>
+//! - RFC 6550 (RPL Control Message — type 155): <https://www.rfc-editor.org/rfc/rfc6550>
+//! - RFC 6775 (6LoWPAN ND — types 157-158, options 33-35): <https://www.rfc-editor.org/rfc/rfc6775>
+//! - RFC 8505 (EARO / EDAR / EDAC): <https://www.rfc-editor.org/rfc/rfc8505>
+//! - RFC 8801 (PvD ID option 21): <https://www.rfc-editor.org/rfc/rfc8801>
+//! - RFC 5175 (RA Flags Extension option 26): <https://www.rfc-editor.org/rfc/rfc5175>
+//! - RFC 8910 (Captive-Portal option 37): <https://www.rfc-editor.org/rfc/rfc8910>
+//! - RFC 4950 (MPLS Label Stack extension object): <https://www.rfc-editor.org/rfc/rfc4950>
+//! - RFC 5837 (Interface Information extension object): <https://www.rfc-editor.org/rfc/rfc5837>
 
 #![deny(missing_docs)]
 
@@ -91,6 +103,66 @@ static REFERENCES: &[SpecReference] = &[
         "Extended ICMP to Support Multi-Part Messages",
         "https://www.rfc-editor.org/rfc/rfc4884",
     ),
+    SpecReference::new(
+        "RFC 2894",
+        "Router Renumbering for IPv6",
+        "https://www.rfc-editor.org/rfc/rfc2894",
+    ),
+    SpecReference::new(
+        "RFC 4620",
+        "IPv6 Node Information Queries",
+        "https://www.rfc-editor.org/rfc/rfc4620",
+    ),
+    SpecReference::new(
+        "RFC 3122",
+        "Extensions to IPv6 Neighbor Discovery for Inverse Discovery Specification",
+        "https://www.rfc-editor.org/rfc/rfc3122",
+    ),
+    SpecReference::new(
+        "RFC 3971",
+        "SEcure Neighbor Discovery (SEND)",
+        "https://www.rfc-editor.org/rfc/rfc3971",
+    ),
+    SpecReference::new(
+        "RFC 6550",
+        "RPL: IPv6 Routing Protocol for Low-Power and Lossy Networks",
+        "https://www.rfc-editor.org/rfc/rfc6550",
+    ),
+    SpecReference::new(
+        "RFC 6775",
+        "Neighbor Discovery Optimization for IPv6 over Low-Power Wireless Personal Area Networks (6LoWPANs)",
+        "https://www.rfc-editor.org/rfc/rfc6775",
+    ),
+    SpecReference::new(
+        "RFC 8505",
+        "Registration Extensions for IPv6 over Low-Power Wireless Personal Area Network (6LoWPAN) Neighbor Discovery",
+        "https://www.rfc-editor.org/rfc/rfc8505",
+    ),
+    SpecReference::new(
+        "RFC 8801",
+        "Discovering Provisioning Domain Names and Data",
+        "https://www.rfc-editor.org/rfc/rfc8801",
+    ),
+    SpecReference::new(
+        "RFC 5175",
+        "IPv6 Router Advertisement Flags Option",
+        "https://www.rfc-editor.org/rfc/rfc5175",
+    ),
+    SpecReference::new(
+        "RFC 8910",
+        "Captive-Portal Identification in DHCP and Router Advertisements (RAs)",
+        "https://www.rfc-editor.org/rfc/rfc8910",
+    ),
+    SpecReference::new(
+        "RFC 4950",
+        "ICMP Extensions for Multiprotocol Label Switching",
+        "https://www.rfc-editor.org/rfc/rfc4950",
+    ),
+    SpecReference::new(
+        "RFC 5837",
+        "Extending ICMP for Interface and Next-Hop Identification",
+        "https://www.rfc-editor.org/rfc/rfc5837",
+    ),
 ];
 
 /// Returns a human-readable name for ICMPv6 type values.
@@ -111,7 +183,7 @@ fn icmpv6_type_name(v: u8) -> Option<&'static str> {
         134 => Some("Router Advertisement"),
         135 => Some("Neighbor Solicitation"),
         136 => Some("Neighbor Advertisement"),
-        137 => Some("Redirect Message"),
+        137 => Some("Redirect"),
         138 => Some("Router Renumbering"),
         139 => Some("ICMP Node Information Query"),
         140 => Some("ICMP Node Information Response"),
@@ -151,12 +223,15 @@ fn ndp_option_type_name(v: u8) -> Option<&'static str> {
         4 => Some("Redirected Header"),
         5 => Some("MTU"),
         // RFC 6275, Sections 7.3 and 7.4
+        // <https://www.rfc-editor.org/rfc/rfc6275#section-7.3>
         7 => Some("Advertisement Interval"),
         8 => Some("Home Agent Information"),
         // RFC 3122, Section 3.1
+        // <https://www.rfc-editor.org/rfc/rfc3122#section-3.1>
         9 => Some("Source Address List"),
         10 => Some("Target Address List"),
         // RFC 3971, Sections 5.1-5.3 and 6.4
+        // <https://www.rfc-editor.org/rfc/rfc3971#section-5>
         11 => Some("CGA"),
         12 => Some("RSA Signature"),
         13 => Some("Timestamp"),
@@ -164,21 +239,25 @@ fn ndp_option_type_name(v: u8) -> Option<&'static str> {
         15 => Some("Trust Anchor"),
         16 => Some("Certificate"),
         // RFC 8801, Section 3.1
+        // <https://www.rfc-editor.org/rfc/rfc8801#section-3.1>
         21 => Some("PvD ID Router Advertisement"),
         // RFC 4191, Section 2.3
         24 => Some("Route Information"),
         // RFC 8106
         25 => Some("Recursive DNS Server"),
         // RFC 5175, Section 4
+        // <https://www.rfc-editor.org/rfc/rfc5175#section-4>
         26 => Some("RA Flags Extension"),
         // RFC 8106
         31 => Some("DNS Search List"),
         // RFC 6775, Sections 4.1-4.3 (Address Registration extended by
         // RFC 8505, Section 4.1)
+        // <https://www.rfc-editor.org/rfc/rfc6775#section-4>
         33 => Some("Address Registration"),
         34 => Some("6LoWPAN Context"),
         35 => Some("Authoritative Border Router"),
         // RFC 8910, Section 2.3
+        // <https://www.rfc-editor.org/rfc/rfc8910#section-2.3>
         37 => Some("Captive-Portal"),
         // RFC 8781
         38 => Some("PREF64"),
@@ -189,6 +268,14 @@ fn ndp_option_type_name(v: u8) -> Option<&'static str> {
 /// Minimum ICMPv6 header size (Type + Code + Checksum + 4 bytes type-specific).
 /// RFC 4443, Section 2.1.
 const HEADER_SIZE: usize = 8;
+
+/// Type, Code and Checksum (RFC 4443, Section 2.1).
+/// <https://www.rfc-editor.org/rfc/rfc4443#section-2.1>
+const COMMON_HEADER_SIZE: usize = 4;
+
+/// RFC 6550, Section 6 — ICMPv6 Type 155, RPL Control Message.
+/// <https://www.rfc-editor.org/rfc/rfc6550#section-6>
+const RPL_CONTROL_MESSAGE: u8 = 155;
 
 /// Minimum header size for Router Advertisement (RFC 4861, Section 4.2).
 const RA_HEADER_SIZE: usize = 16;
@@ -651,10 +738,13 @@ pub(crate) static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 pub struct Icmpv6Dissector;
 
 /// Router Renumbering header size (RFC 2894, Section 3.1).
+/// <https://www.rfc-editor.org/rfc/rfc2894#section-3.1>
 const RR_HEADER_SIZE: usize = 16;
 /// Node Information header size (RFC 4620, Section 4).
+/// <https://www.rfc-editor.org/rfc/rfc4620#section-4>
 const NI_HEADER_SIZE: usize = 16;
 /// Certification Path Advertisement header size (RFC 3971, Section 6.4.2).
+/// <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.2>
 const CPA_HEADER_SIZE: usize = 12;
 
 pub(crate) fn push_u8(
@@ -1636,7 +1726,21 @@ impl Dissector for Icmpv6Dissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        if data.len() < HEADER_SIZE {
+        // RFC 4443, Section 2.1 — Type, Code and Checksum are common to all
+        // messages; the message body follows.
+        // <https://www.rfc-editor.org/rfc/rfc4443#section-2.1>
+        if data.len() < COMMON_HEADER_SIZE {
+            return Err(PacketError::Truncated {
+                expected: COMMON_HEADER_SIZE,
+                actual: data.len(),
+            });
+        }
+        // Every message decoded here has at least 4 octets after the common
+        // header, except RPL Control Messages: a DIS without options is 6
+        // octets (RFC 6550, Section 6.2.1), so RPL bodies are length-checked
+        // in the `rpl` module instead.
+        // <https://www.rfc-editor.org/rfc/rfc6550#section-6.2.1>
+        if data.len() < HEADER_SIZE && data[0] != RPL_CONTROL_MESSAGE {
             return Err(PacketError::Truncated {
                 expected: HEADER_SIZE,
                 actual: data.len(),
@@ -2211,7 +2315,7 @@ impl Dissector for Icmpv6Dissector {
 
             // RFC 6550, Section 6 — RPL Control Message.
             // <https://www.rfc-editor.org/rfc/rfc6550#section-6>
-            155 => rpl::push_rpl_message(buf, code, data, offset),
+            RPL_CONTROL_MESSAGE => rpl::push_rpl_message(buf, code, data, offset),
 
             // RFC 6775, Section 4.4 — Duplicate Address Request /
             // Confirmation: Status, Reserved, Registration Lifetime, EUI-64,

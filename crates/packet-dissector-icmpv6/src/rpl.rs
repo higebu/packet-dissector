@@ -27,6 +27,9 @@ const CODE_DAO: u8 = 0x02;
 /// <https://www.rfc-editor.org/rfc/rfc6550#section-6>
 const CODE_DAO_ACK: u8 = 0x03;
 
+/// DIS base object size: Flags and Reserved (RFC 6550, Section 6.2.1).
+/// <https://www.rfc-editor.org/rfc/rfc6550#section-6.2.1>
+const DIS_BASE_SIZE: usize = 2;
 /// DIO base object size (RFC 6550, Section 6.3.1).
 /// <https://www.rfc-editor.org/rfc/rfc6550#section-6.3.1>
 const DIO_BASE_SIZE: usize = 24;
@@ -150,9 +153,9 @@ pub(crate) fn push_rpl_message<'pkt>(
     let options_at = match code {
         // RFC 6550, Section 6.2.1 — DIS: Flags, Reserved, Option(s).
         // <https://www.rfc-editor.org/rfc/rfc6550#section-6.2.1>
-        CODE_DIS => {
+        CODE_DIS if data.len() >= BASE + DIS_BASE_SIZE => {
             push_u8(buf, FD_RPL_FLAGS, data, BASE, offset);
-            BASE + 2
+            BASE + DIS_BASE_SIZE
         }
         // RFC 6550, Section 6.3.1 — DIO: RPLInstanceID, Version Number,
         // Rank, G|0|MOP|Prf, DTSN, Flags, Reserved, DODAGID, Option(s).

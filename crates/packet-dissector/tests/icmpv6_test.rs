@@ -88,6 +88,8 @@
 //! | RFC 6775 §4.4     | Duplicate Address Request (157)      | parse_icmpv6_duplicate_address_request             |
 //! | RFC 8505 §4.2     | Extended DAC (158, Code Suffix 2)    | parse_icmpv6_extended_duplicate_address_confirmation |
 //! | RFC 6550 §6.2.1   | RPL DIS                              | parse_icmpv6_rpl_dis                               |
+//! | RFC 6550 §6.2.1   | RPL DIS without options (6 octets)   | parse_icmpv6_rpl_dis_without_options               |
+//! | RFC 4443 §2.1     | Other types shorter than 8 octets    | parse_icmpv6_short_non_rpl_is_truncated            |
 //! | RFC 6550 §6.3.1   | RPL DIO                              | parse_icmpv6_rpl_dio_with_dodag_configuration      |
 //! | RFC 6550 §6.7.6   | DODAG Configuration option           | parse_icmpv6_rpl_dio_with_dodag_configuration      |
 //! | RFC 6550 §6.4.1   | RPL DAO with DODAGID                 | parse_icmpv6_rpl_dao_with_target                   |
@@ -2801,7 +2803,7 @@ fn icmpv6_type_names() {
         (130, "Multicast Listener Query"),
         (131, "Multicast Listener Report"),
         (132, "Multicast Listener Done"),
-        (137, "Redirect Message"),
+        (137, "Redirect"),
         (138, "Router Renumbering"),
         (139, "ICMP Node Information Query"),
         (140, "ICMP Node Information Response"),
@@ -3167,4 +3169,43 @@ fn parse_icmpv6_short_message_bodies() {
             "type {t} code {code}"
         );
     }
+}
+
+#[test]
+fn parse_icmpv6_rpl_dis_without_options() {
+    // RFC 6550, Section 6.2.1 — the DIS base object is Flags and Reserved
+    // only, so a DIS without options is a 6-octet ICMPv6 message.
+    let data = [155, 0x00, 0x12, 0x34, 0x00, 0x00];
+    let mut buf = DissectBuffer::new();
+    let result = Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(result.bytes_consumed, 6);
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(buf.field_u8(layer, "rpl_flags"), Some(0));
+    assert!(buf.field_by_name(layer, "rpl_options").is_none());
+}
+
+#[test]
+fn parse_icmpv6_short_non_rpl_is_truncated() {
+    // Other types still need the 8-octet header (RFC 4443, Section 2.1).
+    let data = [128, 0x00, 0x12, 0x34, 0x00, 0x00];
+    let mut buf = DissectBuffer::new();
+    let err = Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap_err();
+    assert!(matches!(
+        err,
+        packet_dissector::error::PacketError::Truncated {
+            expected: 8,
+            actual: 6
+        }
+    ));
+    // Fewer than 4 octets cannot even hold the RPL common header.
+    let err = Icmpv6Dissector
+        .dissect(&[155, 0, 0], &mut buf, 0)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        packet_dissector::error::PacketError::Truncated {
+            expected: 4,
+            actual: 3
+        }
+    ));
 }

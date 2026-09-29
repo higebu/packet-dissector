@@ -13,8 +13,9 @@ use crate::util::{read_be_u16, read_be_u32};
 
 /// ICMP Extension Header size (RFC 4884, Section 7).
 /// <https://www.rfc-editor.org/rfc/rfc4884#section-7>
-pub const EXTENSION_HEADER_SIZE: usize = 4;
+const EXTENSION_HEADER_SIZE: usize = 4;
 // Minimum ICMP Extension Object header size per RFC 4884, Section 7.
+// <https://www.rfc-editor.org/rfc/rfc4884#section-7>
 const EXT_OBJECT_HEADER_SIZE: usize = 4;
 // Minimum padded original datagram length when extensions are present, per
 // RFC 4884, Section 5.5. <https://www.rfc-editor.org/rfc/rfc4884#section-5.5>
@@ -49,7 +50,7 @@ const MPLS_TTL: usize = 3;
 
 /// RFC 4950, Section 3 — MPLS Label Stack Entry (4 octets).
 /// <https://www.rfc-editor.org/rfc/rfc4950#section-3>
-pub static MPLS_LABEL_CHILDREN: &[FieldDescriptor] = &[
+static MPLS_LABEL_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("label", "Label", FieldType::U32),
     FieldDescriptor::new("tc", "Traffic Class", FieldType::U8),
     FieldDescriptor::new("s", "Bottom of Stack", FieldType::U8),
@@ -61,7 +62,7 @@ pub static MPLS_LABEL_CHILDREN: &[FieldDescriptor] = &[
 /// Class 2, RFC 8335 Section 2.1 Class 3). Only the first three entries are
 /// always present; the remainder are conditional on class/c_type.
 /// <https://www.rfc-editor.org/rfc/rfc4884#section-7.1>
-pub static EXTENSION_OBJECT_CHILDREN: &[FieldDescriptor] = &[
+static EXTENSION_OBJECT_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("length", "Length", FieldType::U16),
     FieldDescriptor::new("class_num", "Class-Num", FieldType::U8),
     FieldDescriptor::new("c_type", "C-Type", FieldType::U8),
@@ -114,6 +115,7 @@ pub fn push_extension_structure<'pkt>(
         return;
     }
     // RFC 4884, Section 7 — Version (4 bits) + Reserved (12 bits) + Checksum (16 bits).
+    // <https://www.rfc-editor.org/rfc/rfc4884#section-7>
     let version = data[0] >> 4;
     let reserved = (u16::from(data[0] & 0x0F) << 8) | u16::from(data[1]);
     let checksum = read_be_u16(data, 2).unwrap_or_default();
@@ -147,6 +149,7 @@ pub fn push_extension_structure<'pkt>(
     let mut pos = EXTENSION_HEADER_SIZE;
     while pos + EXT_OBJECT_HEADER_SIZE <= data.len() {
         // RFC 4884, Section 7.1 — Object header: Length(u16) + Class-Num(u8) + C-Type(u8).
+        // <https://www.rfc-editor.org/rfc/rfc4884#section-7.1>
         let obj_len = read_be_u16(data, pos).unwrap_or_default() as usize;
         let class_num = data[pos + 2];
         let c_type = data[pos + 3];
@@ -275,6 +278,7 @@ fn push_interface_info<'pkt>(
 ) {
     // RFC 5837, Section 4.1 — Interface Role: bits 0-1 of the C-Type byte
     // (bit 0 = MSB; i.e. (c_type >> 6) & 0x03).
+    // <https://www.rfc-editor.org/rfc/rfc5837#section-4.1>
     let role = (c_type >> 6) & 0x03;
     let has_ifindex = (c_type & 0x08) != 0;
     let has_addr = (c_type & 0x04) != 0;
@@ -302,6 +306,7 @@ fn push_interface_info<'pkt>(
     }
     if has_addr {
         // RFC 5837, Section 4.2 — IP Address Sub-Object: AFI(u16) + Reserved(u16) + Address.
+        // <https://www.rfc-editor.org/rfc/rfc5837#section-4.2>
         if p + 4 > body.len() {
             return;
         }
@@ -345,6 +350,7 @@ fn push_interface_info<'pkt>(
     if has_name {
         // RFC 5837, Section 4.5 — Interface Name Sub-Object: 1-octet Length
         // (including itself, multiple of 4, max 64), then name bytes padded with NULs.
+        // <https://www.rfc-editor.org/rfc/rfc5837#section-4.5>
         if p >= body.len() {
             return;
         }
@@ -362,6 +368,7 @@ fn push_interface_info<'pkt>(
     }
     if has_mtu {
         // RFC 5837, Section 4.6 — MTU Sub-Object: 32-bit unsigned MTU.
+        // <https://www.rfc-editor.org/rfc/rfc5837#section-4.6>
         if p + 4 > body.len() {
             return;
         }
@@ -482,6 +489,7 @@ mod tests {
     #[test]
     fn extension_structure_start_padding() {
         // RFC 4884, Section 4 — at least 128 octets of original datagram.
+        // <https://www.rfc-editor.org/rfc/rfc4884#section-4>
         assert_eq!(extension_structure_start(8, 128, 200), Some(136));
         assert_eq!(extension_structure_start(8, 40, 200), Some(136));
         assert_eq!(extension_structure_start(8, 160, 300), Some(168));
