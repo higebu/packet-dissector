@@ -8,7 +8,7 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "vxlan"]
 categories = ["network-programming", "parser-implementations"]
-description = "VXLAN (RFC 7348) dissector for packet-dissector"
+description = "VXLAN (RFC 7348, VXLAN-GBP) and VXLAN-GPE dissectors for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }

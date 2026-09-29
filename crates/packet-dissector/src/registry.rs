@@ -2292,6 +2292,15 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("vxlan", || {
                 Box::new(packet_dissector_vxlan::VxlanDissector)
             });
+            // VXLAN-GPE runs over UDP port 4790 (draft-ietf-nvo3-vxlan-gpe-13,
+            // Section 11.1 — https://datatracker.ietf.org/doc/html/draft-ietf-nvo3-vxlan-gpe-13#section-11.1)
+            #[cfg(feature = "udp")]
+            assert_builtin(
+                reg.register_by_udp_port(4790, Box::new(packet_dissector_vxlan::VxlanGpeDissector)),
+            );
+            reg.register_dissector_factory("vxlan-gpe", || {
+                Box::new(packet_dissector_vxlan::VxlanGpeDissector)
+            });
         }
 
         // L2TP port 1701 registration is handled by L2tpDispatcher above.
@@ -3442,6 +3451,8 @@ mod tests {
 
         #[cfg(all(feature = "vxlan", feature = "udp"))]
         assert!(reg.get_by_udp_port(4789).is_some());
+        #[cfg(all(feature = "vxlan", feature = "udp"))]
+        assert!(reg.get_by_udp_port(4790).is_some());
 
         #[cfg(all(feature = "geneve", feature = "udp"))]
         assert!(reg.get_by_udp_port(6081).is_some());
@@ -3515,6 +3526,8 @@ mod tests {
 
         #[cfg(feature = "vxlan")]
         assert!(reg.create_dissector_by_name("vxlan").is_some());
+        #[cfg(feature = "vxlan")]
+        assert!(reg.create_dissector_by_name("vxlan-gpe").is_some());
 
         #[cfg(feature = "ike")]
         assert!(reg.create_dissector_by_name("ike").is_some());
