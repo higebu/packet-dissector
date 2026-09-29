@@ -322,8 +322,6 @@ const AFD_CRC32: usize = 9;
 const AFD_ERROR_CODE: usize = 10;
 const AFD_REASON: usize = 11;
 const AFD_ATTRIBUTE_TYPES: usize = 12;
-const AFD_ALGORITHM: usize = 13;
-const AFD_ALGORITHM_PARAMETERS: usize = 14;
 const AFD_ALGORITHMS: usize = 15;
 const AFD_CHANNEL_NUMBER: usize = 16;
 const AFD_LIFETIME: usize = 17;
@@ -648,7 +646,9 @@ fn push_attr_value<'pkt>(
         // RFC 5780, Sections 7.3, 7.4 (RESPONSE-ORIGIN, OTHER-ADDRESS) use the
         // MAPPED-ADDRESS format.
         // https://www.rfc-editor.org/rfc/rfc8489#section-14.1
-        // https://www.rfc-editor.org/rfc/rfc5780#section-7.1
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.15
+        // https://www.rfc-editor.org/rfc/rfc5780#section-7.3
+        // https://www.rfc-editor.org/rfc/rfc5780#section-7.4
         ATTR_MAPPED_ADDRESS | ATTR_ALTERNATE_SERVER | ATTR_RESPONSE_ORIGIN | ATTR_OTHER_ADDRESS => {
             push_address(v, off, &[0; 16], buf)
         }
@@ -657,6 +657,7 @@ fn push_attr_value<'pkt>(
         // same way as the XOR-MAPPED-ADDRESS attribute".
         // https://www.rfc-editor.org/rfc/rfc8489#section-14.2
         // https://www.rfc-editor.org/rfc/rfc8656#section-18.3
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.5
         //
         // Classic STUN (RFC 3489) has no magic cookie and no XOR- attributes
         // (RFC 5389, Section 12 —
@@ -666,6 +667,10 @@ fn push_attr_value<'pkt>(
         }
         // RFC 8489, Sections 14.3, 14.9, 14.10, 14.14, 14.16 — UTF-8 text.
         // https://www.rfc-editor.org/rfc/rfc8489#section-14.3
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.9
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.10
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.14
+        // https://www.rfc-editor.org/rfc/rfc8489#section-14.16
         ATTR_USERNAME | ATTR_REALM | ATTR_NONCE | ATTR_SOFTWARE | ATTR_ALTERNATE_DOMAIN => {
             match core::str::from_utf8(v) {
                 Ok(text) => {
@@ -725,52 +730,31 @@ fn push_attr_value<'pkt>(
             Some((algorithm, params, consumed))
                 if consumed == v.len() || consumed.next_multiple_of(4) == v.len() =>
             {
-                push_password_algorithm(
-                    algorithm,
-                    params,
-                    off,
-                    &ATTR_CHILD_FIELDS[AFD_ALGORITHM..=AFD_ALGORITHM_PARAMETERS],
-                    buf,
-                );
+                push_password_algorithm(algorithm, params, off, buf);
                 true
             }
             _ => false,
         },
         // RFC 8489, Section 14.11 — https://www.rfc-editor.org/rfc/rfc8489#section-14.11
         ATTR_PASSWORD_ALGORITHMS => {
-            // Validate the whole list before pushing anything. The padding
-            // of the last entry may be the attribute padding.
-            let mut pos = 0;
-            while pos < v.len() {
-                match parse_password_algorithm(&v[pos..]) {
-                    Some((_, _, consumed)) => pos = (pos + consumed).next_multiple_of(4),
-                    None => return false,
-                }
+            // Validate the whole list before pushing anything.
+            if !PasswordAlgorithmEntries::new(v).all(|entry| entry.is_some()) {
+                return false;
             }
             let idx = buf.begin_container(
                 f(AFD_ALGORITHMS),
                 FieldValue::Array(0..0),
                 off..off + v.len(),
             );
-            let mut pos = 0;
-            while let Some((algorithm, params, consumed)) =
-                v.get(pos..).and_then(parse_password_algorithm)
-            {
+            for (pos, algorithm, params) in PasswordAlgorithmEntries::new(v).flatten() {
                 let at = off + pos;
                 let entry = buf.begin_container(
                     &FD_PASSWORD_ALGORITHM_ENTRY,
                     FieldValue::Object(0..0),
-                    at..at + consumed,
+                    at..at + 4 + params.len(),
                 );
-                push_password_algorithm(
-                    algorithm,
-                    params,
-                    at,
-                    PASSWORD_ALGORITHM_ENTRY_FIELDS,
-                    buf,
-                );
+                push_password_algorithm(algorithm, params, at, buf);
                 buf.end_container(entry);
-                pos = (pos + consumed).next_multiple_of(4);
             }
             buf.end_container(idx);
             true
@@ -792,6 +776,7 @@ fn push_attr_value<'pkt>(
         }
         // RFC 8656, Sections 18.6, 18.11 — Family(8) + Reserved(24).
         // https://www.rfc-editor.org/rfc/rfc8656#section-18.6
+        // https://www.rfc-editor.org/rfc/rfc8656#section-18.11
         ATTR_REQUESTED_ADDRESS_FAMILY | ATTR_ADDITIONAL_ADDRESS_FAMILY if v.len() == 4 => {
             buf.push_field(f(AFD_FAMILY), FieldValue::U8(v[0]), off..off + 1);
             true
@@ -960,11 +945,11 @@ fn push_address<'pkt>(
 /// by XOR'ing the mapped IP address with the concatenation of the magic cookie
 /// and the 96-bit transaction ID."
 /// <https://www.rfc-editor.org/rfc/rfc8489#section-14.2>.
-fn xor_key(transaction_id: &[u8]) -> Option<[u8; 16]> {
+fn xor_key(transaction_id: &[u8; 12]) -> [u8; 16] {
     let mut key = [0u8; 16];
     key[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
-    key[4..].copy_from_slice(transaction_id.get(..12)?);
-    Some(key)
+    key[4..].copy_from_slice(transaction_id);
+    key
 }
 
 /// Push ERROR-CODE (or, with `family`, ADDRESS-ERROR-CODE) fields.
@@ -1029,14 +1014,57 @@ fn parse_password_algorithm(v: &[u8]) -> Option<(u16, &[u8], usize)> {
     Some((algorithm, params, 4 + len))
 }
 
+/// Iterator over PASSWORD-ALGORITHMS entries as `(offset, algorithm,
+/// parameters)`, each padded to a 32-bit boundary. Yields `None` once for a
+/// malformed entry and then stops. The padding of the last entry may be the
+/// attribute padding.
+///
+/// RFC 8489, Section 14.11 — <https://www.rfc-editor.org/rfc/rfc8489#section-14.11>.
+struct PasswordAlgorithmEntries<'a> {
+    v: &'a [u8],
+    pos: usize,
+    failed: bool,
+}
+
+impl<'a> PasswordAlgorithmEntries<'a> {
+    fn new(v: &'a [u8]) -> Self {
+        Self {
+            v,
+            pos: 0,
+            failed: false,
+        }
+    }
+}
+
+impl<'a> Iterator for PasswordAlgorithmEntries<'a> {
+    type Item = Option<(usize, u16, &'a [u8])>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed || self.pos >= self.v.len() {
+            return None;
+        }
+        let at = self.pos;
+        match self.v.get(at..).and_then(parse_password_algorithm) {
+            Some((algorithm, params, consumed)) => {
+                self.pos = (at + consumed).next_multiple_of(4);
+                Some(Some((at, algorithm, params)))
+            }
+            None => {
+                self.failed = true;
+                Some(None)
+            }
+        }
+    }
+}
+
 /// Push `algorithm` and `algorithm_parameters` for one entry at `at`.
 fn push_password_algorithm<'pkt>(
     algorithm: u16,
     params: &'pkt [u8],
     at: usize,
-    fields: &'static [FieldDescriptor],
     buf: &mut DissectBuffer<'pkt>,
 ) {
+    let fields = PASSWORD_ALGORITHM_ENTRY_FIELDS;
     buf.push_field(&fields[0], FieldValue::U16(algorithm), at..at + 2);
     buf.push_field(
         &fields[1],
@@ -1306,11 +1334,11 @@ fn dissect_stun<'pkt>(
             FieldValue::Array(0..0),
             offset + HEADER_SIZE..offset + total_len,
         );
-        let key = if classic {
-            None
-        } else {
-            xor_key(&data[8..HEADER_SIZE])
-        };
+        let key = (!classic).then(|| {
+            let mut transaction_id = [0u8; 12];
+            transaction_id.copy_from_slice(&data[8..HEADER_SIZE]);
+            xor_key(&transaction_id)
+        });
         push_attrs(attr_data, offset + HEADER_SIZE, key.as_ref(), buf);
         buf.end_container(array_idx);
     }
@@ -1561,6 +1589,7 @@ mod tests {
     // | 8489 14.16       | ALTERNATE-DOMAIN                         | test_alternate_domain                       |
     // | 8489 14.3        | Invalid UTF-8 text → raw value           | test_text_invalid_utf8_falls_back_to_raw    |
     // | 8489 18.3        | Unknown attribute keeps raw value        | test_unknown_attribute_raw_value            |
+    // | 8489 14, 8656 18 | Fixed-length value with wrong length     | test_fixed_length_attributes_wrong_length_fall_back_to_raw |
     // | 8656 17          | TURN method names                        | test_method_names                           |
     // | 8656 18.1        | CHANNEL-NUMBER                           | test_turn_channel_number                    |
     // | 8656 18.2        | LIFETIME                                 | test_turn_lifetime                          |
@@ -2340,6 +2369,50 @@ mod tests {
         let a = attr(&buf, 0);
         assert!(get(a, "text").is_none());
         assert_eq!(get(a, "value"), Some(&FieldValue::Bytes(&[0xff, 0xfe])));
+    }
+
+    #[test]
+    fn test_fixed_length_attributes_wrong_length_fall_back_to_raw() {
+        // Each fixed-length attribute with a value one byte too long keeps
+        // the raw `value` instead of decoding partial data.
+        for (attr_type, good_len) in [
+            (0x000C, 4),  // CHANNEL-NUMBER
+            (0x000D, 4),  // LIFETIME
+            (0x0017, 4),  // REQUESTED-ADDRESS-FAMILY
+            (0x0018, 1),  // EVEN-PORT
+            (0x0019, 4),  // REQUESTED-TRANSPORT
+            (0x0022, 8),  // RESERVATION-TOKEN
+            (0x8004, 8),  // ICMP
+            (0x8029, 8),  // ICE-CONTROLLED
+            (0x802A, 8),  // ICE-CONTROLLING
+            (0x0003, 4),  // CHANGE-REQUEST
+            (0x0027, 4),  // RESPONSE-PORT
+            (0x001E, 32), // USERHASH
+            (0x0008, 20), // MESSAGE-INTEGRITY
+            (0x002A, 4),  // CONNECTION-ID
+            (0x0024, 4),  // PRIORITY
+            (0x8028, 4),  // FINGERPRINT
+        ] {
+            let v = vec![0x01; good_len + 1];
+            let buf = dissect_one(0b00, 0x001, attr_type, &v);
+            let a = attr(&buf, 0);
+            assert_eq!(
+                get(a, "value"),
+                Some(&FieldValue::Bytes(&v[..])),
+                "attribute {attr_type:#06x}"
+            );
+            assert_eq!(a.len(), 3, "attribute {attr_type:#06x}");
+        }
+        // MESSAGE-INTEGRITY-SHA256: shorter than 16 or not a multiple of 4.
+        for len in [12, 18, 36] {
+            let buf = dissect_one(0b00, 0x001, 0x001C, &vec![0; len]);
+            assert!(get(attr(&buf, 0), "value").is_some(), "len {len}");
+        }
+        // DONT-FRAGMENT / USE-CANDIDATE with a value.
+        for attr_type in [0x001A, 0x0025] {
+            let buf = dissect_one(0b00, 0x001, attr_type, &[0]);
+            assert!(get(attr(&buf, 0), "value").is_some());
+        }
     }
 
     #[test]
