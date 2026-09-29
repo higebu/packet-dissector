@@ -74,6 +74,7 @@
 //! | Ethernet → LLC → STP Config BPDU                    | integration_ethernet_llc_stp_config                  |
 //! | Ethernet → LLC → STP TCN BPDU                       | integration_ethernet_llc_stp_tcn                     |
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
+//! | Ethernet → LLC → MST BPDU with an MSTI message      | integration_ethernet_llc_mstp                        |
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
 //! | Ethernet → MPLS (2 labels) → IPv4 → UDP              | integration_ethernet_mpls_two_labels_ipv4_udp        |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
@@ -4096,6 +4097,42 @@ fn integration_ethernet_llc_rstp() {
         buf.field_by_name(stp, "version1_length").unwrap().value,
         FieldValue::U8(0)
     );
+}
+
+/// Ethernet → LLC → MST BPDU (IEEE 802.1Q-2022, Clause 14.4) with one MSTI.
+#[test]
+fn integration_ethernet_llc_mstp() {
+    let mut pkt = Vec::new();
+    let len_offset = push_ethernet_llc(&mut pkt, STP_DST, MAC_SRC_STP);
+    push_rstp_bpdu(&mut pkt);
+    let bpdu_start = pkt.len() - 36;
+    pkt[bpdu_start + 2] = 0x03; // Version 3
+    pkt.extend_from_slice(&80u16.to_be_bytes()); // Version 3 Length
+    pkt.push(0x00); // Format Selector
+    pkt.extend_from_slice(&[0u8; 32]); // Configuration Name
+    pkt.extend_from_slice(&[0u8; 2 + 16]); // Revision Level, Digest
+    pkt.extend_from_slice(&[0u8; 4]); // CIST Internal Root Path Cost
+    pkt.extend_from_slice(&[0x80, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // CIST Bridge ID
+    pkt.push(20); // CIST Remaining Hops
+    let mut msti = [0u8; 16];
+    msti[1..3].copy_from_slice(&0x8001u16.to_be_bytes());
+    pkt.extend_from_slice(&msti);
+    fixup_802_3_length(&mut pkt, len_offset);
+
+    let registry = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 2);
+    assert_layers_contiguous(&buf);
+    let stp = &buf.layers()[1];
+    assert_eq!(stp.range.len(), 118);
+    assert_eq!(display_name_for(&buf, stp, "bpdu_type"), Some("MST"));
+    assert_eq!(
+        buf.field_by_name(stp, "cist_remaining_hops").unwrap().value,
+        FieldValue::U8(20)
+    );
+    assert!(buf.field_by_name(stp, "mstis").unwrap().value.is_array());
 }
 
 // ---------------------------------------------------------------------------

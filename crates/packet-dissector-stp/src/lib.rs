@@ -1,13 +1,15 @@
-//! STP/RSTP BPDU dissector.
+//! STP/RSTP/MSTP BPDU dissector.
 //!
-//! Parses Spanning Tree Protocol (STP) and Rapid Spanning Tree Protocol (RSTP)
-//! Bridge Protocol Data Units (BPDUs) as defined in IEEE 802.1D-2004 and
-//! IEEE 802.1w-2001.
+//! Parses Spanning Tree Protocol (STP), Rapid Spanning Tree Protocol (RSTP)
+//! and Multiple Spanning Tree Protocol (MSTP) Bridge Protocol Data Units
+//! (BPDUs) as defined in IEEE 802.1D-2004 and IEEE 802.1Q-2022 Clause 14.
 //!
 //! ## References
 //! - IEEE 802.1D-2004 (STP): <https://standards.ieee.org/ieee/802.1D/2486/>
 //! - IEEE 802.1w-2001 (RSTP, incorporated into IEEE 802.1D-2004):
 //!   <https://standards.ieee.org/ieee/802.1w/1039/>
+//! - IEEE 802.1Q-2022, Clause 14 (MST and SPT BPDU encoding):
+//!   <https://standards.ieee.org/ieee/802.1Q/10323/>
 //!
 //! ## BPDU Types
 //!
@@ -15,6 +17,8 @@
 //! |------|---------|---------------------------------|---------|
 //! | 0x00 | 0       | STP Configuration BPDU          | 35 bytes|
 //! | 0x02 | 2       | RST BPDU                        | 36 bytes|
+//! | 0x02 | 3       | MST BPDU                        | 102 + 16 × MSTIs bytes |
+//! | 0x02 | 4       | SPT BPDU (MST part decoded, SPT data raw) | ≥ 106 bytes |
 //! | 0x80 | 0       | Topology Change Notification    | 4 bytes |
 
 #![deny(missing_docs)]
@@ -23,7 +27,9 @@ use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, MacAddr};
+use packet_dissector_core::field::{
+    Field, FieldDescriptor, FieldType, FieldValue, MacAddr, format_utf8_lossy,
+};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
 
@@ -50,6 +56,28 @@ const FD_MAX_AGE: usize = 18;
 const FD_HELLO_TIME: usize = 19;
 const FD_FORWARD_DELAY: usize = 20;
 const FD_VERSION1_LENGTH: usize = 21;
+const FD_ROOT_PRIORITY_COMPONENT: usize = 22;
+const FD_ROOT_SYSTEM_ID_EXTENSION: usize = 23;
+const FD_BRIDGE_PRIORITY_COMPONENT: usize = 24;
+const FD_BRIDGE_SYSTEM_ID_EXTENSION: usize = 25;
+const FD_PORT_PRIORITY: usize = 26;
+const FD_PORT_NUMBER: usize = 27;
+const FD_CIST_REGIONAL_ROOT_PRIORITY: usize = 28;
+const FD_CIST_REGIONAL_ROOT_MAC: usize = 29;
+const FD_VERSION3_LENGTH: usize = 30;
+const FD_MST_CONFIG_FORMAT_SELECTOR: usize = 31;
+const FD_MST_CONFIG_NAME: usize = 32;
+const FD_MST_CONFIG_REVISION: usize = 33;
+const FD_MST_CONFIG_DIGEST: usize = 34;
+const FD_CIST_INTERNAL_ROOT_PATH_COST: usize = 35;
+const FD_CIST_BRIDGE_PRIORITY: usize = 36;
+const FD_CIST_BRIDGE_PRIORITY_COMPONENT: usize = 37;
+const FD_CIST_BRIDGE_SYSTEM_ID_EXTENSION: usize = 38;
+const FD_CIST_BRIDGE_MAC: usize = 39;
+const FD_CIST_REMAINING_HOPS: usize = 40;
+const FD_MSTIS: usize = 41;
+const FD_VERSION4_LENGTH: usize = 42;
+const FD_UNPARSED: usize = 43;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("protocol_id", "Protocol Identifier", FieldType::U16),
@@ -60,8 +88,8 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         field_type: FieldType::U8,
         optional: false,
         children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(t) => bpdu_type_name(*t),
+        display_fn: Some(|v, siblings| match v {
+            FieldValue::U8(t) => bpdu_type_name(*t, siblings),
             _ => None,
         }),
         format_fn: None,
@@ -69,7 +97,12 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("flags", "Flags", FieldType::U8).optional(),
     FieldDescriptor::new("flags_tc", "Topology Change", FieldType::U8).optional(),
     FieldDescriptor::new("flags_proposal", "Proposal", FieldType::U8).optional(),
-    FieldDescriptor::new("flags_port_role", "Port Role", FieldType::U8).optional(),
+    FieldDescriptor::new("flags_port_role", "Port Role", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, siblings| match v {
+            FieldValue::U8(role) => cist_port_role_name(*role, siblings),
+            _ => None,
+        }),
     FieldDescriptor::new("flags_learning", "Learning", FieldType::U8).optional(),
     FieldDescriptor::new("flags_forwarding", "Forwarding", FieldType::U8).optional(),
     FieldDescriptor::new("flags_agreement", "Agreement", FieldType::U8).optional(),
@@ -85,6 +118,168 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("hello_time", "Hello Time", FieldType::U16).optional(),
     FieldDescriptor::new("forward_delay", "Forward Delay", FieldType::U16).optional(),
     FieldDescriptor::new("version1_length", "Version 1 Length", FieldType::U8).optional(),
+    FieldDescriptor::new(
+        "root_priority_component",
+        "Root Bridge Priority (priority component)",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "root_system_id_extension",
+        "Root Bridge System ID Extension",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "bridge_priority_component",
+        "Bridge Priority (priority component)",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "bridge_system_id_extension",
+        "Bridge System ID Extension",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new("port_priority", "Port Priority", FieldType::U8).optional(),
+    FieldDescriptor::new("port_number", "Port Number", FieldType::U16).optional(),
+    FieldDescriptor::new(
+        "cist_regional_root_priority",
+        "CIST Regional Root Priority",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "cist_regional_root_mac",
+        "CIST Regional Root MAC",
+        FieldType::MacAddr,
+    )
+    .optional(),
+    FieldDescriptor::new("version3_length", "Version 3 Length", FieldType::U16).optional(),
+    FieldDescriptor::new(
+        "mst_config_format_selector",
+        "MST Configuration Identifier Format Selector",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "mst_config_name",
+        "MST Configuration Name",
+        FieldType::Bytes,
+    )
+    .optional()
+    .with_format_fn(format_utf8_lossy),
+    FieldDescriptor::new(
+        "mst_config_revision",
+        "MST Configuration Revision Level",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "mst_config_digest",
+        "MST Configuration Digest",
+        FieldType::Bytes,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "cist_internal_root_path_cost",
+        "CIST Internal Root Path Cost",
+        FieldType::U32,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "cist_bridge_priority",
+        "CIST Bridge Priority",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "cist_bridge_priority_component",
+        "CIST Bridge Priority (priority component)",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "cist_bridge_system_id_extension",
+        "CIST Bridge System ID Extension",
+        FieldType::U16,
+    )
+    .optional(),
+    FieldDescriptor::new("cist_bridge_mac", "CIST Bridge MAC", FieldType::MacAddr).optional(),
+    FieldDescriptor::new("cist_remaining_hops", "CIST Remaining Hops", FieldType::U8).optional(),
+    FieldDescriptor::new("mstis", "MSTI Configuration Messages", FieldType::Array)
+        .optional()
+        .with_children(MSTI_FIELDS),
+    FieldDescriptor::new("version4_length", "Version 4 Length", FieldType::U16).optional(),
+    FieldDescriptor::new("unparsed", "Unparsed Data", FieldType::Bytes).optional(),
+];
+
+// MSTI child descriptor indices. Child names carry an `msti_` prefix so a
+// flattened layer lookup (e.g. `field_by_name`) never mistakes an MSTI value
+// for a top-level field of the same name.
+const FD_MSTI_FLAGS: usize = 0;
+const FD_MSTI_FLAGS_TC: usize = 1;
+const FD_MSTI_FLAGS_PROPOSAL: usize = 2;
+const FD_MSTI_FLAGS_PORT_ROLE: usize = 3;
+const FD_MSTI_FLAGS_LEARNING: usize = 4;
+const FD_MSTI_FLAGS_FORWARDING: usize = 5;
+const FD_MSTI_FLAGS_AGREEMENT: usize = 6;
+const FD_MSTI_FLAGS_MASTER: usize = 7;
+const FD_MSTI_REGIONAL_ROOT_PRIORITY: usize = 8;
+const FD_MSTI_ID: usize = 9;
+const FD_MSTI_REGIONAL_ROOT_MAC: usize = 10;
+const FD_MSTI_INTERNAL_ROOT_PATH_COST: usize = 11;
+const FD_MSTI_BRIDGE_PRIORITY: usize = 12;
+const FD_MSTI_PORT_PRIORITY: usize = 13;
+const FD_MSTI_REMAINING_HOPS: usize = 14;
+
+/// Container descriptor for one MSTI Configuration Message.
+static FD_MSTI: FieldDescriptor = FieldDescriptor::new("msti", "MSTI", FieldType::Object);
+
+/// MSTI Configuration Message fields (IEEE 802.1Q-2022, Section 14.4.1,
+/// Figure 14-3).
+static MSTI_FIELDS: &[FieldDescriptor] = &[
+    FieldDescriptor::new("msti_flags", "MSTI Flags", FieldType::U8),
+    FieldDescriptor::new("msti_flags_tc", "Topology Change", FieldType::U8),
+    FieldDescriptor::new("msti_flags_proposal", "Proposal", FieldType::U8),
+    FieldDescriptor::new("msti_flags_port_role", "Port Role", FieldType::U8).with_display_fn(
+        |v, _| match v {
+            FieldValue::U8(role) => port_role_name(*role, true),
+            _ => None,
+        },
+    ),
+    FieldDescriptor::new("msti_flags_learning", "Learning", FieldType::U8),
+    FieldDescriptor::new("msti_flags_forwarding", "Forwarding", FieldType::U8),
+    FieldDescriptor::new("msti_flags_agreement", "Agreement", FieldType::U8),
+    FieldDescriptor::new("msti_flags_master", "Master", FieldType::U8),
+    FieldDescriptor::new(
+        "msti_regional_root_priority",
+        "Regional Root Priority (priority component)",
+        FieldType::U16,
+    ),
+    FieldDescriptor::new("msti_id", "MSTID", FieldType::U16),
+    FieldDescriptor::new(
+        "msti_regional_root_mac",
+        "Regional Root MAC",
+        FieldType::MacAddr,
+    ),
+    FieldDescriptor::new(
+        "msti_internal_root_path_cost",
+        "Internal Root Path Cost",
+        FieldType::U32,
+    ),
+    FieldDescriptor::new(
+        "msti_bridge_priority",
+        "Bridge Identifier Priority",
+        FieldType::U16,
+    ),
+    FieldDescriptor::new(
+        "msti_port_priority",
+        "Port Identifier Priority",
+        FieldType::U8,
+    ),
+    FieldDescriptor::new("msti_remaining_hops", "Remaining Hops", FieldType::U8),
 ];
 
 /// Minimum BPDU size: Protocol ID (2) + Version (1) + Type (1).
@@ -115,20 +310,131 @@ const BPDU_TYPE_RST: u8 = 0x02;
 /// IEEE 802.1D-2004, Section 9.3.2.
 const BPDU_TYPE_TCN: u8 = 0x80;
 
+/// Offset of the Version 3 Length field (IEEE 802.1Q-2022, Section 14.4 q):
+/// octets 37 and 38).
+const VERSION3_LENGTH_OFFSET: usize = 36;
+
+/// Octets up to and including Version 3 Length.
+const VERSION3_START: usize = 38;
+
+/// 0-based offsets of the MST BPDU fields after Version 3 Length
+/// (IEEE 802.1Q-2022, Section 14.4 r)-u), Figure 14-1 gives 1-based octet
+/// numbers 39, 40–71, 72–73, 74–89, 90–93, 94–101 and 102).
+const MST_FORMAT_SELECTOR_OFFSET: usize = 38;
+const MST_CONFIG_NAME_OFFSET: usize = 39;
+const MST_CONFIG_NAME_SIZE: usize = 32;
+const MST_REVISION_OFFSET: usize = 71;
+const MST_DIGEST_OFFSET: usize = 73;
+const MST_DIGEST_SIZE: usize = 16;
+const CIST_INTERNAL_ROOT_PATH_COST_OFFSET: usize = 89;
+const CIST_BRIDGE_ID_OFFSET: usize = 93;
+const CIST_REMAINING_HOPS_OFFSET: usize = 101;
+
+/// Minimum MST BPDU size: through CIST Remaining Hops (octet 102).
+/// IEEE 802.1Q-2022, Section 14.5 e) 1): "102 or more octets".
+const MST_BPDU_MIN_SIZE: usize = 102;
+
+/// Version 3 Length with no MSTI Configuration Messages: MST Configuration
+/// Identifier (51) + CIST Internal Root Path Cost (4) + CIST Bridge
+/// Identifier (8) + CIST Remaining Hops (1). IEEE 802.1Q-2022, Figure 14-1.
+const VERSION3_FIXED_LENGTH: usize = 64;
+
+/// Size of one MSTI Configuration Message (IEEE 802.1Q-2022, Figure 14-3).
+const MSTI_MESSAGE_SIZE: usize = 16;
+
+/// Maximum number of MSTI Configuration Messages in an MST BPDU.
+/// IEEE 802.1Q-2022, Section 14.4 v): "up to a maximum of 64".
+const MAX_MSTIS: usize = 64;
+
+/// Protocol Version Identifier of MST BPDUs (IEEE 802.1Q-2022, Section 14.3 d).
+const VERSION_MST: u8 = 3;
+
+/// Protocol Version Identifier of SPT BPDUs (IEEE 802.1Q-2022, Section 14.3 e).
+const VERSION_SPT: u8 = 4;
+
 /// Returns a human-readable name for BPDU type values.
-fn bpdu_type_name(v: u8) -> Option<&'static str> {
+///
+/// A type 0x02 BPDU is an RST BPDU unless it was decoded as an MST BPDU
+/// (IEEE 802.1Q-2022, Section 14.5), and an MST BPDU that carries a Version 4
+/// Length is an SPT BPDU.
+fn bpdu_type_name(v: u8, siblings: &[Field<'_>]) -> Option<&'static str> {
     match v {
         BPDU_TYPE_CONFIG => Some("Configuration"),
+        BPDU_TYPE_RST if has_field(siblings, "version4_length") => Some("SPT"),
+        BPDU_TYPE_RST if is_mst(siblings) => Some("MST"),
         BPDU_TYPE_RST => Some("RST"),
         BPDU_TYPE_TCN => Some("Topology Change Notification"),
         _ => None,
     }
 }
 
-/// STP/RSTP BPDU dissector.
+/// Whether a field named `name` is among `fields`.
+fn has_field(fields: &[Field<'_>], name: &str) -> bool {
+    fields.iter().any(|f| f.name() == name)
+}
+
+/// Whether the layer was decoded as an MST (or SPT) BPDU: only then is the
+/// Version 3 Length field emitted.
+fn is_mst(fields: &[Field<'_>]) -> bool {
+    has_field(fields, "version3_length")
+}
+
+/// Port Role name for the 2-bit role field.
 ///
-/// Handles STP Configuration BPDUs (type 0x00), RST BPDUs (type 0x02),
-/// and Topology Change Notification BPDUs (type 0x80).
+/// IEEE 802.1Q-2022, Section 14.2.9: 0 Master Port, 1 Alternate or Backup,
+/// 2 Root, 3 Designated. IEEE 802.1D-2004 called value 0 "Unknown".
+fn port_role_name(role: u8, mstp: bool) -> Option<&'static str> {
+    match role {
+        0 if mstp => Some("Master"),
+        0 => Some("Unknown"),
+        1 => Some("Alternate/Backup"),
+        2 => Some("Root"),
+        3 => Some("Designated"),
+        _ => None,
+    }
+}
+
+/// CIST Port Role name; value 0 is Master in MST/SPT BPDUs.
+fn cist_port_role_name(role: u8, siblings: &[Field<'_>]) -> Option<&'static str> {
+    port_role_name(role, is_mst(siblings))
+}
+
+/// Priority component of a Bridge Identifier: its four most significant
+/// bits, as a 16-bit value in units of 4096 (IEEE 802.1Q-2022,
+/// Section 14.2.5).
+fn priority_component(id_priority: u16) -> u16 {
+    id_priority & 0xF000
+}
+
+/// System ID extension of a Bridge Identifier: the next twelve bits
+/// (IEEE 802.1Q-2022, Section 14.2.5).
+fn system_id_extension(id_priority: u16) -> u16 {
+    id_priority & 0x0FFF
+}
+
+/// Version 3 Length when `data` is a well-formed MST BPDU.
+///
+/// IEEE 802.1Q-2022, Section 14.5 e): 102 or more octets, a Version 1
+/// Length of 0, and a Version 3 Length representing an integral number,
+/// from 0 to 64 inclusive, of MSTI Configuration Messages. The messages
+/// must also be present in `data`.
+fn mst_version3_length(data: &[u8]) -> Option<usize> {
+    if data.len() < MST_BPDU_MIN_SIZE || data[CONFIG_BPDU_SIZE] != 0 {
+        return None;
+    }
+    let v3 = read_be_u16(data, VERSION3_LENGTH_OFFSET).ok()? as usize;
+    let msti_octets = v3.checked_sub(VERSION3_FIXED_LENGTH)?;
+    let well_formed = msti_octets % MSTI_MESSAGE_SIZE == 0
+        && msti_octets / MSTI_MESSAGE_SIZE <= MAX_MSTIS
+        && VERSION3_START + v3 <= data.len();
+    well_formed.then_some(v3)
+}
+
+/// STP/RSTP/MSTP BPDU dissector.
+///
+/// Handles STP Configuration BPDUs (type 0x00), RST BPDUs (type 0x02,
+/// version 2), MST BPDUs (type 0x02, version 3 or greater, with SPT data of
+/// version 4 kept raw), and Topology Change Notification BPDUs (type 0x80).
 pub struct StpDissector;
 
 /// Specification references for the STP dissector.
@@ -142,6 +448,11 @@ static REFERENCES: &[SpecReference] = &[
         "IEEE 802.1w-2001",
         "Rapid Reconfiguration (RSTP), incorporated into IEEE 802.1D-2004",
         "https://standards.ieee.org/ieee/802.1w/1039/",
+    ),
+    SpecReference::new(
+        "IEEE 802.1Q-2022",
+        "Bridges and Bridged Networks, Clause 14 (Encoding of Bridge Protocol Data Units: MST and SPT BPDUs)",
+        "https://standards.ieee.org/ieee/802.1Q/10323/",
     ),
 ];
 
@@ -251,7 +562,7 @@ impl Dissector for StpDissector {
                     FieldValue::U8(bpdu_type),
                     offset + 3..offset + 4,
                 );
-                self.push_config_fields(data, offset, buf, false);
+                self.push_config_fields(data, offset, buf, false, false);
                 buf.end_layer();
                 CONFIG_BPDU_SIZE
             }
@@ -263,11 +574,25 @@ impl Dissector for StpDissector {
                         actual: data.len(),
                     });
                 }
+                // IEEE 802.1Q-2022, Section 14.5 d)/e): a version 3 or greater
+                // BPDU is an MST BPDU only when well formed; otherwise it is
+                // decoded as an RST BPDU and the rest is reported unparsed.
+                let mst = if version >= VERSION_MST {
+                    mst_version3_length(data)
+                } else {
+                    None
+                };
+                let consumed = match mst {
+                    Some(v3) if version >= VERSION_SPT => spt_end(data, VERSION3_START + v3),
+                    Some(v3) => VERSION3_START + v3,
+                    None if version >= VERSION_MST => data.len(),
+                    None => RST_BPDU_SIZE,
+                };
                 buf.begin_layer(
                     self.short_name(),
                     None,
                     FIELD_DESCRIPTORS,
-                    offset..offset + RST_BPDU_SIZE,
+                    offset..offset + consumed,
                 );
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_PROTOCOL_ID],
@@ -284,15 +609,28 @@ impl Dissector for StpDissector {
                     FieldValue::U8(bpdu_type),
                     offset + 3..offset + 4,
                 );
-                self.push_config_fields(data, offset, buf, true);
+                self.push_config_fields(data, offset, buf, true, mst.is_some());
                 // Version 1 Length field (1 octet, must be 0x00).
                 buf.push_field(
                     &FIELD_DESCRIPTORS[FD_VERSION1_LENGTH],
                     FieldValue::U8(data[CONFIG_BPDU_SIZE]),
                     offset + CONFIG_BPDU_SIZE..offset + RST_BPDU_SIZE,
                 );
+                if let Some(v3) = mst {
+                    push_mst_fields(data, offset, buf, v3);
+                    let mst_end = VERSION3_START + v3;
+                    if consumed > mst_end {
+                        push_spt_fields(&data[..consumed], offset, buf, mst_end);
+                    }
+                } else if consumed > RST_BPDU_SIZE {
+                    buf.push_field(
+                        &FIELD_DESCRIPTORS[FD_UNPARSED],
+                        FieldValue::Bytes(&data[RST_BPDU_SIZE..consumed]),
+                        offset + RST_BPDU_SIZE..offset + consumed,
+                    );
+                }
                 buf.end_layer();
-                RST_BPDU_SIZE
+                consumed
             }
             _ => {
                 // Unknown BPDU type — consume only the common header.
@@ -345,6 +683,7 @@ impl StpDissector {
         offset: usize,
         buf: &mut DissectBuffer<'pkt>,
         is_rstp: bool,
+        is_mst: bool,
     ) {
         // IEEE 802.1D-2004, Section 9.3.1: Flags (1 octet).
         // Bit 0: Topology Change (TC)
@@ -410,6 +749,13 @@ impl StpDissector {
             FieldValue::U16(root_priority),
             offset + 5..offset + 7,
         );
+        push_id_split(
+            buf,
+            FD_ROOT_PRIORITY_COMPONENT,
+            FD_ROOT_SYSTEM_ID_EXTENSION,
+            root_priority,
+            offset + 5,
+        );
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_ROOT_MAC],
             FieldValue::MacAddr(root_mac),
@@ -432,17 +778,50 @@ impl StpDissector {
             FieldValue::U16(bridge_priority),
             offset + 17..offset + 19,
         );
+        push_id_split(
+            buf,
+            FD_BRIDGE_PRIORITY_COMPONENT,
+            FD_BRIDGE_SYSTEM_ID_EXTENSION,
+            bridge_priority,
+            offset + 17,
+        );
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_BRIDGE_MAC],
             FieldValue::MacAddr(bridge_mac),
             offset + 19..offset + 25,
         );
+        // IEEE 802.1Q-2022, Section 14.4 j): "On receipt of an MST BPDU the
+        // CIST Regional Root Identifier shall be decoded from this field."
+        // The bridge_* fields above keep their names for compatibility.
+        if is_mst {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CIST_REGIONAL_ROOT_PRIORITY],
+                FieldValue::U16(bridge_priority),
+                offset + 17..offset + 19,
+            );
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CIST_REGIONAL_ROOT_MAC],
+                FieldValue::MacAddr(bridge_mac),
+                offset + 19..offset + 25,
+            );
+        }
 
-        // Port Identifier (2 octets at offset 25).
+        // Port Identifier (2 octets at offset 25). IEEE 802.1Q-2022,
+        // Section 14.2.7: 4-bit priority component, 12-bit Port Number.
         let port_id = read_be_u16(data, 25).unwrap_or_default();
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_PORT_ID],
             FieldValue::U16(port_id),
+            offset + 25..offset + 27,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_PORT_PRIORITY],
+            FieldValue::U8((port_id >> 8) as u8 & 0xF0),
+            offset + 25..offset + 27,
+        );
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_PORT_NUMBER],
+            FieldValue::U16(port_id & 0x0FFF),
             offset + 25..offset + 27,
         );
 
@@ -477,6 +856,232 @@ impl StpDissector {
             &FIELD_DESCRIPTORS[FD_FORWARD_DELAY],
             FieldValue::U16(forward_delay),
             offset + 33..offset + 35,
+        );
+    }
+}
+
+/// Push the priority component and system ID extension of the 16-bit
+/// priority part of a Bridge Identifier starting at `start`.
+///
+/// IEEE 802.1Q-2022, Section 14.2.5.
+fn push_id_split(
+    buf: &mut DissectBuffer<'_>,
+    fd_component: usize,
+    fd_extension: usize,
+    id_priority: u16,
+    start: usize,
+) {
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd_component],
+        FieldValue::U16(priority_component(id_priority)),
+        start..start + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[fd_extension],
+        FieldValue::U16(system_id_extension(id_priority)),
+        start..start + 2,
+    );
+}
+
+/// Push the MST BPDU fields that follow Version 1 Length.
+///
+/// IEEE 802.1Q-2022, Section 14.4 q)–v) and Figure 14-1 (1-based octet
+/// numbers; offsets here are 0-based): Version 3 Length (37–38), MST
+/// Configuration Identifier (39–89), CIST Internal Root Path Cost (90–93),
+/// CIST Bridge Identifier (94–101), CIST Remaining Hops (102), then the MSTI
+/// Configuration Messages.
+fn push_mst_fields<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+    v3: usize,
+) {
+    let at = |start: usize, len: usize| offset + start..offset + start + len;
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_VERSION3_LENGTH],
+        FieldValue::U16(v3 as u16),
+        at(VERSION3_LENGTH_OFFSET, 2),
+    );
+    // Section 14.4 r) 1)-4): Format Selector, Name, Revision Level, Digest.
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MST_CONFIG_FORMAT_SELECTOR],
+        FieldValue::U8(data[MST_FORMAT_SELECTOR_OFFSET]),
+        at(MST_FORMAT_SELECTOR_OFFSET, 1),
+    );
+    let name = &data[MST_CONFIG_NAME_OFFSET..MST_CONFIG_NAME_OFFSET + MST_CONFIG_NAME_SIZE];
+    let name_len = name.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MST_CONFIG_NAME],
+        FieldValue::Bytes(&name[..name_len]),
+        at(MST_CONFIG_NAME_OFFSET, MST_CONFIG_NAME_SIZE),
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MST_CONFIG_REVISION],
+        FieldValue::U16(read_be_u16(data, MST_REVISION_OFFSET).unwrap_or_default()),
+        at(MST_REVISION_OFFSET, 2),
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MST_CONFIG_DIGEST],
+        FieldValue::Bytes(&data[MST_DIGEST_OFFSET..MST_DIGEST_OFFSET + MST_DIGEST_SIZE]),
+        at(MST_DIGEST_OFFSET, MST_DIGEST_SIZE),
+    );
+    // Section 14.4 s) — CIST Internal Root Path Cost.
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_CIST_INTERNAL_ROOT_PATH_COST],
+        FieldValue::U32(read_be_u32(data, CIST_INTERNAL_ROOT_PATH_COST_OFFSET).unwrap_or_default()),
+        at(CIST_INTERNAL_ROOT_PATH_COST_OFFSET, 4),
+    );
+    // Section 14.4 t) — CIST Bridge Identifier.
+    let cist_bridge_priority = read_be_u16(data, CIST_BRIDGE_ID_OFFSET).unwrap_or_default();
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_CIST_BRIDGE_PRIORITY],
+        FieldValue::U16(cist_bridge_priority),
+        at(CIST_BRIDGE_ID_OFFSET, 2),
+    );
+    push_id_split(
+        buf,
+        FD_CIST_BRIDGE_PRIORITY_COMPONENT,
+        FD_CIST_BRIDGE_SYSTEM_ID_EXTENSION,
+        cist_bridge_priority,
+        offset + CIST_BRIDGE_ID_OFFSET,
+    );
+    let mac = &data[CIST_BRIDGE_ID_OFFSET + 2..CIST_BRIDGE_ID_OFFSET + 8];
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_CIST_BRIDGE_MAC],
+        FieldValue::MacAddr(MacAddr([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]])),
+        at(CIST_BRIDGE_ID_OFFSET + 2, 6),
+    );
+    // Section 14.4 u) — CIST Remaining Hops.
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_CIST_REMAINING_HOPS],
+        FieldValue::U8(data[CIST_REMAINING_HOPS_OFFSET]),
+        at(CIST_REMAINING_HOPS_OFFSET, 1),
+    );
+
+    // Section 14.4 v) — zero or more MSTI Configuration Messages.
+    let msti_end = VERSION3_START + v3;
+    if msti_end == MST_BPDU_MIN_SIZE {
+        return;
+    }
+    let array_idx = buf.begin_container(
+        &FIELD_DESCRIPTORS[FD_MSTIS],
+        FieldValue::Array(0..0),
+        offset + MST_BPDU_MIN_SIZE..offset + msti_end,
+    );
+    for (i, m) in data[MST_BPDU_MIN_SIZE..msti_end]
+        .chunks_exact(MSTI_MESSAGE_SIZE)
+        .enumerate()
+    {
+        push_msti(buf, m, offset + MST_BPDU_MIN_SIZE + i * MSTI_MESSAGE_SIZE);
+    }
+    buf.end_container(array_idx);
+}
+
+/// Push one MSTI Configuration Message (IEEE 802.1Q-2022, Section 14.4.1).
+fn push_msti<'pkt>(buf: &mut DissectBuffer<'pkt>, m: &'pkt [u8], base: usize) {
+    let obj_idx = buf.begin_container(&FD_MSTI, FieldValue::Object(0..0), base..base + 16);
+    // Section 14.4.1 a) — bits 1..8 of octet 1: Topology Change, Proposal,
+    // Port Role (2 bits), Learning, Forwarding, Agreement, Master.
+    let flags = m[0];
+    let flag_range = base..base + 1;
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_FLAGS],
+        FieldValue::U8(flags),
+        flag_range.clone(),
+    );
+    for (fd, value) in [
+        (FD_MSTI_FLAGS_TC, flags & 0x01),
+        (FD_MSTI_FLAGS_PROPOSAL, (flags >> 1) & 0x01),
+        (FD_MSTI_FLAGS_PORT_ROLE, (flags >> 2) & 0x03),
+        (FD_MSTI_FLAGS_LEARNING, (flags >> 4) & 0x01),
+        (FD_MSTI_FLAGS_FORWARDING, (flags >> 5) & 0x01),
+        (FD_MSTI_FLAGS_AGREEMENT, (flags >> 6) & 0x01),
+        (FD_MSTI_FLAGS_MASTER, (flags >> 7) & 0x01),
+    ] {
+        buf.push_field(&MSTI_FIELDS[fd], FieldValue::U8(value), flag_range.clone());
+    }
+    // Section 14.4.1 b) — Regional Root Identifier; its system ID extension
+    // carries the MSTID.
+    let root_priority = u16::from_be_bytes([m[1], m[2]]);
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_REGIONAL_ROOT_PRIORITY],
+        FieldValue::U16(priority_component(root_priority)),
+        base + 1..base + 3,
+    );
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_ID],
+        FieldValue::U16(system_id_extension(root_priority)),
+        base + 1..base + 3,
+    );
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_REGIONAL_ROOT_MAC],
+        FieldValue::MacAddr(MacAddr([m[3], m[4], m[5], m[6], m[7], m[8]])),
+        base + 3..base + 9,
+    );
+    // Section 14.4.1 c) — Internal Root Path Cost.
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_INTERNAL_ROOT_PATH_COST],
+        FieldValue::U32(u32::from_be_bytes([m[9], m[10], m[11], m[12]])),
+        base + 9..base + 13,
+    );
+    // Section 14.4.1 d)/e) — bits 5–8 of octets 14 and 15 carry the Bridge
+    // and Port Identifier Priority; shown in the units of the identifiers.
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_BRIDGE_PRIORITY],
+        FieldValue::U16(u16::from(m[13] >> 4) << 12),
+        base + 13..base + 14,
+    );
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_PORT_PRIORITY],
+        FieldValue::U8(m[14] & 0xF0),
+        base + 14..base + 15,
+    );
+    // Octet 16 — remainingHops.
+    buf.push_field(
+        &MSTI_FIELDS[FD_MSTI_REMAINING_HOPS],
+        FieldValue::U8(m[15]),
+        base + 15..base + 16,
+    );
+    buf.end_container(obj_idx);
+}
+
+/// End of an SPT BPDU whose MST part ends at `mst_end`.
+///
+/// IEEE 802.1Q-2022, Section 14.4 w): the Version 4 Length is "the number of
+/// octets that follow the Version 4 Length". Octets beyond it are not part of
+/// the BPDU; a Version 4 Length that runs past the data ends at the data.
+fn spt_end(data: &[u8], mst_end: usize) -> usize {
+    match read_be_u16(data, mst_end) {
+        Ok(v4) => (mst_end + 2 + v4 as usize).min(data.len()),
+        Err(_) => data.len(),
+    }
+}
+
+/// Push the SPT BPDU fields that follow the MST part.
+///
+/// IEEE 802.1Q-2022, Section 14.4 w)–y): Version 4 Length (2 octets), then
+/// the Agreement Number, Discarded Agreement Number and Agreement Digest,
+/// which are reported as `unparsed`.
+fn push_spt_fields<'pkt>(
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+    start: usize,
+) {
+    let mut pos = start;
+    if data.len() >= start + 2 {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_VERSION4_LENGTH],
+            FieldValue::U16(u16::from_be_bytes([data[start], data[start + 1]])),
+            offset + start..offset + start + 2,
+        );
+        pos += 2;
+    }
+    if data.len() > pos {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_UNPARSED],
+            FieldValue::Bytes(&data[pos..]),
+            offset + pos..offset + data.len(),
         );
     }
 }

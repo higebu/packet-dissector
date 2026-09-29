@@ -8,7 +8,7 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "stp"]
 categories = ["network-programming", "parser-implementations"]
-description = "STP/RSTP (IEEE 802.1D/802.1w) dissector for packet-dissector"
+description = "STP/RSTP/MSTP (IEEE 802.1D/802.1w/802.1Q) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }
