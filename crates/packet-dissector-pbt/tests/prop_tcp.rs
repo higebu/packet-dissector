@@ -9,6 +9,7 @@
 //! | 3.1         | Data Offset → consumed bytes == Data Offset×4 | tcp_valid_segment_consumes_data_offset   |
 //! | 3.1         | Source/Destination Port → DispatchHint        | tcp_valid_segment_dispatch_hint          |
 //! | 3.2         | Options region length matches (DO − 5) × 4    | tcp_valid_segment_options_fit_header     |
+//! | 3.1         | Arbitrary options never fail; objects tile area| tcp_arbitrary_options_stay_in_header     |
 //!
 //! References:
 //! - RFC 9293, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>
@@ -95,14 +96,64 @@ proptest! {
             .find(|f| f.name() == "options");
         match options_field {
             Some(field) => match field.value {
-                FieldValue::Bytes(b) => {
-                    prop_assert_eq!(b.len(), expected_options_len);
+                FieldValue::Array(_) => {
+                    prop_assert_eq!(field.range.clone(), 20..20 + expected_options_len);
                 }
-                _ => prop_assert!(false, "options field must be Bytes"),
+                _ => prop_assert!(false, "options field must be an Array"),
             },
             None => {
                 prop_assert_eq!(expected_options_len, 0, "options field missing but Data Offset > 5");
             }
+        }
+    }
+
+    /// Arbitrary option bytes never fail the segment (the header length is
+    /// known from Data Offset), and the decoded option objects are laid out
+    /// back to back from the start of the Options area without leaving it
+    /// (RFC 9293, Section 3.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>).
+    #[test]
+    fn tcp_arbitrary_options_stay_in_header(
+        words in 1usize..=10,
+        opts in prop::collection::vec(any::<u8>(), 40),
+    ) {
+        let opts_len = words * 4;
+        let mut segment = vec![0u8; 20];
+        segment[12] = ((5 + words) as u8) << 4;
+        segment.extend_from_slice(&opts[..opts_len]);
+
+        let mut buf = DissectBuffer::new();
+        let result = TcpDissector::new()
+            .dissect(&segment, &mut buf, 0)
+            .expect("options must never fail the segment");
+        prop_assert_eq!(result.bytes_consumed, 20 + opts_len);
+
+        let layer = &buf.layers()[0];
+        let options = buf
+            .layer_fields(layer)
+            .iter()
+            .find(|f| f.name() == "options")
+            .expect("options present when Data Offset > 5");
+        let FieldValue::Array(range) = options.value.clone() else {
+            panic!("options must be an Array");
+        };
+        let mut expected_start = 20;
+        let mut i = range.start;
+        while i < range.end {
+            let f = &buf.fields()[i as usize];
+            prop_assert_eq!(f.name(), "option");
+            prop_assert_eq!(f.range.start, expected_start);
+            prop_assert!(f.range.end > f.range.start);
+            prop_assert!(f.range.end <= 20 + opts_len);
+            expected_start = f.range.end;
+            let FieldValue::Object(r) = &f.value else {
+                panic!("option must be an Object");
+            };
+            for child in buf.nested_fields(r) {
+                prop_assert!(child.range.start >= f.range.start);
+                prop_assert!(child.range.end <= f.range.end);
+            }
+            i = r.end;
         }
     }
 }
