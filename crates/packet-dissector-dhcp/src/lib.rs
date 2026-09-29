@@ -17,6 +17,25 @@
 //! - RFC 3442 (Classless Static Route): <https://www.rfc-editor.org/rfc/rfc3442>
 //! - RFC 6842 (Client Identifier in Responses): <https://www.rfc-editor.org/rfc/rfc6842>
 //! - RFC 1035 (DNS name compression, used by Domain Search List): <https://www.rfc-editor.org/rfc/rfc1035>
+//! - RFC 3527 (Link Selection sub-option): <https://www.rfc-editor.org/rfc/rfc3527>
+//! - RFC 3993 (Subscriber-ID sub-option): <https://www.rfc-editor.org/rfc/rfc3993>
+//! - RFC 4014 (RADIUS Attributes sub-option): <https://www.rfc-editor.org/rfc/rfc4014>
+//! - RFC 2865 (RADIUS attribute encoding): <https://www.rfc-editor.org/rfc/rfc2865>
+//! - RFC 4030 (Authentication sub-option): <https://www.rfc-editor.org/rfc/rfc4030>
+//! - RFC 4243 (Vendor-Specific sub-option): <https://www.rfc-editor.org/rfc/rfc4243>
+//! - RFC 5010 (Relay Agent Flags sub-option): <https://www.rfc-editor.org/rfc/rfc5010>
+//! - RFC 5107 (Server Identifier Override sub-option): <https://www.rfc-editor.org/rfc/rfc5107>
+//! - RFC 3004 (User Class): <https://www.rfc-editor.org/rfc/rfc3004>
+//! - RFC 4039 (Rapid Commit): <https://www.rfc-editor.org/rfc/rfc4039>
+//! - RFC 4702 (Client FQDN): <https://www.rfc-editor.org/rfc/rfc4702>
+//! - RFC 3118 (Authentication): <https://www.rfc-editor.org/rfc/rfc3118>
+//! - RFC 4578 (PXE options 93, 94, 97): <https://www.rfc-editor.org/rfc/rfc4578>
+//! - RFC 8925 (IPv6-Only Preferred): <https://www.rfc-editor.org/rfc/rfc8925>
+//! - RFC 8910 (Captive-Portal): <https://www.rfc-editor.org/rfc/rfc8910>
+//! - RFC 3011 (Subnet Selection): <https://www.rfc-editor.org/rfc/rfc3011>
+//! - RFC 3925 (Vendor-Identifying Vendor Options): <https://www.rfc-editor.org/rfc/rfc3925>
+//! - RFC 6704 (Forcerenew Nonce Authentication): <https://www.rfc-editor.org/rfc/rfc6704>
+//! - RFC 5859 (TFTP Server Address): <https://www.rfc-editor.org/rfc/rfc5859>
 
 #![deny(missing_docs)]
 
@@ -25,7 +44,7 @@ use packet_dissector_core::dissector::{
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{
-    FieldDescriptor, FieldType, FieldValue, MacAddr, format_utf8_lossy,
+    FieldDescriptor, FieldType, FieldValue, MacAddr, format_fqdn_labels, format_utf8_lossy,
 };
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
@@ -114,6 +133,29 @@ const FD_X_WINDOW_DISPLAY_MANAGER: usize = 81;
 const FD_X_WINDOW_FONT_SERVER: usize = 82;
 const FD_VEND: usize = 83;
 const FD_CHADDR_BYTES: usize = 84;
+const FD_MOBILE_IP_HOME_AGENT: usize = 85;
+const FD_SMTP_SERVER: usize = 86;
+const FD_POP3_SERVER: usize = 87;
+const FD_NNTP_SERVER: usize = 88;
+const FD_WWW_SERVER: usize = 89;
+const FD_FINGER_SERVER: usize = 90;
+const FD_IRC_SERVER: usize = 91;
+const FD_STREETTALK_SERVER: usize = 92;
+const FD_STDA_SERVER: usize = 93;
+const FD_USER_CLASS: usize = 94;
+const FD_RAPID_COMMIT: usize = 95;
+const FD_CLIENT_FQDN: usize = 96;
+const FD_AUTHENTICATION: usize = 97;
+const FD_CLIENT_SYSTEM_ARCHITECTURE: usize = 98;
+const FD_CLIENT_NII: usize = 99;
+const FD_CLIENT_MACHINE_ID: usize = 100;
+const FD_IPV6_ONLY_PREFERRED: usize = 101;
+const FD_CAPTIVE_PORTAL: usize = 102;
+const FD_SUBNET_SELECTION: usize = 103;
+const FD_VI_VENDOR_CLASS: usize = 104;
+const FD_VI_VENDOR_SPECIFIC_INFO: usize = 105;
+const FD_FORCERENEW_NONCE_CAPABLE: usize = 106;
+const FD_TFTP_SERVER_ADDRESS: usize = 107;
 
 // Fixed header fields are always present; DHCP options are dynamic
 // and represented as individual option fields at the top level.
@@ -375,6 +417,111 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // octets, at most 16)
     // <https://www.rfc-editor.org/rfc/rfc2131#section-2>
     FieldDescriptor::new("chaddr_bytes", "Client Hardware Address", FieldType::Bytes).optional(),
+    // RFC 2132, Sections 8.13-8.21 — IPv4 server address lists (options 68-76)
+    // <https://www.rfc-editor.org/rfc/rfc2132#section-8.13>
+    FieldDescriptor::new(
+        "mobile_ip_home_agent",
+        "Mobile IP Home Agent",
+        FieldType::Array,
+    )
+    .optional(),
+    FieldDescriptor::new("smtp_server", "SMTP Server", FieldType::Array).optional(),
+    FieldDescriptor::new("pop3_server", "POP3 Server", FieldType::Array).optional(),
+    FieldDescriptor::new("nntp_server", "NNTP Server", FieldType::Array).optional(),
+    FieldDescriptor::new("www_server", "Default WWW Server", FieldType::Array).optional(),
+    FieldDescriptor::new("finger_server", "Default Finger Server", FieldType::Array).optional(),
+    FieldDescriptor::new("irc_server", "Default IRC Server", FieldType::Array).optional(),
+    FieldDescriptor::new("streettalk_server", "StreetTalk Server", FieldType::Array).optional(),
+    FieldDescriptor::new(
+        "stda_server",
+        "StreetTalk Directory Assistance Server",
+        FieldType::Array,
+    )
+    .optional(),
+    // RFC 3004, Section 4 — User Class (option 77); each element is one
+    // User Class Data instance.
+    // <https://www.rfc-editor.org/rfc/rfc3004#section-4>
+    FieldDescriptor::new("user_class", "User Class", FieldType::Array).optional(),
+    // RFC 4039, Section 4 — Rapid Commit (option 80), zero-length.
+    // <https://www.rfc-editor.org/rfc/rfc4039#section-4>
+    FieldDescriptor::new("rapid_commit", "Rapid Commit", FieldType::Bytes).optional(),
+    // RFC 4702, Section 2 — Client FQDN (option 81).
+    // <https://www.rfc-editor.org/rfc/rfc4702#section-2>
+    FieldDescriptor::new("client_fqdn", "Client FQDN", FieldType::Object)
+        .optional()
+        .with_children(CLIENT_FQDN_CHILDREN),
+    // RFC 3118, Section 2 — Authentication (option 90).
+    // <https://www.rfc-editor.org/rfc/rfc3118#section-2>
+    FieldDescriptor::new("authentication", "Authentication", FieldType::Object)
+        .optional()
+        .with_children(AUTHENTICATION_CHILDREN),
+    // RFC 4578, Section 2.1 — Client System Architecture Type (option 93).
+    // <https://www.rfc-editor.org/rfc/rfc4578#section-2.1>
+    FieldDescriptor::new(
+        "client_system_architecture",
+        "Client System Architecture",
+        FieldType::Array,
+    )
+    .optional(),
+    // RFC 4578, Section 2.2 — Client Network Interface Identifier (option 94).
+    // <https://www.rfc-editor.org/rfc/rfc4578#section-2.2>
+    FieldDescriptor::new(
+        "client_network_interface_identifier",
+        "Client Network Interface Identifier",
+        FieldType::Object,
+    )
+    .optional()
+    .with_children(CLIENT_NII_CHILDREN),
+    // RFC 4578, Section 2.3 — Client Machine Identifier (option 97).
+    // <https://www.rfc-editor.org/rfc/rfc4578#section-2.3>
+    FieldDescriptor::new(
+        "client_machine_identifier",
+        "Client Machine Identifier",
+        FieldType::Object,
+    )
+    .optional()
+    .with_children(CLIENT_MACHINE_ID_CHILDREN),
+    // RFC 8925, Section 3.1 — IPv6-Only Preferred (option 108), V6ONLY_WAIT.
+    // <https://www.rfc-editor.org/rfc/rfc8925#section-3.1>
+    FieldDescriptor::new("ipv6_only_preferred", "IPv6-Only Preferred", FieldType::U32).optional(),
+    // RFC 8910, Section 2.1 — Captive-Portal (option 114), a URI.
+    // <https://www.rfc-editor.org/rfc/rfc8910#section-2.1>
+    FieldDescriptor::new("captive_portal", "Captive-Portal URI", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_utf8_lossy),
+    // RFC 3011, Section 3 — Subnet Selection (option 118).
+    // <https://www.rfc-editor.org/rfc/rfc3011#section-3>
+    FieldDescriptor::new("subnet_selection", "Subnet Selection", FieldType::Ipv4Addr).optional(),
+    // RFC 3925, Section 3 — V-I Vendor Class (option 124).
+    // <https://www.rfc-editor.org/rfc/rfc3925#section-3>
+    FieldDescriptor::new("vi_vendor_class", "V-I Vendor Class", FieldType::Array)
+        .optional()
+        .with_children(VENDOR_ENTRY_CHILDREN),
+    // RFC 3925, Section 4 — V-I Vendor-Specific Information (option 125).
+    // <https://www.rfc-editor.org/rfc/rfc3925#section-4>
+    FieldDescriptor::new(
+        "vi_vendor_specific_info",
+        "V-I Vendor-Specific Information",
+        FieldType::Array,
+    )
+    .optional()
+    .with_children(VENDOR_ENTRY_CHILDREN),
+    // RFC 6704, Section 3.1.1 — FORCERENEW_NONCE_CAPABLE (option 145).
+    // <https://www.rfc-editor.org/rfc/rfc6704#section-3.1.1>
+    FieldDescriptor::new(
+        "forcerenew_nonce_capable",
+        "Forcerenew Nonce Capable",
+        FieldType::Array,
+    )
+    .optional(),
+    // RFC 5859, Section 3 — TFTP Server Address (option 150).
+    // <https://www.rfc-editor.org/rfc/rfc5859#section-3>
+    FieldDescriptor::new(
+        "tftp_server_address",
+        "TFTP Server Address",
+        FieldType::Array,
+    )
+    .optional(),
 ];
 
 /// Child field descriptor indices for [`CLIENT_ID_CHILDREN`].
@@ -402,13 +549,162 @@ const CFD_RELAY_SUB_OPTION: usize = 0;
 const CFD_RELAY_CIRCUIT_ID: usize = 1;
 const CFD_RELAY_REMOTE_ID: usize = 2;
 const CFD_RELAY_DATA: usize = 3;
+const CFD_RELAY_LINK_SELECTION: usize = 4;
+const CFD_RELAY_SUBSCRIBER_ID: usize = 5;
+const CFD_RELAY_RADIUS_ATTRIBUTES: usize = 6;
+const CFD_RELAY_ALGORITHM: usize = 7;
+const CFD_RELAY_RDM: usize = 8;
+const CFD_RELAY_REPLAY_DETECTION: usize = 9;
+const CFD_RELAY_RELAY_IDENTIFIER: usize = 10;
+const CFD_RELAY_AUTH_INFO: usize = 11;
+const CFD_RELAY_VENDOR_SPECIFIC: usize = 12;
+const CFD_RELAY_FLAGS: usize = 13;
+const CFD_RELAY_UNICAST: usize = 14;
+const CFD_RELAY_SERVER_ID_OVERRIDE: usize = 15;
 
-/// Child field descriptors for Relay Agent Information sub-options (RFC 3046).
+/// Child field descriptors for Relay Agent Information sub-options (RFC 3046
+/// and the sub-option RFCs listed on [`relay_agent_sub_option_name`]).
 static RELAY_AGENT_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("sub_option", "Sub-Option", FieldType::U8),
     FieldDescriptor::new("circuit_id", "Circuit ID", FieldType::Bytes).optional(),
     FieldDescriptor::new("remote_id", "Remote ID", FieldType::Bytes).optional(),
     FieldDescriptor::new("data", "Data", FieldType::Bytes).optional(),
+    // RFC 3527, Section 3 — <https://www.rfc-editor.org/rfc/rfc3527#section-3>
+    FieldDescriptor::new("link_selection", "Link Selection", FieldType::Ipv4Addr).optional(),
+    // RFC 3993, Section 3 — <https://www.rfc-editor.org/rfc/rfc3993#section-3>
+    FieldDescriptor::new("subscriber_id", "Subscriber-ID", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_utf8_lossy),
+    // RFC 4014, Section 3 — <https://www.rfc-editor.org/rfc/rfc4014#section-3>
+    FieldDescriptor::new("radius_attributes", "RADIUS Attributes", FieldType::Array)
+        .optional()
+        .with_children(RADIUS_ATTRIBUTE_CHILDREN),
+    // RFC 4030, Section 4 — <https://www.rfc-editor.org/rfc/rfc4030#section-4>
+    FieldDescriptor::new("algorithm", "Algorithm", FieldType::U8).optional(),
+    FieldDescriptor::new("rdm", "Replay Detection Method", FieldType::U8).optional(),
+    FieldDescriptor::new("replay_detection", "Replay Detection", FieldType::Bytes).optional(),
+    FieldDescriptor::new("relay_identifier", "Relay Identifier", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "authentication_information",
+        "Authentication Information",
+        FieldType::Bytes,
+    )
+    .optional(),
+    // RFC 4243, Section 3 — <https://www.rfc-editor.org/rfc/rfc4243#section-3>
+    FieldDescriptor::new(
+        "vendor_specific",
+        "Vendor-Specific Information",
+        FieldType::Array,
+    )
+    .optional()
+    .with_children(VENDOR_ENTRY_CHILDREN),
+    // RFC 5010, Section 3 — <https://www.rfc-editor.org/rfc/rfc5010#section-3>
+    FieldDescriptor::new("flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("unicast", "Unicast", FieldType::U8).optional(),
+    // RFC 5107, Section 4 — <https://www.rfc-editor.org/rfc/rfc5107#section-4>
+    FieldDescriptor::new(
+        "server_identifier_override",
+        "Server Identifier Override",
+        FieldType::Ipv4Addr,
+    )
+    .optional(),
+];
+
+/// Child field descriptor indices for [`RADIUS_ATTRIBUTE_CHILDREN`].
+const CFD_RADIUS_TYPE: usize = 0;
+const CFD_RADIUS_VALUE: usize = 1;
+
+/// Child field descriptors for one RADIUS attribute (RFC 2865, Section 5)
+/// inside the RADIUS Attributes sub-option (RFC 4014, Section 3).
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
+static RADIUS_ATTRIBUTE_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("type", "Type", FieldType::U8),
+    FieldDescriptor::new("value", "Value", FieldType::Bytes),
+];
+
+/// Object container for one RADIUS attribute.
+static FD_RADIUS_ATTRIBUTE: FieldDescriptor =
+    FieldDescriptor::new("radius_attribute", "RADIUS Attribute", FieldType::Object)
+        .with_children(RADIUS_ATTRIBUTE_CHILDREN);
+
+/// Child field descriptor indices for [`VENDOR_ENTRY_CHILDREN`].
+const CFD_VENDOR_ENTERPRISE_NUMBER: usize = 0;
+const CFD_VENDOR_DATA: usize = 1;
+
+/// Child field descriptors for one enterprise-number / data entry, shared by
+/// the Vendor-Specific relay sub-option (RFC 4243, Section 3) and the V-I
+/// Vendor Class / V-I Vendor-Specific Information options (RFC 3925,
+/// Sections 3 and 4).
+/// <https://www.rfc-editor.org/rfc/rfc4243#section-3>
+/// <https://www.rfc-editor.org/rfc/rfc3925#section-3>
+static VENDOR_ENTRY_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("enterprise_number", "Enterprise Number", FieldType::U32),
+    FieldDescriptor::new("data", "Data", FieldType::Bytes),
+];
+
+/// Object container for one enterprise-number / data entry.
+static FD_VENDOR_ENTRY: FieldDescriptor =
+    FieldDescriptor::new("vendor", "Vendor", FieldType::Object)
+        .with_children(VENDOR_ENTRY_CHILDREN);
+
+/// Child field descriptor indices for [`CLIENT_FQDN_CHILDREN`].
+const CFD_FQDN_FLAGS: usize = 0;
+const CFD_FQDN_RCODE1: usize = 1;
+const CFD_FQDN_RCODE2: usize = 2;
+const CFD_FQDN_DOMAIN_NAME: usize = 3;
+
+/// Child field descriptors for the Client FQDN option (RFC 4702, Section 2).
+/// <https://www.rfc-editor.org/rfc/rfc4702#section-2>
+static CLIENT_FQDN_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("flags", "Flags", FieldType::U8),
+    FieldDescriptor::new("rcode1", "RCODE1", FieldType::U8),
+    FieldDescriptor::new("rcode2", "RCODE2", FieldType::U8),
+    // RFC 4702, Section 2.3 — canonical wire format (E = 1) or the deprecated
+    // ASCII encoding (E = 0); `format_fqdn_labels` falls back to UTF-8 text
+    // when the bytes are not length-prefixed labels.
+    // <https://www.rfc-editor.org/rfc/rfc4702#section-2.3>
+    FieldDescriptor::new("domain_name", "Domain Name", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_fqdn_labels),
+];
+
+/// Child field descriptor indices for [`AUTHENTICATION_CHILDREN`].
+const CFD_AUTH_PROTOCOL: usize = 0;
+const CFD_AUTH_ALGORITHM: usize = 1;
+const CFD_AUTH_RDM: usize = 2;
+const CFD_AUTH_REPLAY_DETECTION: usize = 3;
+const CFD_AUTH_INFORMATION: usize = 4;
+
+/// Child field descriptors for the Authentication option (RFC 3118, Section 2).
+/// <https://www.rfc-editor.org/rfc/rfc3118#section-2>
+static AUTHENTICATION_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("protocol", "Protocol", FieldType::U8),
+    FieldDescriptor::new("algorithm", "Algorithm", FieldType::U8),
+    FieldDescriptor::new("rdm", "Replay Detection Method", FieldType::U8),
+    FieldDescriptor::new("replay_detection", "Replay Detection", FieldType::Bytes),
+    FieldDescriptor::new(
+        "authentication_information",
+        "Authentication Information",
+        FieldType::Bytes,
+    )
+    .optional(),
+];
+
+/// Child field descriptors for the Client Network Interface Identifier
+/// option (RFC 4578, Section 2.2).
+/// <https://www.rfc-editor.org/rfc/rfc4578#section-2.2>
+static CLIENT_NII_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("type", "Type", FieldType::U8),
+    FieldDescriptor::new("major", "Major", FieldType::U8),
+    FieldDescriptor::new("minor", "Minor", FieldType::U8),
+];
+
+/// Child field descriptors for the Client Machine Identifier option
+/// (RFC 4578, Section 2.3).
+/// <https://www.rfc-editor.org/rfc/rfc4578#section-2.3>
+static CLIENT_MACHINE_ID_CHILDREN: &[FieldDescriptor] = &[
+    FieldDescriptor::new("type", "Type", FieldType::U8),
+    FieldDescriptor::new("machine_identifier", "Machine Identifier", FieldType::Bytes),
 ];
 
 /// Returns a human-readable name for Relay Agent Information sub-option codes.
@@ -652,6 +948,7 @@ const IPV4_OPTIONS: &[(u8, usize)] = &[
     (32, FD_ROUTER_SOLICITATION_ADDRESS), // RFC 2132, Section 5.7
     (50, FD_REQUESTED_IP),                // RFC 2132, Section 9.1
     (54, FD_SERVER_IDENTIFIER),           // RFC 2132, Section 9.7
+    (118, FD_SUBNET_SELECTION), // RFC 3011, Section 3 — <https://www.rfc-editor.org/rfc/rfc3011#section-3>
 ];
 
 /// IPv4 address list options: (code, FD index).
@@ -672,6 +969,15 @@ const IPV4_LIST_OPTIONS: &[(u8, usize)] = &[
     (48, FD_X_WINDOW_FONT_SERVER),     // RFC 2132, Section 8.9
     (49, FD_X_WINDOW_DISPLAY_MANAGER), // RFC 2132, Section 8.10
     (65, FD_NISPLUS_SERVERS),          // RFC 2132, Section 8.12
+    (69, FD_SMTP_SERVER), // RFC 2132, Section 8.14 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.14>
+    (70, FD_POP3_SERVER), // RFC 2132, Section 8.15 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.15>
+    (71, FD_NNTP_SERVER), // RFC 2132, Section 8.16 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.16>
+    (72, FD_WWW_SERVER), // RFC 2132, Section 8.17 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.17>
+    (73, FD_FINGER_SERVER), // RFC 2132, Section 8.18 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.18>
+    (74, FD_IRC_SERVER), // RFC 2132, Section 8.19 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.19>
+    (75, FD_STREETTALK_SERVER), // RFC 2132, Section 8.20 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.20>
+    (76, FD_STDA_SERVER), // RFC 2132, Section 8.21 — <https://www.rfc-editor.org/rfc/rfc2132#section-8.21>
+    (150, FD_TFTP_SERVER_ADDRESS), // RFC 5859, Section 3 — <https://www.rfc-editor.org/rfc/rfc5859#section-3>
 ];
 
 /// Single U8 options: (code, FD index).
@@ -708,6 +1014,7 @@ const U32_OPTIONS: &[(u8, usize)] = &[
     (51, FD_LEASE_TIME),             // RFC 2132, Section 9.2
     (58, FD_RENEWAL_TIME),           // RFC 2132, Section 9.11
     (59, FD_REBINDING_TIME),         // RFC 2132, Section 9.12
+    (108, FD_IPV6_ONLY_PREFERRED), // RFC 8925, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc8925#section-3.1>
 ];
 
 /// String options: (code, FD index).
@@ -723,12 +1030,19 @@ const STRING_OPTIONS: &[(u8, usize)] = &[
     (64, FD_NISPLUS_DOMAIN),   // RFC 2132, Section 8.11
     (66, FD_TFTP_SERVER_NAME), // RFC 2132, Section 9.4
     (67, FD_BOOTFILE_NAME),    // RFC 2132, Section 9.5
+    (114, FD_CAPTIVE_PORTAL), // RFC 8910, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc8910#section-2.1>
 ];
 
 /// Look up option `code` in a table of `(code, FD_index)` tuples.
 fn lookup_option(table: &[(u8, usize)], code: u8) -> Option<usize> {
     table.iter().find(|&&(c, _)| c == code).map(|&(_, fd)| fd)
 }
+
+/// Fixed part of the Authentication option: Protocol (1), Algorithm (1),
+/// RDM (1), Replay Detection (8).
+///
+/// RFC 3118, Section 2 — <https://www.rfc-editor.org/rfc/rfc3118#section-2>
+const DHCP_AUTH_FIXED_LEN: usize = 11;
 
 /// Parse Relay Agent Information sub-options (RFC 3046).
 ///
@@ -753,11 +1067,6 @@ fn push_relay_agent_info<'pkt>(
         }
         let sub_data = &opt_data[i + 2..i + 2 + sub_len];
         let base = opt_offset + 2 + i;
-        let data_fd = match sub_type {
-            1 => CFD_RELAY_CIRCUIT_ID,
-            2 => CFD_RELAY_REMOTE_ID,
-            _ => CFD_RELAY_DATA,
-        };
         let obj_idx = buf.begin_container(
             &FD_RELAY_AGENT_SUB_OPTION,
             FieldValue::Object(0..0),
@@ -768,13 +1077,317 @@ fn push_relay_agent_info<'pkt>(
             FieldValue::U8(sub_type),
             base..base + 1,
         );
-        buf.push_field(
-            &RELAY_AGENT_CHILDREN[data_fd],
-            FieldValue::Bytes(sub_data),
-            base + 2..base + 2 + sub_len,
-        );
+        if !push_relay_sub_option_value(buf, sub_type, sub_data, base + 2) {
+            buf.push_field(
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_DATA],
+                FieldValue::Bytes(sub_data),
+                base + 2..base + 2 + sub_len,
+            );
+        }
         buf.end_container(obj_idx);
         i += 2 + sub_len;
+    }
+    buf.end_container(arr_idx);
+}
+
+/// Push the decoded value of one Relay Agent Information sub-option.
+///
+/// `start` is the absolute offset of `data`. Returns `false` when the
+/// sub-option is unknown or its data does not match the defined format, in
+/// which case the caller pushes the raw bytes instead.
+fn push_relay_sub_option_value<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    sub_type: u8,
+    data: &'pkt [u8],
+    start: usize,
+) -> bool {
+    let end = start + data.len();
+    match (sub_type, data) {
+        // RFC 3046, Section 3.1 — Agent Circuit ID Sub-option
+        // <https://www.rfc-editor.org/rfc/rfc3046#section-3.1>
+        (1, _) => buf.push_field(
+            &RELAY_AGENT_CHILDREN[CFD_RELAY_CIRCUIT_ID],
+            FieldValue::Bytes(data),
+            start..end,
+        ),
+        // RFC 3046, Section 3.2 — Agent Remote ID Sub-option
+        // <https://www.rfc-editor.org/rfc/rfc3046#section-3.2>
+        (2, _) => buf.push_field(
+            &RELAY_AGENT_CHILDREN[CFD_RELAY_REMOTE_ID],
+            FieldValue::Bytes(data),
+            start..end,
+        ),
+        // RFC 3527, Section 3 — "The sub-option contains a single IP address
+        // that is an address contained in a subnet."
+        // <https://www.rfc-editor.org/rfc/rfc3527#section-3>
+        (5, &[a, b, c, d]) => buf.push_field(
+            &RELAY_AGENT_CHILDREN[CFD_RELAY_LINK_SELECTION],
+            FieldValue::Ipv4Addr([a, b, c, d]),
+            start..end,
+        ),
+        // RFC 3993, Section 3 — "The Subscriber-ID is an ASCII string"
+        // <https://www.rfc-editor.org/rfc/rfc3993#section-3>
+        (6, _) => buf.push_field(
+            &RELAY_AGENT_CHILDREN[CFD_RELAY_SUBSCRIBER_ID],
+            FieldValue::Bytes(data),
+            start..end,
+        ),
+        // RFC 4014, Section 3 — "The RADIUS attributes are encoded according
+        // to the encoding rules in RFC 2865, in octets o1...oN."
+        // <https://www.rfc-editor.org/rfc/rfc4014#section-3>
+        (7, _) if radius_attributes_valid(data) => {
+            push_radius_attributes(buf, data, start);
+        }
+        // RFC 4030, Section 4 — Algorithm (1), MBZ/RDM (1), Replay Detection
+        // (8), Relay Identifier (4), Authentication Information (variable).
+        // <https://www.rfc-editor.org/rfc/rfc4030#section-4>
+        (8, _) if data.len() >= RELAY_AUTH_FIXED_LEN => {
+            buf.push_field(
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_ALGORITHM],
+                FieldValue::U8(data[0]),
+                start..start + 1,
+            );
+            // "Four bits are reserved for future use.  These bits SHOULD be
+            // set to zero and MUST NOT be used when the suboption is
+            // processed." — the RDM is the low nibble.
+            buf.push_field(
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_RDM],
+                FieldValue::U8(data[1] & 0x0F),
+                start + 1..start + 2,
+            );
+            buf.push_field(
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_REPLAY_DETECTION],
+                FieldValue::Bytes(&data[2..10]),
+                start + 2..start + 10,
+            );
+            buf.push_field(
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_RELAY_IDENTIFIER],
+                FieldValue::Bytes(&data[10..14]),
+                start + 10..start + 14,
+            );
+            if data.len() > RELAY_AUTH_FIXED_LEN {
+                buf.push_field(
+                    &RELAY_AGENT_CHILDREN[CFD_RELAY_AUTH_INFO],
+                    FieldValue::Bytes(&data[RELAY_AUTH_FIXED_LEN..]),
+                    start + RELAY_AUTH_FIXED_LEN..end,
+                );
+            }
+        }
+        // RFC 4243, Section 3 — Enterprise NumberN (4), DataLenN (1),
+        // Suboption DataN; "the minimum length is 4 bytes."
+        // <https://www.rfc-editor.org/rfc/rfc4243#section-3>
+        (9, _) if vendor_entries_valid(data) => {
+            push_vendor_entries(
+                buf,
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_VENDOR_SPECIFIC],
+                data,
+                start,
+                start..end,
+            );
+        }
+        // RFC 5010, Section 3 — "Length   The suboption length, 1 octet."
+        // "U:  UNICAST flag" is the most significant bit.
+        // <https://www.rfc-editor.org/rfc/rfc5010#section-3>
+        (10, &[flags]) => {
+            buf.push_field(
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_FLAGS],
+                FieldValue::U8(flags),
+                start..end,
+            );
+            buf.push_field(
+                &RELAY_AGENT_CHILDREN[CFD_RELAY_UNICAST],
+                FieldValue::U8(flags >> 7),
+                start..end,
+            );
+        }
+        // RFC 5107, Section 4 — Server Identifier Override carries one IPv4
+        // address.
+        // <https://www.rfc-editor.org/rfc/rfc5107#section-4>
+        (11, &[a, b, c, d]) => buf.push_field(
+            &RELAY_AGENT_CHILDREN[CFD_RELAY_SERVER_ID_OVERRIDE],
+            FieldValue::Ipv4Addr([a, b, c, d]),
+            start..end,
+        ),
+        _ => return false,
+    }
+    true
+}
+
+/// Fixed part of the relay Authentication sub-option: Algorithm (1),
+/// MBZ/RDM (1), Replay Detection (8), Relay Identifier (4).
+///
+/// RFC 4030, Section 4 — <https://www.rfc-editor.org/rfc/rfc4030#section-4>
+const RELAY_AUTH_FIXED_LEN: usize = 14;
+
+/// Whether `data` is a non-empty sequence of RADIUS attributes that exactly
+/// fills it.
+///
+/// RFC 2865, Section 5 — "The Length field is one octet, and indicates the
+/// length of this Attribute including the Type, Length and Value fields."
+/// <https://www.rfc-editor.org/rfc/rfc2865#section-5>
+fn radius_attributes_valid(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < data.len() {
+        if i + 2 > data.len() {
+            return false;
+        }
+        let attr_len = data[i + 1] as usize;
+        if attr_len < 2 || i + attr_len > data.len() {
+            return false;
+        }
+        i += attr_len;
+    }
+    true
+}
+
+/// Push the RADIUS attributes of a RADIUS Attributes sub-option (RFC 4014,
+/// Section 3). The caller has checked [`radius_attributes_valid`].
+/// <https://www.rfc-editor.org/rfc/rfc4014#section-3>
+fn push_radius_attributes<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], start: usize) {
+    let arr_idx = buf.begin_container(
+        &RELAY_AGENT_CHILDREN[CFD_RELAY_RADIUS_ATTRIBUTES],
+        FieldValue::Array(0..0),
+        start..start + data.len(),
+    );
+    let mut i = 0;
+    while i + 2 <= data.len() {
+        let attr_len = data[i + 1] as usize;
+        if attr_len < 2 || i + attr_len > data.len() {
+            break;
+        }
+        let base = start + i;
+        let obj_idx = buf.begin_container(
+            &FD_RADIUS_ATTRIBUTE,
+            FieldValue::Object(0..0),
+            base..base + attr_len,
+        );
+        buf.push_field(
+            &RADIUS_ATTRIBUTE_CHILDREN[CFD_RADIUS_TYPE],
+            FieldValue::U8(data[i]),
+            base..base + 1,
+        );
+        buf.push_field(
+            &RADIUS_ATTRIBUTE_CHILDREN[CFD_RADIUS_VALUE],
+            FieldValue::Bytes(&data[i + 2..i + attr_len]),
+            base + 2..base + attr_len,
+        );
+        buf.end_container(obj_idx);
+        i += attr_len;
+    }
+    buf.end_container(arr_idx);
+}
+
+/// Whether `data` is a non-empty sequence of (enterprise-number (4),
+/// data-len (1), data) entries that exactly fills it.
+///
+/// Shared by RFC 4243, Section 3 and RFC 3925, Sections 3 and 4.
+/// <https://www.rfc-editor.org/rfc/rfc4243#section-3>
+/// <https://www.rfc-editor.org/rfc/rfc3925#section-3>
+fn vendor_entries_valid(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < data.len() {
+        if i + 5 > data.len() {
+            return false;
+        }
+        let data_len = data[i + 4] as usize;
+        if i + 5 + data_len > data.len() {
+            return false;
+        }
+        i += 5 + data_len;
+    }
+    true
+}
+
+/// Push (enterprise-number, data) entries as an array of objects. The caller
+/// has checked [`vendor_entries_valid`]. `start` is the absolute offset of
+/// `data`.
+fn push_vendor_entries<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    fd: &'static FieldDescriptor,
+    data: &'pkt [u8],
+    start: usize,
+    range: core::ops::Range<usize>,
+) {
+    let arr_idx = buf.begin_container(fd, FieldValue::Array(0..0), range);
+    let mut i = 0;
+    while i + 5 <= data.len() {
+        let data_len = data[i + 4] as usize;
+        if i + 5 + data_len > data.len() {
+            break;
+        }
+        let enterprise = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        let base = start + i;
+        let obj_idx = buf.begin_container(
+            &FD_VENDOR_ENTRY,
+            FieldValue::Object(0..0),
+            base..base + 5 + data_len,
+        );
+        buf.push_field(
+            &VENDOR_ENTRY_CHILDREN[CFD_VENDOR_ENTERPRISE_NUMBER],
+            FieldValue::U32(enterprise),
+            base..base + 4,
+        );
+        buf.push_field(
+            &VENDOR_ENTRY_CHILDREN[CFD_VENDOR_DATA],
+            FieldValue::Bytes(&data[i + 5..i + 5 + data_len]),
+            base + 5..base + 5 + data_len,
+        );
+        buf.end_container(obj_idx);
+        i += 5 + data_len;
+    }
+    buf.end_container(arr_idx);
+}
+
+/// Whether `data` is a non-empty sequence of User Class Data instances
+/// (UC_Len_i (1) + data) that exactly fills it.
+///
+/// RFC 3004, Section 4 — "The value in UC_Len_i does not include the length
+/// field itself and MUST be non-zero."
+/// <https://www.rfc-editor.org/rfc/rfc3004#section-4>
+fn user_class_valid(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < data.len() {
+        let uc_len = data[i] as usize;
+        if uc_len == 0 || i + 1 + uc_len > data.len() {
+            return false;
+        }
+        i += 1 + uc_len;
+    }
+    true
+}
+
+/// Push the User Class Data instances of option 77 (RFC 3004, Section 4).
+/// The caller has checked [`user_class_valid`].
+/// <https://www.rfc-editor.org/rfc/rfc3004#section-4>
+fn push_user_class<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    start: usize,
+    range: core::ops::Range<usize>,
+) {
+    let fd = &FIELD_DESCRIPTORS[FD_USER_CLASS];
+    let arr_idx = buf.begin_container(fd, FieldValue::Array(0..0), range);
+    let mut i = 0;
+    while i < data.len() {
+        let uc_len = data[i] as usize;
+        if uc_len == 0 || i + 1 + uc_len > data.len() {
+            break;
+        }
+        buf.push_field(
+            fd,
+            FieldValue::Bytes(&data[i + 1..i + 1 + uc_len]),
+            start + i + 1..start + i + 1 + uc_len,
+        );
+        i += 1 + uc_len;
     }
     buf.end_container(arr_idx);
 }
@@ -1160,6 +1773,215 @@ fn parse_options<'pkt>(
                 buf.end_container(obj_idx);
             }
 
+            // RFC 2132, Section 8.13 — Mobile IP Home Agent: "Its minimum
+            // length is 0 (indicating no home agents are available) and the
+            // length MUST be a multiple of 4."
+            // <https://www.rfc-editor.org/rfc/rfc2132#section-8.13>
+            68 if len % 4 == 0 => {
+                push_ipv4_list(
+                    buf,
+                    &FIELD_DESCRIPTORS[FD_MOBILE_IP_HOME_AGENT],
+                    opt_data,
+                    opt_offset,
+                    opt_range,
+                );
+            }
+
+            // RFC 3004, Section 4 — User Class
+            // <https://www.rfc-editor.org/rfc/rfc3004#section-4>
+            77 if user_class_valid(opt_data) => {
+                push_user_class(buf, opt_data, opt_offset + 2, opt_range);
+            }
+
+            // RFC 4039, Section 4 — Rapid Commit: "The code for the Rapid
+            // Commit option is 80." Its Len is 0.
+            // <https://www.rfc-editor.org/rfc/rfc4039#section-4>
+            80 if len == 0 => {
+                buf.push_field(
+                    &FIELD_DESCRIPTORS[FD_RAPID_COMMIT],
+                    FieldValue::Bytes(opt_data),
+                    opt_range,
+                );
+            }
+
+            // RFC 4702, Section 2 — Client FQDN: "Len contains the number of
+            // octets that follow the Len field, and the minimum value is 3
+            // (octets)."
+            // <https://www.rfc-editor.org/rfc/rfc4702#section-2>
+            81 if len >= 3 => {
+                let data_start = opt_offset + 2;
+                let obj_idx = buf.begin_container(
+                    &FIELD_DESCRIPTORS[FD_CLIENT_FQDN],
+                    FieldValue::Object(0..0),
+                    opt_range,
+                );
+                buf.push_field(
+                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_FLAGS],
+                    FieldValue::U8(opt_data[0]),
+                    data_start..data_start + 1,
+                );
+                buf.push_field(
+                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_RCODE1],
+                    FieldValue::U8(opt_data[1]),
+                    data_start + 1..data_start + 2,
+                );
+                buf.push_field(
+                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_RCODE2],
+                    FieldValue::U8(opt_data[2]),
+                    data_start + 2..data_start + 3,
+                );
+                // RFC 4702, Section 2.3 — "A client MAY also leave the Domain
+                // Name field empty if it desires the server to provide a
+                // name."
+                // <https://www.rfc-editor.org/rfc/rfc4702#section-2.3>
+                if len > 3 {
+                    buf.push_field(
+                        &CLIENT_FQDN_CHILDREN[CFD_FQDN_DOMAIN_NAME],
+                        FieldValue::Bytes(&opt_data[3..]),
+                        data_start + 3..data_start + len,
+                    );
+                }
+                buf.end_container(obj_idx);
+            }
+
+            // RFC 3118, Section 2 — Authentication: Protocol (1), Algorithm
+            // (1), RDM (1), Replay Detection (8), Authentication Information.
+            // <https://www.rfc-editor.org/rfc/rfc3118#section-2>
+            90 if len >= DHCP_AUTH_FIXED_LEN => {
+                let data_start = opt_offset + 2;
+                let obj_idx = buf.begin_container(
+                    &FIELD_DESCRIPTORS[FD_AUTHENTICATION],
+                    FieldValue::Object(0..0),
+                    opt_range,
+                );
+                buf.push_field(
+                    &AUTHENTICATION_CHILDREN[CFD_AUTH_PROTOCOL],
+                    FieldValue::U8(opt_data[0]),
+                    data_start..data_start + 1,
+                );
+                buf.push_field(
+                    &AUTHENTICATION_CHILDREN[CFD_AUTH_ALGORITHM],
+                    FieldValue::U8(opt_data[1]),
+                    data_start + 1..data_start + 2,
+                );
+                buf.push_field(
+                    &AUTHENTICATION_CHILDREN[CFD_AUTH_RDM],
+                    FieldValue::U8(opt_data[2]),
+                    data_start + 2..data_start + 3,
+                );
+                buf.push_field(
+                    &AUTHENTICATION_CHILDREN[CFD_AUTH_REPLAY_DETECTION],
+                    FieldValue::Bytes(&opt_data[3..DHCP_AUTH_FIXED_LEN]),
+                    data_start + 3..data_start + DHCP_AUTH_FIXED_LEN,
+                );
+                if len > DHCP_AUTH_FIXED_LEN {
+                    buf.push_field(
+                        &AUTHENTICATION_CHILDREN[CFD_AUTH_INFORMATION],
+                        FieldValue::Bytes(&opt_data[DHCP_AUTH_FIXED_LEN..]),
+                        data_start + DHCP_AUTH_FIXED_LEN..data_start + len,
+                    );
+                }
+                buf.end_container(obj_idx);
+            }
+
+            // RFC 4578, Section 2.1 — Client System Architecture Type: "It
+            // MUST be an even number greater than zero."
+            // <https://www.rfc-editor.org/rfc/rfc4578#section-2.1>
+            93 if len >= 2 && len % 2 == 0 => {
+                push_u16_list(
+                    buf,
+                    &FIELD_DESCRIPTORS[FD_CLIENT_SYSTEM_ARCHITECTURE],
+                    opt_data,
+                    opt_offset,
+                    opt_range,
+                );
+            }
+
+            // RFC 4578, Section 2.2 — Client Network Interface Identifier:
+            // Type, Major, Minor (Len 3).
+            // <https://www.rfc-editor.org/rfc/rfc4578#section-2.2>
+            94 if len == 3 => {
+                let data_start = opt_offset + 2;
+                let obj_idx = buf.begin_container(
+                    &FIELD_DESCRIPTORS[FD_CLIENT_NII],
+                    FieldValue::Object(0..0),
+                    opt_range,
+                );
+                for (i, fd) in CLIENT_NII_CHILDREN.iter().enumerate() {
+                    buf.push_field(
+                        fd,
+                        FieldValue::U8(opt_data[i]),
+                        data_start + i..data_start + i + 1,
+                    );
+                }
+                buf.end_container(obj_idx);
+            }
+
+            // RFC 4578, Section 2.3 — Client Machine Identifier: "Octet "t"
+            // describes the type of the machine identifier in the remaining
+            // octets in this option."
+            // <https://www.rfc-editor.org/rfc/rfc4578#section-2.3>
+            97 if len >= 1 => {
+                let data_start = opt_offset + 2;
+                let obj_idx = buf.begin_container(
+                    &FIELD_DESCRIPTORS[FD_CLIENT_MACHINE_ID],
+                    FieldValue::Object(0..0),
+                    opt_range,
+                );
+                buf.push_field(
+                    &CLIENT_MACHINE_ID_CHILDREN[0],
+                    FieldValue::U8(opt_data[0]),
+                    data_start..data_start + 1,
+                );
+                buf.push_field(
+                    &CLIENT_MACHINE_ID_CHILDREN[1],
+                    FieldValue::Bytes(&opt_data[1..]),
+                    data_start + 1..data_start + len,
+                );
+                buf.end_container(obj_idx);
+            }
+
+            // RFC 3925, Section 3 — V-I Vendor Class
+            // <https://www.rfc-editor.org/rfc/rfc3925#section-3>
+            124 if vendor_entries_valid(opt_data) => {
+                push_vendor_entries(
+                    buf,
+                    &FIELD_DESCRIPTORS[FD_VI_VENDOR_CLASS],
+                    opt_data,
+                    opt_offset + 2,
+                    opt_range,
+                );
+            }
+
+            // RFC 3925, Section 4 — V-I Vendor-Specific Information
+            // <https://www.rfc-editor.org/rfc/rfc3925#section-4>
+            125 if vendor_entries_valid(opt_data) => {
+                push_vendor_entries(
+                    buf,
+                    &FIELD_DESCRIPTORS[FD_VI_VENDOR_SPECIFIC_INFO],
+                    opt_data,
+                    opt_offset + 2,
+                    opt_range,
+                );
+            }
+
+            // RFC 6704, Section 3.1.1 — "The FORCERENEW_NONCE_CAPABLE option
+            // contains code 145, length n, and a sequence of algorithms the
+            // client supports"
+            // <https://www.rfc-editor.org/rfc/rfc6704#section-3.1.1>
+            145 if len >= 1 => {
+                let fd = &FIELD_DESCRIPTORS[FD_FORCERENEW_NONCE_CAPABLE];
+                let arr_idx = buf.begin_container(fd, FieldValue::Array(0..0), opt_range);
+                for (i, &alg) in opt_data.iter().enumerate() {
+                    buf.push_field(
+                        fd,
+                        FieldValue::U8(alg),
+                        opt_offset + 2 + i..opt_offset + 3 + i,
+                    );
+                }
+                buf.end_container(arr_idx);
+            }
+
             // RFC 3046 — Relay Agent Information
             82 => {
                 push_relay_agent_info(buf, opt_data, opt_offset, opt_range);
@@ -1283,6 +2105,96 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 7724",
         "Active DHCPv4 Lease Query",
         "https://www.rfc-editor.org/rfc/rfc7724",
+    ),
+    SpecReference::new(
+        "RFC 3527",
+        "Link Selection sub-option for the Relay Agent Information Option for DHCPv4",
+        "https://www.rfc-editor.org/rfc/rfc3527",
+    ),
+    SpecReference::new(
+        "RFC 3993",
+        "Subscriber-ID Suboption for the Dynamic Host Configuration Protocol (DHCP) Relay Agent Option",
+        "https://www.rfc-editor.org/rfc/rfc3993",
+    ),
+    SpecReference::new(
+        "RFC 4014",
+        "Remote Authentication Dial-In User Service (RADIUS) Attributes Suboption for the Dynamic Host Configuration Protocol (DHCP) Relay Agent Information Option",
+        "https://www.rfc-editor.org/rfc/rfc4014",
+    ),
+    SpecReference::new(
+        "RFC 4030",
+        "The Authentication Suboption for the Dynamic Host Configuration Protocol (DHCP) Relay Agent Option",
+        "https://www.rfc-editor.org/rfc/rfc4030",
+    ),
+    SpecReference::new(
+        "RFC 4243",
+        "Vendor-Specific Information Suboption for the Dynamic Host Configuration Protocol (DHCP) Relay Agent Option",
+        "https://www.rfc-editor.org/rfc/rfc4243",
+    ),
+    SpecReference::new(
+        "RFC 5010",
+        "The Dynamic Host Configuration Protocol Version 4 (DHCPv4) Relay Agent Flags Suboption",
+        "https://www.rfc-editor.org/rfc/rfc5010",
+    ),
+    SpecReference::new(
+        "RFC 5107",
+        "DHCP Server Identifier Override Suboption",
+        "https://www.rfc-editor.org/rfc/rfc5107",
+    ),
+    SpecReference::new(
+        "RFC 3004",
+        "The User Class Option for DHCP",
+        "https://www.rfc-editor.org/rfc/rfc3004",
+    ),
+    SpecReference::new(
+        "RFC 4039",
+        "Rapid Commit Option for the Dynamic Host Configuration Protocol version 4 (DHCPv4)",
+        "https://www.rfc-editor.org/rfc/rfc4039",
+    ),
+    SpecReference::new(
+        "RFC 4702",
+        "The Dynamic Host Configuration Protocol (DHCP) Client Fully Qualified Domain Name (FQDN) Option",
+        "https://www.rfc-editor.org/rfc/rfc4702",
+    ),
+    SpecReference::new(
+        "RFC 3118",
+        "Authentication for DHCP Messages",
+        "https://www.rfc-editor.org/rfc/rfc3118",
+    ),
+    SpecReference::new(
+        "RFC 4578",
+        "Dynamic Host Configuration Protocol (DHCP) Options for the Intel Preboot eXecution Environment (PXE)",
+        "https://www.rfc-editor.org/rfc/rfc4578",
+    ),
+    SpecReference::new(
+        "RFC 8925",
+        "IPv6-Only Preferred Option for DHCPv4",
+        "https://www.rfc-editor.org/rfc/rfc8925",
+    ),
+    SpecReference::new(
+        "RFC 8910",
+        "Captive-Portal Identification in DHCP and Router Advertisements (RAs)",
+        "https://www.rfc-editor.org/rfc/rfc8910",
+    ),
+    SpecReference::new(
+        "RFC 3011",
+        "The IPv4 Subnet Selection Option for DHCP",
+        "https://www.rfc-editor.org/rfc/rfc3011",
+    ),
+    SpecReference::new(
+        "RFC 3925",
+        "Vendor-Identifying Vendor Options for Dynamic Host Configuration Protocol version 4 (DHCPv4)",
+        "https://www.rfc-editor.org/rfc/rfc3925",
+    ),
+    SpecReference::new(
+        "RFC 6704",
+        "Forcerenew Nonce Authentication",
+        "https://www.rfc-editor.org/rfc/rfc6704",
+    ),
+    SpecReference::new(
+        "RFC 5859",
+        "TFTP Server Address Option for DHCPv4",
+        "https://www.rfc-editor.org/rfc/rfc5859",
     ),
 ];
 
@@ -1661,6 +2573,47 @@ mod tests {
     // |-------------|-------------------------------------|---------------------------------------------|
     // | 3.1         | Circuit ID Sub-option               | parse_dhcp_relay_agent_info                 |
     // | 3.2         | Remote ID Sub-option                | parse_dhcp_relay_agent_info                 |
+    // | 3           | Unassigned sub-option stays raw     | parse_dhcp_relay_agent_info_unknown_sub_option |
+    //
+    // # Relay Agent Information Sub-Option Coverage
+    //
+    // | RFC / Section | Description                       | Test                                        |
+    // |---------------|-----------------------------------|---------------------------------------------|
+    // | 3527 §3       | Link Selection (5)                | parse_relay_sub_option_link_selection       |
+    // | 3527 §3       | Link Selection, bad length -> raw | parse_relay_sub_option_link_selection_bad_length_raw |
+    // | 3993 §3       | Subscriber-ID (6)                 | parse_relay_sub_option_subscriber_id        |
+    // | 4014 §3       | RADIUS Attributes (7)             | parse_relay_sub_option_radius_attributes    |
+    // | 4014 §3       | Malformed RADIUS attrs -> raw     | parse_relay_sub_option_radius_attributes_malformed_raw |
+    // | 4030 §4       | Authentication (8)                | parse_relay_sub_option_authentication       |
+    // | 4030 §4       | Short Authentication -> raw       | parse_relay_sub_option_authentication_short_raw |
+    // | 4243 §3       | Vendor-Specific Information (9)   | parse_relay_sub_option_vendor_specific      |
+    // | 5010 §3       | Relay Agent Flags (10)            | parse_relay_sub_option_flags                |
+    // | 5107 §4       | Server Identifier Override (11)   | parse_relay_sub_option_server_identifier_override |
+    //
+    // # Later DHCPv4 Option Coverage
+    //
+    // | RFC / Section | Description                       | Test                                        |
+    // |---------------|-----------------------------------|---------------------------------------------|
+    // | 2132 §8.13-21 | Options 68-76 (server lists)      | parse_dhcp_server_address_list_options_68_to_76 |
+    // | 2132 §8.13    | Mobile IP Home Agent, length 0    | parse_dhcp_mobile_ip_home_agent_empty       |
+    // | 3004 §4       | User Class (77)                   | parse_dhcp_user_class                       |
+    // | 3004 §4       | Malformed User Class -> raw       | parse_dhcp_user_class_malformed_raw         |
+    // | 4039 §4       | Rapid Commit (80)                 | parse_dhcp_rapid_commit                     |
+    // | 4702 §2       | Client FQDN (81)                  | parse_dhcp_client_fqdn                      |
+    // | 4702 §2       | Client FQDN below 3 octets -> raw | parse_dhcp_client_fqdn_too_short_raw        |
+    // | 3118 §2       | Authentication (90)               | parse_dhcp_authentication                   |
+    // | 4578 §2.1     | Client System Architecture (93)   | parse_dhcp_client_system_architecture       |
+    // | 4578 §2.2     | Client Network Interface Id (94)  | parse_dhcp_client_network_interface_identifier |
+    // | 4578 §2.3     | Client Machine Identifier (97)    | parse_dhcp_client_machine_identifier        |
+    // | 8925 §3.1     | IPv6-Only Preferred (108)         | parse_dhcp_ipv6_only_preferred              |
+    // | 8910 §2.1     | Captive-Portal (114)              | parse_dhcp_captive_portal                   |
+    // | 3011 §3       | Subnet Selection (118)            | parse_dhcp_subnet_selection                 |
+    // | 3925 §3       | V-I Vendor Class (124)            | parse_dhcp_vi_vendor_class                  |
+    // | 3925 §4       | V-I Vendor-Specific Info (125)    | parse_dhcp_vi_vendor_specific_info          |
+    // | 3925 §4       | Malformed V-I data -> raw         | parse_dhcp_vi_vendor_specific_info_malformed_raw |
+    // | 6704 §3.1.1   | FORCERENEW_NONCE_CAPABLE (145)    | parse_dhcp_forcerenew_nonce_capable         |
+    // | 5859 §3       | TFTP Server Address (150)         | parse_dhcp_tftp_server_address              |
+    // | (all above)   | Value types match descriptors     | new_option_value_types_match_descriptors    |
     //
     // # RFC 3397 Coverage
     //
@@ -3467,7 +4420,7 @@ mod tests {
     fn parse_dhcp_relay_agent_info_unknown_sub_option() {
         // Unknown sub-option code: surfaced via the generic `data` field.
         let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
-        let relay_info = [9, 2, 0xAA, 0xBB]; // sub-option 9: opaque 2-byte payload
+        let relay_info = [200, 2, 0xAA, 0xBB]; // sub-option 200: unassigned, opaque payload
         push_option(&mut pkt, 82, &relay_info);
         pkt.push(255);
         let d = DhcpDissector;
@@ -3487,7 +4440,7 @@ mod tests {
             .collect();
         assert_eq!(subs.len(), 1);
         let fields = buf.nested_fields(subs[0].value.as_container_range().unwrap());
-        assert_eq!(fields[0].value, FieldValue::U8(9));
+        assert_eq!(fields[0].value, FieldValue::U8(200));
         assert_eq!(fields[1].name(), "data");
         assert_eq!(fields[1].value, FieldValue::Bytes(&[0xAA, 0xBB]));
     }
@@ -3928,6 +4881,584 @@ mod tests {
         let mut buf = DissectBuffer::new();
         d.dissect(&pkt, &mut buf, 0).unwrap();
         assert!(buf.field_by_name(&buf.layers()[0], "file").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Relay Agent Information sub-options 5-11 and later DHCPv4 options
+    // -----------------------------------------------------------------------
+
+    /// Direct children of a container field (nested containers are skipped
+    /// as a whole).
+    fn direct_children<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        field: &packet_dissector_core::field::Field<'pkt>,
+    ) -> Vec<&'a packet_dissector_core::field::Field<'pkt>> {
+        let range = field.value.as_container_range().unwrap().clone();
+        let mut out = Vec::new();
+        let mut i = range.start;
+        while i < range.end {
+            let child = &buf.fields()[i as usize];
+            out.push(child);
+            i = match child.value.as_container_range() {
+                Some(r) => r.end,
+                None => i + 1,
+            };
+        }
+        out
+    }
+
+    /// Build a DHCPDISCOVER carrying the given options (plus End).
+    fn discover_with_options(options: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        push_option(&mut pkt, 53, &[1]);
+        for (code, data) in options {
+            push_option(&mut pkt, *code, data);
+        }
+        pkt.push(255);
+        pkt
+    }
+
+    /// Top-level field of layer 0 by name.
+    fn top_field<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+        name: &str,
+    ) -> &'a packet_dissector_core::field::Field<'pkt> {
+        buf.layer_fields(&buf.layers()[0])
+            .iter()
+            .find(|f| f.name() == name)
+            .unwrap_or_else(|| panic!("field {name} not found"))
+    }
+
+    /// Children of the single relay agent sub-option in option 82.
+    fn relay_sub_option_children<'a, 'pkt>(
+        buf: &'a DissectBuffer<'pkt>,
+    ) -> Vec<&'a packet_dissector_core::field::Field<'pkt>> {
+        let arr = top_field(buf, "relay_agent_info");
+        let subs = direct_children(buf, arr);
+        assert_eq!(subs.len(), 1);
+        direct_children(buf, subs[0])
+    }
+
+    fn child<'a, 'pkt>(
+        fields: &[&'a packet_dissector_core::field::Field<'pkt>],
+        name: &str,
+    ) -> &'a packet_dissector_core::field::Field<'pkt> {
+        fields
+            .iter()
+            .find(|f| f.name() == name)
+            .copied()
+            .unwrap_or_else(|| panic!("child {name} not found"))
+    }
+
+    /// RFC 3527, Section 3 — Link Selection sub-option (5) carries one
+    /// subnet IPv4 address. Issue repro: `52 06 05 04 0a 00 00 01`.
+    #[test]
+    fn parse_relay_sub_option_link_selection() {
+        let pkt = discover_with_options(&[(82, &[5, 4, 10, 0, 0, 1])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        assert_eq!(child(&fields, "sub_option").value, FieldValue::U8(5));
+        let ls = child(&fields, "link_selection");
+        assert_eq!(ls.value, FieldValue::Ipv4Addr([10, 0, 0, 1]));
+        // cookie ends at 240; option 53 (3) + option 82 header (2) + sub header (2)
+        assert_eq!(ls.range, 247..251);
+        assert!(!fields.iter().any(|f| f.name() == "data"));
+    }
+
+    /// A Link Selection sub-option whose length is not 4 stays raw.
+    #[test]
+    fn parse_relay_sub_option_link_selection_bad_length_raw() {
+        let pkt = discover_with_options(&[(82, &[5, 3, 10, 0, 0])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        assert_eq!(child(&fields, "data").value, FieldValue::Bytes(&[10, 0, 0]));
+    }
+
+    /// RFC 3993, Section 3 — Subscriber-ID sub-option (6) is an ASCII string.
+    #[test]
+    fn parse_relay_sub_option_subscriber_id() {
+        let pkt = discover_with_options(&[(82, &[6, 5, b's', b'u', b'b', b'-', b'1'])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        let f = child(&fields, "subscriber_id");
+        assert_eq!(f.value, FieldValue::Bytes(b"sub-1"));
+        assert!(f.descriptor.format_fn.is_some());
+    }
+
+    /// RFC 4014, Section 3 — RADIUS Attributes sub-option (7) holds RADIUS
+    /// attributes encoded per RFC 2865 (Type, Length, Value).
+    #[test]
+    fn parse_relay_sub_option_radius_attributes() {
+        // User-Name (1) "ab", Framed-Pool (88) "p"
+        let sub = [7, 7, 1, 4, b'a', b'b', 88, 3, b'p'];
+        let pkt = discover_with_options(&[(82, &sub)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        let attrs = direct_children(&buf, child(&fields, "radius_attributes"));
+        assert_eq!(attrs.len(), 2);
+        let a0 = direct_children(&buf, attrs[0]);
+        assert_eq!(child(&a0, "type").value, FieldValue::U8(1));
+        assert_eq!(child(&a0, "value").value, FieldValue::Bytes(b"ab"));
+        let a1 = direct_children(&buf, attrs[1]);
+        assert_eq!(child(&a1, "type").value, FieldValue::U8(88));
+        assert_eq!(child(&a1, "value").value, FieldValue::Bytes(b"p"));
+    }
+
+    /// RADIUS attributes that do not parse exactly stay raw.
+    #[test]
+    fn parse_relay_sub_option_radius_attributes_malformed_raw() {
+        // Attribute length 9 overruns the 4-octet sub-option; length 1 is
+        // below the RFC 2865 minimum of 2.
+        for sub in [&[7u8, 4, 1, 9, b'a', b'b'][..], &[7, 2, 1, 1]] {
+            let pkt = discover_with_options(&[(82, sub)]);
+            let mut buf = DissectBuffer::new();
+            DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            let fields = relay_sub_option_children(&buf);
+            assert!(!fields.iter().any(|f| f.name() == "radius_attributes"));
+            assert_eq!(child(&fields, "data").value, FieldValue::Bytes(&sub[2..]));
+        }
+    }
+
+    /// RFC 4030, Section 4 — Authentication sub-option (8): Algorithm,
+    /// MBZ/RDM, 64-bit Replay Detection, Relay Identifier, Authentication
+    /// Information.
+    #[test]
+    fn parse_relay_sub_option_authentication() {
+        let mut sub = vec![8, 0];
+        sub.push(1); // Algorithm: HMAC-SHA1
+        sub.push(0xF2); // MBZ (ignored) | RDM 2
+        sub.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 7]); // Replay Detection
+        sub.extend_from_slice(&[192, 0, 2, 1]); // Relay Identifier
+        sub.extend_from_slice(&[0xAA; 4]); // Authentication Information
+        sub[1] = (sub.len() - 2) as u8;
+        let pkt = discover_with_options(&[(82, &sub)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        assert_eq!(child(&fields, "algorithm").value, FieldValue::U8(1));
+        assert_eq!(child(&fields, "rdm").value, FieldValue::U8(2));
+        assert_eq!(
+            child(&fields, "replay_detection").value,
+            FieldValue::Bytes(&[0, 0, 0, 0, 0, 0, 0, 7])
+        );
+        assert_eq!(
+            child(&fields, "relay_identifier").value,
+            FieldValue::Bytes(&[192, 0, 2, 1])
+        );
+        assert_eq!(
+            child(&fields, "authentication_information").value,
+            FieldValue::Bytes(&[0xAA; 4])
+        );
+    }
+
+    /// An Authentication sub-option shorter than its fixed fields stays raw.
+    #[test]
+    fn parse_relay_sub_option_authentication_short_raw() {
+        let pkt = discover_with_options(&[(82, &[8, 3, 1, 0, 0])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        assert_eq!(child(&fields, "data").value, FieldValue::Bytes(&[1, 0, 0]));
+    }
+
+    /// RFC 4243, Section 3 — Vendor-Specific sub-option (9): repeated
+    /// Enterprise Number, DataLen, Suboption Data.
+    #[test]
+    fn parse_relay_sub_option_vendor_specific() {
+        let mut sub = vec![9, 0];
+        sub.extend_from_slice(&3561u32.to_be_bytes());
+        sub.extend_from_slice(&[2, 0x01, 0x02]);
+        sub.extend_from_slice(&9u32.to_be_bytes());
+        sub.extend_from_slice(&[0]);
+        sub[1] = (sub.len() - 2) as u8;
+        let pkt = discover_with_options(&[(82, &sub)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        let vendors = direct_children(&buf, child(&fields, "vendor_specific"));
+        assert_eq!(vendors.len(), 2);
+        let v0 = direct_children(&buf, vendors[0]);
+        assert_eq!(child(&v0, "enterprise_number").value, FieldValue::U32(3561));
+        assert_eq!(child(&v0, "data").value, FieldValue::Bytes(&[1, 2]));
+        let v1 = direct_children(&buf, vendors[1]);
+        assert_eq!(child(&v1, "enterprise_number").value, FieldValue::U32(9));
+        assert_eq!(child(&v1, "data").value, FieldValue::Bytes(&[]));
+    }
+
+    /// RFC 5010, Section 3 — Relay Agent Flags sub-option (10): one octet,
+    /// most significant bit is the UNICAST flag.
+    #[test]
+    fn parse_relay_sub_option_flags() {
+        let pkt = discover_with_options(&[(82, &[10, 1, 0x80])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        assert_eq!(child(&fields, "flags").value, FieldValue::U8(0x80));
+        assert_eq!(child(&fields, "unicast").value, FieldValue::U8(1));
+    }
+
+    /// RFC 5107, Section 4 — Server Identifier Override sub-option (11)
+    /// holds one IPv4 address.
+    #[test]
+    fn parse_relay_sub_option_server_identifier_override() {
+        let pkt = discover_with_options(&[(82, &[11, 4, 192, 0, 2, 10])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = relay_sub_option_children(&buf);
+        assert_eq!(
+            child(&fields, "server_identifier_override").value,
+            FieldValue::Ipv4Addr([192, 0, 2, 10])
+        );
+    }
+
+    /// RFC 2132, Sections 8.13-8.21 — options 68-76 are IPv4 address lists.
+    #[test]
+    fn parse_dhcp_server_address_list_options_68_to_76() {
+        let expected = [
+            (68, "mobile_ip_home_agent"),
+            (69, "smtp_server"),
+            (70, "pop3_server"),
+            (71, "nntp_server"),
+            (72, "www_server"),
+            (73, "finger_server"),
+            (74, "irc_server"),
+            (75, "streettalk_server"),
+            (76, "stda_server"),
+        ];
+        for (code, name) in expected {
+            let pkt = discover_with_options(&[(code, &[192, 0, 2, 1, 192, 0, 2, 2])]);
+            let mut buf = DissectBuffer::new();
+            DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            let addrs = direct_children(&buf, top_field(&buf, name));
+            assert_eq!(addrs.len(), 2, "option {code}");
+            assert_eq!(addrs[0].value, FieldValue::Ipv4Addr([192, 0, 2, 1]));
+            assert_eq!(addrs[1].value, FieldValue::Ipv4Addr([192, 0, 2, 2]));
+        }
+    }
+
+    /// RFC 2132, Section 8.13 — "Its minimum length is 0 (indicating no
+    /// home agents are available)".
+    #[test]
+    fn parse_dhcp_mobile_ip_home_agent_empty() {
+        let pkt = discover_with_options(&[(68, &[])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let arr = top_field(&buf, "mobile_ip_home_agent");
+        assert!(direct_children(&buf, arr).is_empty());
+    }
+
+    /// RFC 3004, Section 4 — User Class: one or more UC_Len_i + data.
+    #[test]
+    fn parse_dhcp_user_class() {
+        let pkt = discover_with_options(&[(77, &[3, b'a', b'b', b'c', 1, b'x'])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let classes = direct_children(&buf, top_field(&buf, "user_class"));
+        assert_eq!(classes.len(), 2);
+        assert_eq!(classes[0].value, FieldValue::Bytes(b"abc"));
+        assert_eq!(classes[1].value, FieldValue::Bytes(b"x"));
+    }
+
+    /// User Class data that does not parse exactly (zero UC_Len or overrun)
+    /// stays raw.
+    #[test]
+    fn parse_dhcp_user_class_malformed_raw() {
+        for data in [&[0u8, 1][..], &[5, b'a'], &[]] {
+            let pkt = discover_with_options(&[(77, data)]);
+            let mut buf = DissectBuffer::new();
+            DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert!(buf.field_by_name(layer, "user_class").is_none());
+            assert!(buf.field_by_name(layer, "unknown_option").is_some());
+        }
+    }
+
+    /// RFC 4039, Section 4 — Rapid Commit has length 0.
+    #[test]
+    fn parse_dhcp_rapid_commit() {
+        let pkt = discover_with_options(&[(80, &[])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(
+            top_field(&buf, "rapid_commit").value,
+            FieldValue::Bytes(&[])
+        );
+    }
+
+    /// RFC 4702, Section 2 — Client FQDN: Flags, RCODE1, RCODE2, Domain Name.
+    #[test]
+    fn parse_dhcp_client_fqdn() {
+        let mut data = vec![0x05, 0, 255]; // E and S set
+        data.extend_from_slice(b"\x04host\x07example\x00");
+        let pkt = discover_with_options(&[(81, &data)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = direct_children(&buf, top_field(&buf, "client_fqdn"));
+        assert_eq!(child(&fields, "flags").value, FieldValue::U8(0x05));
+        assert_eq!(child(&fields, "rcode1").value, FieldValue::U8(0));
+        assert_eq!(child(&fields, "rcode2").value, FieldValue::U8(255));
+        let name = child(&fields, "domain_name");
+        assert_eq!(name.value, FieldValue::Bytes(b"\x04host\x07example\x00"));
+        assert!(name.descriptor.format_fn.is_some());
+    }
+
+    /// RFC 4702, Section 2 — "the minimum value is 3 (octets)".
+    #[test]
+    fn parse_dhcp_client_fqdn_too_short_raw() {
+        let pkt = discover_with_options(&[(81, &[0x01, 0])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        assert!(buf.field_by_name(layer, "client_fqdn").is_none());
+        assert!(buf.field_by_name(layer, "unknown_option").is_some());
+    }
+
+    /// RFC 3118, Section 2 — Authentication: Protocol, Algorithm, RDM,
+    /// Replay Detection (64 bits), Authentication Information.
+    #[test]
+    fn parse_dhcp_authentication() {
+        let mut data = vec![3, 1, 0];
+        data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        data.extend_from_slice(&[2, 0xAB, 0xCD]);
+        let pkt = discover_with_options(&[(90, &data)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = direct_children(&buf, top_field(&buf, "authentication"));
+        assert_eq!(child(&fields, "protocol").value, FieldValue::U8(3));
+        assert_eq!(child(&fields, "algorithm").value, FieldValue::U8(1));
+        assert_eq!(child(&fields, "rdm").value, FieldValue::U8(0));
+        assert_eq!(
+            child(&fields, "replay_detection").value,
+            FieldValue::Bytes(&[0, 0, 0, 0, 0, 0, 0, 1])
+        );
+        assert_eq!(
+            child(&fields, "authentication_information").value,
+            FieldValue::Bytes(&[2, 0xAB, 0xCD])
+        );
+    }
+
+    /// RFC 4578, Section 2.1 — Client System Architecture Type: list of
+    /// 16-bit types.
+    #[test]
+    fn parse_dhcp_client_system_architecture() {
+        let pkt = discover_with_options(&[(93, &[0x00, 0x07, 0x00, 0x09])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let types = direct_children(&buf, top_field(&buf, "client_system_architecture"));
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0].value, FieldValue::U16(7));
+        assert_eq!(types[1].value, FieldValue::U16(9));
+    }
+
+    /// RFC 4578, Section 2.2 — Client Network Interface Identifier:
+    /// Type, Major, Minor.
+    #[test]
+    fn parse_dhcp_client_network_interface_identifier() {
+        let pkt = discover_with_options(&[(94, &[1, 2, 1])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = direct_children(&buf, top_field(&buf, "client_network_interface_identifier"));
+        assert_eq!(child(&fields, "type").value, FieldValue::U8(1));
+        assert_eq!(child(&fields, "major").value, FieldValue::U8(2));
+        assert_eq!(child(&fields, "minor").value, FieldValue::U8(1));
+    }
+
+    /// RFC 4578, Section 2.3 — Client Machine Identifier: Type 0 followed by
+    /// a 16-octet GUID.
+    #[test]
+    fn parse_dhcp_client_machine_identifier() {
+        let mut data = vec![0];
+        data.extend_from_slice(&[0x11; 16]);
+        let pkt = discover_with_options(&[(97, &data)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = direct_children(&buf, top_field(&buf, "client_machine_identifier"));
+        assert_eq!(child(&fields, "type").value, FieldValue::U8(0));
+        assert_eq!(
+            child(&fields, "machine_identifier").value,
+            FieldValue::Bytes(&[0x11; 16])
+        );
+    }
+
+    /// RFC 8925, Section 3.1 — IPv6-Only Preferred: 4-octet V6ONLY_WAIT.
+    #[test]
+    fn parse_dhcp_ipv6_only_preferred() {
+        let pkt = discover_with_options(&[(108, &1800u32.to_be_bytes())]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(
+            top_field(&buf, "ipv6_only_preferred").value,
+            FieldValue::U32(1800)
+        );
+    }
+
+    /// RFC 8910, Section 2.1 — Captive-Portal DHCPv4 option carries a URI.
+    #[test]
+    fn parse_dhcp_captive_portal() {
+        let uri = b"https://cp.example/api";
+        let pkt = discover_with_options(&[(114, uri)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let f = top_field(&buf, "captive_portal");
+        assert_eq!(f.value, FieldValue::Bytes(uri));
+        assert!(f.descriptor.format_fn.is_some());
+    }
+
+    /// RFC 3011, Section 3 — Subnet Selection: one IPv4 address.
+    #[test]
+    fn parse_dhcp_subnet_selection() {
+        let pkt = discover_with_options(&[(118, &[10, 1, 2, 0])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(
+            top_field(&buf, "subnet_selection").value,
+            FieldValue::Ipv4Addr([10, 1, 2, 0])
+        );
+    }
+
+    /// RFC 3925, Section 3 — V-I Vendor Class: repeated enterprise-number,
+    /// data-len, vendor-class-data.
+    #[test]
+    fn parse_dhcp_vi_vendor_class() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&4491u32.to_be_bytes());
+        data.extend_from_slice(&[3, 2, b'o', b'k']);
+        let pkt = discover_with_options(&[(124, &data)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let entries = direct_children(&buf, top_field(&buf, "vi_vendor_class"));
+        assert_eq!(entries.len(), 1);
+        let e = direct_children(&buf, entries[0]);
+        assert_eq!(child(&e, "enterprise_number").value, FieldValue::U32(4491));
+        assert_eq!(child(&e, "data").value, FieldValue::Bytes(&[2, b'o', b'k']));
+    }
+
+    /// RFC 3925, Section 4 — V-I Vendor-Specific Information: repeated
+    /// enterprise-number, data-len, option-data.
+    #[test]
+    fn parse_dhcp_vi_vendor_specific_info() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&4491u32.to_be_bytes());
+        data.extend_from_slice(&[3, 1, 1, 0x7F]);
+        data.extend_from_slice(&311u32.to_be_bytes());
+        data.push(0);
+        let pkt = discover_with_options(&[(125, &data)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let entries = direct_children(&buf, top_field(&buf, "vi_vendor_specific_info"));
+        assert_eq!(entries.len(), 2);
+        let e0 = direct_children(&buf, entries[0]);
+        assert_eq!(child(&e0, "enterprise_number").value, FieldValue::U32(4491));
+        assert_eq!(child(&e0, "data").value, FieldValue::Bytes(&[1, 1, 0x7F]));
+        let e1 = direct_children(&buf, entries[1]);
+        assert_eq!(child(&e1, "enterprise_number").value, FieldValue::U32(311));
+    }
+
+    /// V-I vendor data that does not parse exactly stays raw.
+    #[test]
+    fn parse_dhcp_vi_vendor_specific_info_malformed_raw() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&4491u32.to_be_bytes());
+        data.extend_from_slice(&[9, 1]); // data-len overruns
+        for d in [&data[..], &[0, 0, 1]] {
+            let pkt = discover_with_options(&[(125, d)]);
+            let mut buf = DissectBuffer::new();
+            DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert!(
+                buf.field_by_name(layer, "vi_vendor_specific_info")
+                    .is_none()
+            );
+            assert!(buf.field_by_name(layer, "unknown_option").is_some());
+        }
+    }
+
+    /// RFC 6704, Section 3.1.1 — FORCERENEW_NONCE_CAPABLE: list of
+    /// one-octet algorithms.
+    #[test]
+    fn parse_dhcp_forcerenew_nonce_capable() {
+        let pkt = discover_with_options(&[(145, &[1, 2])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let algs = direct_children(&buf, top_field(&buf, "forcerenew_nonce_capable"));
+        assert_eq!(algs.len(), 2);
+        assert_eq!(algs[0].value, FieldValue::U8(1));
+        assert_eq!(algs[1].value, FieldValue::U8(2));
+    }
+
+    /// RFC 5859, Section 3 — TFTP Server Address: IPv4 address list.
+    #[test]
+    fn parse_dhcp_tftp_server_address() {
+        let pkt = discover_with_options(&[(150, &[192, 0, 2, 5])]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let addrs = direct_children(&buf, top_field(&buf, "tftp_server_address"));
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].value, FieldValue::Ipv4Addr([192, 0, 2, 5]));
+    }
+
+    /// Every emitted field (at any nesting depth) matches its descriptor's
+    /// type for the newly decoded options, and none falls back to raw.
+    #[test]
+    fn new_option_value_types_match_descriptors() {
+        let mut fqdn = vec![0x04, 0, 0];
+        fqdn.extend_from_slice(b"\x01a\x00");
+        let mut vi = Vec::new();
+        vi.extend_from_slice(&1u32.to_be_bytes());
+        vi.extend_from_slice(&[1, 0]);
+        let mut relay = vec![5, 4, 10, 0, 0, 1, 10, 1, 0, 11, 4, 1, 2, 3, 4];
+        relay.extend_from_slice(&[7, 3, 1, 3, b'a']);
+        relay.extend_from_slice(&[9, 5, 0, 0, 0, 1, 0]);
+        relay.extend_from_slice(&[6, 1, b'x']);
+        relay.extend_from_slice(&[8, 14, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4]);
+        let pkt = discover_with_options(&[
+            (68, &[1, 2, 3, 4]),
+            (77, &[1, b'a']),
+            (80, &[]),
+            (81, &fqdn),
+            (82, &relay),
+            (90, &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            (93, &[0, 7]),
+            (94, &[1, 3, 16]),
+            (97, &[0; 17]),
+            (108, &[0, 0, 7, 8]),
+            (114, b"urn:x"),
+            (118, &[1, 2, 3, 0]),
+            (124, &vi),
+            (125, &vi),
+            (145, &[1]),
+            (150, &[1, 2, 3, 4]),
+        ]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = &buf.layers()[0];
+        for f in buf.layer_fields(layer) {
+            // Scalar array elements reuse the array's descriptor (crate
+            // convention, see `push_ipv4_list`).
+            if f.descriptor.field_type == FieldType::Array && !f.value.is_array() {
+                continue;
+            }
+            assert_eq!(
+                f.value.field_type(),
+                f.descriptor.field_type,
+                "field {}",
+                f.name()
+            );
+        }
+        assert!(buf.field_by_name(layer, "unknown_option").is_none());
+        let subs = direct_children(&buf, top_field(&buf, "relay_agent_info"));
+        assert_eq!(subs.len(), 7);
+        for sub in subs {
+            assert!(
+                !direct_children(&buf, sub)
+                    .iter()
+                    .any(|f| f.name() == "data")
+            );
+        }
     }
 
     /// Every dissector in this crate must cite the specifications it
