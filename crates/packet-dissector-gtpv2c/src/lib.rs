@@ -290,15 +290,8 @@ fn dissect_message<'pkt>(
             offset + 4..offset + 7,
         );
 
-        // Octet 8: Spare or Message Priority when MP=1
-        if mp_flag == 1 {
-            let priority = data[7];
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_MESSAGE_PRIORITY],
-                FieldValue::U8(priority),
-                offset + 7..offset + 8,
-            );
-        }
+        // Octet 8: Spare. Section 5.5.1 places the Message Priority in
+        // octet 12, which exists only when T = 1.
     };
 
     // msg_length covers bytes after the first 4 mandatory octets,
@@ -594,7 +587,6 @@ mod tests {
     fn parse_gtpv2c_header_errors_and_priority() {
         let d = Gtpv2cDissector;
         assert_eq!(d.name(), "GPRS Tunnelling Protocol Control Plane v2");
-        assert_eq!(d.field_descriptors().len(), 10);
 
         // Version 1
         let mut data = make_gtpv2c_with_teid(32, 1, 1, &[]);
@@ -624,13 +616,14 @@ mod tests {
         let layer = &buf.layers()[0];
         assert_eq!(buf.field_u8(layer, "message_priority"), Some(5));
 
-        // MP = 1 with T = 0: octet 8
+        // MP = 1 with T = 0: Section 5.5.1 places the priority in octet 12,
+        // which a T = 0 header does not have; octet 8 is Spare (Section 5.1).
         let mut data = make_gtpv2c_without_teid(1, 1, &[]);
         data[0] |= 0x04;
         data[7] = 0x03;
         let (_, buf) = dissect_ok(&data);
         let layer = &buf.layers()[0];
-        assert_eq!(buf.field_u8(layer, "message_priority"), Some(3));
+        assert_eq!(buf.field_u8(layer, "message_priority"), None);
 
         // Stray octets that do not form an IE leave no empty IE array.
         let data = make_gtpv2c_with_teid(32, 1, 1, &[0x01, 0x00]);

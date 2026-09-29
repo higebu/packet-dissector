@@ -58,11 +58,6 @@ fn bytes<'pkt>(
     buf.push_field(fd, FieldValue::Bytes(v), at..at + v.len());
 }
 
-/// PLMN identity coded as in 3GPP TS 24.008, Figure 10.5.13.
-fn push_plmn(buf: &mut DissectBuffer<'_>, p: &[u8], at: usize) {
-    ie_parsers::push_plmn_fields(p, at, 3, buf);
-}
-
 /// PLMN ID coded as in 3GPP TS 29.274, Figures 8.50-2 / 8.50-3 (the
 /// TS 36.413 order): with a 3-digit MNC octet 2 carries MNC digit 1 in its
 /// high nibble and octet 3 carries MNC digit 3 | MNC digit 2; with a 2-digit
@@ -659,7 +654,7 @@ pub(crate) fn push_guti<'pkt>(
         return;
     };
     let obj = begin(value_desc, value_range, buf);
-    push_plmn(buf, data, offset);
+    ie_parsers::push_plmn_fields(data, offset, 3, buf);
     u16f(buf, &FD_MME_GROUP_ID, group, offset + 3..offset + 5);
     u8f(buf, &FD_MME_CODE, data[5], offset + 5);
     u32f(buf, &FD_M_TMSI, m_tmsi, offset + 6..offset + 10);
@@ -699,7 +694,7 @@ pub(crate) fn push_tmgi<'pkt>(
     };
     let obj = begin(value_desc, value_range, buf);
     u32f(buf, &FD_MBMS_SERVICE_ID, service_id, offset..offset + 3);
-    push_plmn(buf, &data[3..6], offset + 3);
+    ie_parsers::push_plmn_fields(&data[3..6], offset + 3, 3, buf);
     buf.end_container(obj);
 }
 
@@ -763,10 +758,10 @@ static FD_EN_GNB_ID: FieldDescriptor =
 
 /// Keep the `bits` least significant bits of `v` (`bits` capped at 32).
 fn low_bits(v: u32, bits: u8) -> u32 {
-    match bits {
-        0 => 0,
-        b if b >= 32 => v,
-        b => v & ((1u32 << b) - 1),
+    if bits >= 32 {
+        v
+    } else {
+        v & ((1u32 << bits) - 1)
     }
 }
 
@@ -782,16 +777,25 @@ fn target_id_len(target_type: u8, id: &[u8]) -> Option<usize> {
         1 | 4 => Some(8),
         // 8.51.4: PLMN, Home eNodeB ID (4), TAC (2)
         3 => Some(9),
-        // 8.51.7: PLMN, length, gNodeB ID (4), 5GS TAC (3)
-        5 => Some(11),
+        // 8.51.7: PLMN, length, gNodeB ID (4), 5GS TAC (3). "The gNodeB ID
+        // consists of 22 to 32 bits."
+        5 => id.get(3).filter(|&&f| gnb_id_len_valid(f)).map(|_| 11),
         // 8.51.8 / 8.51.9: PLMN, eNodeB ID (3), 5GS TAC (3)
         6 | 7 => Some(9),
         // 8.51.10: PLMN, flags/length, en-gNB ID (4), [TAC (2)], [5GS TAC (3)]
+        // "The en-gNB ID consists of 22 to 32 bits."
         8 => id
             .get(3)
+            .filter(|&&f| gnb_id_len_valid(f))
             .map(|f| 8 + usize::from(f & 0x40 != 0) * 2 + usize::from(f & 0x80 != 0) * 3),
         _ => None,
     }
+}
+
+/// 3GPP TS 29.274, Sections 8.51.7 / 8.51.10 — the ID length in bits 1 to 6
+/// of octet 9 is 22 to 32.
+fn gnb_id_len_valid(octet: u8) -> bool {
+    (22..=32).contains(&(octet & 0x3F))
 }
 
 /// 3GPP TS 29.274, Section 8.51 — Target Identification.
@@ -822,7 +826,7 @@ fn push_target_id(buf: &mut DissectBuffer<'_>, target_type: u8, id: &[u8], at: u
     let u16_at = |i: usize| u16::from_be_bytes([id[i], id[i + 1]]);
     let u24_at = |i: usize| u32::from_be_bytes([0, id[i], id[i + 1], id[i + 2]]);
     let u32_at = |i: usize| u32::from_be_bytes([id[i], id[i + 1], id[i + 2], id[i + 3]]);
-    push_plmn(buf, id, at);
+    ie_parsers::push_plmn_fields(id, at, 3, buf);
     match target_type {
         0 => {
             // Figure 8.51-1a
@@ -1207,7 +1211,7 @@ pub(crate) fn push_twan_identifier<'pkt>(
     }
     if let Some((at, p)) = t.plmn {
         // "encoded as octets 5 to 7 of the Serving Network IE"
-        push_plmn(buf, p, offset + at);
+        ie_parsers::push_plmn_fields(p, offset + at, 3, buf);
     }
     if let Some((at, b)) = t.operator {
         bytes(buf, &FD_TWAN_OPERATOR_NAME, b, offset + at);
@@ -1266,6 +1270,13 @@ static FD_USAGE_DATA_DL: FieldDescriptor =
     FieldDescriptor::new("usage_data_dl", "Usage Data DL", FieldType::U64);
 static FD_USAGE_DATA_UL: FieldDescriptor =
     FieldDescriptor::new("usage_data_ul", "Usage Data UL", FieldType::U64);
+static FD_SRUDR_TRANSFER_LENGTH: FieldDescriptor = FieldDescriptor::new(
+    "secondary_rat_data_usage_report_transfer_length",
+    "Length of Secondary RAT Data Usage Report Transfer",
+    FieldType::U8,
+);
+static FD_UNDECODED: FieldDescriptor =
+    FieldDescriptor::new("undecoded", "Undecoded", FieldType::Bytes);
 static FD_SRUDR_TRANSFER: FieldDescriptor = FieldDescriptor::new(
     "secondary_rat_data_usage_report_transfer",
     "Secondary RAT Data Usage Report Transfer",
@@ -1292,13 +1303,8 @@ pub(crate) fn push_secondary_rat_usage_data_report<'pkt>(
     };
     // SRUDN: "the Length of Secondary RAT Data Usage Report Transfer and
     // Secondary RAT Data Usage Report Transfer field shall be present".
-    let transfer = if data[0] & 0x04 != 0 {
-        data.get(27)
-            .and_then(|l| data.get(28..28 + usize::from(*l)))
-    } else {
-        None
-    };
-    let decoded_end = transfer.map_or(27, |t| 28 + t.len());
+    let transfer_len = data.get(27).filter(|_| data[0] & 0x04 != 0);
+    let transfer = transfer_len.and_then(|l| data.get(28..28 + usize::from(*l)));
     let obj = begin(value_desc, value_range, buf);
     for f in SRUDR_FLAGS {
         u8f(buf, &f.fd, u8::from(data[0] & f.mask != 0), offset);
@@ -1317,11 +1323,23 @@ pub(crate) fn push_secondary_rat_usage_data_report<'pkt>(
         FieldValue::U64(ul),
         offset + 19..offset + 27,
     );
-    if let Some(t) = transfer {
-        bytes(buf, &FD_SRUDR_TRANSFER, t, offset + 28);
-    }
-    // Octets past the decoded fields: a transfer that runs past the value,
-    // or octets "present only if explicitly specified".
+    let decoded_end = match (transfer_len, transfer) {
+        (Some(&l), Some(t)) => {
+            u8f(buf, &FD_SRUDR_TRANSFER_LENGTH, l, offset + 27);
+            bytes(buf, &FD_SRUDR_TRANSFER, t, offset + 28);
+            28 + t.len()
+        }
+        (Some(&l), None) => {
+            // The transfer runs past the value: keep what is there undecoded.
+            u8f(buf, &FD_SRUDR_TRANSFER_LENGTH, l, offset + 27);
+            if data.len() > 28 {
+                bytes(buf, &FD_UNDECODED, &data[28..], offset + 28);
+            }
+            data.len()
+        }
+        _ => 27,
+    };
+    // Octets "present only if explicitly specified".
     if data.len() > decoded_end {
         bytes(
             buf,
@@ -1375,7 +1393,7 @@ mod tests {
     // | 8.x             | Short values fall back to raw        | short_values_fall_back_to_raw          |
     // | 8.50            | BCD nibble above 9 shown as hex      | plmn_nibble_above_nine_is_visible      |
     // | 8.x             | Value name tables                    | name_tables_and_display_fns            |
-    // | 8.100 / 8.51.7  | Relay IPv6, gNodeB ID length 0       | twan_relay_ipv6_and_gnb_zero_length    |
+    // | 8.100 / 8.51.7  | Relay IPv6, gNB ID length range      | twan_relay_ipv6_and_gnb_length_out_of_range |
 
     static FD_VALUE: FieldDescriptor = FieldDescriptor::new("value", "Value", FieldType::Bytes);
 
@@ -1873,6 +1891,10 @@ mod tests {
         assert_eq!(*val(&buf, "usage_data_dl"), FieldValue::U64(1000));
         assert_eq!(*val(&buf, "usage_data_ul"), FieldValue::U64(2000));
         assert_eq!(
+            *val(&buf, "secondary_rat_data_usage_report_transfer_length"),
+            FieldValue::U8(2)
+        );
+        assert_eq!(
             *val(&buf, "secondary_rat_data_usage_report_transfer"),
             FieldValue::Bytes(&[0xAB, 0xCD])
         );
@@ -1881,14 +1903,30 @@ mod tests {
         no_transfer[0] = 0x03;
         let buf = push(201, &no_transfer);
         assert!(!has(&buf, "secondary_rat_data_usage_report_transfer"));
-        // SRUDN set but the transfer runs past the value: the fixed part is
-        // decoded and the rest is kept raw.
-        let mut short = data[..28].to_vec();
+        // SRUDN set but the transfer runs past the value: the fixed part and
+        // the length are decoded, and the partial transfer is kept undecoded
+        // rather than as octets "present only if explicitly specified".
+        let mut short = data[..29].to_vec();
         short[27] = 0x10;
         let buf = push(201, &short);
         assert_eq!(*val(&buf, "ebi"), FieldValue::U8(5));
-        assert_eq!(*val(&buf, "additional_octets"), FieldValue::Bytes(&[0x10]));
+        assert_eq!(
+            *val(&buf, "secondary_rat_data_usage_report_transfer_length"),
+            FieldValue::U8(0x10)
+        );
+        assert_eq!(*val(&buf, "undecoded"), FieldValue::Bytes(&[0xAB]));
+        assert!(!has(&buf, "additional_octets"));
         assert!(!has(&buf, "secondary_rat_data_usage_report_transfer"));
+        // SRUDN set but the length octet is missing.
+        let mut no_len = data[..27].to_vec();
+        no_len[0] = 0x04;
+        let buf = push(201, &no_len);
+        assert_eq!(*val(&buf, "srudn"), FieldValue::U8(1));
+        assert!(!has(
+            &buf,
+            "secondary_rat_data_usage_report_transfer_length"
+        ));
+        assert!(!has(&buf, "undecoded"));
     }
 
     #[test]
@@ -1998,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn twan_relay_ipv6_and_gnb_zero_length() {
+    fn twan_relay_ipv6_and_gnb_length_out_of_range() {
         let mut data = vec![0x10, 0];
         data.extend_from_slice(&[0, 16]);
         data.extend_from_slice(&[0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
@@ -2009,11 +2047,16 @@ mod tests {
             FieldValue::Ipv6Addr(_)
         ));
 
-        // gNodeB ID Length 0 yields an empty ID.
-        let buf = push(
-            121,
-            &[5, 0x44, 0xF0, 0x01, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 1],
-        );
-        assert_eq!(*val(&buf, "gnodeb_id"), FieldValue::U32(0));
+        // Section 8.51.7 — "The gNodeB ID consists of 22 to 32 bits": any
+        // other length keeps the Target ID raw.
+        let gnb = [5, 0x44, 0xF0, 0x01, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 1];
+        let buf = push(121, &gnb);
+        assert!(!has(&buf, "gnodeb_id"));
+        assert_eq!(*val(&buf, "target_id"), FieldValue::Bytes(&gnb[1..]));
+        // Section 8.51.10 — the en-gNB ID also "consists of 22 to 32 bits".
+        let en_gnb = [8, 0x44, 0xF0, 0x01, 33, 0xFF, 0xFF, 0xFF, 0xFF];
+        let buf = push(121, &en_gnb);
+        assert!(!has(&buf, "en_gnb_id"));
+        assert_eq!(*val(&buf, "target_id"), FieldValue::Bytes(&en_gnb[1..]));
     }
 }
