@@ -6,6 +6,16 @@
 //! - RFC 2918 (Route Refresh): <https://www.rfc-editor.org/rfc/rfc2918>
 //! - RFC 2545 (BGP-4 Multiprotocol Extensions for IPv6): <https://www.rfc-editor.org/rfc/rfc2545>
 //! - RFC 4360 (Extended Communities): <https://www.rfc-editor.org/rfc/rfc4360>
+//! - RFC 4577 (OSPF as the PE/CE Protocol / OSPF Extended Communities): <https://www.rfc-editor.org/rfc/rfc4577>
+//! - RFC 5668 (4-Octet AS Specific Extended Community): <https://www.rfc-editor.org/rfc/rfc5668>
+//! - RFC 5701 (IPv6 Address Specific Extended Community): <https://www.rfc-editor.org/rfc/rfc5701>
+//! - RFC 7153 (IANA Registries for BGP Extended Communities): <https://www.rfc-editor.org/rfc/rfc7153>
+//! - RFC 7432 (BGP MPLS-Based Ethernet VPN): <https://www.rfc-editor.org/rfc/rfc7432>
+//! - RFC 8097 (BGP Prefix Origin Validation State Extended Community): <https://www.rfc-editor.org/rfc/rfc8097>
+//! - RFC 8955 (Dissemination of Flow Specification Rules): <https://www.rfc-editor.org/rfc/rfc8955>
+//! - RFC 9135 (Integrated Routing and Bridging in EVPN): <https://www.rfc-editor.org/rfc/rfc9135>
+//! - RFC 10005 (BGP Link Bandwidth Extended Community): <https://www.rfc-editor.org/rfc/rfc10005>
+//! - IANA BGP Extended Communities: <https://www.iana.org/assignments/bgp-extended-communities/bgp-extended-communities.xhtml>
 //! - RFC 4364 (BGP/MPLS IP VPNs): <https://www.rfc-editor.org/rfc/rfc4364>
 //! - RFC 4456 (Route Reflection): <https://www.rfc-editor.org/rfc/rfc4456>
 //! - RFC 4486 (Cease NOTIFICATION subcodes): <https://www.rfc-editor.org/rfc/rfc4486>
@@ -127,16 +137,19 @@
 //! |-------------|-------------|------|
 //! | RFC 4486 §4 | Cease subcodes 1–8 + RFC 8203 §4 subcode 9 | `parse_bgp_notification_cease_subcode_name` |
 //!
-//! # RFC 4360 / RFC 9012 Coverage
+//! # Extended Communities Coverage (RFC 4360 / RFC 7153 / RFC 5701 / RFC 9012 / RFC 7432 / RFC 9135 / RFC 8955 / RFC 4577 / RFC 10005 / RFC 8097)
 //!
 //! | RFC Section | Description | Test |
 //! |-------------|-------------|------|
-//! | 2 | Extended Communities + Color | `parse_bgp_update_extended_communities` |
-//! | 2 | IPv4 Address Specific Route Target | `parse_bgp_update_extended_communities_ipv4_route_target` |
-//! | 2 | Route Origin (Two-Octet AS) | `parse_bgp_update_extended_communities_route_origin` |
-//! | 2 | IPv4 Address Specific Route Origin | `parse_bgp_update_extended_communities_ipv4_route_origin` |
-//! | 2 | EVPN Extended Community | `parse_bgp_update_extended_communities_evpn` |
-//! | 2 | Unknown Extended Community | `parse_bgp_update_extended_communities_unknown` |
+//! | RFC 4360 §2, §3.1; RFC 9012 §4.3 | Type / Sub-Type objects: Route Target, Color | `parse_bgp_update_extended_communities` |
+//! | RFC 4360 §3.1-3.2; RFC 5668 §2; RFC 8955 §7.4; RFC 4577 §4.2.6 | Global / Local Administrator layouts (RT, RO, OSPF Router ID, rt-redirect) | `parse_bgp_update_extended_communities_admin_layouts` |
+//! | RFC 10005 §2 | Link Bandwidth (IEEE 754 bytes per second) | `parse_bgp_update_extended_communities_link_bandwidth` |
+//! | RFC 7432 §7.5-7.7; RFC 9135 §8.1 | EVPN MAC Mobility, ESI Label, ES-Import RT, Router's MAC | `parse_bgp_update_extended_communities_evpn` |
+//! | RFC 9012 §4.1; RFC 7432 §7.8; RFC 4577 §4.2.6; RFC 8097 §2 | Encapsulation, Default Gateway, OSPF Route Type / Domain ID, Origin Validation State | `parse_bgp_update_extended_communities_opaque_and_ospf` |
+//! | RFC 8955 §7.1-7.5 | Flow spec traffic-rate, traffic-action, traffic-marking | `parse_bgp_update_extended_communities_flowspec_actions` |
+//! | RFC 4360 §2 | Unknown type; length not a multiple of 8 kept raw | `parse_bgp_update_extended_communities_unknown` |
+//! | RFC 5701 §2 | IPv6 Address Specific Extended Community | `parse_bgp_update_ipv6_address_specific_extended_community` |
+//! | RFC 7153 §5 | Type / Sub-Type name tables, IEEE 754 formatting | `extended_community_name_tables` |
 //!
 //! # RFC 4456 (Route Reflection) Coverage
 //!
@@ -249,7 +262,7 @@
 //! | 3.3 | Type 1 ST (3GPP 5G) | `parse_bgp_update_mup_type1_st` |
 //! | 3.1.4/3.3 | Type 2 ST (3GPP 5G) | `parse_bgp_update_mup_type2_st` |
 //! | 3.1.5 | ST Route TLVs (3gpp-5g Session Parameters, Interwork Endpoint, Source Address) | `parse_bgp_update_mup_type1_st`, `parse_bgp_update_mup_type2_st` |
-//! | 3.2 | MUP Extended Community sub-types (2-Octet AS / IPv4 / 4-Octet AS, Direct/Interwork Segment) | `mup_extended_community_type_names`, `format_ext_community_mup_values` |
+//! | 3.2 | MUP Extended Community sub-types (2-Octet AS / IPv4 / 4-Octet AS, Direct/Interwork Segment) | `parse_bgp_update_extended_communities_mup` |
 //! | 3 | Route Type / Architecture Type name tables | `name_lookup_tables` |
 //! | 3 | Truncated MUP entry handling | `parse_bgp_update_mup_truncated_entry_is_raw` |
 //!
@@ -297,7 +310,9 @@ use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
+use packet_dissector_core::field::{
+    FieldDescriptor, FieldType, FieldValue, FormatContext, MacAddr,
+};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{
     read_be_u16, read_be_u24, read_be_u32, read_be_u64, read_ipv4_addr, read_ipv6_addr,
@@ -1935,29 +1950,234 @@ fn well_known_community_name(v: u32) -> Option<&'static str> {
     }
 }
 
-/// Returns a human-readable name for Extended Community types.
+/// Returns a human-readable name for an Extended Community Type (high-order
+/// octet).
 ///
-/// RFC 4360 — <https://www.rfc-editor.org/rfc/rfc4360>
-/// RFC 9012 — <https://www.rfc-editor.org/rfc/rfc9012>
-/// draft-ietf-bess-mup-safi-01, Section 3.2 —
-/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-fn extended_community_type_name(type_high: u8, sub_type: u8) -> Option<&'static str> {
-    let base_type = type_high & 0x3F;
-    match (base_type, sub_type) {
-        (0x00, 0x02) | (0x02, 0x02) => Some("Route Target"),
-        (0x01, 0x02) => Some("Route Target (IPv4)"),
-        (0x00, 0x03) | (0x02, 0x03) => Some("Route Origin"),
-        (0x01, 0x03) => Some("Route Origin (IPv4)"),
-        (0x03, 0x0B) => Some("Color"),
-        (0x06, _) => Some("EVPN"),
-        (0x0C, 0x00) => Some("MUP Direct Segment (2-Octet AS)"),
-        (0x0C, 0x01) => Some("MUP Direct Segment (IPv4 Address)"),
-        (0x0C, 0x02) => Some("MUP Direct Segment (4-Octet AS)"),
-        (0x0C, 0x03) => Some("MUP Interwork Segment (2-Octet AS)"),
-        (0x0C, 0x04) => Some("MUP Interwork Segment (IPv4 Address)"),
-        (0x0C, 0x05) => Some("MUP Interwork Segment (4-Octet AS)"),
+/// IANA BGP Transitive / Non-Transitive Extended Community Types —
+/// <https://www.iana.org/assignments/bgp-extended-communities/bgp-extended-communities.xhtml>
+/// RFC 7153, Section 5 — <https://www.rfc-editor.org/rfc/rfc7153#section-5>
+fn ext_community_type_name(type_high: u8) -> Option<&'static str> {
+    match type_high {
+        0x00 => Some("Transitive Two-Octet AS-Specific"),
+        0x01 => Some("Transitive IPv4-Address-Specific"),
+        0x02 => Some("Transitive Four-Octet AS-Specific"),
+        0x03 => Some("Transitive Opaque"),
+        0x06 => Some("EVPN"),
+        // RFC 9832 — https://www.rfc-editor.org/rfc/rfc9832
+        0x0a => Some("Transport Class"),
+        // RFC 9015 — https://www.rfc-editor.org/rfc/rfc9015
+        0x0b => Some("SFC"),
+        // draft-ietf-bess-mup-safi-01, Section 3.2 —
+        // https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/
+        0x0c => Some("SRv6 MUP"),
+        0x40 => Some("Non-Transitive Two-Octet AS-Specific"),
+        0x41 => Some("Non-Transitive IPv4-Address-Specific"),
+        0x42 => Some("Non-Transitive Four-Octet AS-Specific"),
+        0x43 => Some("Non-Transitive Opaque"),
+        0x4a => Some("Non-Transitive Transport Class"),
+        0x80 => Some("Generic Transitive"),
+        0x81 => Some("Generic Transitive Part 2"),
+        0x82 => Some("Generic Transitive Part 3"),
         _ => None,
     }
+}
+
+/// Returns a human-readable name for an Extended Community (Type, Sub-Type)
+/// pair (see [`ext_community_sub_type`]).
+fn ext_community_sub_type_name(type_high: u8, sub_type: u8) -> Option<&'static str> {
+    ext_community_sub_type(type_high, sub_type).0
+}
+
+/// Returns the name and the Value layout of an Extended Community (Type,
+/// Sub-Type) pair.
+///
+/// Only the sub-types assigned by RFCs are named, plus the BGP-MUP ones
+/// decoded by this dissector. An unnamed sub-type of an AS- or
+/// IPv4-Address-Specific type still uses that type's Global / Local
+/// Administrator layout (RFC 4360, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc4360#section-3>).
+///
+/// IANA BGP Extended Communities —
+/// <https://www.iana.org/assignments/bgp-extended-communities/bgp-extended-communities.xhtml>
+fn ext_community_sub_type(
+    type_high: u8,
+    sub_type: u8,
+) -> (Option<&'static str>, ExtCommunityValue) {
+    use ExtCommunityValue as V;
+    let (name, layout) = match (type_high, sub_type) {
+        // Route Target / Route Origin (RFC 4360, Section 4 —
+        // https://www.rfc-editor.org/rfc/rfc4360#section-4; RFC 5668,
+        // Section 2 — https://www.rfc-editor.org/rfc/rfc5668#section-2).
+        (0x00..=0x02, 0x02) => ("Route Target", V::Generic),
+        (0x00..=0x02, 0x03) => ("Route Origin", V::Generic),
+        // Link Bandwidth (RFC 10005, Section 2 —
+        // https://www.rfc-editor.org/rfc/rfc10005#section-2).
+        (0x00 | 0x40, 0x04) => ("Link Bandwidth", V::LinkBandwidth),
+        // OSPF Domain Identifier / Router ID / Route Type and their
+        // backward-compatible 0x80xx forms (RFC 4577, Section 4.2.6 —
+        // https://www.rfc-editor.org/rfc/rfc4577#section-4.2.6).
+        (0x00..=0x02, 0x05) => ("OSPF Domain Identifier", V::Generic),
+        (0x01, 0x07) => ("OSPF Router ID", V::Generic),
+        (0x03, 0x06) => ("OSPF Route Type", V::OspfRouteType),
+        (0x80, 0x00) => ("OSPF Route Type (deprecated)", V::OspfRouteType),
+        (0x80, 0x01) => ("OSPF Router ID (deprecated)", V::Ipv4Address),
+        (0x80, 0x05) => ("OSPF Domain Identifier (deprecated)", V::TwoOctetAs),
+        // BGP Data Collection (RFC 4384 — https://www.rfc-editor.org/rfc/rfc4384).
+        (0x00 | 0x02, 0x08) => ("BGP Data Collection", V::Generic),
+        // Source AS and VRF Route Import (RFC 6514, Section 4 —
+        // https://www.rfc-editor.org/rfc/rfc6514#section-4).
+        (0x00 | 0x02, 0x09) => ("Source AS", V::Generic),
+        (0x01, 0x0b) => ("VRF Route Import", V::Generic),
+        // L2VPN Identifier (RFC 6074 — https://www.rfc-editor.org/rfc/rfc6074).
+        (0x00 | 0x01, 0x0a) => ("L2VPN Identifier", V::Generic),
+        // RFC 7524 — https://www.rfc-editor.org/rfc/rfc7524
+        (0x01, 0x12) => ("Inter-Area P2MP Segmented Next-Hop", V::Generic),
+        // RFC 9081 — https://www.rfc-editor.org/rfc/rfc9081
+        (0x01, 0x20) => ("MVPN SA RP-address", V::Generic),
+        // Transitive Opaque: CP-ORF (RFC 7543 —
+        // https://www.rfc-editor.org/rfc/rfc7543), Extranet (RFC 7900 —
+        // https://www.rfc-editor.org/rfc/rfc7900), Additional PMSI Tunnel
+        // Attribute Flags (RFC 7902 — https://www.rfc-editor.org/rfc/rfc7902),
+        // Context-Specific Label Space ID (RFC 9573 —
+        // https://www.rfc-editor.org/rfc/rfc9573), Local Color Mapping
+        // (RFC 9871 — https://www.rfc-editor.org/rfc/rfc9871).
+        (0x03, 0x03) => ("CP-ORF", V::Raw),
+        (0x03, 0x04) => ("Extranet Source", V::Raw),
+        (0x03, 0x05) => ("Extranet Separation", V::Raw),
+        (0x03, 0x07) => ("Additional PMSI Tunnel Attribute Flags", V::Raw),
+        (0x03, 0x08) => ("Context-Specific Label Space ID", V::Raw),
+        (0x03, 0x1b) => ("Local Color Mapping", V::Raw),
+        // Color and Encapsulation (RFC 9012, Sections 4.3 and 4.1 —
+        // https://www.rfc-editor.org/rfc/rfc9012#section-4).
+        (0x03, 0x0b) => ("Color", V::Color),
+        (0x03, 0x0c) => ("Encapsulation", V::Encapsulation),
+        // Default Gateway (RFC 7432, Section 7.8 —
+        // https://www.rfc-editor.org/rfc/rfc7432#section-7.8): the Value is
+        // reserved and kept as bytes.
+        (0x03, 0x0d) => ("Default Gateway", V::Raw),
+        // BGP Origin Validation State (RFC 8097, Section 2 —
+        // https://www.rfc-editor.org/rfc/rfc8097#section-2).
+        (0x43, 0x00) => ("BGP Origin Validation State", V::OriginValidation),
+        // EVPN (RFC 7432, Sections 7.5-7.7 —
+        // https://www.rfc-editor.org/rfc/rfc7432#section-7.5; RFC 9135,
+        // Section 8.1 — https://www.rfc-editor.org/rfc/rfc9135#section-8.1).
+        (0x06, 0x00) => ("MAC Mobility", V::MacMobility),
+        (0x06, 0x01) => ("ESI Label", V::EsiLabel),
+        (0x06, 0x02) => ("ES-Import Route Target", V::Mac),
+        (0x06, 0x03) => ("EVPN Router's MAC", V::Mac),
+        // EVPN sub-types kept as bytes: RFC 8214
+        // (https://www.rfc-editor.org/rfc/rfc8214), RFC 8317
+        // (https://www.rfc-editor.org/rfc/rfc8317), RFC 8584
+        // (https://www.rfc-editor.org/rfc/rfc8584), RFC 9047
+        // (https://www.rfc-editor.org/rfc/rfc9047), RFC 9251
+        // (https://www.rfc-editor.org/rfc/rfc9251), RFC 9722
+        // (https://www.rfc-editor.org/rfc/rfc9722).
+        (0x06, 0x04) => ("EVPN Layer 2 Attributes", V::Raw),
+        (0x06, 0x05) => ("E-Tree", V::Raw),
+        (0x06, 0x06) => ("DF Election", V::Raw),
+        (0x06, 0x08) => ("ARP/ND", V::Raw),
+        (0x06, 0x09) => ("Multicast Flags", V::Raw),
+        (0x06, 0x0a) => ("EVI-RT Type 0", V::Raw),
+        (0x06, 0x0b) => ("EVI-RT Type 1", V::Raw),
+        (0x06, 0x0c) => ("EVI-RT Type 2", V::Raw),
+        (0x06, 0x0d) => ("EVI-RT Type 3", V::Raw),
+        (0x06, 0x0f) => ("Service Carving Time", V::Raw),
+        // Flow Specification actions (RFC 8955, Section 7 —
+        // https://www.rfc-editor.org/rfc/rfc8955#section-7).
+        (0x80, 0x06) => ("Flow spec traffic-rate-bytes", V::TrafficRate),
+        (0x80, 0x07) => ("Flow spec traffic-action", V::TrafficAction),
+        (0x80, 0x08) => ("Flow spec rt-redirect AS-2octet", V::TwoOctetAs),
+        (0x80, 0x09) => ("Flow spec traffic-remarking", V::TrafficMarking),
+        (0x80, 0x0c) => ("Flow spec traffic-rate-packets", V::TrafficRate),
+        (0x81, 0x08) => ("Flow spec rt-redirect IPv4", V::Ipv4Address),
+        (0x82, 0x08) => ("Flow spec rt-redirect AS-4octet", V::FourOctetAs),
+        // Layer2 Info (RFC 4761 — https://www.rfc-editor.org/rfc/rfc4761),
+        // E-Tree Info (RFC 7796 — https://www.rfc-editor.org/rfc/rfc7796),
+        // SFC Classifiers (RFC 9015 — https://www.rfc-editor.org/rfc/rfc9015).
+        (0x80, 0x0a) => ("Layer2 Info", V::Raw),
+        (0x80, 0x0b) => ("E-Tree Info", V::Raw),
+        (0x80, 0x0d) => ("Flow Specification for SFC Classifiers", V::Raw),
+        // BGP-MUP Direct / Interwork Segment (draft-ietf-bess-mup-safi-01,
+        // Section 3.2 — https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/).
+        (0x0C, 0x00) => ("MUP Direct Segment (2-Octet AS)", V::TwoOctetAs),
+        (0x0C, 0x01) => ("MUP Direct Segment (IPv4 Address)", V::Ipv4Address),
+        (0x0C, 0x02) => ("MUP Direct Segment (4-Octet AS)", V::FourOctetAs),
+        (0x0C, 0x03) => ("MUP Interwork Segment (2-Octet AS)", V::TwoOctetAs),
+        (0x0C, 0x04) => ("MUP Interwork Segment (IPv4 Address)", V::Ipv4Address),
+        (0x0C, 0x05) => ("MUP Interwork Segment (4-Octet AS)", V::FourOctetAs),
+        _ => return (None, ext_community_type_layout(type_high)),
+    };
+    let layout = match layout {
+        V::Generic => ext_community_type_layout(type_high),
+        other => other,
+    };
+    (Some(name), layout)
+}
+
+/// Returns the Global / Local Administrator layout of an AS- or
+/// IPv4-Address-Specific Extended Community Type, or [`ExtCommunityValue::Raw`].
+///
+/// RFC 4360, Section 3 — <https://www.rfc-editor.org/rfc/rfc4360#section-3>
+/// RFC 5668, Section 2 — <https://www.rfc-editor.org/rfc/rfc5668#section-2>
+fn ext_community_type_layout(type_high: u8) -> ExtCommunityValue {
+    match type_high {
+        0x00 | 0x40 => ExtCommunityValue::TwoOctetAs,
+        0x01 | 0x41 => ExtCommunityValue::Ipv4Address,
+        0x02 | 0x42 => ExtCommunityValue::FourOctetAs,
+        _ => ExtCommunityValue::Raw,
+    }
+}
+
+/// Returns a human-readable name for an IPv6 Address Specific Extended
+/// Community Type.
+///
+/// RFC 5701, Section 2 — <https://www.rfc-editor.org/rfc/rfc5701#section-2>
+fn ipv6_ext_community_type_name(type_high: u8) -> Option<&'static str> {
+    match type_high {
+        0x00 => Some("Transitive IPv6-Address-Specific"),
+        0x40 => Some("Non-Transitive IPv6-Address-Specific"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for an IPv6 Address Specific Extended
+/// Community (Type, Sub-Type) pair.
+///
+/// IANA Transitive IPv6-Address-Specific Extended Community Types —
+/// <https://www.iana.org/assignments/bgp-extended-communities/bgp-extended-communities.xhtml#trans-ipv6>
+fn ipv6_ext_community_sub_type_name(type_high: u8, sub_type: u8) -> Option<&'static str> {
+    match (type_high, sub_type) {
+        // RFC 5701, Section 2 — https://www.rfc-editor.org/rfc/rfc5701#section-2
+        (0x00, 0x02) => Some("Route Target"),
+        (0x00, 0x03) => Some("Route Origin"),
+        // RFC 6515 — https://www.rfc-editor.org/rfc/rfc6515
+        (0x00, 0x0b) => Some("VRF Route Import"),
+        // RFC 8956, Section 6.1 — https://www.rfc-editor.org/rfc/rfc8956#section-6.1
+        (0x00, 0x0d) => Some("Flow spec rt-redirect-ipv6"),
+        // RFC 7524 — https://www.rfc-editor.org/rfc/rfc7524
+        (0x00, 0x12) => Some("Inter-Area P2MP Segmented Next-Hop"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for a BGP Origin Validation State.
+///
+/// RFC 8097, Section 2 — <https://www.rfc-editor.org/rfc/rfc8097#section-2>
+fn origin_validation_state_name(v: u8) -> Option<&'static str> {
+    match v {
+        0 => Some("Valid"),
+        1 => Some("NotFound"),
+        2 => Some("Invalid"),
+        _ => None,
+    }
+}
+
+/// Returns the `type` sibling of an extended community object.
+fn sibling_ext_type(siblings: &[packet_dissector_core::field::Field<'_>]) -> Option<u8> {
+    siblings
+        .iter()
+        .find(|f| f.name() == "type")
+        .and_then(|f| f.value.as_u8())
 }
 
 /// Returns a human-readable name for AS_PATH segment types.
@@ -2608,24 +2828,15 @@ fn parse_attr_value<'pkt>(
         15 if data.len() >= 3 => {
             return Some(parse_mp_unreach_nlri(buf, data, offset));
         }
-        // EXTENDED_COMMUNITIES (RFC 4360) — sequence of 8-byte values
-        16 if data.len() % 8 == 0 => {
-            let array_idx = buf.begin_container(
-                &PATH_ATTR_CHILDREN[FD_PA_VALUE],
-                FieldValue::Array(0..0),
-                offset..offset + data.len(),
-            );
-            let mut pos = 0;
-            while pos + 8 <= data.len() {
-                let abs = offset + pos;
-                buf.push_field(
-                    &EXT_COMMUNITY_ENTRY_DESCRIPTOR,
-                    FieldValue::Bytes(&data[pos..pos + 8]),
-                    abs..abs + 8,
-                );
-                pos += 8;
-            }
-            buf.end_container(array_idx);
+        // EXTENDED COMMUNITIES (RFC 4360, Section 2 —
+        // https://www.rfc-editor.org/rfc/rfc4360#section-2) — 8-octet
+        // communities.
+        16 if data.len() % EXT_COMMUNITY_SIZE == 0 => parse_ext_communities(buf, data, offset),
+        // IPv6 Address Specific Extended Community (RFC 5701, Section 2 —
+        // https://www.rfc-editor.org/rfc/rfc5701#section-2) — 20-octet
+        // communities.
+        25 if data.len() % IPV6_EXT_COMMUNITY_SIZE == 0 => {
+            parse_ipv6_ext_communities(buf, data, offset)
         }
         // AS4_PATH (RFC 6793) — same format as AS_PATH but with 4-byte AS numbers
         17 if as_path_fits(data, 4) => {
@@ -4155,83 +4366,261 @@ fn format_aggregator(
     }
 }
 
-/// Writes the Global Administrator : Local Administrator portion (bytes 2..8) of an
-/// RFC 4360/RFC 5668-style Extended Community.
-///
-/// `kind`: 0 = 2-Octet AS Specific, 1 = IPv4 Address Specific, 2 = 4-Octet AS Specific.
-fn write_ext_community_admin_value(
-    kind: u8,
-    bytes: &[u8],
-    w: &mut dyn std::io::Write,
-) -> std::io::Result<()> {
-    match kind {
-        // 2-Octet AS Specific
-        0 => {
-            let asn = u16::from_be_bytes([bytes[2], bytes[3]]) as u32;
-            let val = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-            write!(w, "\"{}:{}\"", asn, val)
-        }
-        // IPv4 Address Specific
-        1 => {
-            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
-            write!(
-                w,
-                "\"{}.{}.{}.{}:{}\"",
-                bytes[2], bytes[3], bytes[4], bytes[5], val
-            )
-        }
-        // 4-Octet AS Specific
-        _ => {
-            let asn = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
-            let val = u16::from_be_bytes([bytes[6], bytes[7]]);
-            write!(w, "\"{}:{}\"", asn, val)
-        }
-    }
+/// Size of an Extended Community (RFC 4360, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc4360#section-2>).
+const EXT_COMMUNITY_SIZE: usize = 8;
+/// Size of an IPv6 Address Specific Extended Community (RFC 5701, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc5701#section-2>).
+const IPV6_EXT_COMMUNITY_SIZE: usize = 20;
+
+/// Layout of the 6-octet Value of an Extended Community.
+enum ExtCommunityValue {
+    /// The Global / Local Administrator layout of the Type (see
+    /// [`ext_community_type_layout`]).
+    Generic,
+    /// 2-octet Global Administrator (AS) and 4-octet Local Administrator
+    /// (RFC 4360, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc4360#section-3.1>).
+    TwoOctetAs,
+    /// IPv4 address Global Administrator and 2-octet Local Administrator
+    /// (RFC 4360, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc4360#section-3.2>).
+    Ipv4Address,
+    /// 4-octet Global Administrator (AS) and 2-octet Local Administrator
+    /// (RFC 5668, Section 2 — <https://www.rfc-editor.org/rfc/rfc5668#section-2>).
+    FourOctetAs,
+    /// 2-octet Global Administrator and a 4-octet IEEE 754 bandwidth in bytes
+    /// per second (RFC 10005, Section 2 —
+    /// <https://www.rfc-editor.org/rfc/rfc10005#section-2>).
+    LinkBandwidth,
+    /// 2-octet id and a 4-octet IEEE 754 rate (RFC 8955, Sections 7.1-7.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc8955#section-7.1>).
+    TrafficRate,
+    /// Flags (2) and Color Value (4) (RFC 9012, Section 4.3 —
+    /// <https://www.rfc-editor.org/rfc/rfc9012#section-4.3>).
+    Color,
+    /// Reserved (4) and Tunnel Type (2) (RFC 9012, Section 4.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc9012#section-4.1>).
+    Encapsulation,
+    /// Area Number (4), Route Type (1), Options (1) (RFC 4577,
+    /// Section 4.2.6 — <https://www.rfc-editor.org/rfc/rfc4577#section-4.2.6>).
+    OspfRouteType,
+    /// Flags (1), Reserved (1), Sequence Number (4) (RFC 7432, Section 7.7 —
+    /// <https://www.rfc-editor.org/rfc/rfc7432#section-7.7>).
+    MacMobility,
+    /// Flags (1), Reserved (2), ESI Label (3) (RFC 7432, Section 7.5 —
+    /// <https://www.rfc-editor.org/rfc/rfc7432#section-7.5>).
+    EsiLabel,
+    /// A 6-octet MAC address (RFC 7432, Section 7.6 —
+    /// <https://www.rfc-editor.org/rfc/rfc7432#section-7.6>; RFC 9135,
+    /// Section 8.1 — <https://www.rfc-editor.org/rfc/rfc9135#section-8.1>).
+    Mac,
+    /// Traffic Action Field with the S and T bits (RFC 8955, Section 7.3 —
+    /// <https://www.rfc-editor.org/rfc/rfc8955#section-7.3>).
+    TrafficAction,
+    /// DSCP in the 6 least significant bits (RFC 8955, Section 7.5 —
+    /// <https://www.rfc-editor.org/rfc/rfc8955#section-7.5>).
+    TrafficMarking,
+    /// Validation State in the last octet (RFC 8097, Section 2 —
+    /// <https://www.rfc-editor.org/rfc/rfc8097#section-2>).
+    OriginValidation,
+    /// Not decoded: the 6 octets as `value`.
+    Raw,
 }
 
-/// Writes an Extended Community's raw bytes as a `"0x..."` hex string.
-fn write_ext_community_hex(bytes: &[u8], w: &mut dyn std::io::Write) -> std::io::Result<()> {
-    write!(w, "\"0x")?;
-    for b in bytes {
-        write!(w, "{b:02x}")?;
+/// Parses an EXTENDED COMMUNITIES value (type code 16) into an Array of
+/// Extended Community objects.
+///
+/// RFC 4360, Section 2 — <https://www.rfc-editor.org/rfc/rfc4360#section-2>
+///
+/// Callers check that `data` is a multiple of 8 octets.
+fn parse_ext_communities<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
+    let array_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
+    for (i, c) in data.chunks_exact(EXT_COMMUNITY_SIZE).enumerate() {
+        parse_ext_community(buf, c, offset + i * EXT_COMMUNITY_SIZE);
     }
-    write!(w, "\"")
+    buf.end_container(array_idx);
 }
 
-/// Writes a BGP Extended Community as a human-readable string.
+/// Parses one 8-octet Extended Community: Type (1), Sub-Type (1) and a
+/// 6-octet Value laid out per [`ext_community_sub_type`].
 ///
-/// 8-byte value: Type (1) + Sub-Type (1) + Value (6).
-/// - Type 0x00/0x40: 2-Octet AS — `"<AS>:<value>"`
-/// - Type 0x01/0x41: IPv4 Address — `"<IPv4>:<value>"`
-/// - Type 0x02/0x42: 4-Octet AS — `"<AS>:<value>"`
-/// - Type 0x0C (MUP): Sub-Type selects 2-Octet AS / IPv4 Address / 4-Octet AS Specific
-///   formatting for both Direct Segment (0x00-0x02) and Interwork Segment (0x03-0x05).
-/// - Other types: hex representation.
+/// RFC 4360, Section 2 — <https://www.rfc-editor.org/rfc/rfc4360#section-2>
+fn parse_ext_community<'pkt>(buf: &mut DissectBuffer<'pkt>, c: &'pkt [u8], offset: usize) {
+    use ExtCommunityValue as V;
+    let f = EXT_COMMUNITY_CHILDREN;
+    let o = offset;
+    let obj_idx = buf.begin_container(
+        &EXT_COMMUNITY_OBJECT_DESCRIPTOR,
+        FieldValue::Object(0..0),
+        o..o + EXT_COMMUNITY_SIZE,
+    );
+    let (type_high, sub_type) = (c[0], c[1]);
+    buf.push_field(&f[FD_EC_TYPE], FieldValue::U8(type_high), o..o + 1);
+    buf.push_field(&f[FD_EC_SUB_TYPE], FieldValue::U8(sub_type), o + 1..o + 2);
+    let u16_at = |i: usize| read_be_u16(c, i).unwrap_or_default();
+    let u32_at = |i: usize| read_be_u32(c, i).unwrap_or_default();
+    // Value octet `i` (2..8) as the field `fd` of `len` octets.
+    let mut push = |fd: usize, value: FieldValue<'pkt>, i: usize, len: usize| {
+        buf.push_field(&f[fd], value, o + i..o + i + len);
+    };
+    match ext_community_sub_type(type_high, sub_type).1 {
+        V::TwoOctetAs => {
+            push(
+                FD_EC_GLOBAL_ADMIN,
+                FieldValue::U32(u32::from(u16_at(2))),
+                2,
+                2,
+            );
+            push(FD_EC_LOCAL_ADMIN, FieldValue::U32(u32_at(4)), 4, 4);
+        }
+        V::Ipv4Address => {
+            let addr = read_ipv4_addr(c, 2).unwrap_or_default();
+            push(FD_EC_GLOBAL_ADMIN, FieldValue::Ipv4Addr(addr), 2, 4);
+            push(
+                FD_EC_LOCAL_ADMIN,
+                FieldValue::U32(u32::from(u16_at(6))),
+                6,
+                2,
+            );
+        }
+        V::FourOctetAs => {
+            push(FD_EC_GLOBAL_ADMIN, FieldValue::U32(u32_at(2)), 2, 4);
+            push(
+                FD_EC_LOCAL_ADMIN,
+                FieldValue::U32(u32::from(u16_at(6))),
+                6,
+                2,
+            );
+        }
+        V::LinkBandwidth => {
+            push(
+                FD_EC_GLOBAL_ADMIN,
+                FieldValue::U32(u32::from(u16_at(2))),
+                2,
+                2,
+            );
+            push(FD_EC_BANDWIDTH, FieldValue::Bytes(&c[4..]), 4, 4);
+        }
+        V::TrafficRate => {
+            push(
+                FD_EC_GLOBAL_ADMIN,
+                FieldValue::U32(u32::from(u16_at(2))),
+                2,
+                2,
+            );
+            push(FD_EC_RATE, FieldValue::Bytes(&c[4..]), 4, 4);
+        }
+        V::Color => {
+            push(FD_EC_COLOR_FLAGS, FieldValue::U16(u16_at(2)), 2, 2);
+            push(FD_EC_COLOR, FieldValue::U32(u32_at(4)), 4, 4);
+        }
+        V::Encapsulation => push(FD_EC_ENCAP_TUNNEL_TYPE, FieldValue::U16(u16_at(6)), 6, 2),
+        V::OspfRouteType => {
+            push(FD_EC_OSPF_AREA, FieldValue::U32(u32_at(2)), 2, 4);
+            push(FD_EC_OSPF_ROUTE_TYPE, FieldValue::U8(c[6]), 6, 1);
+            push(FD_EC_OSPF_OPTIONS, FieldValue::U8(c[7]), 7, 1);
+        }
+        V::MacMobility => {
+            push(FD_EC_EVPN_FLAGS, FieldValue::U8(c[2]), 2, 1);
+            push(FD_EC_SEQUENCE_NUMBER, FieldValue::U32(u32_at(4)), 4, 4);
+        }
+        V::EsiLabel => {
+            push(FD_EC_EVPN_FLAGS, FieldValue::U8(c[2]), 2, 1);
+            // An MPLS label, encoded like the other EVPN label fields: "The
+            // MPLS Label1 field is encoded as 3 octets, where the high-order
+            // 20 bits contain the label value" (RFC 7432, Section 9.2.1 —
+            // https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1).
+            let label = read_be_u24(c, 5).unwrap_or_default() >> 4;
+            push(FD_EC_ESI_LABEL, FieldValue::U32(label), 5, 3);
+        }
+        V::Mac => {
+            let mac = MacAddr([c[2], c[3], c[4], c[5], c[6], c[7]]);
+            push(FD_EC_MAC, FieldValue::MacAddr(mac), 2, 6);
+        }
+        V::TrafficAction => {
+            // Sample is bit 46 and Terminal Action bit 47 of the community;
+            // the other Traffic Action Field bits stay visible in `value`
+            // (RFC 8955, Section 7.3 —
+            // https://www.rfc-editor.org/rfc/rfc8955#section-7.3).
+            push(FD_EC_VALUE, FieldValue::Bytes(&c[2..]), 2, 6);
+            push(FD_EC_SAMPLE, FieldValue::U8((c[7] >> 1) & 1), 7, 1);
+            push(FD_EC_TERMINAL_ACTION, FieldValue::U8(c[7] & 1), 7, 1);
+        }
+        V::TrafficMarking => push(FD_EC_DSCP, FieldValue::U8(c[7] & 0x3f), 7, 1),
+        V::OriginValidation => push(FD_EC_VALIDATION_STATE, FieldValue::U8(c[7]), 7, 1),
+        V::Generic | V::Raw => push(FD_EC_VALUE, FieldValue::Bytes(&c[2..]), 2, 6),
+    }
+    buf.end_container(obj_idx);
+}
+
+/// Parses an IPv6 Address Specific Extended Community value (type code 25)
+/// into an Array of objects: Type (1), Sub-Type (1), Global Administrator
+/// (IPv6 address, 16) and Local Administrator (2).
 ///
-/// RFC 4360, Section 3 — <https://www.rfc-editor.org/rfc/rfc4360#section-3>
-/// draft-ietf-bess-mup-safi-01, Section 3.2 —
-/// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-fn format_ext_community(
+/// RFC 5701, Section 2 — <https://www.rfc-editor.org/rfc/rfc5701#section-2>
+///
+/// Callers check that `data` is a multiple of 20 octets.
+fn parse_ipv6_ext_communities<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) {
+    // The IPv6 object reuses the FD_EC_TYPE .. FD_EC_LOCAL_ADMIN indices.
+    let f = IPV6_EXT_COMMUNITY_CHILDREN;
+    let array_idx = buf.begin_container(
+        &PATH_ATTR_CHILDREN[FD_PA_VALUE],
+        FieldValue::Array(0..0),
+        offset..offset + data.len(),
+    );
+    for (i, c) in data.chunks_exact(IPV6_EXT_COMMUNITY_SIZE).enumerate() {
+        let o = offset + i * IPV6_EXT_COMMUNITY_SIZE;
+        let obj_idx = buf.begin_container(
+            &IPV6_EXT_COMMUNITY_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            o..o + IPV6_EXT_COMMUNITY_SIZE,
+        );
+        buf.push_field(&f[FD_EC_TYPE], FieldValue::U8(c[0]), o..o + 1);
+        buf.push_field(&f[FD_EC_SUB_TYPE], FieldValue::U8(c[1]), o + 1..o + 2);
+        buf.push_field(
+            &f[FD_EC_GLOBAL_ADMIN],
+            FieldValue::Ipv6Addr(read_ipv6_addr(c, 2).unwrap_or_default()),
+            o + 2..o + 18,
+        );
+        buf.push_field(
+            &f[FD_EC_LOCAL_ADMIN],
+            FieldValue::U32(u32::from(read_be_u16(c, 18).unwrap_or_default())),
+            o + 18..o + 20,
+        );
+        buf.end_container(obj_idx);
+    }
+    buf.end_container(array_idx);
+}
+
+/// Writes a 4-octet IEEE 754 single-precision value (big-endian bytes) as a
+/// JSON number, or as a string when it is not finite.
+///
+/// Used for the Link Bandwidth (RFC 10005, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc10005#section-2>) and traffic-rate
+/// (RFC 8955, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc8955#section-7.1>)
+/// Extended Communities.
+fn format_ieee754_f32(
     value: &FieldValue<'_>,
     _ctx: &FormatContext<'_>,
     w: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
-    let bytes = match value {
-        FieldValue::Bytes(b) if b.len() == 8 => *b,
-        _ => return w.write_all(b"\"\""),
-    };
-    let type_high = bytes[0];
-    match type_high {
-        0x00 | 0x40 => write_ext_community_admin_value(0, bytes, w),
-        0x01 | 0x41 => write_ext_community_admin_value(1, bytes, w),
-        0x02 | 0x42 => write_ext_community_admin_value(2, bytes, w),
-        0x0C => match bytes[1] {
-            0x00 | 0x03 => write_ext_community_admin_value(0, bytes, w),
-            0x01 | 0x04 => write_ext_community_admin_value(1, bytes, w),
-            0x02 | 0x05 => write_ext_community_admin_value(2, bytes, w),
-            _ => write_ext_community_hex(bytes, w),
-        },
-        _ => write_ext_community_hex(bytes, w),
+    match value {
+        &FieldValue::Bytes(&[a, b, c, d]) => {
+            let v = f32::from_be_bytes([a, b, c, d]);
+            if v.is_finite() {
+                write!(w, "{v}")
+            } else {
+                write!(w, "\"{v}\"")
+            }
+        }
+        _ => w.write_all(b"null"),
     }
 }
 
@@ -5187,14 +5576,140 @@ static COMMUNITY_ENTRY_DESCRIPTOR: FieldDescriptor =
 static CLUSTER_ID_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("cluster_id", "Cluster ID", FieldType::Ipv4Addr);
 
-/// Descriptor for extended community entries (raw 8 bytes).
-static EXT_COMMUNITY_ENTRY_DESCRIPTOR: FieldDescriptor =
-    FieldDescriptor::new("ext_community", "Extended Community", FieldType::Bytes)
-        .with_display_fn(|v, _| match v {
-            FieldValue::Bytes(b) if b.len() >= 2 => extended_community_type_name(b[0], b[1]),
+/// Field descriptor indices for [`EXT_COMMUNITY_CHILDREN`].
+const FD_EC_TYPE: usize = 0;
+const FD_EC_SUB_TYPE: usize = 1;
+const FD_EC_GLOBAL_ADMIN: usize = 2;
+const FD_EC_LOCAL_ADMIN: usize = 3;
+const FD_EC_BANDWIDTH: usize = 4;
+const FD_EC_RATE: usize = 5;
+const FD_EC_COLOR_FLAGS: usize = 6;
+const FD_EC_COLOR: usize = 7;
+const FD_EC_ENCAP_TUNNEL_TYPE: usize = 8;
+const FD_EC_OSPF_AREA: usize = 9;
+const FD_EC_OSPF_ROUTE_TYPE: usize = 10;
+const FD_EC_OSPF_OPTIONS: usize = 11;
+const FD_EC_EVPN_FLAGS: usize = 12;
+const FD_EC_SEQUENCE_NUMBER: usize = 13;
+const FD_EC_ESI_LABEL: usize = 14;
+const FD_EC_MAC: usize = 15;
+const FD_EC_SAMPLE: usize = 16;
+const FD_EC_TERMINAL_ACTION: usize = 17;
+const FD_EC_DSCP: usize = 18;
+const FD_EC_VALIDATION_STATE: usize = 19;
+const FD_EC_VALUE: usize = 20;
+
+/// Child field descriptors of an Extended Community object.
+///
+/// `type` / `sub_type` are always present; the other fields depend on the
+/// (Type, Sub-Type) pair (see [`ext_community_sub_type`]), so they are
+/// optional. `global_admin` is a U32 AS number, an IPv4 address or (for the
+/// IPv6 Address Specific Extended Community) an IPv6 address.
+///
+/// RFC 4360, Section 2 — <https://www.rfc-editor.org/rfc/rfc4360#section-2>
+/// RFC 7153 — <https://www.rfc-editor.org/rfc/rfc7153>
+const EXT_COMMUNITY_FIELDS: [FieldDescriptor; 21] = [
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => ext_community_type_name(*t),
+        _ => None,
+    }),
+    FieldDescriptor::new("sub_type", "Sub-Type", FieldType::U8).with_display_fn(
+        |v, siblings| match (v, sibling_ext_type(siblings)) {
+            (FieldValue::U8(s), Some(t)) => ext_community_sub_type_name(t, *s),
             _ => None,
-        })
-        .with_format_fn(format_ext_community);
+        },
+    ),
+    FieldDescriptor::new("global_admin", "Global Administrator", FieldType::Any).optional(),
+    FieldDescriptor::new("local_admin", "Local Administrator", FieldType::U32).optional(),
+    // Link Bandwidth (RFC 10005, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc10005#section-2): bytes per second.
+    FieldDescriptor::new("bandwidth", "Bandwidth", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_ieee754_f32),
+    // traffic-rate-bytes / traffic-rate-packets (RFC 8955, Sections 7.1-7.2 —
+    // https://www.rfc-editor.org/rfc/rfc8955#section-7.1).
+    FieldDescriptor::new("rate", "Rate", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_ieee754_f32),
+    // Color (RFC 9012, Section 4.3 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-4.3).
+    FieldDescriptor::new("color_flags", "Color Flags", FieldType::U16).optional(),
+    FieldDescriptor::new("color", "Color Value", FieldType::U32).optional(),
+    // Encapsulation (RFC 9012, Section 4.1 —
+    // https://www.rfc-editor.org/rfc/rfc9012#section-4.1).
+    FieldDescriptor::new("encap_tunnel_type", "Tunnel Type", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(t) => tunnel_type_name(*t),
+            _ => None,
+        }),
+    // OSPF Route Type (RFC 4577, Section 4.2.6 —
+    // https://www.rfc-editor.org/rfc/rfc4577#section-4.2.6).
+    FieldDescriptor::new("ospf_area", "Area Number", FieldType::U32).optional(),
+    FieldDescriptor::new("ospf_route_type", "OSPF Route Type", FieldType::U8).optional(),
+    FieldDescriptor::new("ospf_options", "Options", FieldType::U8).optional(),
+    // MAC Mobility / ESI Label / ES-Import RT / Router's MAC (RFC 7432,
+    // Sections 7.5-7.7 — https://www.rfc-editor.org/rfc/rfc7432#section-7.5;
+    // RFC 9135, Section 8.1 — https://www.rfc-editor.org/rfc/rfc9135#section-8.1).
+    FieldDescriptor::new("evpn_flags", "Flags", FieldType::U8).optional(),
+    FieldDescriptor::new("sequence_number", "Sequence Number", FieldType::U32).optional(),
+    FieldDescriptor::new("esi_label", "ESI Label", FieldType::U32).optional(),
+    FieldDescriptor::new("mac", "MAC Address", FieldType::MacAddr).optional(),
+    // traffic-action / traffic-marking (RFC 8955, Sections 7.3 and 7.5 —
+    // https://www.rfc-editor.org/rfc/rfc8955#section-7.3).
+    FieldDescriptor::new("sample", "Sample", FieldType::U8).optional(),
+    FieldDescriptor::new("terminal_action", "Terminal Action", FieldType::U8).optional(),
+    FieldDescriptor::new("dscp", "DSCP", FieldType::U8).optional(),
+    // BGP Origin Validation State (RFC 8097, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc8097#section-2).
+    FieldDescriptor::new("validation_state", "Validation State", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(s) => origin_validation_state_name(*s),
+            _ => None,
+        }),
+    // Value of a (Type, Sub-Type) that is not decoded.
+    FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
+];
+
+/// Slice form of [`EXT_COMMUNITY_FIELDS`].
+static EXT_COMMUNITY_CHILDREN: &[FieldDescriptor] = &EXT_COMMUNITY_FIELDS;
+
+/// Object descriptor for Extended Communities.
+static EXT_COMMUNITY_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("ext_community", "Extended Community", FieldType::Object)
+        .with_children(&EXT_COMMUNITY_FIELDS);
+
+/// Child field descriptors of an IPv6 Address Specific Extended Community
+/// object: `type` / `sub_type` named from the IPv6 registries, and the
+/// `global_admin` / `local_admin` of [`EXT_COMMUNITY_FIELDS`].
+///
+/// RFC 5701, Section 2 — <https://www.rfc-editor.org/rfc/rfc5701#section-2>
+const IPV6_EXT_COMMUNITY_FIELDS: [FieldDescriptor; 4] = [
+    FieldDescriptor::new("type", "Type", FieldType::U8).with_display_fn(|v, _| match v {
+        FieldValue::U8(t) => ipv6_ext_community_type_name(*t),
+        _ => None,
+    }),
+    FieldDescriptor::new("sub_type", "Sub-Type", FieldType::U8).with_display_fn(
+        |v, siblings| match (v, sibling_ext_type(siblings)) {
+            (FieldValue::U8(s), Some(t)) => ipv6_ext_community_sub_type_name(t, *s),
+            _ => None,
+        },
+    ),
+    EXT_COMMUNITY_FIELDS[FD_EC_GLOBAL_ADMIN],
+    EXT_COMMUNITY_FIELDS[FD_EC_LOCAL_ADMIN],
+];
+
+/// Slice form of [`IPV6_EXT_COMMUNITY_FIELDS`].
+static IPV6_EXT_COMMUNITY_CHILDREN: &[FieldDescriptor] = &IPV6_EXT_COMMUNITY_FIELDS;
+
+/// Object descriptor for IPv6 Address Specific Extended Communities.
+static IPV6_EXT_COMMUNITY_OBJECT_DESCRIPTOR: FieldDescriptor = FieldDescriptor::new(
+    "ipv6_ext_community",
+    "IPv6 Address Specific Extended Community",
+    FieldType::Object,
+)
+.with_children(&IPV6_EXT_COMMUNITY_FIELDS);
 
 /// Descriptor for large community entries (raw 12 bytes).
 static LARGE_COMMUNITY_ENTRY_DESCRIPTOR: FieldDescriptor =
@@ -5779,8 +6294,8 @@ const FD_PAV_BFD_DISCRIMINATOR: usize = 32;
 const FD_PAV_OPTIONAL_TLVS: usize = 33;
 /// Field descriptor indices of the ATTR_SET entries of
 /// [`PATH_ATTR_VALUE_FIELDS`].
-const FD_PAV_ORIGIN_AS: usize = 34;
-const FD_PAV_PATH_ATTRIBUTES: usize = 35;
+const FD_PAV_ORIGIN_AS: usize = 53;
+const FD_PAV_PATH_ATTRIBUTES: usize = 54;
 
 /// Union of every field that can appear inside a structured path attribute
 /// `value`, except the ATTR_SET ones (see [`PATH_ATTR_VALUE_FIELDS`]).
@@ -5793,7 +6308,9 @@ const FD_PAV_PATH_ATTRIBUTES: usize = 35;
 /// BGP Prefix-SID (RFC 8669 / RFC 9252), AIGP (RFC 7311) and the SFP
 /// attribute (RFC 9015); an Array of segment objects for AS_PATH / AS4_PATH
 /// (RFC 4271, Section 5.1.2); an Array of scalars for COMMUNITIES /
-/// CLUSTER_LIST / EXTENDED COMMUNITIES / LARGE_COMMUNITY; a scalar for ORIGIN /
+/// CLUSTER_LIST / LARGE_COMMUNITY; an Array of objects for EXTENDED
+/// COMMUNITIES (RFC 4360) and IPv6 Address Specific Extended Community
+/// (RFC 5701); a scalar for ORIGIN /
 /// MULTI_EXIT_DISC / LOCAL_PREF / OTC (RFC 9234); an IPv4 address for
 /// NEXT_HOP / ORIGINATOR_ID; and raw bytes for unknown or malformed
 /// attributes.
@@ -5803,7 +6320,7 @@ const FD_PAV_PATH_ATTRIBUTES: usize = 35;
 /// is present for all `type_code` values. Names are unique: where two shapes
 /// would clash on a name with a different type or children, one of them is
 /// wrapped (`tunnels`, `tlvs`) or prefixed (`pmsi_flags`).
-const PATH_ATTR_VALUE_BASE_FIELDS: [FieldDescriptor; 34] = [
+const PATH_ATTR_VALUE_BASE_FIELDS: [FieldDescriptor; 53] = [
     // MP_REACH_NLRI / MP_UNREACH_NLRI object fields (RFC 4760).
     MP_FIELDS[FD_MP_AFI].optional(),
     MP_FIELDS[FD_MP_SAFI].optional(),
@@ -5880,12 +6397,36 @@ const PATH_ATTR_VALUE_BASE_FIELDS: [FieldDescriptor; 34] = [
     FieldDescriptor::new("optional_tlvs", "Optional TLVs", FieldType::Array)
         .optional()
         .with_children(&BFD_TLV_FIELDS),
+    // Extended Community / IPv6 Address Specific Extended Community element
+    // fields (RFC 4360, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc4360#section-2; RFC 5701, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc5701#section-2); they share `type` and
+    // `value` with the TLVs above.
+    EXT_COMMUNITY_FIELDS[FD_EC_SUB_TYPE].optional(),
+    EXT_COMMUNITY_FIELDS[FD_EC_GLOBAL_ADMIN],
+    EXT_COMMUNITY_FIELDS[FD_EC_LOCAL_ADMIN],
+    EXT_COMMUNITY_FIELDS[FD_EC_BANDWIDTH],
+    EXT_COMMUNITY_FIELDS[FD_EC_RATE],
+    EXT_COMMUNITY_FIELDS[FD_EC_COLOR_FLAGS],
+    EXT_COMMUNITY_FIELDS[FD_EC_COLOR],
+    EXT_COMMUNITY_FIELDS[FD_EC_ENCAP_TUNNEL_TYPE],
+    EXT_COMMUNITY_FIELDS[FD_EC_OSPF_AREA],
+    EXT_COMMUNITY_FIELDS[FD_EC_OSPF_ROUTE_TYPE],
+    EXT_COMMUNITY_FIELDS[FD_EC_OSPF_OPTIONS],
+    EXT_COMMUNITY_FIELDS[FD_EC_EVPN_FLAGS],
+    EXT_COMMUNITY_FIELDS[FD_EC_SEQUENCE_NUMBER],
+    EXT_COMMUNITY_FIELDS[FD_EC_ESI_LABEL],
+    EXT_COMMUNITY_FIELDS[FD_EC_MAC],
+    EXT_COMMUNITY_FIELDS[FD_EC_SAMPLE],
+    EXT_COMMUNITY_FIELDS[FD_EC_TERMINAL_ACTION],
+    EXT_COMMUNITY_FIELDS[FD_EC_DSCP],
+    EXT_COMMUNITY_FIELDS[FD_EC_VALIDATION_STATE],
 ];
 
 /// Union of every field that can appear inside a structured path attribute
 /// `value`: [`PATH_ATTR_VALUE_BASE_FIELDS`] plus the ATTR_SET fields (RFC 6368,
 /// Section 5 — <https://www.rfc-editor.org/rfc/rfc6368#section-5>).
-const PATH_ATTR_VALUE_FIELDS: [FieldDescriptor; 36] = concat_fields(
+const PATH_ATTR_VALUE_FIELDS: [FieldDescriptor; 55] = concat_fields(
     PATH_ATTR_VALUE_BASE_FIELDS,
     [
         FieldDescriptor::new("origin_as", "Origin AS", FieldType::U32).optional(),
@@ -6419,6 +6960,51 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 4360",
         "BGP Extended Communities Attribute",
         "https://www.rfc-editor.org/rfc/rfc4360",
+    ),
+    SpecReference::new(
+        "RFC 4577",
+        "OSPF as the Provider/Customer Edge Protocol for BGP/MPLS IP Virtual Private Networks (VPNs)",
+        "https://www.rfc-editor.org/rfc/rfc4577",
+    ),
+    SpecReference::new(
+        "RFC 5668",
+        "4-Octet AS Specific BGP Extended Community",
+        "https://www.rfc-editor.org/rfc/rfc5668",
+    ),
+    SpecReference::new(
+        "RFC 5701",
+        "IPv6 Address Specific BGP Extended Community Attribute",
+        "https://www.rfc-editor.org/rfc/rfc5701",
+    ),
+    SpecReference::new(
+        "RFC 7153",
+        "IANA Registries for BGP Extended Communities",
+        "https://www.rfc-editor.org/rfc/rfc7153",
+    ),
+    SpecReference::new(
+        "RFC 7432",
+        "BGP MPLS-Based Ethernet VPN",
+        "https://www.rfc-editor.org/rfc/rfc7432",
+    ),
+    SpecReference::new(
+        "RFC 8097",
+        "BGP Prefix Origin Validation State Extended Community",
+        "https://www.rfc-editor.org/rfc/rfc8097",
+    ),
+    SpecReference::new(
+        "RFC 8955",
+        "Dissemination of Flow Specification Rules",
+        "https://www.rfc-editor.org/rfc/rfc8955",
+    ),
+    SpecReference::new(
+        "RFC 9135",
+        "Integrated Routing and Bridging in Ethernet VPN (EVPN)",
+        "https://www.rfc-editor.org/rfc/rfc9135",
+    ),
+    SpecReference::new(
+        "RFC 10005",
+        "BGP Link Bandwidth Extended Community",
+        "https://www.rfc-editor.org/rfc/rfc10005",
     ),
     SpecReference::new(
         "RFC 4364",
@@ -7283,30 +7869,6 @@ mod tests {
         assert_eq!(comms.len(), 2);
         assert_eq!(comms[0].value, FieldValue::U32((65001 << 16) | 100));
         assert_eq!(comms[1].value, FieldValue::U32(0xFFFFFF01));
-    }
-
-    #[test]
-    fn parse_bgp_update_extended_communities() {
-        let mut val = vec![0x00, 0x02];
-        val.extend_from_slice(&65001u16.to_be_bytes());
-        val.extend_from_slice(&100u32.to_be_bytes());
-        val.extend_from_slice(&[0x03, 0x0B, 0x00, 0x00]);
-        val.extend_from_slice(&1000u32.to_be_bytes());
-        let attr = build_attr(0xC0, 16, &val);
-        let data = build_update(&attr, &[]);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let obj_range = first_pa_obj_range(&buf);
-        let FieldValue::Array(ref comms_range) = *nested_field_value(&buf, &obj_range, "value")
-        else {
-            panic!("expected Array for extended communities");
-        };
-        let comms = buf.nested_fields(comms_range);
-        assert_eq!(comms.len(), 2);
-        // Extended communities stored as raw 8-byte slices
-        assert_eq!(comms[0].value, FieldValue::Bytes(&val[0..8]));
-        assert_eq!(comms[1].value, FieldValue::Bytes(&val[8..16]));
     }
 
     #[test]
@@ -8522,25 +9084,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_bgp_update_mup_extended_community() {
-        let mut val = vec![0x0C, 0x00];
-        val.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
-        let attr = build_attr(0xC0, 16, &val);
-        let data = build_update(&attr, &[]);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let obj_range = first_pa_obj_range(&buf);
-        let FieldValue::Array(ref comms_range) = *nested_field_value(&buf, &obj_range, "value")
-        else {
-            panic!("expected Array for extended communities");
-        };
-        let comms = buf.nested_fields(comms_range);
-        assert_eq!(comms.len(), 1);
-        assert_eq!(comms[0].value, FieldValue::Bytes(&val[..]));
-    }
-
     // --- BGP Prefix-SID tests ---
 
     fn build_psid_tlv(tlv_type: u8, value: &[u8]) -> Vec<u8> {
@@ -9208,83 +9751,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_bgp_update_extended_communities_ipv4_route_target() {
-        let mut val = vec![0x01, 0x02];
-        val.extend_from_slice(&[192, 168, 1, 1]);
-        val.extend_from_slice(&100u16.to_be_bytes());
-        let attr = build_attr(0xC0, 16, &val);
-        let data = build_update(&attr, &[]);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let obj_range = first_pa_obj_range(&buf);
-        let FieldValue::Array(ref comms_range) = *nested_field_value(&buf, &obj_range, "value")
-        else {
-            panic!("expected Array");
-        };
-        let comms = buf.nested_fields(comms_range);
-        assert_eq!(comms.len(), 1);
-        assert_eq!(comms[0].value, FieldValue::Bytes(&val[..]));
-    }
-
-    #[test]
-    fn parse_bgp_update_extended_communities_route_origin() {
-        let mut val = vec![0x00, 0x03];
-        val.extend_from_slice(&65001u16.to_be_bytes());
-        val.extend_from_slice(&500u32.to_be_bytes());
-        let attr = build_attr(0xC0, 16, &val);
-        let data = build_update(&attr, &[]);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let obj_range = first_pa_obj_range(&buf);
-        let FieldValue::Array(ref comms_range) = *nested_field_value(&buf, &obj_range, "value")
-        else {
-            panic!("expected Array");
-        };
-        let comms = buf.nested_fields(comms_range);
-        assert_eq!(comms.len(), 1);
-        assert_eq!(comms[0].value, FieldValue::Bytes(&val[..]));
-    }
-
-    #[test]
-    fn parse_bgp_update_extended_communities_evpn() {
-        let mut val = vec![0x06, 0x00];
-        val.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
-        let attr = build_attr(0xC0, 16, &val);
-        let data = build_update(&attr, &[]);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let obj_range = first_pa_obj_range(&buf);
-        let FieldValue::Array(ref comms_range) = *nested_field_value(&buf, &obj_range, "value")
-        else {
-            panic!("expected Array");
-        };
-        let comms = buf.nested_fields(comms_range);
-        assert_eq!(comms.len(), 1);
-        assert_eq!(comms[0].value, FieldValue::Bytes(&val[..]));
-    }
-
-    #[test]
-    fn parse_bgp_update_extended_communities_unknown() {
-        let val = vec![0x99, 0x99, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-        let attr = build_attr(0xC0, 16, &val);
-        let data = build_update(&attr, &[]);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let obj_range = first_pa_obj_range(&buf);
-        let FieldValue::Array(ref comms_range) = *nested_field_value(&buf, &obj_range, "value")
-        else {
-            panic!("expected Array");
-        };
-        let comms = buf.nested_fields(comms_range);
-        assert_eq!(comms.len(), 1);
-        assert_eq!(comms[0].value, FieldValue::Bytes(&val[..]));
-    }
-
-    #[test]
     fn parse_bgp_update_unknown_attribute() {
         let attr = build_attr(0xC0, 99, &[0xDE, 0xAD]);
         let data = build_update(&attr, &[]);
@@ -9329,26 +9795,6 @@ mod tests {
             *nested_field_value(&buf, mp_range, "next_hop_link_local"),
             FieldValue::Ipv6Addr([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
         );
-    }
-
-    #[test]
-    fn parse_bgp_update_extended_communities_ipv4_route_origin() {
-        let mut val = vec![0x01, 0x03];
-        val.extend_from_slice(&[10, 0, 0, 1]);
-        val.extend_from_slice(&200u16.to_be_bytes());
-        let attr = build_attr(0xC0, 16, &val);
-        let data = build_update(&attr, &[]);
-        let mut buf = DissectBuffer::new();
-        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
-
-        let obj_range = first_pa_obj_range(&buf);
-        let FieldValue::Array(ref comms_range) = *nested_field_value(&buf, &obj_range, "value")
-        else {
-            panic!("expected Array");
-        };
-        let comms = buf.nested_fields(comms_range);
-        assert_eq!(comms.len(), 1);
-        assert_eq!(comms[0].value, FieldValue::Bytes(&val[..]));
     }
 
     #[test]
@@ -9526,166 +9972,6 @@ mod tests {
         assert_eq!(
             call_format_fn(format_aggregator, &FieldValue::U8(0)),
             "\"\""
-        );
-    }
-
-    #[test]
-    fn format_ext_community_values() {
-        // Type 0x00: 2-Octet AS — AS 65001, value 100
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x00, 0x02, 0xFD, 0xE9, 0, 0, 0, 100])
-            ),
-            "\"65001:100\""
-        );
-        // Type 0x40: transitive 2-Octet AS — same format
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x40, 0x02, 0xFD, 0xE9, 0, 0, 0, 100])
-            ),
-            "\"65001:100\""
-        );
-        // Type 0x01: IPv4 Address — 10.0.0.1:100
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x01, 0x02, 10, 0, 0, 1, 0, 100])
-            ),
-            "\"10.0.0.1:100\""
-        );
-        // Type 0x41: transitive IPv4 Address
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x41, 0x02, 10, 0, 0, 1, 0, 100])
-            ),
-            "\"10.0.0.1:100\""
-        );
-        // Type 0x02: 4-Octet AS — AS 65001, value 100
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x02, 0x02, 0, 0, 0xFD, 0xE9, 0, 100])
-            ),
-            "\"65001:100\""
-        );
-        // Type 0x42: transitive 4-Octet AS
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x42, 0x02, 0, 0, 0xFD, 0xE9, 0, 100])
-            ),
-            "\"65001:100\""
-        );
-        // Unknown type → hex fallback
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x03, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
-            ),
-            "\"0x0300010203040506\""
-        );
-        // Empty bytes → empty string
-        assert_eq!(
-            call_format_fn(format_ext_community, &FieldValue::Bytes(&[])),
-            "\"\""
-        );
-        // Non-Bytes variant → empty string
-        assert_eq!(
-            call_format_fn(format_ext_community, &FieldValue::U8(0)),
-            "\"\""
-        );
-    }
-
-    #[test]
-    fn mup_extended_community_type_names() {
-        assert_eq!(
-            extended_community_type_name(0x0C, 0x00),
-            Some("MUP Direct Segment (2-Octet AS)")
-        );
-        assert_eq!(
-            extended_community_type_name(0x0C, 0x01),
-            Some("MUP Direct Segment (IPv4 Address)")
-        );
-        assert_eq!(
-            extended_community_type_name(0x0C, 0x02),
-            Some("MUP Direct Segment (4-Octet AS)")
-        );
-        assert_eq!(
-            extended_community_type_name(0x0C, 0x03),
-            Some("MUP Interwork Segment (2-Octet AS)")
-        );
-        assert_eq!(
-            extended_community_type_name(0x0C, 0x04),
-            Some("MUP Interwork Segment (IPv4 Address)")
-        );
-        assert_eq!(
-            extended_community_type_name(0x0C, 0x05),
-            Some("MUP Interwork Segment (4-Octet AS)")
-        );
-        // Unknown sub-type → None
-        assert_eq!(extended_community_type_name(0x0C, 0x06), None);
-    }
-
-    #[test]
-    fn format_ext_community_mup_values() {
-        // Sub-Type 0x00: 2-Octet AS Specific, Direct Segment — AS 65001, value 100
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x0C, 0x00, 0xFD, 0xE9, 0, 0, 0, 100])
-            ),
-            "\"65001:100\""
-        );
-        // Sub-Type 0x01: IPv4 Address Specific, Direct Segment — 10.0.0.1:100
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x0C, 0x01, 10, 0, 0, 1, 0, 100])
-            ),
-            "\"10.0.0.1:100\""
-        );
-        // Sub-Type 0x02: 4-Octet AS Specific, Direct Segment — AS 65001, value 100
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x0C, 0x02, 0, 0, 0xFD, 0xE9, 0, 100])
-            ),
-            "\"65001:100\""
-        );
-        // Sub-Type 0x03: 2-Octet AS Specific, Interwork Segment — AS 65002, value 200
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x0C, 0x03, 0xFD, 0xEA, 0, 0, 0, 200])
-            ),
-            "\"65002:200\""
-        );
-        // Sub-Type 0x04: IPv4 Address Specific, Interwork Segment — 10.0.0.2:200
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x0C, 0x04, 10, 0, 0, 2, 0, 200])
-            ),
-            "\"10.0.0.2:200\""
-        );
-        // Sub-Type 0x05: 4-Octet AS Specific, Interwork Segment — AS 65002, value 200
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x0C, 0x05, 0, 0, 0xFD, 0xEA, 0, 200])
-            ),
-            "\"65002:200\""
-        );
-        // Unknown sub-type → hex fallback
-        assert_eq!(
-            call_format_fn(
-                format_ext_community,
-                &FieldValue::Bytes(&[0x0C, 0x99, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
-            ),
-            "\"0x0c99010203040506\""
         );
     }
 
@@ -12121,5 +12407,560 @@ mod tests {
         assert_eq!(check(0..=u8::MAX, sfp_tlv_type_name), 5);
         assert_eq!(check(0..=u8::MAX, bfd_mode_name), 1);
         assert_eq!(check(0..=u8::MAX, bfd_optional_tlv_type_name), 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Extended Communities (RFC 4360 / RFC 7153) and IPv6 Address Specific
+    // Extended Communities (RFC 5701) as structured objects.
+    // ---------------------------------------------------------------------
+
+    /// Helper: dissect an UPDATE whose only attribute is EXTENDED COMMUNITIES
+    /// (type 16) or, with `type_code` 25, IPv6 Address Specific Extended
+    /// Community, and run `check` on each community object range.
+    fn with_ext_communities(
+        type_code: u8,
+        value: &[u8],
+        check: impl FnOnce(&DissectBuffer<'_>, &[core::ops::Range<u32>]),
+    ) {
+        let data = build_update(&build_attr(0xc0, type_code, value), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let comms = first_attr_value_array_objs(&buf);
+        check(&buf, &comms);
+    }
+
+    /// Helper: the display name of the named field of an object, resolved
+    /// with the object's fields as siblings (as the serializer does).
+    fn display_of(
+        buf: &DissectBuffer<'_>,
+        range: &core::ops::Range<u32>,
+        name: &str,
+    ) -> Option<&'static str> {
+        let field = nested_field_by_name(buf, range, name);
+        let siblings = buf.nested_fields(range);
+        (field.descriptor.display_fn?)(&field.value, siblings)
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities() {
+        // RFC 4360, Section 3.1 (Two-Octet AS Specific Route Target 65001:100)
+        // and RFC 9012, Section 4.3 (Color 1000): the type, sub-type and the
+        // value sub-fields of each community are separate fields.
+        let mut val = vec![0x00, 0x02];
+        val.extend_from_slice(&65001u16.to_be_bytes());
+        val.extend_from_slice(&100u32.to_be_bytes());
+        val.extend_from_slice(&[0x03, 0x0B, 0x00, 0x01]);
+        val.extend_from_slice(&1000u32.to_be_bytes());
+        with_ext_communities(16, &val, |buf, comms| {
+            assert_eq!(comms.len(), 2);
+            let rt = &comms[0];
+            assert_eq!(*nested_field_value(buf, rt, "type"), FieldValue::U8(0x00));
+            assert_eq!(
+                display_of(buf, rt, "type"),
+                Some("Transitive Two-Octet AS-Specific")
+            );
+            assert_eq!(
+                *nested_field_value(buf, rt, "sub_type"),
+                FieldValue::U8(0x02)
+            );
+            assert_eq!(display_of(buf, rt, "sub_type"), Some("Route Target"));
+            assert_eq!(
+                *nested_field_value(buf, rt, "global_admin"),
+                FieldValue::U32(65001)
+            );
+            assert_eq!(
+                *nested_field_value(buf, rt, "local_admin"),
+                FieldValue::U32(100)
+            );
+            assert!(nested_field_by_name_opt(buf, rt, "value").is_none());
+
+            let color = &comms[1];
+            assert_eq!(display_of(buf, color, "sub_type"), Some("Color"));
+            assert_eq!(
+                *nested_field_value(buf, color, "color_flags"),
+                FieldValue::U16(1)
+            );
+            assert_eq!(
+                *nested_field_value(buf, color, "color"),
+                FieldValue::U32(1000)
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities_admin_layouts() {
+        // RFC 4360, Sections 3.1-3.2, RFC 5668, Section 2 and RFC 8955,
+        // Section 7.4 (rt-redirect 0x8008 / 0x8108 / 0x8208) share the
+        // Global / Local Administrator layouts.
+        let cases: [([u8; 8], &str, FieldValue<'static>, u32); 8] = [
+            (
+                [0x00, 0x03, 0xfd, 0xe9, 0, 0, 1, 0xf4],
+                "Route Origin",
+                FieldValue::U32(65001),
+                500,
+            ),
+            (
+                [0x01, 0x02, 192, 168, 1, 1, 0, 100],
+                "Route Target",
+                FieldValue::Ipv4Addr([192, 168, 1, 1]),
+                100,
+            ),
+            (
+                [0x01, 0x03, 10, 0, 0, 1, 0, 200],
+                "Route Origin",
+                FieldValue::Ipv4Addr([10, 0, 0, 1]),
+                200,
+            ),
+            (
+                [0x02, 0x02, 0, 1, 0, 0, 0, 100],
+                "Route Target",
+                FieldValue::U32(65536),
+                100,
+            ),
+            (
+                [0x01, 0x07, 192, 0, 2, 1, 0, 0],
+                "OSPF Router ID",
+                FieldValue::Ipv4Addr([192, 0, 2, 1]),
+                0,
+            ),
+            (
+                [0x80, 0x08, 0xfd, 0xe9, 0, 0, 0, 100],
+                "Flow spec rt-redirect AS-2octet",
+                FieldValue::U32(65001),
+                100,
+            ),
+            (
+                [0x81, 0x08, 192, 0, 2, 1, 0, 100],
+                "Flow spec rt-redirect IPv4",
+                FieldValue::Ipv4Addr([192, 0, 2, 1]),
+                100,
+            ),
+            (
+                [0x82, 0x08, 0, 0, 0xfd, 0xe9, 0, 100],
+                "Flow spec rt-redirect AS-4octet",
+                FieldValue::U32(65001),
+                100,
+            ),
+        ];
+        for (bytes, name, global, local) in cases {
+            with_ext_communities(16, &bytes, |buf, comms| {
+                let c = &comms[0];
+                assert_eq!(display_of(buf, c, "sub_type"), Some(name), "{bytes:02x?}");
+                assert_eq!(*nested_field_value(buf, c, "global_admin"), global);
+                assert_eq!(
+                    *nested_field_value(buf, c, "local_admin"),
+                    FieldValue::U32(local)
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities_link_bandwidth() {
+        // RFC 10005, Section 2: Type 0x00 / 0x40, Sub-Type 0x04, 2-octet
+        // Global Administrator and a 4-octet IEEE 754 bandwidth in bytes per
+        // second (here 125000000.0, 1 Gb/s).
+        for type_high in [0x00u8, 0x40] {
+            let mut val = vec![type_high, 0x04, 0xfd, 0xe9];
+            val.extend_from_slice(&125_000_000f32.to_bits().to_be_bytes());
+            with_ext_communities(16, &val, |buf, comms| {
+                let c = &comms[0];
+                assert_eq!(display_of(buf, c, "sub_type"), Some("Link Bandwidth"));
+                assert_eq!(
+                    *nested_field_value(buf, c, "global_admin"),
+                    FieldValue::U32(65001)
+                );
+                let bw = nested_field_by_name(buf, c, "bandwidth");
+                assert_eq!(
+                    bw.value,
+                    FieldValue::Bytes(&125_000_000f32.to_bits().to_be_bytes())
+                );
+                assert_eq!(
+                    call_format_fn(bw.descriptor.format_fn.unwrap(), &bw.value),
+                    "125000000"
+                );
+                assert!(nested_field_by_name_opt(buf, c, "local_admin").is_none());
+            });
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities_evpn() {
+        // RFC 7432, Sections 7.5-7.7 and RFC 9135, Section 8.1.
+        let mut val = Vec::new();
+        val.extend_from_slice(&[0x06, 0x00, 0x01, 0x00, 0, 0, 0, 5]); // MAC Mobility
+        val.extend_from_slice(&[0x06, 0x01, 0x01, 0x00, 0, 0x00, 0x06, 0x41]); // ESI Label 100
+        val.extend_from_slice(&[0x06, 0x02, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // ES-Import RT
+        val.extend_from_slice(&[0x06, 0x03, 0x02, 0x00, 0x5e, 0x00, 0x53, 0x01]); // Router's MAC
+        val.extend_from_slice(&[0x06, 0x04, 0, 0, 0, 0, 0x05, 0xdc]); // Layer 2 Attributes
+        with_ext_communities(16, &val, |buf, comms| {
+            assert_eq!(comms.len(), 5);
+            assert_eq!(display_of(buf, &comms[0], "type"), Some("EVPN"));
+            assert_eq!(display_of(buf, &comms[0], "sub_type"), Some("MAC Mobility"));
+            assert_eq!(
+                *nested_field_value(buf, &comms[0], "evpn_flags"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[0], "sequence_number"),
+                FieldValue::U32(5)
+            );
+            assert_eq!(display_of(buf, &comms[1], "sub_type"), Some("ESI Label"));
+            assert_eq!(
+                *nested_field_value(buf, &comms[1], "evpn_flags"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[1], "esi_label"),
+                FieldValue::U32(100)
+            );
+            assert_eq!(
+                display_of(buf, &comms[2], "sub_type"),
+                Some("ES-Import Route Target")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[2], "mac"),
+                FieldValue::MacAddr(MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]))
+            );
+            assert_eq!(
+                display_of(buf, &comms[3], "sub_type"),
+                Some("EVPN Router's MAC")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[3], "mac"),
+                FieldValue::MacAddr(MacAddr([0x02, 0x00, 0x5e, 0x00, 0x53, 0x01]))
+            );
+            assert_eq!(
+                display_of(buf, &comms[4], "sub_type"),
+                Some("EVPN Layer 2 Attributes")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[4], "value"),
+                FieldValue::Bytes(&[0, 0, 0, 0, 0x05, 0xdc])
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities_opaque_and_ospf() {
+        // RFC 9012, Section 4.1 (Encapsulation, VXLAN), RFC 7432, Section 7.8
+        // (Default Gateway), RFC 4577, Section 4.2.6 (OSPF Route Type 0x0306
+        // and its backward-compatible 0x8000 form, OSPF Domain Identifier
+        // 0x0005 / 0x8005) and RFC 8097, Section 2 (Origin Validation State).
+        let mut val = Vec::new();
+        val.extend_from_slice(&[0x03, 0x0c, 0, 0, 0, 0, 0, 8]);
+        val.extend_from_slice(&[0x03, 0x0d, 0, 0, 0, 0, 0, 0]);
+        val.extend_from_slice(&[0x03, 0x06, 0, 0, 0, 1, 5, 1]);
+        val.extend_from_slice(&[0x80, 0x00, 0, 0, 0, 0, 3, 0]);
+        val.extend_from_slice(&[0x00, 0x05, 0, 0, 0, 0, 0, 7]);
+        val.extend_from_slice(&[0x80, 0x05, 0, 0, 0, 0, 0, 7]);
+        val.extend_from_slice(&[0x43, 0x00, 0, 0, 0, 0, 0, 2]);
+        with_ext_communities(16, &val, |buf, comms| {
+            assert_eq!(comms.len(), 7);
+            assert_eq!(
+                display_of(buf, &comms[0], "sub_type"),
+                Some("Encapsulation")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[0], "encap_tunnel_type"),
+                FieldValue::U16(8)
+            );
+            assert_eq!(
+                display_of(buf, &comms[0], "encap_tunnel_type"),
+                Some("VXLAN Encapsulation")
+            );
+            assert_eq!(
+                display_of(buf, &comms[1], "sub_type"),
+                Some("Default Gateway")
+            );
+            // "The Value field of this community is reserved": kept as bytes.
+            assert_eq!(
+                *nested_field_value(buf, &comms[1], "value"),
+                FieldValue::Bytes(&[0; 6])
+            );
+            for (c, area, route_type, options) in [(&comms[2], 1, 5, 1), (&comms[3], 0, 3, 0)] {
+                assert_eq!(
+                    *nested_field_value(buf, c, "ospf_area"),
+                    FieldValue::U32(area)
+                );
+                assert_eq!(
+                    *nested_field_value(buf, c, "ospf_route_type"),
+                    FieldValue::U8(route_type)
+                );
+                assert_eq!(
+                    *nested_field_value(buf, c, "ospf_options"),
+                    FieldValue::U8(options)
+                );
+            }
+            assert_eq!(
+                display_of(buf, &comms[2], "sub_type"),
+                Some("OSPF Route Type")
+            );
+            assert_eq!(
+                display_of(buf, &comms[3], "sub_type"),
+                Some("OSPF Route Type (deprecated)")
+            );
+            assert_eq!(
+                display_of(buf, &comms[4], "sub_type"),
+                Some("OSPF Domain Identifier")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[5], "local_admin"),
+                FieldValue::U32(7)
+            );
+            let ov = nested_field_by_name(buf, &comms[6], "validation_state");
+            assert_eq!(ov.value, FieldValue::U8(2));
+            assert_eq!(
+                display_of(buf, &comms[6], "validation_state"),
+                Some("Invalid")
+            );
+            assert_eq!(
+                display_of(buf, &comms[6], "sub_type"),
+                Some("BGP Origin Validation State")
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities_flowspec_actions() {
+        // RFC 8955, Sections 7.1-7.5.
+        let mut val = Vec::new();
+        val.extend_from_slice(&[0x80, 0x06, 0xfd, 0xe9]);
+        val.extend_from_slice(&0f32.to_bits().to_be_bytes());
+        val.extend_from_slice(&[0x80, 0x0c, 0, 0]);
+        val.extend_from_slice(&1000f32.to_bits().to_be_bytes());
+        val.extend_from_slice(&[0x80, 0x07, 0, 0, 0, 0, 0, 0x03]);
+        val.extend_from_slice(&[0x80, 0x09, 0, 0, 0, 0, 0, 0xee]);
+        with_ext_communities(16, &val, |buf, comms| {
+            assert_eq!(comms.len(), 4);
+            assert_eq!(
+                display_of(buf, &comms[0], "sub_type"),
+                Some("Flow spec traffic-rate-bytes")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[0], "global_admin"),
+                FieldValue::U32(65001)
+            );
+            let rate = nested_field_by_name(buf, &comms[1], "rate");
+            assert_eq!(
+                call_format_fn(rate.descriptor.format_fn.unwrap(), &rate.value),
+                "1000"
+            );
+            assert_eq!(
+                display_of(buf, &comms[2], "sub_type"),
+                Some("Flow spec traffic-action")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[2], "value"),
+                FieldValue::Bytes(&[0, 0, 0, 0, 0, 0x03])
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[2], "sample"),
+                FieldValue::U8(1)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &comms[2], "terminal_action"),
+                FieldValue::U8(1)
+            );
+            // "the 6 least significant bits of the Extended Community value".
+            assert_eq!(
+                *nested_field_value(buf, &comms[3], "dscp"),
+                FieldValue::U8(0x2e)
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities_mup() {
+        // draft-ietf-bess-mup-safi-01, Section 3.2: Direct / Interwork Segment
+        // in 2-Octet AS, IPv4 and 4-Octet AS layouts.
+        let cases: [([u8; 8], &str, FieldValue<'static>, u32); 6] = [
+            (
+                [0x0C, 0x00, 0xFD, 0xE9, 0, 0, 0, 100],
+                "MUP Direct Segment (2-Octet AS)",
+                FieldValue::U32(65001),
+                100,
+            ),
+            (
+                [0x0C, 0x01, 10, 0, 0, 1, 0, 100],
+                "MUP Direct Segment (IPv4 Address)",
+                FieldValue::Ipv4Addr([10, 0, 0, 1]),
+                100,
+            ),
+            (
+                [0x0C, 0x02, 0, 0, 0xFD, 0xE9, 0, 100],
+                "MUP Direct Segment (4-Octet AS)",
+                FieldValue::U32(65001),
+                100,
+            ),
+            (
+                [0x0C, 0x03, 0xFD, 0xEA, 0, 0, 0, 200],
+                "MUP Interwork Segment (2-Octet AS)",
+                FieldValue::U32(65002),
+                200,
+            ),
+            (
+                [0x0C, 0x04, 10, 0, 0, 2, 0, 200],
+                "MUP Interwork Segment (IPv4 Address)",
+                FieldValue::Ipv4Addr([10, 0, 0, 2]),
+                200,
+            ),
+            (
+                [0x0C, 0x05, 0, 0, 0xFD, 0xEA, 0, 200],
+                "MUP Interwork Segment (4-Octet AS)",
+                FieldValue::U32(65002),
+                200,
+            ),
+        ];
+        for (bytes, name, global, local) in cases {
+            with_ext_communities(16, &bytes, |buf, comms| {
+                let c = &comms[0];
+                assert_eq!(display_of(buf, c, "sub_type"), Some(name));
+                assert_eq!(*nested_field_value(buf, c, "global_admin"), global);
+                assert_eq!(
+                    *nested_field_value(buf, c, "local_admin"),
+                    FieldValue::U32(local)
+                );
+            });
+        }
+        // Unknown MUP sub-type: value bytes, no name.
+        with_ext_communities(16, &[0x0C, 0x99, 1, 2, 3, 4, 5, 6], |buf, comms| {
+            assert_eq!(display_of(buf, &comms[0], "sub_type"), None);
+            assert_eq!(
+                *nested_field_value(buf, &comms[0], "value"),
+                FieldValue::Bytes(&[1, 2, 3, 4, 5, 6])
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_extended_communities_unknown() {
+        with_ext_communities(16, &[0x99, 0x99, 1, 2, 3, 4, 5, 6], |buf, comms| {
+            let c = &comms[0];
+            assert_eq!(*nested_field_value(buf, c, "type"), FieldValue::U8(0x99));
+            assert_eq!(display_of(buf, c, "type"), None);
+            assert_eq!(display_of(buf, c, "sub_type"), None);
+            assert_eq!(
+                *nested_field_value(buf, c, "value"),
+                FieldValue::Bytes(&[1, 2, 3, 4, 5, 6])
+            );
+        });
+        // A length that is not a multiple of 8 keeps the attribute raw.
+        let data = build_update(&build_attr(0xc0, 16, &[0, 2, 0, 1]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&[0, 2, 0, 1]));
+    }
+
+    #[test]
+    fn parse_bgp_update_ipv6_address_specific_extended_community() {
+        // RFC 5701, Section 2: Type 0x00, Sub-Type 0x02 (Route Target), a
+        // 16-octet Global Administrator IPv6 address and a 2-octet Local
+        // Administrator.
+        let mut val = vec![0x00, 0x02];
+        val.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        val.extend_from_slice(&100u16.to_be_bytes());
+        val.extend_from_slice(&[0x40, 0x99]);
+        val.extend_from_slice(&[0u8; 18]);
+        with_ext_communities(25, &val, |buf, comms| {
+            assert_eq!(comms.len(), 2);
+            let c = &comms[0];
+            assert_eq!(
+                display_of(buf, c, "type"),
+                Some("Transitive IPv6-Address-Specific")
+            );
+            assert_eq!(display_of(buf, c, "sub_type"), Some("Route Target"));
+            assert_eq!(
+                *nested_field_value(buf, c, "global_admin"),
+                FieldValue::Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+            );
+            assert_eq!(
+                *nested_field_value(buf, c, "local_admin"),
+                FieldValue::U32(100)
+            );
+            assert_eq!(
+                display_of(buf, &comms[1], "type"),
+                Some("Non-Transitive IPv6-Address-Specific")
+            );
+            assert_eq!(display_of(buf, &comms[1], "sub_type"), None);
+        });
+        // A length that is not a multiple of 20 keeps the attribute raw.
+        let data = build_update(&build_attr(0xc0, 25, &[0, 2, 0]), &[]);
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(*extract_pa_value(&buf), FieldValue::Bytes(&[0, 2, 0]));
+    }
+
+    #[test]
+    fn extended_community_name_tables() {
+        // IANA BGP Extended Communities registries.
+        for (t, name) in [
+            (0x00u8, "Transitive Two-Octet AS-Specific"),
+            (0x01, "Transitive IPv4-Address-Specific"),
+            (0x02, "Transitive Four-Octet AS-Specific"),
+            (0x03, "Transitive Opaque"),
+            (0x06, "EVPN"),
+            (0x40, "Non-Transitive Two-Octet AS-Specific"),
+            (0x43, "Non-Transitive Opaque"),
+            (0x80, "Generic Transitive"),
+            (0x81, "Generic Transitive Part 2"),
+            (0x82, "Generic Transitive Part 3"),
+        ] {
+            assert_eq!(ext_community_type_name(t), Some(name), "type {t:#04x}");
+        }
+        assert_eq!(ext_community_type_name(0x3f), None);
+        assert_eq!(ext_community_sub_type_name(0x00, 0x09), Some("Source AS"));
+        assert_eq!(
+            ext_community_sub_type_name(0x01, 0x0b),
+            Some("VRF Route Import")
+        );
+        assert_eq!(
+            ext_community_sub_type_name(0x06, 0x0a),
+            Some("EVI-RT Type 0")
+        );
+        assert_eq!(ext_community_sub_type_name(0x40, 0x02), None);
+        assert_eq!(
+            ipv6_ext_community_sub_type_name(0x00, 0x0b),
+            Some("VRF Route Import")
+        );
+        assert_eq!(ipv6_ext_community_sub_type_name(0x40, 0x02), None);
+        assert_eq!(origin_validation_state_name(0), Some("Valid"));
+        assert_eq!(origin_validation_state_name(1), Some("NotFound"));
+        assert_eq!(origin_validation_state_name(3), None);
+        // Non-finite IEEE 754 values are written as strings.
+        let fmt = EXT_COMMUNITY_FIELDS[FD_EC_RATE].format_fn.unwrap();
+        let nan = f32::NAN.to_be_bytes();
+        assert_eq!(call_format_fn(fmt, &FieldValue::Bytes(&nan)), "\"NaN\"");
+        let v = 1.5f32.to_be_bytes();
+        assert_eq!(call_format_fn(fmt, &FieldValue::Bytes(&v)), "1.5");
+        assert_eq!(call_format_fn(fmt, &FieldValue::Bytes(&[0; 3])), "null");
+    }
+
+    #[test]
+    fn extended_community_name_tables_have_unique_non_empty_names() {
+        // Walk every (Type, Sub-Type) pair: names are non-empty, and unique
+        // within each Type (the same sub-type name recurs across Types, e.g.
+        // Route Target).
+        for type_high in 0..=u8::MAX {
+            let names: Vec<&str> = (0..=u8::MAX)
+                .filter_map(|s| ext_community_sub_type_name(type_high, s))
+                .collect();
+            for (i, n) in names.iter().enumerate() {
+                assert!(!n.is_empty());
+                assert!(!names[i + 1..].contains(n), "duplicate {n}");
+            }
+            let v6: Vec<&str> = (0..=u8::MAX)
+                .filter_map(|s| ipv6_ext_community_sub_type_name(type_high, s))
+                .collect();
+            assert!(v6.iter().all(|n| !n.is_empty()));
+        }
+        let count = |f: fn(u8) -> Option<&'static str>| (0..=u8::MAX).filter_map(f).count();
+        assert_eq!(count(ext_community_type_name), 16);
+        assert_eq!(count(ipv6_ext_community_type_name), 2);
+        let pairs = (0..=u8::MAX)
+            .flat_map(|t| (0..=u8::MAX).map(move |s| (t, s)))
+            .filter(|&(t, s)| ext_community_sub_type_name(t, s).is_some())
+            .count();
+        assert_eq!(pairs, 65);
     }
 }
