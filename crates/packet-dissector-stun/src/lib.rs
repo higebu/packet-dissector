@@ -54,6 +54,12 @@ const MAGIC_COOKIE: u32 = 0x2112_A442;
 /// <https://www.rfc-editor.org/rfc/rfc5389#section-12>.
 const CLASSIC_DISPLAY_NAME: &str = "Classic STUN (RFC 3489)";
 
+/// STUN Indication message class.
+///
+/// RFC 8489, Section 5 — "0b01 is an indication".
+/// <https://www.rfc-editor.org/rfc/rfc8489#section-5>.
+const CLASS_INDICATION: u8 = 0b01;
+
 /// STUN Binding method.
 ///
 /// RFC 8489, Section 18.2 — <https://www.rfc-editor.org/rfc/rfc8489#section-18.2>.
@@ -1056,8 +1062,8 @@ static REFERENCES: &[SpecReference] = &[
     ),
     SpecReference::new(
         "RFC 8656",
-        "Traversal Using Relays around NAT (TURN), Sections 17-19: Methods, Attributes, Error Codes",
-        "https://www.rfc-editor.org/rfc/rfc8656#section-17",
+        "Traversal Using Relays around NAT (TURN), Sections 12 and 17-19: Channels, Methods, Attributes, Error Codes",
+        "https://www.rfc-editor.org/rfc/rfc8656",
     ),
     SpecReference::new(
         "RFC 6062",
@@ -1221,10 +1227,15 @@ fn dissect_stun<'pkt>(
         // Only the Binding method is used for compatibility (RFC 5389,
         // Section 12.1 — https://www.rfc-editor.org/rfc/rfc5389#section-12.1),
         // and a datagram holds exactly one message, so a
-        // cookie-less message is accepted only when it is a Binding message
-        // over UDP that does not leave trailing bytes. A shorter datagram is
-        // reported as truncated below.
-        if transport == Transport::Stream || method != METHOD_BINDING || data.len() > total_len {
+        // cookie-less message is accepted only when it is a Binding request
+        // or response (RFC 3489 has no indications) over UDP that does not
+        // leave trailing bytes. A shorter datagram is reported as truncated
+        // below.
+        if transport == Transport::Stream
+            || method != METHOD_BINDING
+            || class == CLASS_INDICATION
+            || data.len() > total_len
+        {
             return Err(PacketError::InvalidFieldValue {
                 field: "magic_cookie",
                 value: cookie,
@@ -1582,6 +1593,7 @@ mod tests {
     // | 5389 12.1        | Classic response with attributes       | test_classic_binding_response_with_attrs  |
     // | 5389 12          | Non-Binding without cookie rejected    | test_invalid_magic_cookie                 |
     // | 5389 12          | Classic length must match datagram     | test_classic_length_mismatch_rejected     |
+    // | 5389 12          | No classic Binding Indication          | test_classic_indication_rejected          |
     // | 5389 12          | Truncated classic message              | test_classic_truncated                    |
     // | 5389 12          | Classic STUN is UDP only               | test_classic_rejected_over_stream         |
     // | 5389 12          | No XOR- decoding without magic cookie  | test_classic_xor_attribute_stays_raw      |
@@ -2833,6 +2845,28 @@ mod tests {
     }
 
     #[test]
+    fn test_classic_indication_rejected() {
+        // RFC 3489 has no indications (RFC 5389, Section 12 —
+        // https://www.rfc-editor.org/rfc/rfc5389#section-12), so a
+        // cookie-less Binding Indication is not classic STUN.
+        let data = build_classic(0x0011, &[]);
+        let mut buf = DissectBuffer::new();
+        let err = StunDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            PacketError::InvalidFieldValue {
+                field: "magic_cookie",
+                ..
+            }
+        ));
+        // Binding Error Response is classic.
+        let data = build_classic(0x0111, &[]);
+        let mut buf = DissectBuffer::new();
+        StunDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(buf.layers()[0].display_name, Some(CLASSIC_DISPLAY_NAME));
+    }
+
+    #[test]
     fn test_classic_length_mismatch_rejected() {
         // A Binding message without the cookie whose length does not cover
         // the whole datagram is not accepted as classic STUN.
@@ -3110,5 +3144,7 @@ mod tests {
             assert!(reference.url.starts_with("https://"));
         }
         assert_eq!(StunDissector.layer(), Some(ProtocolLayer::Application));
+        // STUN on the shared port also emits TURN ChannelData layers.
+        assert!(references.iter().any(|r| r.id == "RFC 8656"));
     }
 }
