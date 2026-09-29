@@ -3920,6 +3920,7 @@ fn integration_ethernet_ipv4_gre_key_ipv4() {
 }
 
 /// Ethernet → IPv4 → Enhanced GRE (PPTP, RFC 2637 §4.1) → PPP → IPv4 → UDP
+/// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
 #[test]
 fn integration_ethernet_ipv4_gre_v1_ppp_ipv4() {
     let registry = DissectorRegistry::default();
@@ -3964,6 +3965,7 @@ fn integration_ethernet_ipv4_gre_v1_ppp_ipv4() {
 }
 
 /// Ethernet → IPv4 → Enhanced GRE acknowledgment-only packet (RFC 2637 §4.1)
+/// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
 #[test]
 fn integration_ethernet_ipv4_gre_v1_ack_only() {
     let registry = DissectorRegistry::default();

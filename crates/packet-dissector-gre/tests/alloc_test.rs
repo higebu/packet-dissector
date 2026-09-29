@@ -69,6 +69,7 @@ fn zero_alloc_dissect_gre_all_options() {
 #[test]
 fn zero_alloc_dissect_gre_v1_enhanced() {
     // RFC 2637, Section 4.1 — Enhanced GRE with K=1, S=1, A=1.
+    // https://www.rfc-editor.org/rfc/rfc2637#section-4.1
     let raw: &[u8] = &[
         0x30, 0x81, // K=1 S=1 A=1, ver=1
         0x88, 0x0B, // Protocol Type: PPP
@@ -93,6 +94,7 @@ fn zero_alloc_dissect_gre_v1_enhanced() {
 #[test]
 fn zero_alloc_dissect_gre_rfc1701_routing() {
     // RFC 1701 — R=1 with one SRE and the NULL SRE.
+    // https://www.rfc-editor.org/rfc/rfc1701
     let raw: &[u8] = &[
         0x40, 0x00, 0x08, 0x00, // R=1, IPv4
         0x00, 0x00, 0x00, 0x04, // Checksum, Offset

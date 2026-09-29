@@ -302,13 +302,20 @@ impl Dissector for GreDissector {
                     offset,
                     flags_ver,
                     protocol_type,
-                    (flags_ver >> 3) & 0x01FF,
+                    reserved0_bits(flags_ver),
                 );
                 buf.end_layer();
                 Ok(DissectResult::new(MIN_HEADER_SIZE, DispatchHint::End))
             }
         }
     }
+}
+
+/// Reserved0: bits 4-12 of the flags/version word (RFC 2890, Section 2).
+///
+/// <https://www.rfc-editor.org/rfc/rfc2890#section-2>
+fn reserved0_bits(flags_ver: u16) -> u16 {
+    (flags_ver >> 3) & 0x01FF
 }
 
 /// Push the fields of the base header shared by all versions.
@@ -359,6 +366,10 @@ fn push_base_fields(
 
 /// Dissect a version 0 header (RFC 2784 / RFC 2890, and RFC 1701 when any of
 /// bits 1, 4-7 is set).
+///
+/// - RFC 2784: <https://www.rfc-editor.org/rfc/rfc2784>
+/// - RFC 2890: <https://www.rfc-editor.org/rfc/rfc2890>
+/// - RFC 1701: <https://www.rfc-editor.org/rfc/rfc1701>
 fn dissect_v0<'pkt>(
     data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
@@ -408,7 +419,7 @@ fn dissect_v0<'pkt>(
         offset,
         flags_ver,
         protocol_type,
-        (flags_ver >> 3) & 0x01FF,
+        reserved0_bits(flags_ver),
     );
 
     if rfc1701 {
@@ -440,7 +451,12 @@ fn dissect_v0<'pkt>(
     if c_flag || r_flag {
         let checksum = read_be_u16(data, pos)?;
         let second = read_be_u16(data, pos + 2)?;
-        push_u16(buf, FD_CHECKSUM, checksum, offset + pos..offset + pos + 2);
+        // RFC 1701 — the Checksum "contains valid information only if the
+        // Checksum Present bit is set to 1", so it is only shown with C=1.
+        // https://www.rfc-editor.org/rfc/rfc1701
+        if c_flag {
+            push_u16(buf, FD_CHECKSUM, checksum, offset + pos..offset + pos + 2);
+        }
         let fd = if r_flag { FD_OFFSET } else { FD_RESERVED1 };
         push_u16(buf, fd, second, offset + pos + 2..offset + pos + 4);
         pos += 4;
@@ -457,7 +473,7 @@ fn dissect_v0<'pkt>(
         // field in the GRE header is used to carry the Virtual Subnet ID
         // (VSID) and the FlowID". Protocol Type is 0x6558.
         // https://www.rfc-editor.org/rfc/rfc7637#section-3.2
-        if protocol_type == PROTOCOL_TYPE_TEB && !c_flag && !s_flag && !rfc1701 {
+        if protocol_type == PROTOCOL_TYPE_TEB && !c_flag && !s_flag {
             push_u32(buf, FD_VSID, key >> 8, offset + pos..offset + pos + 3);
             push_u8(
                 buf,
@@ -538,7 +554,7 @@ fn dissect_v1<'pkt>(
     // RFC 2637, Section 4.1 — bits 4-12 without the A flag: s, Recur and
     // Flags, all "Set to zero (0)".
     // https://www.rfc-editor.org/rfc/rfc2637#section-4.1
-    let reserved0 = ((flags_ver & !ENHANCED_GRE_ACK_FLAG) >> 3) & 0x01FF;
+    let reserved0 = reserved0_bits(flags_ver & !ENHANCED_GRE_ACK_FLAG);
     push_base_fields(buf, offset, flags_ver, protocol_type, reserved0);
     push_u8(buf, FD_ACK_PRESENT, a_flag as u8, offset + 1..offset + 2);
     // RFC 2637, Section 4.1 — "R (Bit 1) Routing Present. Set to zero (0)."
@@ -606,8 +622,12 @@ fn dissect_v1<'pkt>(
     // (GRE packet is an Acknowledgment only)". "The payload section contains
     // a PPP data packet without any media specific framing elements."
     // https://www.rfc-editor.org/rfc/rfc2637#section-4.1
+    // A set R bit ("Set to zero (0)") would add Routing fields whose
+    // position RFC 2637 does not define, so the payload offset is unknown
+    // and nothing is dispatched.
+    let r_flag = flags_ver & ROUTING_PRESENT_FLAG != 0;
     match payload_length {
-        Some(len) if s_flag && len > 0 => Ok(DissectResult::new(
+        Some(len) if s_flag && len > 0 && !r_flag => Ok(DissectResult::new(
             header_len,
             DispatchHint::ByEtherType(protocol_type),
         )
@@ -658,6 +678,7 @@ mod tests {
     // | 2637 §4.1    | C=1 in Enhanced GRE                  | parse_gre_v1_with_checksum                          |
     // | 7637 §3.2    | NVGRE VSID / FlowID                  | parse_gre_nvgre_key_split                           |
     // | 7637 §3.2    | Key not split outside NVGRE          | parse_gre_key_not_split_outside_nvgre               |
+    // | 7637 §3.2    | NVGRE split with reserved bits 6-7   | parse_gre_nvgre_key_split_with_reserved_bits        |
 
     /// Helper: dissect raw bytes at offset 0 and return the result.
     fn dissect(data: &[u8]) -> Result<(DissectBuffer<'_>, DissectResult), PacketError> {
@@ -845,6 +866,8 @@ mod tests {
     /// RFC 2784, Section 2.3.1 — versions other than 0 (GRE) and 1
     /// (Enhanced GRE, RFC 2637) are unknown. The layer is still reported
     /// with its flags and version, and dissection ends there.
+    /// <https://www.rfc-editor.org/rfc/rfc2784#section-2.3.1>
+    /// <https://www.rfc-editor.org/rfc/rfc2637>
     #[test]
     fn parse_gre_unknown_version() {
         let raw: &[u8] = &[
@@ -865,6 +888,7 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — Enhanced GRE data packet with a piggy-backed
     /// acknowledgment (K=1, S=1, A=1, Ver=1).
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_data_with_ack() {
         let raw: &[u8] = &[
@@ -911,6 +935,7 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — acknowledgment-only packet (S=0, A=1): no
     /// payload, so dissection ends at GRE.
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_ack_only() {
         let raw: &[u8] = &[
@@ -939,6 +964,7 @@ mod tests {
     }
 
     /// RFC 2637, Section 4.1 — data packet without an acknowledgment (A=0).
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_data_without_ack() {
         let raw: &[u8] = &[
@@ -963,6 +989,7 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — S=1 with a zero Payload Length carries no
     /// payload to dispatch.
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_sequence_with_zero_payload_length() {
         let raw: &[u8] = &[
@@ -979,6 +1006,7 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — malformed v1 header with neither S nor A
     /// set: no payload and no acknowledgment. Must not panic.
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_no_sequence_no_ack() {
         let raw: &[u8] = &[
@@ -996,6 +1024,7 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — Enhanced GRE without K=1 has no Payload
     /// Length / Call ID, so nothing can be dispatched.
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_without_key() {
         let raw: &[u8] = &[
@@ -1013,15 +1042,21 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — "R (Bit 1) Routing Present. Set to zero
     /// (0)." A set R bit is reported, but no Routing field is parsed.
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_routing_present_reported() {
         let raw: &[u8] = &[
-            0x60, 0x01, // R=1 K=1, ver=1
+            0x70, 0x01, // R=1 K=1 S=1, ver=1
             0x88, 0x0B, // Protocol Type: PPP
-            0x00, 0x00, 0x00, 0x2A, // Payload Length, Call ID
+            0x00, 0x04, 0x00, 0x2A, // Payload Length 4, Call ID
+            0x00, 0x00, 0x00, 0x01, // Sequence Number
+            0x00, 0x00, 0x00, 0x00, // unknown (Routing?) then payload
         ];
         let (buf, result) = dissect(raw).unwrap();
-        assert_eq!(result.bytes_consumed, 8);
+        assert_eq!(result.bytes_consumed, 12);
+        // The layout after the header is undefined with R=1, so the payload
+        // is not dispatched.
+        assert_eq!(result.next, DispatchHint::End);
         let layer = buf.layer_by_name("GRE").unwrap();
         assert_eq!(buf.field_u8(layer, "routing_present"), Some(1));
         assert!(buf.field_by_name(layer, "routing").is_none());
@@ -1034,6 +1069,7 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — the Acknowledgment Number is counted in the
     /// header length, so a missing one is a truncation.
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_truncated_ack() {
         let raw: &[u8] = &[
@@ -1057,6 +1093,7 @@ mod tests {
 
     /// RFC 2637, Section 4.1 — C "Set to zero (0)" in Enhanced GRE, but a
     /// set C bit still announces the Checksum and Reserved1 fields.
+    /// <https://www.rfc-editor.org/rfc/rfc2637#section-4.1>
     #[test]
     fn parse_gre_v1_with_checksum() {
         let raw: &[u8] = &[
@@ -1107,6 +1144,8 @@ mod tests {
     /// This dissector implements RFC 1701, where bit 1 is Routing Present:
     /// the Checksum and Offset fields and a list of Source Route Entries
     /// terminated by a NULL SRE follow.
+    /// <https://www.rfc-editor.org/rfc/rfc2784#section-2.3>
+    /// <https://www.rfc-editor.org/rfc/rfc1701>
     #[test]
     fn parse_gre_rfc1701_routing() {
         let raw: &[u8] = &[
@@ -1128,7 +1167,10 @@ mod tests {
         assert_eq!(buf.field_u8(layer, "routing_present"), Some(1));
         assert_eq!(buf.field_u8(layer, "strict_source_route"), Some(0));
         assert_eq!(buf.field_u8(layer, "recursion_control"), Some(0));
-        assert_eq!(buf.field_u16(layer, "checksum"), Some(0));
+        // RFC 1701 — the Checksum field "contains valid information only if
+        // the Checksum Present bit is set to 1", so with C=0 it is not shown.
+        // https://www.rfc-editor.org/rfc/rfc1701
+        assert!(buf.field_by_name(layer, "checksum").is_none());
         assert_eq!(buf.field_u16(layer, "offset"), Some(4));
         assert!(buf.field_by_name(layer, "reserved1").is_none());
         let routing = buf.field_by_name(layer, "routing").unwrap();
@@ -1142,6 +1184,7 @@ mod tests {
     }
 
     /// RFC 1701 — Routing follows the Key and Sequence Number fields.
+    /// <https://www.rfc-editor.org/rfc/rfc1701>
     #[test]
     fn parse_gre_rfc1701_routing_after_key_and_sequence() {
         let raw: &[u8] = &[
@@ -1163,6 +1206,7 @@ mod tests {
 
     /// RFC 1701 — bit 4 is Strict Source Route and bits 5-7 are Recursion
     /// Control. Without R=1 neither Offset nor Routing is present.
+    /// <https://www.rfc-editor.org/rfc/rfc1701>
     #[test]
     fn parse_gre_rfc1701_strict_source_route_and_recursion() {
         // byte 0 = 0000 1111: s=1, Recur=0b111
@@ -1181,6 +1225,7 @@ mod tests {
     }
 
     /// RFC 1701 — only bit 5 (the top bit of Recursion Control) set.
+    /// <https://www.rfc-editor.org/rfc/rfc1701>
     #[test]
     fn parse_gre_rfc1701_recursion_bit5() {
         let raw: &[u8] = &[0x04, 0x00, 0x08, 0x00];
@@ -1192,6 +1237,7 @@ mod tests {
 
     /// RFC 1701 — a Routing field that is not terminated by a NULL SRE
     /// within the data is truncated.
+    /// <https://www.rfc-editor.org/rfc/rfc1701>
     #[test]
     fn parse_gre_rfc1701_routing_unterminated() {
         let raw: &[u8] = &[
@@ -1214,6 +1260,7 @@ mod tests {
     }
 
     /// RFC 1701 — a missing SRE header is truncated too.
+    /// <https://www.rfc-editor.org/rfc/rfc1701>
     #[test]
     fn parse_gre_rfc1701_routing_missing_sre() {
         let raw: &[u8] = &[
@@ -1237,6 +1284,7 @@ mod tests {
     /// RFC 7637, Section 3.2 — NVGRE carries the VSID (upper 24 bits) and
     /// FlowID (lower 8 bits) in the Key field of a Transparent Ethernet
     /// Bridging (0x6558) packet with C=0, K=1, S=0.
+    /// <https://www.rfc-editor.org/rfc/rfc7637#section-3.2>
     #[test]
     fn parse_gre_nvgre_key_split() {
         let raw: &[u8] = &[
@@ -1255,8 +1303,27 @@ mod tests {
         assert_eq!(buf.field_by_name(layer, "flow_id").unwrap().range, 7..8);
     }
 
+    /// RFC 7637, Section 3.2 only requires C=0, K=1 and S=0; reserved bits 6-7
+    /// ("MUST be ignored on receipt", RFC 2784, Section 2.3) do not stop the
+    /// NVGRE split.
+    /// <https://www.rfc-editor.org/rfc/rfc7637#section-3.2>
+    /// <https://www.rfc-editor.org/rfc/rfc2784#section-2.3>
+    #[test]
+    fn parse_gre_nvgre_key_split_with_reserved_bits() {
+        let raw: &[u8] = &[
+            0x22, 0x00, // K=1, bit 6 set
+            0x65, 0x58, // Protocol Type: Transparent Ethernet Bridging
+            0x00, 0x00, 0x64, 0x01, // VSID 100, FlowID 1
+        ];
+        let (buf, _) = dissect(raw).unwrap();
+        let layer = buf.layer_by_name("GRE").unwrap();
+        assert_eq!(buf.field_u32(layer, "vsid"), Some(100));
+        assert_eq!(buf.field_u8(layer, "flow_id"), Some(1));
+    }
+
     /// RFC 7637, Section 3.2 — the Key is not split for other protocol
     /// types, or when C or S is set (NVGRE requires both to be zero).
+    /// <https://www.rfc-editor.org/rfc/rfc7637#section-3.2>
     #[test]
     fn parse_gre_key_not_split_outside_nvgre() {
         let ipv4: &[u8] = &[0x20, 0x00, 0x08, 0x00, 0x00, 0x00, 0x64, 0x01];
@@ -1277,6 +1344,7 @@ mod tests {
     /// bits MUST be sent as zero and MUST be ignored on receipt." The
     /// dissector must accept such packets and expose the received bits via
     /// the `reserved0` field.
+    /// <https://www.rfc-editor.org/rfc/rfc2784#section-2.3>
     #[test]
     fn parse_gre_reserved_bits_6_to_12() {
         // Set bits 6-12 all to 1. In byte terms:
@@ -1293,6 +1361,7 @@ mod tests {
             FieldValue::U16(0x7F)
         );
         // Bits 6-7 are the low bits of RFC 1701 Recursion Control.
+        // https://www.rfc-editor.org/rfc/rfc1701
         assert_eq!(buf.field_u8(layer, "recursion_control"), Some(3));
         assert_eq!(buf.field_u8(layer, "routing_present"), Some(0));
         assert_eq!(
