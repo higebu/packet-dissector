@@ -18,7 +18,7 @@
 //! | 0x00 | 0       | STP Configuration BPDU          | 35 bytes|
 //! | 0x02 | 2       | RST BPDU                        | 36 bytes|
 //! | 0x02 | 3       | MST BPDU                        | 102 + 16 × MSTIs bytes |
-//! | 0x02 | 4       | SPT BPDU (MST part decoded, SPT data raw) | ≥ 106 bytes |
+//! | 0x02 | 4       | SPT BPDU (MST part decoded, SPT data raw; MST if not well formed) | ≥ 108 bytes |
 //! | 0x80 | 0       | Topology Change Notification    | 4 bytes |
 
 #![deny(missing_docs)]
@@ -209,7 +209,7 @@ static MSTI_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("msti_flags_master", "Master", FieldType::U8),
     FieldDescriptor::new(
         "msti_regional_root_priority",
-        "Regional Root Priority (priority component)",
+        "Regional Root Priority",
         FieldType::U16,
     ),
     FieldDescriptor::new("msti_id", "MSTID", FieldType::U16),
@@ -351,13 +351,6 @@ fn port_role_name(role: u8, mstp: bool) -> Option<&'static str> {
 /// CIST Port Role name; value 0 is Master in MST/SPT BPDUs.
 fn cist_port_role_name(role: u8, siblings: &[Field<'_>]) -> Option<&'static str> {
     port_role_name(role, is_mst(siblings))
-}
-
-/// Priority component of a Bridge Identifier: its four most significant
-/// bits, as a 16-bit value in units of 4096 (IEEE 802.1Q-2022,
-/// Section 14.2.5).
-fn priority_component(id_priority: u16) -> u16 {
-    id_priority & 0xF000
 }
 
 /// System ID extension of a Bridge Identifier: the next twelve bits
@@ -537,7 +530,9 @@ impl Dissector for StpDissector {
                     None
                 };
                 let consumed = match mst {
-                    Some(v3) if version >= VERSION_SPT => spt_end(data, VERSION3_START + v3),
+                    Some(v3) if version >= VERSION_SPT => {
+                        spt_end(data, VERSION3_START + v3).unwrap_or(VERSION3_START + v3)
+                    }
                     Some(v3) => VERSION3_START + v3,
                     None if version >= VERSION_MST => data.len(),
                     None => RST_BPDU_SIZE,
@@ -746,7 +741,9 @@ impl StpDissector {
             );
         }
 
-        // Port Identifier (2 octets at offset 25).
+        // Port Identifier (2 octets at offset 25). IEEE 802.1Q-2022,
+        // Section 14.2.7: a 4-bit priority component and a 12-bit Port
+        // Number, reported here as the raw 16-bit value.
         let port_id = read_be_u16(data, 25).unwrap_or_default();
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_PORT_ID],
@@ -904,7 +901,7 @@ fn push_msti<'pkt>(buf: &mut DissectBuffer<'pkt>, m: &'pkt [u8], base: usize) {
     let root_priority = u16::from_be_bytes([m[1], m[2]]);
     buf.push_field(
         &MSTI_FIELDS[FD_MSTI_REGIONAL_ROOT_PRIORITY],
-        FieldValue::U16(priority_component(root_priority)),
+        FieldValue::U16(root_priority),
         base + 1..base + 3,
     );
     buf.push_field(
@@ -944,19 +941,35 @@ fn push_msti<'pkt>(buf: &mut DissectBuffer<'pkt>, m: &'pkt [u8], base: usize) {
     buf.end_container(obj_idx);
 }
 
-/// End of an SPT BPDU whose MST part ends at `mst_end`.
+/// Minimum octets after the MST part of an SPT BPDU: Version 4 Length (2)
+/// plus at least 4 octets of SPT parameters. IEEE 802.1Q-2022, Section
+/// 14.5 f) 4) i)-ii).
+const SPT_MIN_TAIL: usize = 6;
+
+/// MST Configuration Identifier Format Selector of SPT BPDUs.
+/// IEEE 802.1Q-2022, Section 14.5 g) 4) iii).
+const SPT_FORMAT_SELECTOR: u8 = 1;
+
+/// End of the SPT BPDU whose MST part ends at `mst_end`, or `None` when the
+/// octets are not a well-formed SPT BPDU and it is decoded as an MST BPDU.
 ///
-/// IEEE 802.1Q-2022, Section 14.4 w): the Version 4 Length is "the number of
-/// octets that follow the Version 4 Length". Octets beyond it are not part of
-/// the BPDU; a Version 4 Length that runs past the data ends at the data.
-fn spt_end(data: &[u8], mst_end: usize) -> usize {
-    match read_be_u16(data, mst_end) {
-        Ok(v4) => (mst_end + 2 + v4 as usize).min(data.len()),
-        Err(_) => data.len(),
+/// IEEE 802.1Q-2022, Section 14.5 g): at least 6 octets after the Version 3
+/// information, a Version 4 Length of 4 or greater, and an MST Configuration
+/// Identifier Format Selector of 1. Section 14.4 w): the Version 4 Length is
+/// the number of octets that follow it; octets beyond it are not part of
+/// the BPDU.
+fn spt_end(data: &[u8], mst_end: usize) -> Option<usize> {
+    if data[MST_FORMAT_SELECTOR_OFFSET] != SPT_FORMAT_SELECTOR
+        || data.len() < mst_end + SPT_MIN_TAIL
+    {
+        return None;
     }
+    let v4 = read_be_u16(data, mst_end).ok()? as usize;
+    (v4 >= SPT_MIN_TAIL - 2).then(|| (mst_end + 2 + v4).min(data.len()))
 }
 
-/// Push the SPT BPDU fields that follow the MST part.
+/// Push the SPT BPDU fields that follow the MST part of a well-formed SPT
+/// BPDU (`data` ends at the BPDU's end).
 ///
 /// IEEE 802.1Q-2022, Section 14.4 w)–y): Version 4 Length (2 octets), then
 /// the Agreement Number, Discarded Agreement Number and Agreement Digest,
@@ -967,22 +980,16 @@ fn push_spt_fields<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     start: usize,
 ) {
-    let mut pos = start;
-    if data.len() >= start + 2 {
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_VERSION4_LENGTH],
-            FieldValue::U16(u16::from_be_bytes([data[start], data[start + 1]])),
-            offset + start..offset + start + 2,
-        );
-        pos += 2;
-    }
-    if data.len() > pos {
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_UNPARSED],
-            FieldValue::Bytes(&data[pos..]),
-            offset + pos..offset + data.len(),
-        );
-    }
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_VERSION4_LENGTH],
+        FieldValue::U16(u16::from_be_bytes([data[start], data[start + 1]])),
+        offset + start..offset + start + 2,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_UNPARSED],
+        FieldValue::Bytes(&data[start + 2..]),
+        offset + start + 2..offset + data.len(),
+    );
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@
 //! | IEEE 802.1D-2004 §9.3.1   | Flags: TC and TCA bits                   | parse_stp_flags_tc_tca        |
 //! | IEEE 802.1w-2004 §9.3.3   | RSTP flags: all bits                     | parse_rstp_flags_all          |
 //! | IEEE 802.1D-2004 §9.2.5   | Bridge ID: priority + MAC                | parse_stp_bridge_id           |
-//! | IEEE 802.1Q §14.2.5       | Bridge ID kept as the raw 16-bit value   | parse_stp_bridge_id_split     |
+//! | IEEE 802.1Q §14.2.5       | Bridge ID kept as the raw 16-bit value   | parse_stp_bridge_id_raw_priority |
 //! | IEEE 802.1Q §14.2.9       | Port Role names (Unknown vs Master)      | parse_port_role_names         |
 //! | IEEE 802.1Q §14.4 a)–u)   | MST BPDU without MSTI messages           | parse_mst_bpdu_no_msti        |
 //! | IEEE 802.1Q §14.4 j)      | Octets 18–25 = CIST Regional Root in MST | parse_mst_bpdu_no_msti        |
@@ -20,6 +20,7 @@
 //! | IEEE 802.1Q §14.5 d) 1)   | Version 3 but < 102 octets → RST         | parse_mst_bpdu_short          |
 //! | IEEE 802.1Q §14.4 w)      | SPT BPDU: Version 4 Length + unparsed    | parse_spt_bpdu_version4       |
 //! | IEEE 802.1Q §14.4 w)      | SPT data bounded by Version 4 Length     | parse_spt_bpdu_version4       |
+//! | IEEE 802.1Q §14.5 f)/g)   | Malformed SPT part → MST                 | parse_spt_bpdu_version4       |
 //! | —                         | Dissector metadata                       | stp_dissector_metadata        |
 
 use packet_dissector::dissector::{DispatchHint, Dissector};
@@ -493,9 +494,10 @@ fn parse_mst_bpdu_two_mstis() {
     assert_eq!(get(m0, "msti_flags_port_role"), Some(FieldValue::U8(3)));
     assert_eq!(get(m0, "msti_flags_agreement"), Some(FieldValue::U8(1)));
     assert_eq!(get(m0, "msti_flags_master"), Some(FieldValue::U8(0)));
+    // Raw 16-bit priority part (priority component + MSTID), like the CIST fields.
     assert_eq!(
         get(m0, "msti_regional_root_priority"),
-        Some(FieldValue::U16(0x8000))
+        Some(FieldValue::U16(0x800A))
     );
     assert_eq!(get(m0, "msti_id"), Some(FieldValue::U16(10)));
     assert_eq!(
@@ -613,10 +615,16 @@ fn parse_mst_bpdu_short() {
 
 #[test]
 fn parse_spt_bpdu_version4() {
-    // SPT BPDU: MST part, Version 4 Length, then SPT data (IEEE 802.1Q §14.4 w)-y)).
-    let mut data = build_mst_bpdu(&[]);
-    data[2] = 4;
-    data.extend_from_slice(&[0x00, 0x04, 0x05, 0x00, 0xDE, 0xAD]);
+    // SPT BPDU: MST part with Format Selector 1, Version 4 Length, then SPT
+    // data (IEEE 802.1Q §14.4 w)-y), §14.5 g)).
+    let spt = |tail: &[u8]| {
+        let mut data = build_mst_bpdu(&[]);
+        data[2] = 4;
+        data[38] = 1; // MST Configuration Identifier Format Selector
+        data.extend_from_slice(tail);
+        data
+    };
+    let data = spt(&[0x00, 0x04, 0x05, 0x00, 0xDE, 0xAD]);
     let mut buf = DissectBuffer::new();
     let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
     assert_eq!(r.bytes_consumed, data.len());
@@ -636,7 +644,7 @@ fn parse_spt_bpdu_version4() {
     );
 
     // Octets after those covered by the Version 4 Length are not part of it.
-    data.extend_from_slice(&[0xEE, 0xEE]);
+    let data = spt(&[0x00, 0x04, 0x05, 0x00, 0xDE, 0xAD, 0xEE, 0xEE]);
     let mut buf = DissectBuffer::new();
     let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
     assert_eq!(r.bytes_consumed, data.len() - 2);
@@ -645,16 +653,28 @@ fn parse_spt_bpdu_version4() {
         Some(&FieldValue::Bytes(&[0x05, 0x00, 0xDE, 0xAD]))
     );
 
-    // Version 4 with nothing after the MST part is an MST BPDU.
-    let mut data = build_mst_bpdu(&[]);
-    data[2] = 4;
-    let mut buf = DissectBuffer::new();
-    StpDissector.dissect(&data, &mut buf, 0).unwrap();
-    let layer = buf.layer_by_name("STP").unwrap();
-    assert_eq!(
-        buf.resolve_display_name(layer, "bpdu_type_name"),
-        Some("MST")
-    );
+    // Not a well-formed SPT BPDU (§14.5 f) 4)): decoded as MST, and the
+    // trailing octets are not part of the BPDU.
+    for (selector, tail) in [
+        (1u8, &[][..]),                             // nothing after the MST part
+        (1, &[0x00, 0x00]),                         // fewer than 6 octets
+        (1, &[0x00]),                               // no room for Version 4 Length
+        (1, &[0x00, 0x03, 0x05, 0x00, 0xDE, 0xAD]), // Version 4 Length < 4
+        (0, &[0x00, 0x04, 0x05, 0x00, 0xDE, 0xAD]), // Format Selector 0
+    ] {
+        let mut data = spt(tail);
+        data[38] = selector;
+        let mut buf = DissectBuffer::new();
+        let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(r.bytes_consumed, 102, "tail {tail:?} selector {selector}");
+        let layer = buf.layer_by_name("STP").unwrap();
+        assert_eq!(
+            buf.resolve_display_name(layer, "bpdu_type_name"),
+            Some("MST")
+        );
+        assert!(field(&buf, "version4_length").is_none());
+        assert!(field(&buf, "unparsed").is_none());
+    }
 
     // Version 3 MST BPDU followed by extra octets: they are not part of it.
     let mut data = build_mst_bpdu(&[]);
@@ -663,22 +683,12 @@ fn parse_spt_bpdu_version4() {
     let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
     assert_eq!(r.bytes_consumed, 102);
     assert!(field(&buf, "version4_length").is_none());
-
-    // Version 4 with a single trailing octet: no room for Version 4 Length.
-    let mut data = build_mst_bpdu(&[]);
-    data[2] = 4;
-    data.push(0x00);
-    let mut buf = DissectBuffer::new();
-    let r = StpDissector.dissect(&data, &mut buf, 0).unwrap();
-    assert_eq!(r.bytes_consumed, 103);
-    assert!(field(&buf, "version4_length").is_none());
-    assert_eq!(field(&buf, "unparsed"), Some(&FieldValue::Bytes(&[0x00])));
 }
 
 #[test]
-fn parse_stp_bridge_id_split() {
-    // Priority 32768 + VLAN 100 (PVST+ / MSTP system ID extension): the
-    // 16-bit priority part is reported as-is; no split fields are emitted.
+fn parse_stp_bridge_id_raw_priority() {
+    // Priority 32768 + system ID extension 100 (PVST+ / MSTP): the 16-bit
+    // priority part of the Bridge Identifier is reported as-is.
     let data = build_config_bpdu(
         0x8064,
         [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
@@ -696,8 +706,6 @@ fn parse_stp_bridge_id_split() {
         Some(&FieldValue::U16(0x7065))
     );
     assert_eq!(field(&buf, "port_id"), Some(&FieldValue::U16(0x8001)));
-    assert!(field(&buf, "root_system_id_extension").is_none());
-    assert!(field(&buf, "port_number").is_none());
 }
 
 #[test]
