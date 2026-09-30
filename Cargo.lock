@@ -609,14 +609,17 @@ dependencies = [
  "packet-dissector-arp",
  "packet-dissector-bfd",
  "packet-dissector-bgp",
+ "packet-dissector-cdp",
  "packet-dissector-core",
  "packet-dissector-dhcp",
  "packet-dissector-dhcpv6",
  "packet-dissector-diameter",
  "packet-dissector-dns",
+ "packet-dissector-e1ap",
  "packet-dissector-eap",
  "packet-dissector-esp",
  "packet-dissector-ethernet",
+ "packet-dissector-f1ap",
  "packet-dissector-geneve",
  "packet-dissector-gre",
  "packet-dissector-gtpv1c",
@@ -643,6 +646,7 @@ dependencies = [
  "packet-dissector-nas-eps",
  "packet-dissector-nas5g",
  "packet-dissector-ngap",
+ "packet-dissector-nsh",
  "packet-dissector-ntp",
  "packet-dissector-null",
  "packet-dissector-ospf",
@@ -668,6 +672,7 @@ dependencies = [
  "packet-dissector-udp",
  "packet-dissector-vrrp",
  "packet-dissector-vxlan",
+ "packet-dissector-xnap",
 ]
 
 [[package]]
@@ -677,6 +682,13 @@ dependencies = [
  "criterion",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-aper"
+version = "0.5.0"
+dependencies = [
+ "packet-dissector-core",
 ]
 
 [[package]]
@@ -699,6 +711,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-bgp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-cdp"
 version = "0.5.0"
 dependencies = [
  "criterion",
@@ -750,6 +771,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-e1ap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-aper",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-eap"
 version = "0.5.0"
 dependencies = [
@@ -779,6 +810,16 @@ name = "packet-dissector-ethernet"
 version = "0.5.0"
 dependencies = [
  "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-f1ap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-aper",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]
@@ -1017,8 +1058,18 @@ name = "packet-dissector-ngap"
 version = "0.5.0"
 dependencies = [
  "criterion",
+ "packet-dissector-aper",
  "packet-dissector-core",
  "packet-dissector-nas5g",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-nsh"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]
 
@@ -1054,9 +1105,12 @@ name = "packet-dissector-pbt"
 version = "0.5.0"
 dependencies = [
  "packet-dissector",
+ "packet-dissector-cdp",
  "packet-dissector-core",
  "packet-dissector-dns",
+ "packet-dissector-e1ap",
  "packet-dissector-eap",
+ "packet-dissector-f1ap",
  "packet-dissector-gtpv1c",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
@@ -1066,6 +1120,7 @@ dependencies = [
  "packet-dissector-m3ua",
  "packet-dissector-mdns",
  "packet-dissector-nas-eps",
+ "packet-dissector-nsh",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
  "packet-dissector-pppoe",
@@ -1074,6 +1129,7 @@ dependencies = [
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
  "packet-dissector-tcp",
+ "packet-dissector-xnap",
  "proptest",
 ]
 
@@ -1279,6 +1335,16 @@ name = "packet-dissector-vxlan"
 version = "0.5.0"
 dependencies = [
  "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-xnap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-aper",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]
