@@ -1313,7 +1313,10 @@ impl DissectorRegistry {
     ///
     /// `stop` is evaluated with the current buffer state and the pending
     /// dispatch hint before each dissector runs, and again immediately after
-    /// each dissector returns (before reassembly / tunnel middleware). When
+    /// each dissector returns (before reassembly / tunnel middleware). After
+    /// the TCP reassembly middleware has dissected a segment's messages, it
+    /// is evaluated once more with [`DispatchHint::End`] so it sees the
+    /// layers the middleware added. When
     /// it returns `true` the loop terminates early, leaving the layers
     /// dissected so far in `buf`. Full dissection passes a predicate that
     /// always returns `false`.
@@ -1525,6 +1528,10 @@ impl DissectorRegistry {
                         // segment (and their bodies) itself, so the chain
                         // ends here.
                         self.handle_tcp_segment(ctx, payload, captured_all, upper, buf, offset)?;
+                        // Let the stop predicate see the layers the
+                        // middleware added (e.g. a field projection
+                        // satisfied by the application layer).
+                        stop(buf, &DispatchHint::End);
                         break;
                     }
                     break;
