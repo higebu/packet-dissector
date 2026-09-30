@@ -614,8 +614,10 @@ dependencies = [
  "packet-dissector-dhcpv6",
  "packet-dissector-diameter",
  "packet-dissector-dns",
+ "packet-dissector-e1ap",
  "packet-dissector-esp",
  "packet-dissector-ethernet",
+ "packet-dissector-f1ap",
  "packet-dissector-geneve",
  "packet-dissector-gre",
  "packet-dissector-gtpv1u",
@@ -661,6 +663,7 @@ dependencies = [
  "packet-dissector-udp",
  "packet-dissector-vrrp",
  "packet-dissector-vxlan",
+ "packet-dissector-xnap",
 ]
 
 [[package]]
@@ -1039,6 +1042,8 @@ version = "0.5.0"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-dns",
+ "packet-dissector-e1ap",
+ "packet-dissector-f1ap",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
  "packet-dissector-ipv4",
@@ -1050,6 +1055,7 @@ dependencies = [
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
+ "packet-dissector-xnap",
  "proptest",
 ]
 

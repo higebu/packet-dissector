@@ -68,8 +68,10 @@ changelog_include = [
   "packet-dissector-dhcpv6",
   "packet-dissector-diameter",
   "packet-dissector-dns",
+  "packet-dissector-e1ap",
   "packet-dissector-esp",
   "packet-dissector-ethernet",
+  "packet-dissector-f1ap",
   "packet-dissector-geneve",
   "packet-dissector-gre",
   "packet-dissector-gtpv1u",
@@ -117,6 +119,7 @@ changelog_include = [
   "packet-dissector-udp",
   "packet-dissector-vrrp",
   "packet-dissector-vxlan",
+  "packet-dissector-xnap",
 ]
 
 [[package]]
@@ -160,11 +163,19 @@ name = "packet-dissector-dns"
 version_group = "workspace"
 
 [[package]]
+name = "packet-dissector-e1ap"
+version_group = "workspace"
+
+[[package]]
 name = "packet-dissector-esp"
 version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-ethernet"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-f1ap"
 version_group = "workspace"
 
 [[package]]
@@ -353,6 +364,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-vxlan"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-xnap"
 version_group = "workspace"
 
 # -----------------------------------------------------------------------------

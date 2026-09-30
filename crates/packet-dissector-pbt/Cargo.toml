@@ -16,6 +16,8 @@ proptest = "1"
 
 [dev-dependencies]
 packet-dissector-dns = { workspace = true }
+packet-dissector-e1ap = { workspace = true }
+packet-dissector-f1ap = { workspace = true }
 packet-dissector-icmp = { workspace = true }
 packet-dissector-icmpv6 = { workspace = true }
 packet-dissector-ipv4 = { workspace = true }
@@ -27,3 +29,4 @@ packet-dissector-ospf = { workspace = true }
 packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcp = { workspace = true }
+packet-dissector-xnap = { workspace = true }

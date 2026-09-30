@@ -2533,6 +2533,72 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // XnAP runs over SCTP (3GPP TS 38.423). IANA "Service Name and Transport
+        // Protocol Port Number Registry": 38422 `xn-control`; IANA "SCTP Payload
+        // Protocol Identifiers": 61 = XnAP —
+        // https://www.iana.org/assignments/service-names-port-numbers/
+        // https://www.iana.org/assignments/sctp-parameters/
+        #[cfg(feature = "xnap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_xnap::SCTP_PORT,
+                Box::new(packet_dissector_xnap::XnapDissector),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_ppid(
+                packet_dissector_xnap::SCTP_PPID,
+                Box::new(packet_dissector_xnap::XnapDissector),
+            ));
+            reg.register_dissector_factory("xnap", || {
+                Box::new(packet_dissector_xnap::XnapDissector)
+            });
+        }
+
+        // F1AP runs over SCTP (3GPP TS 38.473). IANA "Service Name and Transport
+        // Protocol Port Number Registry": 38472 `f1-control`; IANA "SCTP Payload
+        // Protocol Identifiers": 62 = F1AP —
+        // https://www.iana.org/assignments/service-names-port-numbers/
+        // https://www.iana.org/assignments/sctp-parameters/
+        #[cfg(feature = "f1ap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_f1ap::SCTP_PORT,
+                Box::new(packet_dissector_f1ap::F1apDissector),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_ppid(
+                packet_dissector_f1ap::SCTP_PPID,
+                Box::new(packet_dissector_f1ap::F1apDissector),
+            ));
+            reg.register_dissector_factory("f1ap", || {
+                Box::new(packet_dissector_f1ap::F1apDissector)
+            });
+        }
+
+        // E1AP runs over SCTP (3GPP TS 37.483). IANA "Service Name and Transport
+        // Protocol Port Number Registry": 38462 `e1-interface`; IANA "SCTP Payload
+        // Protocol Identifiers": 64 = E1AP —
+        // https://www.iana.org/assignments/service-names-port-numbers/
+        // https://www.iana.org/assignments/sctp-parameters/
+        #[cfg(feature = "e1ap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_e1ap::SCTP_PORT,
+                Box::new(packet_dissector_e1ap::E1apDissector),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_ppid(
+                packet_dissector_e1ap::SCTP_PPID,
+                Box::new(packet_dissector_e1ap::E1apDissector),
+            ));
+            reg.register_dissector_factory("e1ap", || {
+                Box::new(packet_dissector_e1ap::E1apDissector)
+            });
+        }
+
         // NAS-5G is invoked from NGAP IE parsers; register factory for
         // standalone use (e.g., `bask read --dissector nas5g`).
         #[cfg(feature = "nas5g")]
@@ -4275,6 +4341,23 @@ mod tests {
         #[cfg(all(feature = "ngap", feature = "sctp"))]
         assert_eq!(reg.get_by_sctp_ppid(60).unwrap().short_name(), "NGAP");
 
+        // IANA: XnAP port 38422 / PPID 61, F1AP 38472 / 62, E1AP 38462 / 64.
+        #[cfg(all(feature = "xnap", feature = "sctp"))]
+        {
+            assert_eq!(reg.get_by_sctp_port(38422).unwrap().short_name(), "XnAP");
+            assert_eq!(reg.get_by_sctp_ppid(61).unwrap().short_name(), "XnAP");
+        }
+        #[cfg(all(feature = "f1ap", feature = "sctp"))]
+        {
+            assert_eq!(reg.get_by_sctp_port(38472).unwrap().short_name(), "F1AP");
+            assert_eq!(reg.get_by_sctp_ppid(62).unwrap().short_name(), "F1AP");
+        }
+        #[cfg(all(feature = "e1ap", feature = "sctp"))]
+        {
+            assert_eq!(reg.get_by_sctp_port(38462).unwrap().short_name(), "E1AP");
+            assert_eq!(reg.get_by_sctp_ppid(64).unwrap().short_name(), "E1AP");
+        }
+
         #[cfg(all(any(feature = "l2tp", feature = "l2tpv3"), feature = "udp"))]
         assert!(reg.get_by_udp_port(1701).is_some());
     }
@@ -4326,6 +4409,15 @@ mod tests {
 
         #[cfg(feature = "ngap")]
         assert!(reg.create_dissector_by_name("ngap").is_some());
+
+        #[cfg(feature = "xnap")]
+        assert!(reg.create_dissector_by_name("xnap").is_some());
+
+        #[cfg(feature = "f1ap")]
+        assert!(reg.create_dissector_by_name("f1ap").is_some());
+
+        #[cfg(feature = "e1ap")]
+        assert!(reg.create_dissector_by_name("e1ap").is_some());
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());
