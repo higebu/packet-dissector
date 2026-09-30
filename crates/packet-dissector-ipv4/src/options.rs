@@ -373,15 +373,20 @@ fn push_option_body<'pkt>(
     }
 }
 
-/// Push a route data area as an array of IPv4 addresses. Trailing octets
-/// that do not form a whole address are left out.
+/// Push a route data area as an array of IPv4 addresses.
+///
+/// Route data is a whole number of 4-octet addresses, so trailing octets
+/// that do not form a whole address are pushed as `malformed` bytes.
 fn push_route<'pkt>(buf: &mut DissectBuffer<'pkt>, route: &'pkt [u8], offset: usize) {
+    let addrs = route.chunks_exact(4);
+    let rest = addrs.remainder();
+    let addrs_len = route.len() - rest.len();
     let idx = buf.begin_container(
         &OPTION_CHILDREN[OC_ROUTE],
         FieldValue::Array(0..0),
-        offset..offset + route.len(),
+        offset..offset + addrs_len,
     );
-    for (i, addr) in route.chunks_exact(4).enumerate() {
+    for (i, addr) in addrs.enumerate() {
         let start = offset + i * 4;
         buf.push_field(
             &OPTION_CHILDREN[OC_ROUTE],
@@ -390,6 +395,13 @@ fn push_route<'pkt>(buf: &mut DissectBuffer<'pkt>, route: &'pkt [u8], offset: us
         );
     }
     buf.end_container(idx);
+    if !rest.is_empty() {
+        buf.push_field(
+            &OPTION_CHILDREN[OC_MALFORMED],
+            FieldValue::Bytes(rest),
+            offset + addrs_len..offset + route.len(),
+        );
+    }
 }
 
 /// Push the Internet Timestamp data area.
@@ -400,6 +412,11 @@ fn push_route<'pkt>(buf: &mut DissectBuffer<'pkt>, route: &'pkt [u8], offset: us
 /// prespecified". Other flag values have no defined layout, so the area is
 /// kept as raw bytes.
 /// <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
+///
+/// Flag 0 entries are 4 octets and the area of the longest option (length
+/// 40) holds exactly nine of them, so octets after the last whole entry are
+/// `malformed`. With flags 1 and 3 an option of length 40 leaves 4 octets
+/// after four 8-octet entries, so such octets are kept as `value`.
 fn push_timestamps<'pkt>(buf: &mut DissectBuffer<'pkt>, area: &'pkt [u8], offset: usize, flag: u8) {
     let entry_len = match flag {
         0 => 4,
@@ -415,12 +432,15 @@ fn push_timestamps<'pkt>(buf: &mut DissectBuffer<'pkt>, area: &'pkt [u8], offset
             return;
         }
     };
+    let entries = area.chunks_exact(entry_len);
+    let rest = entries.remainder();
+    let entries_len = area.len() - rest.len();
     let idx = buf.begin_container(
         &OPTION_CHILDREN[OC_ENTRIES],
         FieldValue::Array(0..0),
-        offset..offset + area.len(),
+        offset..offset + entries_len,
     );
-    for (i, entry) in area.chunks_exact(entry_len).enumerate() {
+    for (i, entry) in entries.enumerate() {
         let start = offset + i * entry_len;
         let obj = buf.begin_container(
             &FD_TIMESTAMP_ENTRY,
@@ -443,6 +463,18 @@ fn push_timestamps<'pkt>(buf: &mut DissectBuffer<'pkt>, area: &'pkt [u8], offset
         buf.end_container(obj);
     }
     buf.end_container(idx);
+    if !rest.is_empty() {
+        let fd = if entry_len == 4 {
+            OC_MALFORMED
+        } else {
+            OC_VALUE
+        };
+        buf.push_field(
+            &OPTION_CHILDREN[fd],
+            FieldValue::Bytes(rest),
+            offset + entries_len..offset + area.len(),
+        );
+    }
 }
 
 /// Push the Quick-Start option data (6 octets after type and length).

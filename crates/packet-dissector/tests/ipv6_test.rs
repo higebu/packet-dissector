@@ -44,10 +44,12 @@
 //! | 2473 §5.1   | Tunnel Encapsulation Limit     | parse_ipv6_option_tunnel_encap_limit    |
 //! | 6275 §6.3   | Home Address                   | parse_ipv6_option_home_address          |
 //! | 5570 §5.1   | CALIPSO                        | parse_ipv6_option_calipso               |
+//! | 5570 §5.1.3 | Cmpt Length / Opt Data Len mismatch | parse_ipv6_option_calipso_cmpt_length_mismatch |
 //! | 6553 §3     | RPL Option (0x63)              | parse_ipv6_option_rpl                   |
 //! | 9008 §11.1  | RPL Option (0x23)              | parse_ipv6_option_rpl                   |
 //! | 7731 §6.1   | MPL Option                     | parse_ipv6_option_mpl                   |
 //! | 7731 §6.1   | MPL seed-id sizes (S=0,2,3)    | parse_ipv6_option_mpl_seed_id_sizes     |
+//! | 7731 §6.1   | MPL fields after the seed-id   | parse_ipv6_option_mpl_trailing_fields   |
 //! | IANA        | Option names                   | parse_ipv6_option_names                 |
 //! | 9486 §3     | IOAM                           | parse_ipv6_option_ioam                  |
 //! | 8250 §3.2.1 | PDM                            | parse_ipv6_option_pdm                   |
@@ -1131,6 +1133,71 @@ fn parse_ipv6_option_calipso() {
 }
 
 #[test]
+fn parse_ipv6_option_calipso_cmpt_length_mismatch() {
+    // RFC 5570, Section 5.1.3 — Cmpt Length "specifies the size of the
+    // Compartment Bitmap field in 32-bit words".
+    // <https://www.rfc-editor.org/rfc/rfc5570#section-5.1.3>
+    // Cmpt Length 2 promises an 8-octet bitmap but Opt Data Len 12 leaves
+    // only 4 octets: they are malformed, not a valid bitmap.
+    let data = [
+        0x3a, 0x01, 0x07, 0x0C, // NH, len, type, Opt Data Len 12
+        0x00, 0x00, 0x00, 0x03, // DOI 3
+        0x02, 0x05, 0xAB, 0xCD, // Cmpt Length 2, Sens Level 5, Checksum
+        0x80, 0x00, 0x00, 0x01, // 4 octets of bitmap
+    ];
+    let buf = hbh_options(&data);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    let opt = opts[0].1;
+    assert_eq!(child(opt, "calipso_doi"), Some(&FieldValue::U32(3)));
+    assert_eq!(child(opt, "sens_level"), Some(&FieldValue::U8(5)));
+    assert_eq!(child(opt, "compartment_bitmap"), None);
+    let malformed = opt.iter().find(|f| f.name() == "malformed").unwrap();
+    assert_eq!(
+        malformed.value,
+        FieldValue::Bytes(&[0x80, 0x00, 0x00, 0x01])
+    );
+    assert_eq!(malformed.range, 52..56);
+
+    // Cmpt Length 1 with Opt Data Len 16: the 4-octet bitmap is decoded and
+    // the 4 octets after it are malformed.
+    let data = [
+        0x3a, 0x02, 0x07, 0x10, // NH, len, type, Opt Data Len 16
+        0x00, 0x00, 0x00, 0x03, // DOI 3
+        0x01, 0x05, 0xAB, 0xCD, // Cmpt Length 1, Sens Level 5, Checksum
+        0x80, 0x00, 0x00, 0x01, // bitmap
+        0x11, 0x22, 0x33, 0x44, // trailing octets
+        0x01, 0x02, 0x00, 0x00, // PadN
+    ];
+    let buf = hbh_options(&data);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    let opt = opts[0].1;
+    assert_eq!(
+        child(opt, "compartment_bitmap"),
+        Some(&FieldValue::Bytes(&[0x80, 0x00, 0x00, 0x01]))
+    );
+    let malformed = opt.iter().find(|f| f.name() == "malformed").unwrap();
+    assert_eq!(
+        malformed.value,
+        FieldValue::Bytes(&[0x11, 0x22, 0x33, 0x44])
+    );
+    assert_eq!(malformed.range, 56..60);
+
+    // Cmpt Length 0 with Opt Data Len 8: no bitmap and nothing malformed.
+    let data = [
+        0x3a, 0x01, 0x07, 0x08, // NH, len, type, Opt Data Len 8
+        0x00, 0x00, 0x00, 0x03, // DOI 3
+        0x00, 0x05, 0xAB, 0xCD, // Cmpt Length 0, Sens Level 5, Checksum
+        0x01, 0x02, 0x00, 0x00, // PadN
+    ];
+    let buf = hbh_options(&data);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    let opt = opts[0].1;
+    assert_eq!(child(opt, "cmpt_length"), Some(&FieldValue::U8(0)));
+    assert_eq!(child(opt, "compartment_bitmap"), None);
+    assert_eq!(child(opt, "malformed"), None);
+}
+
+#[test]
 fn parse_ipv6_option_rpl() {
     // RFC 6553, Section 3 — O|R|F flags, RPLInstanceID, SenderRank.
     // RFC 9008, Section 11.1 assigns 0x23 as the RPL Option type as well.
@@ -1664,6 +1731,32 @@ fn parse_ipv6_option_mpl_seed_id_sizes() {
         child(opts[0].1, "value"),
         Some(&FieldValue::Bytes(&[0xC0, 0x07, 0x01, 0x02]))
     );
+}
+
+#[test]
+fn parse_ipv6_option_mpl_trailing_fields() {
+    // RFC 7731, Section 6.1 — "Future updates to this specification may
+    // define additional fields following the seed-id field." Octets after
+    // the seed-id are kept as `value` rather than dropped.
+    // <https://www.rfc-editor.org/rfc/rfc7731#section-6.1>
+    let data = [
+        0x3a, 0x01, // NH, Hdr Ext Len 1 (16 octets)
+        0x6D, 0x06, // MPL Option, Opt Data Len 6
+        0x40, 0x2A, // S=1, sequence 42
+        0xBE, 0xEF, // seed-id
+        0x11, 0x22, // additional fields
+        0x01, 0x04, 0x00, 0x00, 0x00, 0x00, // PadN
+    ];
+    let buf = hbh_options(&data);
+    let opts = option_objects(&buf, "IPv6 Hop-by-Hop", "options");
+    let opt = opts[0].1;
+    assert_eq!(
+        child(opt, "mpl_seed_id"),
+        Some(&FieldValue::Bytes(&[0xBE, 0xEF]))
+    );
+    let value = opt.iter().find(|f| f.name() == "value").unwrap();
+    assert_eq!(value.value, FieldValue::Bytes(&[0x11, 0x22]));
+    assert_eq!(value.range, 48..50);
 }
 
 #[test]

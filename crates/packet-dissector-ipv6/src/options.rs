@@ -369,7 +369,9 @@ fn push_bytes<'pkt>(buf: &mut DissectBuffer<'pkt>, fd: usize, b: &'pkt [u8], at:
 
 /// Push the decoded Option Data. `body` is the Option Data and `offset` its
 /// absolute position. Returns the Jumbo Payload Length for a Jumbo Payload
-/// option. Options with an unexpected length keep their data as `value`.
+/// option. Options with an unexpected length keep their data as `value`,
+/// which also holds option data this module does not decode; CALIPSO octets
+/// that disagree with its Cmpt Length are pushed as `malformed`.
 fn push_option_body<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     opt_type: u8,
@@ -413,6 +415,11 @@ fn push_option_body<'pkt>(
         // bits), Cmpt Length (8 bits, in 32-bit words), Sens Level (8 bits),
         // Checksum (16 bits), Compartment Bitmap (optional).
         // <https://www.rfc-editor.org/rfc/rfc5570#section-5.1>
+        // RFC 5570, Section 5.1.3 — Cmpt Length "specifies the size of the
+        // Compartment Bitmap field in 32-bit words". Octets that disagree
+        // with it (a short bitmap or trailing data) are pushed as
+        // `malformed`.
+        // <https://www.rfc-editor.org/rfc/rfc5570#section-5.1.3>
         (OPT_CALIPSO, 8..) => {
             buf.push_field(
                 &OPTION_CHILDREN[OC_CALIPSO_DOI],
@@ -422,7 +429,13 @@ fn push_option_body<'pkt>(
             push_u8(buf, OC_CMPT_LENGTH, body[4], offset + 4);
             push_u8(buf, OC_SENS_LEVEL, body[5], offset + 5);
             push_u16(buf, OC_CHECKSUM, &body[6..8], offset + 6);
-            push_bytes(buf, OC_COMPARTMENT_BITMAP, &body[8..], offset + 8);
+            let bitmap_end = 8 + 4 * usize::from(body[4]);
+            if bitmap_end <= body.len() {
+                push_bytes(buf, OC_COMPARTMENT_BITMAP, &body[8..bitmap_end], offset + 8);
+                push_bytes(buf, OC_MALFORMED, &body[bitmap_end..], offset + bitmap_end);
+            } else {
+                push_bytes(buf, OC_MALFORMED, &body[8..], offset + 8);
+            }
         }
         // RFC 6553, Section 3 — RPL Option: O|R|F|00000, RPLInstanceID,
         // SenderRank, optional sub-TLVs. RFC 9008, Section 11.1 assigns 0x23
@@ -438,7 +451,9 @@ fn push_option_body<'pkt>(
         }
         // RFC 7731, Section 6.1 — MPL Option: S (2 bits), M, V, rsv (4
         // bits), sequence, seed-id whose size S selects (0, 2, 8 or 16
-        // octets).
+        // octets). "Future updates to this specification may define
+        // additional fields following the seed-id field"; such octets are
+        // kept undecoded as `value`.
         // <https://www.rfc-editor.org/rfc/rfc7731#section-6.1>
         (OPT_MPL, 2..) => {
             let s = body[0] >> 6;
@@ -457,6 +472,7 @@ fn push_option_body<'pkt>(
             push_u8(buf, OC_MPL_VERSION, (body[0] >> 4) & 0x01, offset);
             push_u8(buf, OC_MPL_SEQUENCE, body[1], offset + 1);
             push_bytes(buf, OC_MPL_SEED_ID, &body[2..2 + seed_len], offset + 2);
+            push_bytes(buf, OC_VALUE, &body[2 + seed_len..], offset + 2 + seed_len);
         }
         // RFC 9486, Section 3 — IOAM: Reserved (8 bits), IOAM Option-Type
         // (8 bits), Option Data.
