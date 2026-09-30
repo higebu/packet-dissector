@@ -372,13 +372,9 @@ pub(crate) fn push_mcc_mnc(
 ///   Byte 1: MNC digit 3 | MCC digit 3
 ///   Byte 2: MNC digit 2 | MNC digit 1
 ///
-/// Fewer than 3 bytes yield empty MCC and MNC fields.
-pub(crate) fn push_plmn_fields(
-    data: &[u8],
-    offset: usize,
-    plmn_len: usize,
-    buf: &mut DissectBuffer<'_>,
-) {
+/// Fewer than 3 bytes yield empty MCC and MNC fields. The fields are named
+/// `mcc` and `mnc` and hold ASCII digits in the scratch buffer.
+pub fn push_plmn_fields(data: &[u8], offset: usize, plmn_len: usize, buf: &mut DissectBuffer<'_>) {
     let range = offset..offset + plmn_len;
     let [o1, o2, o3, ..] = *data else {
         let empty = buf.push_scratch(&[]);
