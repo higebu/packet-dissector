@@ -44,6 +44,7 @@ default = [
   "ngap",
   "geneve",
   "gre",
+  "erspan",
   "vxlan",
   "lldp",
   "stp",
@@ -106,6 +107,7 @@ nas5g = ["dep:packet-dissector-nas5g"]
 ngap = ["dep:packet-dissector-ngap", "nas5g"]
 geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
+erspan = ["dep:packet-dissector-erspan"]
 vxlan = ["dep:packet-dissector-vxlan"]
 lldp = ["dep:packet-dissector-lldp"]
 stp = ["dep:packet-dissector-stp"]
@@ -162,7 +164,7 @@ application = [
   "quic",
   "stun",
 ]
-tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
+tunneling = ["gre", "erspan", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]
@@ -202,6 +204,7 @@ packet-dissector-nas5g = { workspace = true, optional = true }
 packet-dissector-ngap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }
 packet-dissector-gre = { workspace = true, optional = true }
+packet-dissector-erspan = { workspace = true, optional = true }
 packet-dissector-vxlan = { workspace = true, optional = true }
 packet-dissector-lldp = { workspace = true, optional = true }
 packet-dissector-stp = { workspace = true, optional = true }

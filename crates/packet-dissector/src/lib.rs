@@ -163,6 +163,9 @@ pub mod dissectors {
     #[cfg(feature = "gre")]
     pub use packet_dissector_gre as gre;
 
+    #[cfg(feature = "erspan")]
+    pub use packet_dissector_erspan as erspan;
+
     #[cfg(feature = "mpls")]
     pub use packet_dissector_mpls as mpls;
 

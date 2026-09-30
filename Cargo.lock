@@ -614,6 +614,7 @@ dependencies = [
  "packet-dissector-dhcpv6",
  "packet-dissector-diameter",
  "packet-dissector-dns",
+ "packet-dissector-erspan",
  "packet-dissector-esp",
  "packet-dissector-ethernet",
  "packet-dissector-geneve",
@@ -735,6 +736,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-dns"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-erspan"
 version = "0.5.0"
 dependencies = [
  "criterion",
@@ -1011,6 +1021,7 @@ version = "0.5.0"
 dependencies = [
  "packet-dissector-core",
  "packet-dissector-dns",
+ "packet-dissector-erspan",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
  "packet-dissector-ipv4",
