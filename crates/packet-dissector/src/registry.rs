@@ -1,6 +1,8 @@
 //! Dissector registry for managing and dispatching protocol dissectors.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "mpls")]
+use std::sync::atomic::Ordering;
 
 use packet_dissector_core::dissector::{
     DispatchHint, Dissector, DissectorPlugin, DissectorTable, ProtocolLayer, SpecReference,
@@ -16,7 +18,7 @@ use crate::summary::{DissectSummary, FieldProjection};
 /// A free fn (single concrete type) rather than a closure, so the recursive
 /// `dispatch_loop` instantiation for decrypted payloads does not create an
 /// unbounded chain of monomorphizations.
-fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
+pub(crate) fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
     false
 }
 
@@ -35,6 +37,15 @@ pub(crate) fn bound_payload_end(
         Some(len) => end.min(payload_start.saturating_add(len)),
         None => end,
     }
+}
+
+/// Number of layers, fields and scratch bytes at the start of a temporary
+/// buffer that were copied from the main buffer and must not be merged back.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TmpPrefix {
+    pub(crate) layers: usize,
+    pub(crate) fields: u32,
+    pub(crate) scratch: u32,
 }
 
 struct TmpRemapContext {
@@ -75,12 +86,19 @@ pub struct DissectorRegistry {
     /// Factory functions for creating fresh dissector instances by decode-as name.
     /// Keys are lowercase protocol names (e.g., "http", "dns", "dns.tcp").
     dissector_factories: HashMap<String, fn() -> Box<dyn Dissector>>,
+    /// Centralized IP fragment reassembly service.
+    #[cfg(feature = "ip-reassembly")]
+    pub(crate) ip_reassembly: std::sync::Mutex<super::ip_reassembly::IpReassemblyService>,
     /// Centralized TCP stream reassembly service.
     #[cfg(feature = "tcp")]
     pub(crate) tcp_reassembly: std::sync::Mutex<super::tcp_reassembly::TcpReassemblyService>,
     /// Shared ESP Security Association database for decryption.
     #[cfg(feature = "esp-decrypt")]
     esp_sa_db: packet_dissector_esp::EspSaDb,
+    /// MPLS label table — decode-as rules for the payload after a
+    /// bottom-of-stack label, shared with the built-in MPLS dispatcher.
+    #[cfg(feature = "mpls")]
+    mpls_labels: std::sync::Arc<MplsLabelTable>,
 }
 
 impl DissectorRegistry {
@@ -101,10 +119,14 @@ impl DissectorRegistry {
             by_link_type: HashMap::new(),
             by_ach_channel_type: HashMap::new(),
             dissector_factories: HashMap::new(),
+            #[cfg(feature = "ip-reassembly")]
+            ip_reassembly: super::ip_reassembly::new_ip_reassembly(),
             #[cfg(feature = "tcp")]
             tcp_reassembly: super::tcp_reassembly::new_tcp_reassembly(),
             #[cfg(feature = "esp-decrypt")]
             esp_sa_db: std::sync::Arc::new(packet_dissector_esp::SharedEspSaDb::new()),
+            #[cfg(feature = "mpls")]
+            mpls_labels: std::sync::Arc::new(MplsLabelTable::default()),
         }
     }
 
@@ -545,6 +567,70 @@ impl DissectorRegistry {
             .map(|d| d.as_ref())
     }
 
+    /// Register a dissector for the payload after the bottom-of-stack MPLS
+    /// label `label` (a decode-as rule, e.g. `pw-eth` or `pw-eth-cw`).
+    ///
+    /// The PW type, and hence the payload type, is signalled out of band
+    /// (RFC 4385, Section 3 — <https://www.rfc-editor.org/rfc/rfc4385#section-3>),
+    /// so the MPLS dissector otherwise guesses it from the first nibble
+    /// (RFC 4928, Section 3 — <https://www.rfc-editor.org/rfc/rfc4928#section-3>).
+    /// A rule replaces that guess for `label`. It is consulted by the
+    /// built-in MPLS dissector registered for EtherType 0x8847 only:
+    /// upstream-assigned labels (0x8848) come from a context-specific label
+    /// space (RFC 5331, Section 3 —
+    /// <https://www.rfc-editor.org/rfc/rfc5331#section-3>). It is never
+    /// consulted for bottom labels with a fixed meaning (IPv4 / IPv6
+    /// Explicit NULL and the GAL) or for a bottom entropy label, and it has
+    /// no effect once 0x8847 is re-registered with another dissector.
+    /// Labels are 20 bits wide, so a larger value never matches.
+    ///
+    /// Returns an error if a dissector is already registered for this
+    /// label. Use
+    /// [`register_by_mpls_label_or_replace`](Self::register_by_mpls_label_or_replace)
+    /// to intentionally override an existing registration.
+    #[cfg(feature = "mpls")]
+    pub fn register_by_mpls_label(
+        &mut self,
+        label: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        let mut rules = self.mpls_labels.lock();
+        if let Some(existing) = rules.get(&label) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "mpls_label",
+                key: u64::from(label),
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        rules.insert(label, dissector);
+        self.mpls_labels.has_rules.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Register a dissector for the payload after the bottom-of-stack MPLS
+    /// label `label`, replacing any existing one.
+    ///
+    /// See [`register_by_mpls_label`](Self::register_by_mpls_label). Returns
+    /// the previously registered dissector, if any.
+    #[cfg(feature = "mpls")]
+    pub fn register_by_mpls_label_or_replace(
+        &mut self,
+        label: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        let previous = self.mpls_labels.lock().insert(label, dissector);
+        self.mpls_labels.has_rules.store(true, Ordering::Release);
+        previous
+    }
+
+    /// Short name of the dissector registered for MPLS label `label`, if
+    /// any.
+    #[cfg(feature = "mpls")]
+    pub fn mpls_label_short_name(&self, label: u32) -> Option<&'static str> {
+        self.mpls_labels.lock().get(&label).map(|d| d.short_name())
+    }
+
     /// Look up a dissector by pcap link-layer header type.
     pub fn get_by_link_type(&self, link_type: u32) -> Option<&dyn Dissector> {
         self.by_link_type.get(&link_type).map(|d| d.as_ref())
@@ -651,7 +737,7 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'pkt>,
     ) -> Result<(), PacketError> {
         let entry = self.entry_dissector()?;
-        self.dissect_from_entry(entry, data, buf, &mut no_stop)
+        self.dissect_from_entry(entry, data, buf, &mut no_stop, true)
     }
 
     /// Dissect a raw packet using a link-layer type to select the entry dissector.
@@ -688,7 +774,7 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'pkt>,
     ) -> Result<(), PacketError> {
         let entry = self.entry_dissector_for_link_type(link_type)?;
-        self.dissect_from_entry(entry, data, buf, &mut no_stop)
+        self.dissect_from_entry(entry, data, buf, &mut no_stop, true)
     }
 
     /// Shallow dissection for row summaries: stop once the transport layer
@@ -710,6 +796,11 @@ impl DissectorRegistry {
     /// Stopping before the upper-layer dissector also skips TCP reassembly
     /// and tunnel/inner-packet dissection, so for tunneled packets (e.g.,
     /// VXLAN) the summary describes the outermost transport.
+    ///
+    /// IP fragments are not fed to the stateful fragment reassembly (feature
+    /// `ip-reassembly`): a first fragment is summarized by its own transport
+    /// header and any other fragment ends after its IP layer, so summarizing
+    /// a capture does not disturb a later full dissection of it.
     ///
     /// # Example
     ///
@@ -743,9 +834,13 @@ impl DissectorRegistry {
     ) -> Result<DissectSummary, PacketError> {
         let entry = self.entry_dissector()?;
         let mut summary = DissectSummary::new();
-        self.dissect_from_entry(entry, data, buf, &mut |buf, hint| {
-            self.summary_stop(buf, hint, &mut summary)
-        })?;
+        self.dissect_from_entry(
+            entry,
+            data,
+            buf,
+            &mut |buf, hint| self.summary_stop(buf, hint, &mut summary),
+            false,
+        )?;
         Ok(summary)
     }
 
@@ -760,9 +855,13 @@ impl DissectorRegistry {
     ) -> Result<DissectSummary, PacketError> {
         let entry = self.entry_dissector_for_link_type(link_type)?;
         let mut summary = DissectSummary::new();
-        self.dissect_from_entry(entry, data, buf, &mut |buf, hint| {
-            self.summary_stop(buf, hint, &mut summary)
-        })?;
+        self.dissect_from_entry(
+            entry,
+            data,
+            buf,
+            &mut |buf, hint| self.summary_stop(buf, hint, &mut summary),
+            false,
+        )?;
         Ok(summary)
     }
 
@@ -805,8 +904,15 @@ impl DissectorRegistry {
     /// `(layer, field)` targets, and the dispatch loop stops before
     /// dissecting any deeper layer once all targets are found. If the packet
     /// never produces all targets, the chain runs to completion, identical
-    /// to [`dissect`](Self::dissect), and
-    /// [`FieldProjection::is_satisfied`] returns `false`.
+    /// to [`dissect`](Self::dissect) except that IP fragments are not
+    /// reassembled (see below), and [`FieldProjection::is_satisfied`]
+    /// returns `false`.
+    ///
+    /// Like [`dissect_summary`](Self::dissect_summary), projected
+    /// dissection does not feed IP fragments to the stateful fragment
+    /// reassembly (feature `ip-reassembly`): a first fragment is dissected
+    /// from its own upper-layer header and any other fragment ends after
+    /// its IP layer.
     ///
     /// `projection` is reset automatically, so it can be reused across
     /// packets without per-packet allocation. Read the extracted values from
@@ -848,7 +954,7 @@ impl DissectorRegistry {
     ) -> Result<(), PacketError> {
         let entry = self.entry_dissector()?;
         projection.reset();
-        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf))
+        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf), false)
     }
 
     /// [`dissect_projected`](Self::dissect_projected) variant that selects
@@ -865,12 +971,12 @@ impl DissectorRegistry {
         // packet's state when the link type is unsupported.
         projection.reset();
         let entry = self.entry_dissector_for_link_type(link_type)?;
-        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf))
+        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf), false)
     }
 
     /// Dissect with the given entry dissector, then run the dispatch loop.
     ///
-    /// `stop` is the early-termination predicate described on
+    /// `stop` and `full` are described on
     /// [`dispatch_loop`](Self::dispatch_loop).
     fn dissect_from_entry<'pkt, F>(
         &self,
@@ -878,6 +984,7 @@ impl DissectorRegistry {
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
         stop: &mut F,
+        full: bool,
     ) -> Result<(), PacketError>
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
@@ -895,10 +1002,33 @@ impl DissectorRegistry {
                 buf.truncate_embedded_payloads(payloads_base);
                 return Ok(());
             }
-            return self.dispatch_embedded_payloads(data, buf, payloads_base, data.len(), stop);
+            return self.dispatch_embedded_payloads(
+                data,
+                buf,
+                payloads_base,
+                data.len(),
+                stop,
+                full,
+            );
         }
         let end = bound_payload_end(data.len(), result.bytes_consumed, result.payload_len);
-        self.dispatch_loop(data, buf, result.bytes_consumed, end, result.next, stop)
+        // An IP entry dissector (e.g. set with `set_entry_dissector`) may
+        // report a fragment itself.
+        #[cfg(feature = "ip-reassembly")]
+        if let Some(result) =
+            self.reassemble_reported_fragment(&result, data, buf, result.bytes_consumed, end, full)
+        {
+            return result;
+        }
+        self.dispatch_loop(
+            data,
+            buf,
+            result.bytes_consumed,
+            end,
+            result.next,
+            stop,
+            full,
+        )
     }
 
     /// Dispatch the payloads a dissector recorded with
@@ -921,6 +1051,7 @@ impl DissectorRegistry {
         base: usize,
         end: usize,
         stop: &mut F,
+        full: bool,
     ) -> Result<(), PacketError>
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
@@ -934,7 +1065,9 @@ impl DissectorRegistry {
             if start >= payload_end {
                 continue;
             }
-            if let Err(e) = self.dispatch_loop(data, buf, start, payload_end, payload.next, stop) {
+            if let Err(e) =
+                self.dispatch_loop(data, buf, start, payload_end, payload.next, stop, full)
+            {
                 first_err.get_or_insert(e);
             }
         }
@@ -1008,7 +1141,15 @@ impl DissectorRegistry {
     /// The predicate is a generic parameter (not `&mut dyn FnMut`) so the
     /// full-dissection instantiation inlines the always-`false` predicate
     /// and keeps the existing fast path free of indirect calls.
-    fn dispatch_loop<'pkt, F>(
+    ///
+    /// `full` is `true` for full dissection ([`dissect`](Self::dissect) and
+    /// [`dissect_with_link_type`](Self::dissect_with_link_type)). Only full
+    /// dissection feeds IP fragments to the (stateful) fragment reassembly;
+    /// shallow dissection dispatches the first fragment's upper layers as
+    /// if reassembly were disabled and leaves the reassembly state alone.
+    #[cfg_attr(not(feature = "ip-reassembly"), allow(unused_variables))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_loop<'pkt, F>(
         &self,
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
@@ -1016,6 +1157,7 @@ impl DissectorRegistry {
         mut end: usize,
         mut next: DispatchHint,
         stop: &mut F,
+        full: bool,
     ) -> Result<(), PacketError>
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
@@ -1084,7 +1226,14 @@ impl DissectorRegistry {
             // several upper-layer messages (e.g. bundled SCTP DATA chunks)
             // records each one in the buffer, and each gets its own chain.
             if buf.embedded_payloads().len() > payloads_base {
-                return self.dispatch_embedded_payloads(data, buf, payloads_base, layer_end, stop);
+                return self.dispatch_embedded_payloads(
+                    data,
+                    buf,
+                    payloads_base,
+                    layer_end,
+                    stop,
+                    full,
+                );
             }
 
             // Embedded payload middleware: when a dissector signals that the
@@ -1099,6 +1248,17 @@ impl DissectorRegistry {
                         let upper_result = upper.dissect(&data[start..range_end], buf, start)?;
                         offset = start + upper_result.bytes_consumed;
                         end = bound_payload_end(end, offset, upper_result.payload_len);
+                        #[cfg(feature = "ip-reassembly")]
+                        if let Some(result) = self.reassemble_reported_fragment(
+                            &upper_result,
+                            data,
+                            buf,
+                            offset,
+                            end,
+                            full,
+                        ) {
+                            return result;
+                        }
                         next = upper_result.next;
                         continue;
                     }
@@ -1127,20 +1287,22 @@ impl DissectorRegistry {
                 padded.extend_from_slice(&decrypted.data);
 
                 // Dissect into a temporary buffer. Fields borrow from `padded`.
-                // Decrypted inner data is always dissected fully: shallow
+                // Decrypted inner data is always dissected to the end: shallow
                 // callers stop on the outer chain before reaching this point.
                 // `no_stop` is a free fn (not a closure) so this recursive
                 // instantiation does not depend on `F` and monomorphization
-                // terminates.
+                // terminates. `full` is passed on so a shallow caller never
+                // feeds inner IP fragments to the reassembly state.
                 let mut tmp_buf = DissectBuffer::new();
-                let mut full = no_stop;
+                let mut inner_stop = no_stop;
                 self.dispatch_loop(
                     &padded,
                     &mut tmp_buf,
                     virtual_start,
                     padded.len(),
                     decrypted.next,
-                    &mut full,
+                    &mut inner_stop,
+                    full,
                 )?;
 
                 // Merge tmp_buf into the main buf. Layers are cheap to copy.
@@ -1149,6 +1311,26 @@ impl DissectorRegistry {
                 // and outlives the fields).
                 Self::merge_tmp_buf(buf, tmp_buf, &padded, virtual_start, aux_handle);
                 break;
+            }
+
+            // IP fragment reassembly middleware: a fragment's data is
+            // buffered, and the packet that completes a datagram continues
+            // with the upper layers of the reassembled datagram. Packets
+            // carrying an incomplete datagram end here, including the first
+            // fragment. A fragment whose data was not captured in full
+            // (snaplen truncation) cannot be reassembled; it, and every
+            // fragment in shallow dissection, follows the dissector's own
+            // hint (the first fragment's upper layers, or the end of the
+            // chain).
+            // RFC 791, Section 3.2 —
+            // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+            // RFC 8200, Section 4.5 —
+            // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
+            #[cfg(feature = "ip-reassembly")]
+            if let Some(result) =
+                self.reassemble_reported_fragment(&result, data, buf, offset, end, full)
+            {
+                return result;
             }
 
             // TCP reassembly middleware: if the dissector provided TCP stream
@@ -1196,13 +1378,37 @@ impl DissectorRegistry {
         virtual_start: usize,
         aux_handle: AuxDataHandle,
     ) {
+        Self::merge_tmp_tail(
+            buf,
+            tmp_buf,
+            TmpPrefix::default(),
+            padded,
+            virtual_start,
+            aux_handle,
+        );
+    }
+
+    /// Like [`merge_tmp_buf`](Self::merge_tmp_buf), but skip the first
+    /// `prefix` layers, fields and scratch bytes of `tmp_buf`: a copy of
+    /// `buf`'s own content that seeded the temporary buffer so upper-layer
+    /// dissectors could see the enclosing layers.
+    pub(crate) fn merge_tmp_tail<'pkt>(
+        buf: &mut DissectBuffer<'pkt>,
+        tmp_buf: DissectBuffer<'_>,
+        prefix: TmpPrefix,
+        padded: &[u8],
+        virtual_start: usize,
+        aux_handle: AuxDataHandle,
+    ) {
         use packet_dissector_core::field::Field;
 
-        let field_offset = buf.field_count();
-        let scratch_offset = buf.scratch_len();
-        let (tmp_layers, tmp_fields, tmp_scratch) = tmp_buf.into_parts();
-        buf.extend_scratch(&tmp_scratch);
-        for mut layer in tmp_layers {
+        // Indices recorded in `tmp_buf` count the prefix; in `buf` they
+        // start at its current length instead.
+        let field_offset = buf.field_count() - prefix.fields;
+        let scratch_offset = buf.scratch_len() - prefix.scratch;
+        buf.extend_scratch(&tmp_buf.scratch()[prefix.scratch as usize..]);
+        for layer in &tmp_buf.layers()[prefix.layers..] {
+            let mut layer = layer.clone();
             layer.field_range.start += field_offset;
             layer.field_range.end += field_offset;
             buf.push_layer(layer);
@@ -1217,13 +1423,17 @@ impl DissectorRegistry {
             scratch_offset,
         };
 
-        for field in tmp_fields {
+        // `tmp_buf` stays alive while its fields are remapped: values that
+        // borrow from its own auxiliary data (e.g. TCP reassembly inside the
+        // inner dissection) are copied into `buf` before it is dropped.
+        for field in &tmp_buf.fields()[prefix.fields as usize..] {
             // Remap borrowed field values from `padded` to `buf.aux_data`.
-            let new_value: FieldValue<'pkt> = Self::remap_field_value(field.value, buf, &remap_ctx);
+            let new_value: FieldValue<'pkt> =
+                Self::remap_field_value(field.value.clone(), buf, &remap_ctx);
             buf.push_raw_field(Field {
                 descriptor: field.descriptor,
                 value: new_value,
-                range: field.range,
+                range: field.range.clone(),
             });
         }
     }
@@ -1422,6 +1632,10 @@ impl DissectorRegistry {
         if let Some(ref d) = self.ipv6_routing_fallback {
             push(d.as_ref());
         }
+        #[cfg(feature = "mpls")]
+        for d in self.mpls_labels.lock().values() {
+            push(d.as_ref());
+        }
         for d in self.by_link_type.values() {
             push(d.as_ref());
         }
@@ -1452,6 +1666,11 @@ impl DissectorRegistry {
             push(&packet_dissector_lacp::OsspDissector);
             push(&packet_dissector_lacp::EsmcDissector);
         }
+        // GtpcDispatcher delegates by version; expose both GTP-C schemas.
+        #[cfg(feature = "gtpv1c")]
+        push(&packet_dissector_gtpv1c::Gtpv1cDissector);
+        #[cfg(feature = "gtpv2c")]
+        push(&packet_dissector_gtpv2c::Gtpv2cDissector);
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
@@ -1837,6 +2056,88 @@ impl Dissector for L2tpDispatcher {
 }
 
 // ---------------------------------------------------------------------------
+// MPLS dispatcher — applies the MPLS label decode-as rules.
+// ---------------------------------------------------------------------------
+
+/// Decode-as rules keyed by bottom-of-stack MPLS label, shared between the
+/// registry (which adds rules) and [`MplsDispatcher`] (which applies them).
+///
+/// `has_rules` lets the dispatcher skip the lock while no rule exists.
+#[cfg(feature = "mpls")]
+#[derive(Default)]
+struct MplsLabelTable {
+    rules: std::sync::Mutex<HashMap<u32, Box<dyn Dissector>>>,
+    has_rules: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "mpls")]
+impl MplsLabelTable {
+    /// Lock the rules. A panic while the lock was held cannot leave the map
+    /// half-updated, so a poisoned lock is recovered.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u32, Box<dyn Dissector>>> {
+        self.rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// MPLS dissector that hands the payload after a bottom-of-stack label with
+/// a decode-as rule to the rule's dissector.
+///
+/// The PW type is signalled out of band (RFC 4385, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc4385#section-3>), so without a rule
+/// the MPLS dissector's own first-nibble heuristic applies.
+#[cfg(feature = "mpls")]
+struct MplsDispatcher {
+    labels: std::sync::Arc<MplsLabelTable>,
+}
+
+#[cfg(feature = "mpls")]
+impl Dissector for MplsDispatcher {
+    fn name(&self) -> &'static str {
+        packet_dissector_mpls::MplsDissector.name()
+    }
+
+    fn short_name(&self) -> &'static str {
+        packet_dissector_mpls::MplsDissector.short_name()
+    }
+
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        packet_dissector_mpls::MplsDissector.field_descriptors()
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        packet_dissector_mpls::MplsDissector.references()
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        packet_dissector_mpls::MplsDissector.layer()
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        if !self.labels.has_rules.load(Ordering::Acquire) {
+            return packet_dissector_mpls::MplsDissector.dissect(data, buf, offset);
+        }
+        let rules = self.labels.lock();
+        packet_dissector_mpls::MplsDissector.dissect_with_payload_override(
+            data,
+            buf,
+            offset,
+            |label, payload, buf, payload_offset| {
+                rules
+                    .get(&label)
+                    .map(|d| d.dissect(payload, buf, payload_offset))
+            },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UDP port 4500 dispatcher — RFC 3948 multiplexes UDP-encapsulated ESP, IKE
 // (behind a Non-ESP marker) and NAT-keepalives onto a single port.
 // ---------------------------------------------------------------------------
@@ -1918,6 +2219,95 @@ impl Dissector for UdpEncapDispatcher {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GTP-C version dispatcher — GTPv1-C and GTPv2-C share UDP port 2123 and are
+// told apart by the version field in bits 8-6 of octet 1.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
+struct GtpcDispatcher;
+
+/// Specifications behind both versions the GTP-C dispatcher routes to.
+#[cfg(all(feature = "gtpv1c", feature = "gtpv2c", feature = "udp"))]
+static GTPC_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "3GPP TS 29.060",
+        "General Packet Radio Service (GPRS); GPRS Tunnelling Protocol (GTP) across the Gn and \
+         Gp interface",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.060/",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.274",
+        "3GPP Evolved Packet System (EPS); Evolved General Packet Radio Service (GPRS) \
+         Tunnelling Protocol for Control plane (GTPv2-C); Stage 3",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.274/",
+    ),
+];
+
+#[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
+impl Dissector for GtpcDispatcher {
+    fn name(&self) -> &'static str {
+        "GPRS Tunnelling Protocol Control Plane"
+    }
+
+    fn short_name(&self) -> &'static str {
+        "GTP-C"
+    }
+
+    /// Empty: this dispatcher never emits a layer of its own. The GTPv1-C
+    /// and GTPv2-C schemas are exposed by
+    /// [`DissectorRegistry::for_each_unique_dissector`].
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        &[]
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        #[cfg(all(feature = "gtpv1c", feature = "gtpv2c"))]
+        {
+            GTPC_REFERENCES
+        }
+        #[cfg(all(feature = "gtpv1c", not(feature = "gtpv2c")))]
+        {
+            packet_dissector_gtpv1c::Gtpv1cDissector.references()
+        }
+        #[cfg(not(feature = "gtpv1c"))]
+        {
+            packet_dissector_gtpv2c::Gtpv2cDissector.references()
+        }
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        let Some(&first) = data.first() else {
+            return Err(PacketError::Truncated {
+                expected: 1,
+                actual: 0,
+            });
+        };
+        // 3GPP TS 29.060, Section 6 and TS 29.274, Section 5.1 — the
+        // Version field is bits 8-6 of octet 1 in both headers; TS 29.060,
+        // Section 11.1.1 covers a message "of an unsupported version".
+        match first >> 5 {
+            #[cfg(feature = "gtpv1c")]
+            1 => packet_dissector_gtpv1c::Gtpv1cDissector.dissect(data, buf, offset),
+            #[cfg(feature = "gtpv2c")]
+            2 => packet_dissector_gtpv2c::Gtpv2cDissector.dissect(data, buf, offset),
+            version => Err(PacketError::InvalidFieldValue {
+                field: "version",
+                value: u32::from(version),
+            }),
+        }
+    }
+}
+
 /// Assert that a built-in dissector registration succeeds.
 ///
 /// Used only during [`DissectorRegistry::default()`] initialization where
@@ -1983,6 +2373,17 @@ impl Default for DissectorRegistry {
             0x6558,
             Box::new(packet_dissector_ethernet::EthernetDissector),
         ));
+
+        // IP protocol 143 (Ethernet) — carries an Ethernet frame directly,
+        // e.g. SRv6 L2 services (End.DX2 / End.DT2U / End.DT2M).
+        // RFC 8986, Section 10.1 — https://www.rfc-editor.org/rfc/rfc8986#section-10.1
+        #[cfg(feature = "ethernet")]
+        assert_builtin(
+            reg.register_by_ip_protocol(
+                143,
+                Box::new(packet_dissector_ethernet::EthernetDissector),
+            ),
+        );
 
         // LINKTYPE_LINUX_SLL (113) — Linux cooked capture v1
         #[cfg(feature = "linux_sll")]
@@ -2117,9 +2518,16 @@ impl Default for DissectorRegistry {
         );
 
         #[cfg(feature = "arp")]
-        assert_builtin(
-            reg.register_by_ethertype(0x0806, Box::new(packet_dissector_arp::ArpDissector)),
-        );
+        {
+            assert_builtin(
+                reg.register_by_ethertype(0x0806, Box::new(packet_dissector_arp::ArpDissector)),
+            );
+            // RARP (0x8035) reuses the ARP packet format with opcodes 3/4.
+            // RFC 903 — https://www.rfc-editor.org/rfc/rfc903
+            assert_builtin(
+                reg.register_by_ethertype(0x8035, Box::new(packet_dissector_arp::ArpDissector)),
+            );
+        }
 
         // EtherType 0x8809 — IEEE 802.3 Slow Protocols; the dispatcher selects
         // LACP, Marker, OAM or OSSP/ESMC by subtype (IEEE 802.3 Annex 57A)
@@ -2135,15 +2543,34 @@ impl Default for DissectorRegistry {
             reg.register_by_ethertype(0x88CC, Box::new(packet_dissector_lldp::LldpDissector)),
         );
 
-        // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332)
+        // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332).
+        // The 0x8847 dispatcher applies the MPLS label decode-as rules.
+        // Upstream-assigned labels come from a context-specific label space
+        // (RFC 5331, Section 3 — https://www.rfc-editor.org/rfc/rfc5331#section-3),
+        // so the rules, keyed by label value alone, do not apply to 0x8848.
         #[cfg(feature = "mpls")]
         {
-            assert_builtin(
-                reg.register_by_ethertype(0x8847, Box::new(packet_dissector_mpls::MplsDissector)),
-            );
+            assert_builtin(reg.register_by_ethertype(
+                0x8847,
+                Box::new(MplsDispatcher {
+                    labels: reg.mpls_labels.clone(),
+                }),
+            ));
             assert_builtin(
                 reg.register_by_ethertype(0x8848, Box::new(packet_dissector_mpls::MplsDissector)),
             );
+            // Decode-as names for MPLS label rules: an Ethernet PW without
+            // and with the control word (RFC 4448, Section 4.6 —
+            // https://www.rfc-editor.org/rfc/rfc4448#section-4.6).
+            #[cfg(feature = "ethernet")]
+            {
+                reg.register_dissector_factory("pw-eth", || {
+                    Box::new(packet_dissector_ethernet::EthernetDissector)
+                });
+                reg.register_dissector_factory("pw-eth-cw", || {
+                    Box::new(packet_dissector_mpls::EthernetPwControlWordDissector)
+                });
+            }
         }
 
         // MPLS G-ACh / PW Associated Channel Types (IANA "MPLS Generalized
@@ -2417,13 +2844,16 @@ impl Default for DissectorRegistry {
             });
         }
 
-        // GTPv2-C runs over UDP on port 2123 (3GPP TS 29.274)
+        // GTPv1-C (3GPP TS 29.060, Section 10.1.1.1) and GTPv2-C (3GPP
+        // TS 29.274) share UDP port 2123; GtpcDispatcher picks by version.
+        #[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
+        assert_builtin(reg.register_by_udp_port(2123, Box::new(GtpcDispatcher)));
+        #[cfg(feature = "gtpv1c")]
+        reg.register_dissector_factory("gtpv1c", || {
+            Box::new(packet_dissector_gtpv1c::Gtpv1cDissector)
+        });
         #[cfg(feature = "gtpv2c")]
         {
-            #[cfg(feature = "udp")]
-            assert_builtin(
-                reg.register_by_udp_port(2123, Box::new(packet_dissector_gtpv2c::Gtpv2cDissector)),
-            );
             reg.register_dissector_factory("gtpv2c", || {
                 Box::new(packet_dissector_gtpv2c::Gtpv2cDissector)
             });
@@ -2460,6 +2890,19 @@ impl Default for DissectorRegistry {
                 reg.register_by_tcp_port(5060, Box::new(packet_dissector_sip::SipDissector)),
             );
 
+            // RFC 3261, Section 18.1.1 — the default port "is 5060 for UDP,
+            // TCP and SCTP". SCTP preserves message boundaries (RFC 4168,
+            // Section 3.2), so each DATA chunk is framed like a datagram.
+            // https://www.rfc-editor.org/rfc/rfc3261#section-18.1.1
+            // https://www.rfc-editor.org/rfc/rfc4168#section-3.2
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_port(
+                    5060,
+                    Box::new(packet_dissector_sip::SipDatagramDissector),
+                ),
+            );
+
             reg.register_dissector_factory("sip", || Box::new(packet_dissector_sip::SipDissector));
             reg.register_dissector_factory("sip.udp", || {
                 Box::new(packet_dissector_sip::SipDatagramDissector)
@@ -2484,17 +2927,22 @@ impl Default for DissectorRegistry {
         }
 
         // RADIUS runs over UDP on ports 1812 (auth) and 1813 (accounting)
-        // (RFC 2865, Section 3 / RFC 2866, Section 3)
+        // (RFC 2865, Section 3 / RFC 2866, Section 3), plus:
+        // - 3799: RFC 5176, Section 2.3 — "For either Disconnect-Request or
+        //   CoA-Request packets UDP port 3799 is used as the destination port."
+        //   https://www.rfc-editor.org/rfc/rfc5176#section-2.3
+        // - 1645 / 1646: RFC 2865, Section 3 — "The early deployment of
+        //   RADIUS was done using UDP port number 1645"; RFC 2866, Section 3
+        //   — "The early deployment of RADIUS Accounting was done using UDP
+        //   port number 1646".
+        //   https://www.rfc-editor.org/rfc/rfc2865#section-3
+        //   https://www.rfc-editor.org/rfc/rfc2866#section-3
         #[cfg(feature = "radius")]
         {
             #[cfg(feature = "udp")]
-            {
+            for port in [1812, 1813, 3799, 1645, 1646] {
                 assert_builtin(reg.register_by_udp_port(
-                    1812,
-                    Box::new(packet_dissector_radius::RadiusDissector),
-                ));
-                assert_builtin(reg.register_by_udp_port(
-                    1813,
+                    port,
                     Box::new(packet_dissector_radius::RadiusDissector),
                 ));
             }
@@ -2571,12 +3019,31 @@ impl Default for DissectorRegistry {
         }
 
         // Register TLS for the common HTTPS port 443 (RFC 5246, RFC 8446)
+        // and for the ports whose assigned service runs over implicit TLS
+        // (the TLS handshake is the first data exchanged on the connection):
+        // - 465 submissions, 993 imaps, 995 pop3s: RFC 8314, Sections 7.1–7.3
+        //   https://www.rfc-editor.org/rfc/rfc8314#section-7
+        // - 636 ldaps, 990 ftps: IANA Service Name and Transport Protocol
+        //   Port Number Registry
+        //   https://www.iana.org/assignments/service-names-port-numbers/
+        // - 853 domain-s (DNS over TLS): RFC 7858, Section 3.1
+        //   https://www.rfc-editor.org/rfc/rfc7858#section-3.1
+        // - 2083 radsec: RFC 6614, Section 2.1
+        //   https://www.rfc-editor.org/rfc/rfc6614#section-2.1
+        // - 5061 sips: RFC 3261, Section 18.2.1
+        //   https://www.rfc-editor.org/rfc/rfc3261#section-18.2.1
+        // - 5349 stuns: RFC 8489, Section 18.6
+        //   https://www.rfc-editor.org/rfc/rfc8489#section-18.6
+        // - 6697 ircs-u: RFC 7194, Section 4
+        //   https://www.rfc-editor.org/rfc/rfc7194#section-4
         #[cfg(feature = "tls")]
         {
             #[cfg(feature = "tcp")]
-            assert_builtin(
-                reg.register_by_tcp_port(443, Box::new(packet_dissector_tls::TlsDissector)),
-            );
+            for port in [443, 465, 636, 853, 990, 993, 995, 2083, 5061, 5349, 6697] {
+                assert_builtin(
+                    reg.register_by_tcp_port(port, Box::new(packet_dissector_tls::TlsDissector)),
+                );
+            }
             reg.register_dissector_factory("tls", || Box::new(packet_dissector_tls::TlsDissector));
         }
 
@@ -2618,6 +3085,25 @@ impl Default for DissectorRegistry {
             );
             assert_builtin(
                 reg.register_by_ethertype(0x880B, Box::new(packet_dissector_ppp::PppDissector)),
+            );
+        }
+
+        // PPPoE — EtherType 0x8863 (Discovery) and 0x8864 (Session)
+        // (RFC 2516, Section 4 — https://www.rfc-editor.org/rfc/rfc2516#section-4),
+        // and LINKTYPE_PPP_ETHER (51), where the packet begins with the PPPoE
+        // header (https://www.tcpdump.org/linktypes.html).
+        #[cfg(feature = "pppoe")]
+        {
+            assert_builtin(reg.register_by_ethertype(
+                0x8863,
+                Box::new(packet_dissector_pppoe::PppoeDiscoveryDissector),
+            ));
+            assert_builtin(reg.register_by_ethertype(
+                0x8864,
+                Box::new(packet_dissector_pppoe::PppoeSessionDissector),
+            ));
+            assert_builtin(
+                reg.register_by_link_type(51, Box::new(packet_dissector_pppoe::PppoeDissector)),
             );
         }
 
@@ -2975,7 +3461,7 @@ mod tests {
         reg.register_by_llc_sap_or_replace(0x42, Box::new(MsgDissector));
         let data = [0x00, 0x00, 0x01, 0xAA];
         let mut buf = DissectBuffer::new();
-        reg.dissect_from_entry(&BundleDissector, &data, &mut buf, &mut |_, _| true)
+        reg.dissect_from_entry(&BundleDissector, &data, &mut buf, &mut |_, _| true, false)
             .unwrap();
         assert_eq!(buf.layers().len(), 1);
         assert!(buf.embedded_payloads().is_empty());
@@ -4172,6 +4658,13 @@ mod tests {
             assert!(reg.get_by_ethertype(0x880B).is_some());
         }
 
+        #[cfg(feature = "pppoe")]
+        {
+            assert!(reg.get_by_ethertype(0x8863).is_some());
+            assert!(reg.get_by_ethertype(0x8864).is_some());
+            assert!(reg.get_by_link_type(51).is_some());
+        }
+
         #[cfg(feature = "stp")]
         assert!(reg.get_by_llc_sap(0x42).is_some());
 
@@ -4266,7 +4759,7 @@ mod tests {
         #[cfg(all(feature = "gtpv1u", feature = "udp"))]
         assert!(reg.get_by_udp_port(2152).is_some());
 
-        #[cfg(all(feature = "gtpv2c", feature = "udp"))]
+        #[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
         assert!(reg.get_by_udp_port(2123).is_some());
 
         #[cfg(all(feature = "pfcp", feature = "udp"))]
@@ -4305,6 +4798,107 @@ mod tests {
         assert!(reg.get_by_udp_port(1701).is_some());
     }
 
+    #[cfg(all(feature = "gtpv1c", feature = "gtpv2c", feature = "udp"))]
+    #[test]
+    fn gtpc_dispatcher_routes_by_version() {
+        let reg = DissectorRegistry::default();
+        let d = reg.get_by_udp_port(2123).unwrap();
+        assert_eq!(d.short_name(), "GTP-C");
+        assert!(d.field_descriptors().is_empty());
+        assert_eq!(d.references().len(), 2);
+        assert_eq!(d.layer(), Some(ProtocolLayer::Application));
+        assert!(!d.name().is_empty());
+
+        // GTPv1-C Echo Request (TS 29.060) and GTPv2-C Echo Request (TS 29.274)
+        let v1 = [0x32, 1, 0, 4, 0, 0, 0, 0, 0, 1, 0, 0];
+        let v2 = [0x40, 1, 0, 4, 0, 0, 1, 0];
+        let mut buf = DissectBuffer::new();
+        d.dissect(&v1, &mut buf, 0).unwrap();
+        d.dissect(&v2, &mut buf, 12).unwrap();
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["GTPv1-C", "GTPv2-C"]);
+
+        let mut buf = DissectBuffer::new();
+        assert!(matches!(
+            d.dissect(&[], &mut buf, 0),
+            Err(PacketError::Truncated {
+                expected: 1,
+                actual: 0
+            })
+        ));
+        assert!(matches!(
+            d.dissect(&[0x60, 1, 0, 4], &mut buf, 0),
+            Err(PacketError::InvalidFieldValue {
+                field: "version",
+                value: 3
+            })
+        ));
+
+        let schemas = reg.all_field_schemas();
+        for name in ["GTPv1-C", "GTPv2-C"] {
+            let schema = schemas.iter().find(|s| s.short_name == name).unwrap();
+            assert!(schema.fields.iter().any(|f| f.name == "ies"), "{name}");
+        }
+    }
+
+    #[test]
+    fn default_registry_assigned_port_registrations() {
+        let reg = DissectorRegistry::default();
+
+        // Implicit-TLS service ports (see the references in `default()`):
+        // RFC 7858, Section 3.1 — https://www.rfc-editor.org/rfc/rfc7858#section-3.1
+        // RFC 8314, Section 7 — https://www.rfc-editor.org/rfc/rfc8314#section-7
+        // RFC 6614, Section 2.1 — https://www.rfc-editor.org/rfc/rfc6614#section-2.1
+        // RFC 3261, Section 18.2.1 — https://www.rfc-editor.org/rfc/rfc3261#section-18.2.1
+        // RFC 8489, Section 18.6 — https://www.rfc-editor.org/rfc/rfc8489#section-18.6
+        // RFC 7194, Section 4 — https://www.rfc-editor.org/rfc/rfc7194#section-4
+        // IANA ldaps (636), ftps (990) — https://www.iana.org/assignments/service-names-port-numbers/
+        #[cfg(all(feature = "tls", feature = "tcp"))]
+        for port in [465, 636, 853, 990, 993, 995, 2083, 5061, 5349, 6697] {
+            assert_eq!(
+                reg.get_by_tcp_port(port).map(|d| d.short_name()),
+                Some("TLS"),
+                "TCP port {port}"
+            );
+        }
+
+        // RFC 3261, Section 18.1.1 — SIP over SCTP on 5060.
+        // https://www.rfc-editor.org/rfc/rfc3261#section-18.1.1
+        #[cfg(all(feature = "sip", feature = "sctp"))]
+        assert_eq!(
+            reg.get_by_sctp_port(5060).map(|d| d.short_name()),
+            Some("SIP")
+        );
+
+        // RFC 5176, Section 2.3 — https://www.rfc-editor.org/rfc/rfc5176#section-2.3
+        // RFC 2865, Section 3 — https://www.rfc-editor.org/rfc/rfc2865#section-3
+        // RFC 2866, Section 3 — https://www.rfc-editor.org/rfc/rfc2866#section-3
+        #[cfg(all(feature = "radius", feature = "udp"))]
+        for port in [1645, 1646, 3799] {
+            assert_eq!(
+                reg.get_by_udp_port(port).map(|d| d.short_name()),
+                Some("RADIUS"),
+                "UDP port {port}"
+            );
+        }
+
+        // RFC 903 — RARP (EtherType 0x8035) uses the ARP packet format.
+        // https://www.rfc-editor.org/rfc/rfc903
+        #[cfg(feature = "arp")]
+        assert_eq!(
+            reg.get_by_ethertype(0x8035).map(|d| d.short_name()),
+            Some("ARP")
+        );
+
+        // RFC 8986, Section 10.1 — IP protocol 143 (Ethernet).
+        // https://www.rfc-editor.org/rfc/rfc8986#section-10.1
+        #[cfg(feature = "ethernet")]
+        assert_eq!(
+            reg.get_by_ip_protocol(143).map(|d| d.short_name()),
+            Some("Ethernet")
+        );
+    }
+
     #[test]
     fn default_registry_factories() {
         let reg = DissectorRegistry::default();
@@ -4332,6 +4926,9 @@ mod tests {
 
         #[cfg(feature = "gtpv1u")]
         assert!(reg.create_dissector_by_name("gtpv1u").is_some());
+
+        #[cfg(feature = "gtpv1c")]
+        assert!(reg.create_dissector_by_name("gtpv1c").is_some());
 
         #[cfg(feature = "gtpv2c")]
         assert!(reg.create_dissector_by_name("gtpv2c").is_some());
