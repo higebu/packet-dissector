@@ -1388,6 +1388,14 @@ mod tests {
             FieldValue::U16(0x1234)
         );
 
+        // E set with no IE flagged in either octet.
+        let pkt = make_gpdu_with_ext(0x85, 2, &[0x10, 0x45, 0x80, 0x00], &[]);
+        let mut buf = DissectBuffer::new();
+        Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let ext = ext_header(&buf, 0);
+        assert_eq!(*get(ext, "new_ie_flags"), FieldValue::U8(0x80));
+        assert!(!has(ext, "d1_ul_pdcp_delay_result_ind"));
+
         // Every octet announces another extension octet, so the chain runs
         // past the content: keep the header raw.
         let pkt = make_gpdu_with_ext(0x85, 2, &[0x10, 0x45, 0x81, 0x80, 0x80, 0x80], &[]);
