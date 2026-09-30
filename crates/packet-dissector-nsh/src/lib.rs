@@ -496,7 +496,7 @@ mod tests {
     //! | 8300 §2.5      | MD Type 2 with no Context Headers             | parse_md_type2_no_context             |
     //! | 8300 §2.5.1    | MD Type 2 Variable-Length Context Headers     | parse_md_type2_context_headers        |
     //! | 8300 §2.5.1    | Context Header overruns NSH length            | parse_md_type2_context_overrun        |
-    //! | 8300 §9.1.4    | MD Class names                                | md_class_names                        |
+    //! | 8300 §9.1.4    | MD Class names                                | md_class_names, display_fns           |
     //! | 8300 §2.2      | Unassigned / reserved MD Type: raw context    | parse_unknown_md_type                 |
     //! | 8300 §2.2      | MD Type 1 Length must be 6                    | parse_md_type1_bad_length             |
     //! | 8300 §2.2      | Unknown Version: MD Type 2 context left raw   | parse_unknown_version                 |
@@ -566,34 +566,20 @@ mod tests {
     /// Collect `(md_class, type, length, value)` of each Context Header.
     fn context_headers<'a>(buf: &'a DissectBuffer<'a>) -> Vec<(u16, u8, u8, &'a [u8])> {
         let layer = buf.layer_by_name("NSH").unwrap();
-        let Some(list) = buf.field_by_name(layer, "context_headers") else {
-            return Vec::new();
-        };
-        let FieldValue::Array(ref range) = list.value else {
-            panic!("context_headers is not an array");
-        };
+        let list = buf.field_by_name(layer, "context_headers").unwrap();
+        let range = list.value.as_container_range().unwrap();
         buf.nested_fields(range)
             .iter()
-            .filter_map(|f| match &f.value {
-                FieldValue::Object(r) => Some(r.clone()),
-                _ => None,
-            })
+            .filter_map(|f| f.value.as_container_range())
             .map(|r| {
-                let fields = buf.nested_fields(&r);
-                let get = |n: &str| fields.iter().find(|f| f.name() == n).unwrap();
-                let FieldValue::U16(class) = get("md_class").value else {
-                    panic!()
-                };
-                let FieldValue::U8(ty) = get("type").value else {
-                    panic!()
-                };
-                let FieldValue::U8(len) = get("length").value else {
-                    panic!()
-                };
-                let FieldValue::Bytes(v) = get("value").value else {
-                    panic!()
-                };
-                (class, ty, len, v)
+                let fields = buf.nested_fields(r);
+                let get = |n: &str| &fields.iter().find(|f| f.name() == n).unwrap().value;
+                (
+                    get("md_class").as_u16().unwrap(),
+                    get("type").as_u8().unwrap(),
+                    get("length").as_u8().unwrap(),
+                    get("value").as_bytes().unwrap(),
+                )
             })
             .collect()
     }
@@ -626,16 +612,11 @@ mod tests {
         let list = buf.field_by_name(layer, "context_headers").unwrap();
         assert_eq!(list.range, 8..20);
         // The U bit is reported separately from Length.
-        let FieldValue::Array(ref range) = list.value else {
-            panic!()
-        };
+        let range = list.value.as_container_range().unwrap();
         let objs: Vec<_> = buf
             .nested_fields(range)
             .iter()
-            .filter_map(|f| match &f.value {
-                FieldValue::Object(r) => Some(r.clone()),
-                _ => None,
-            })
+            .filter_map(|f| f.value.as_container_range().cloned())
             .collect();
         assert_eq!(objs.len(), 2);
         let second = buf.nested_fields(&objs[1]);
@@ -842,6 +823,24 @@ mod tests {
             buf.resolve_display_name(layer, "md_type_name"),
             Some("NSH MD Type 2")
         );
+    }
+
+    /// The display functions name their own value type and nothing else.
+    #[test]
+    fn display_fns() {
+        let class = CONTEXT_HEADER_FIELD_DESCRIPTORS[CFD_MD_CLASS]
+            .display_fn
+            .unwrap();
+        assert_eq!(
+            class(&FieldValue::U16(0x0200), &[]),
+            Some("BBF Specific NSH Metadata")
+        );
+        assert_eq!(class(&FieldValue::U8(0), &[]), None);
+        for (fd, name) in [(FD_MD_TYPE, "NSH MD Type 1"), (FD_NEXT_PROTOCOL, "IPv4")] {
+            let display = FIELD_DESCRIPTORS[fd].display_fn.unwrap();
+            assert_eq!(display(&FieldValue::U8(1), &[]), Some(name));
+            assert_eq!(display(&FieldValue::U16(1), &[]), None);
+        }
     }
 
     #[test]
