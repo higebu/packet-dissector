@@ -44,6 +44,7 @@ packet-dissector-mpls = { version = "0.5.0", path = "crates/packet-dissector-mpl
 packet-dissector-vxlan = { version = "0.5.0", path = "crates/packet-dissector-vxlan" }
 packet-dissector-lacp = { version = "0.5.0", path = "crates/packet-dissector-lacp" }
 packet-dissector-lldp = { version = "0.5.0", path = "crates/packet-dissector-lldp" }
+packet-dissector-eap = { version = "0.5.0", path = "crates/packet-dissector-eap" }
 packet-dissector-ntp = { version = "0.5.0", path = "crates/packet-dissector-ntp" }
 packet-dissector-ospf = { version = "0.5.0", path = "crates/packet-dissector-ospf" }
 packet-dissector-pcap = { version = "0.5.0", path = "crates/packet-dissector-pcap" }
