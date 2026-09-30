@@ -44,6 +44,9 @@ default = [
   "nas5g",
   "nas-eps",
   "ngap",
+  "xnap",
+  "f1ap",
+  "e1ap",
   "sgsap",
   "geneve",
   "gre",
@@ -113,6 +116,9 @@ diameter = ["dep:packet-dissector-diameter"]
 nas5g = ["dep:packet-dissector-nas5g"]
 nas-eps = ["dep:packet-dissector-nas-eps"]
 ngap = ["dep:packet-dissector-ngap", "nas5g"]
+xnap = ["dep:packet-dissector-xnap"]
+f1ap = ["dep:packet-dissector-f1ap"]
+e1ap = ["dep:packet-dissector-e1ap"]
 sgsap = ["dep:packet-dissector-sgsap"]
 geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
@@ -196,6 +202,9 @@ ipsec = ["ah", "esp", "ike"]
   "nas5g",
   "nas-eps",
   "ngap",
+  "xnap",
+  "f1ap",
+  "e1ap",
   "sgsap",
 ]
 
@@ -234,6 +243,9 @@ packet-dissector-diameter = { workspace = true, optional = true }
 packet-dissector-nas5g = { workspace = true, optional = true }
 packet-dissector-nas-eps = { workspace = true, optional = true }
 packet-dissector-ngap = { workspace = true, optional = true }
+packet-dissector-xnap = { workspace = true, optional = true }
+packet-dissector-f1ap = { workspace = true, optional = true }
+packet-dissector-e1ap = { workspace = true, optional = true }
 packet-dissector-sgsap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }
 packet-dissector-gre = { workspace = true, optional = true }

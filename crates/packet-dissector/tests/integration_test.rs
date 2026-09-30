@@ -35,6 +35,12 @@
 //! | Ethernet → IPv4 → SCTP(unknown PPID and ports) → no upper layer | integration_ethernet_ipv4_sctp_unknown_ppid_and_port |
 //! | Ethernet → IPv4 → SCTP(unknown PPID, then PPID 46) summary names Diameter | integration_ethernet_ipv4_sctp_summary_uses_first_resolvable_chunk |
 //! | Ethernet → IPv4 → SCTP(9487→40001, PPID 60) → NGAP | integration_ethernet_ipv4_sctp_ppid_ngap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 38422, PPID 0) → XnAP | integration_ethernet_ipv4_sctp_xnap |
+//! | Ethernet → IPv4 → SCTP(40000→40001, PPID 61) → XnAP | integration_ethernet_ipv4_sctp_ppid_xnap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 38472, PPID 0) → F1AP | integration_ethernet_ipv4_sctp_f1ap |
+//! | Ethernet → IPv4 → SCTP(40000→40001, PPID 62) → F1AP | integration_ethernet_ipv4_sctp_ppid_f1ap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 38462, PPID 0) → E1AP | integration_ethernet_ipv4_sctp_e1ap |
+//! | Ethernet → IPv4 → SCTP(40000→40001, PPID 64) → E1AP | integration_ethernet_ipv4_sctp_ppid_e1ap_nondefault_port |
 //! | Ethernet → IPv4 → SCTP(port 29118, PPID 0) → SGsAP | integration_ethernet_ipv4_sctp_sgsap_paging_request |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
@@ -8321,6 +8327,225 @@ fn integration_ethernet_ipv4_sctp_ngap() {
     } else {
         panic!("expected ies to be Array");
     }
+}
+
+// ---------------------------------------------------------------------------
+// SCTP → XnAP (Xn Setup Failure)
+// ---------------------------------------------------------------------------
+
+/// XnAP Xn Setup Failure (APER, pycrate): Cause and Time To Wait IEs.
+#[cfg(all(feature = "sctp", feature = "xnap"))]
+const XNAP_SETUP_FAILURE: &[u8] = &[
+    0x40, 0x11, 0x00, 0x0e, 0x00, 0x00, 0x02, 0x00, 0x07, 0x40, 0x02, 0x10, 0x00, 0x00, 0x4c, 0x40,
+    0x01, 0x10,
+];
+
+/// XnAP is found by its IANA SCTP port 38422 with an unspecified PPID
+/// (IANA "Service Name and Transport Protocol Port Number Registry" —
+/// <https://www.iana.org/assignments/service-names-port-numbers/>).
+#[cfg(all(feature = "sctp", feature = "xnap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_xnap() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 38422);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, XNAP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "XnAP"]);
+    // The SCTP layer spans its chunks, so the XnAP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + XNAP_SETUP_FAILURE.len());
+    let layer = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(layer, "pdu_type").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert_eq!(
+        display_name_for(&buf, layer, "procedure_code"),
+        Some("xnSetup")
+    );
+    let ies = buf.field_by_name(layer, "ies").unwrap();
+    let FieldValue::Array(ref arr) = ies.value else {
+        panic!("expected ies to be Array");
+    };
+    assert!(!direct_children(&buf, arr).is_empty());
+    assert!(buf.field_by_name(layer, "ie_container_error").is_none());
+}
+
+/// XnAP on a non-default port is found by PPID 61 (IANA "SCTP Payload
+/// Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>).
+#[cfg(all(feature = "sctp", feature = "xnap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_xnap_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 61, XNAP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "XnAP"]);
+    // The SCTP layer spans its chunks, so the XnAP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + XNAP_SETUP_FAILURE.len());
+}
+
+// ---------------------------------------------------------------------------
+// SCTP → F1AP (F1 Setup Failure)
+// ---------------------------------------------------------------------------
+
+/// F1AP F1 Setup Failure (APER, pycrate): Cause and Time To Wait IEs.
+#[cfg(all(feature = "sctp", feature = "f1ap"))]
+const F1AP_SETUP_FAILURE: &[u8] = &[
+    0x80, 0x01, 0x00, 0x13, 0x00, 0x00, 0x03, 0x00, 0x4e, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x40,
+    0x01, 0x66, 0x00, 0x4d, 0x40, 0x01, 0x30,
+];
+
+/// F1AP is found by its IANA SCTP port 38472 with an unspecified PPID
+/// (IANA "Service Name and Transport Protocol Port Number Registry" —
+/// <https://www.iana.org/assignments/service-names-port-numbers/>).
+#[cfg(all(feature = "sctp", feature = "f1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_f1ap() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 38472);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, F1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "F1AP"]);
+    // The SCTP layer spans its chunks, so the F1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + F1AP_SETUP_FAILURE.len());
+    let layer = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(layer, "pdu_type").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert_eq!(
+        display_name_for(&buf, layer, "procedure_code"),
+        Some("F1Setup")
+    );
+    let ies = buf.field_by_name(layer, "ies").unwrap();
+    let FieldValue::Array(ref arr) = ies.value else {
+        panic!("expected ies to be Array");
+    };
+    assert!(!direct_children(&buf, arr).is_empty());
+    assert!(buf.field_by_name(layer, "ie_container_error").is_none());
+}
+
+/// F1AP on a non-default port is found by PPID 62 (IANA "SCTP Payload
+/// Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>).
+#[cfg(all(feature = "sctp", feature = "f1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_f1ap_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 62, F1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "F1AP"]);
+    // The SCTP layer spans its chunks, so the F1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + F1AP_SETUP_FAILURE.len());
+}
+
+// ---------------------------------------------------------------------------
+// SCTP → E1AP (gNB-CU-UP E1 Setup Failure)
+// ---------------------------------------------------------------------------
+
+/// E1AP gNB-CU-UP E1 Setup Failure (APER, pycrate): Cause and Time To Wait IEs.
+#[cfg(all(feature = "sctp", feature = "e1ap"))]
+const E1AP_SETUP_FAILURE: &[u8] = &[
+    0x40, 0x03, 0x00, 0x13, 0x00, 0x00, 0x03, 0x00, 0x39, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x40,
+    0x01, 0x48, 0x00, 0x0c, 0x40, 0x01, 0x50,
+];
+
+/// E1AP is found by its IANA SCTP port 38462 with an unspecified PPID
+/// (IANA "Service Name and Transport Protocol Port Number Registry" —
+/// <https://www.iana.org/assignments/service-names-port-numbers/>).
+#[cfg(all(feature = "sctp", feature = "e1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_e1ap() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 38462);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, E1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "E1AP"]);
+    // The SCTP layer spans its chunks, so the E1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + E1AP_SETUP_FAILURE.len());
+    let layer = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(layer, "pdu_type").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert_eq!(
+        display_name_for(&buf, layer, "procedure_code"),
+        Some("gNB-CU-UP-E1Setup")
+    );
+    let ies = buf.field_by_name(layer, "ies").unwrap();
+    let FieldValue::Array(ref arr) = ies.value else {
+        panic!("expected ies to be Array");
+    };
+    assert!(!direct_children(&buf, arr).is_empty());
+    assert!(buf.field_by_name(layer, "ie_container_error").is_none());
+}
+
+/// E1AP on a non-default port is found by PPID 64 (IANA "SCTP Payload
+/// Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>).
+#[cfg(all(feature = "sctp", feature = "e1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_e1ap_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 64, E1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "E1AP"]);
+    // The SCTP layer spans its chunks, so the E1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + E1AP_SETUP_FAILURE.len());
 }
 
 // ---------------------------------------------------------------------------

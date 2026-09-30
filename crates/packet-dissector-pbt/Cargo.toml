@@ -19,6 +19,8 @@ proptest = "1"
 packet-dissector = { path = "../packet-dissector" }
 packet-dissector-cdp = { workspace = true }
 packet-dissector-dns = { workspace = true }
+packet-dissector-e1ap = { workspace = true }
+packet-dissector-f1ap = { workspace = true }
 packet-dissector-eap = { workspace = true }
 packet-dissector-gtpv1c = { workspace = true }
 packet-dissector-icmp = { workspace = true }
@@ -35,3 +37,4 @@ packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-sgsap = { workspace = true }
 packet-dissector-tcp = { workspace = true }
+packet-dissector-xnap = { workspace = true }

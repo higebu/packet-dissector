@@ -156,6 +156,10 @@ pub mod dissectors {
     #[cfg(feature = "diameter")]
     pub use packet_dissector_diameter as diameter;
 
+    #[cfg(feature = "e1ap")]
+    pub use packet_dissector_e1ap as e1ap;
+    #[cfg(feature = "f1ap")]
+    pub use packet_dissector_f1ap as f1ap;
     #[cfg(feature = "nas-eps")]
     pub use packet_dissector_nas_eps as nas_eps;
     #[cfg(feature = "nas5g")]
@@ -164,6 +168,8 @@ pub mod dissectors {
     pub use packet_dissector_ngap as ngap;
     #[cfg(feature = "sgsap")]
     pub use packet_dissector_sgsap as sgsap;
+    #[cfg(feature = "xnap")]
+    pub use packet_dissector_xnap as xnap;
 
     #[cfg(feature = "geneve")]
     pub use packet_dissector_geneve as geneve;
