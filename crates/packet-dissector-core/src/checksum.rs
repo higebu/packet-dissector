@@ -194,11 +194,22 @@ fn layer_field<'a, 'pkt>(
     buf.field_by_name(layer, name).map(|f| &f.value)
 }
 
+/// Length of the datagram data reassembled from fragments, which the
+/// registry's IP reassembly reports on the layer of the fragment that
+/// completed it (`reassembled_length`).
+fn reassembled_length(buf: &DissectBuffer<'_>, layer: &Layer) -> Option<usize> {
+    match layer_field(buf, layer, "reassembled_length")? {
+        FieldValue::U32(v) => usize::try_from(*v).ok(),
+        _ => None,
+    }
+}
+
 /// Find the innermost IPv4 / IPv6 layer that carries the message starting at
 /// `offset`, and the upper-layer length it declares.
 ///
 /// Returns `None` when there is no such layer or when the message cannot be
-/// checked against it: a fragment of a larger datagram, an IPv6 jumbogram,
+/// checked against it: a fragment of a larger datagram that was not
+/// reassembled, an IPv6 jumbogram,
 /// or an IPv6 packet whose pseudo-header addresses differ from the IPv6
 /// header's (a Routing header with Segments Left > 0, or a Home Address
 /// option).
@@ -220,18 +231,21 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
             FieldValue::U16(v) => *v,
             _ => return None,
         };
-        if flags & 0x01 != 0 || fragment_offset != 0 {
-            return None;
-        }
-        let total_length = match layer_field(buf, ip, "total_length")? {
-            FieldValue::U16(v) => usize::from(*v),
-            _ => return None,
-        };
         let (src, dst) = match (layer_field(buf, ip, "src")?, layer_field(buf, ip, "dst")?) {
             (FieldValue::Ipv4Addr(s), FieldValue::Ipv4Addr(d)) => (*s, *d),
             _ => return None,
         };
-        let upper_len = total_length.checked_sub(offset - ip.range.start)?;
+        let upper_len = if flags & 0x01 != 0 || fragment_offset != 0 {
+            // Only the datagram reassembled from all fragments is complete;
+            // its data follows this fragment's header.
+            reassembled_length(buf, ip)?.checked_sub(offset.checked_sub(ip.range.end)?)?
+        } else {
+            let total_length = match layer_field(buf, ip, "total_length")? {
+                FieldValue::U16(v) => usize::from(*v),
+                _ => return None,
+            };
+            total_length.checked_sub(offset - ip.range.start)?
+        };
         return Some(EnclosingIp {
             addrs: IpAddrs::V4(src, dst),
             upper_len,
@@ -247,6 +261,8 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
     if payload_length == 0 {
         return None;
     }
+    // Reassembled length and the end of the Fragment header it follows.
+    let mut reassembled = None;
     for ext in layers[idx + 1..].iter().filter(|l| l.range.start < offset) {
         // RFC 8200, Section 4.5 — "If the fragment is a whole datagram (that
         // is, both the Fragment Offset field and the M flag are zero), then
@@ -260,7 +276,7 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
                 (offset, more),
                 (Some(FieldValue::U16(0)), Some(FieldValue::U8(0)))
             ) {
-                return None;
+                reassembled = Some((reassembled_length(buf, ext)?, ext.range.end));
             }
         }
         for field in buf.layer_fields(ext) {
@@ -287,7 +303,13 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
     // the length of any extension headers present between the IPv6 header
     // and the upper-layer header."
     // https://www.rfc-editor.org/rfc/rfc8200#section-8.1
-    let upper_len = payload_length.checked_sub(offset.checked_sub(ip.range.end)?)?;
+    // For a reassembled packet, the fragmentable part (everything after the
+    // Fragment header) is the reassembled data (RFC 8200, Section 4.5).
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
+    let upper_len = match reassembled {
+        Some((len, start)) => len.checked_sub(offset.checked_sub(start)?)?,
+        None => payload_length.checked_sub(offset.checked_sub(ip.range.end)?)?,
+    };
     Some(EnclosingIp {
         addrs: IpAddrs::V6(src, dst),
         upper_len,
@@ -393,6 +415,7 @@ mod tests {
     //! | RFC 8200 §8.1   | IPv6 pseudo-header, extension headers       | pseudo_header_ipv6_skips_extension_headers  |
     //! | RFC 8200 §8.1   | Routing header with Segments Left > 0       | ipv6_routing_header_pending_is_unverified   |
     //! | RFC 8200 §4.5   | IPv6 fragment unverified, atomic verified   | ipv6_fragment_is_unverified                 |
+    //! | RFC 791 §3.2    | Reassembled IPv4 / IPv6 datagram            | reassembled_fragments_use_reassembled_length |
     //! | RFC 6275 §9.3.1 | Home Address option changes the source      | ipv6_home_address_option_is_unverified      |
     //! | RFC 2675        | Jumbogram (Payload Length 0)                | ipv6_jumbogram_is_unverified                |
     //! | ---             | Truncated message                           | truncated_message_is_unverified             |
@@ -764,6 +787,45 @@ mod tests {
         fill_checksum(&v4_pseudo(17, 8), &mut msg, 6);
         assert_eq!(
             verify_pseudo_header_checksum(&buf, 60, 17, &msg, Some(8)),
+            ChecksumStatus::Good
+        );
+    }
+
+    #[test]
+    fn reassembled_fragments_use_reassembled_length() {
+        // The registry's IP reassembly reports `reassembled_length` on the
+        // layer of the fragment that completed the datagram, and dissects
+        // the reassembled data after that fragment's header.
+        static REASM: FieldDescriptor =
+            FieldDescriptor::new("reassembled_length", "Reassembled Length", FieldType::U32);
+        let mut msg = vec![0x30, 0x39, 0x00, 0x35, 0x00, 0x0a, 0, 0, 0xab, 0xcd];
+        fill_checksum(&v4_pseudo(17, 10), &mut msg, 6);
+
+        // Last IPv4 fragment (offset 1): its Total Length covers only itself.
+        let mut buf = DissectBuffer::new();
+        push_ipv4(&mut buf, 22, 0, 1);
+        assert_eq!(
+            verify_pseudo_header_checksum(&buf, 20, 17, &msg, Some(10)),
+            ChecksumStatus::Unverified
+        );
+        buf.append_fields_to_layer("IPv4", &[REASM.to_field(FieldValue::U32(10), 0..20)]);
+        assert_eq!(
+            verify_pseudo_header_checksum(&buf, 20, 17, &msg, Some(10)),
+            ChecksumStatus::Good
+        );
+
+        // IPv6: the data follows the Fragment header.
+        let mut msg = vec![0x30, 0x39, 0x00, 0x35, 0x00, 0x0a, 0, 0, 0xab, 0xcd];
+        fill_checksum(&v6_pseudo(17, 10), &mut msg, 6);
+        let mut buf = DissectBuffer::new();
+        push_ipv6(&mut buf, 8 + 2);
+        buf.begin_layer("IPv6 Fragment", None, EXT_FIELDS, 40..48);
+        buf.push_field(&EXT_FIELDS[2], FieldValue::U16(1), 42..44);
+        buf.push_field(&EXT_FIELDS[3], FieldValue::U8(0), 43..44);
+        buf.push_field(&REASM, FieldValue::U32(10), 40..48);
+        buf.end_layer();
+        assert_eq!(
+            verify_pseudo_header_checksum(&buf, 48, 17, &msg, Some(10)),
             ChecksumStatus::Good
         );
     }

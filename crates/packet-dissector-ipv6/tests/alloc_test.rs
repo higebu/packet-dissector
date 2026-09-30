@@ -71,3 +71,28 @@ fn zero_alloc_dissect_ipv6_extension_options() {
     assert_eq!(allocs, 0, "IPv6 extension headers allocated {allocs} times");
     assert_eq!(buf.layers().len(), 3);
 }
+
+#[test]
+fn zero_alloc_dissect_ipv6_fragment() {
+    use packet_dissector_ipv6::FragmentDissector;
+
+    // IPv6 header (Payload Length 16, Next Header 44) + Fragment header
+    // (Fragment Offset 1, M=1) + 8 bytes (RFC 8200, Section 4.5). Building
+    // the reassembly context must not allocate.
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
+    let mut raw = vec![0x60, 0, 0, 0, 0x00, 0x10, 44, 64];
+    raw.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    raw.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    raw.extend_from_slice(&[17, 0, 0x00, 0x09, 0, 0, 0, 1]);
+    raw.extend_from_slice(&[0; 8]);
+    let mut buf = DissectBuffer::new();
+
+    let mut result = None;
+    let allocs = count_allocs(|| {
+        buf.clear();
+        Ipv6Dissector.dissect(&raw, &mut buf, 0).unwrap();
+        result = Some(FragmentDissector.dissect(&raw[40..], &mut buf, 40).unwrap());
+    });
+    assert_eq!(allocs, 0, "IPv6 fragment dissect allocated {allocs} times");
+    assert!(result.unwrap().ip_fragment_context.is_some());
+}

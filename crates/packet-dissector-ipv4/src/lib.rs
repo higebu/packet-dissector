@@ -17,16 +17,22 @@ use packet_dissector_core::checksum::{
     ChecksumStatus, checksum_status_descriptor, internet_checksum,
 };
 use packet_dissector_core::dissector::{
-    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+    DispatchHint, DissectResult, Dissector, IpFragmentContext, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::lookup::ip_protocol_name;
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::read_be_u16;
+use packet_dissector_core::util::{ipv4_mapped, read_be_u16};
 
 /// Minimum IPv4 header size (no options).
 const MIN_HEADER_SIZE: usize = 20;
+
+/// More Fragments flag within the 3-bit Flags field.
+///
+/// RFC 791, Section 3.1 — "Bit 2: (MF) 0 = Last Fragment, 1 = More
+/// Fragments." — <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
+const FLAG_MF: u8 = 0x01;
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_VERSION: usize = 0;
@@ -43,7 +49,7 @@ const FD_CHECKSUM: usize = 10;
 const FD_SRC: usize = 11;
 const FD_DST: usize = 12;
 const FD_OPTIONS: usize = 13;
-const FD_CHECKSUM_STATUS: usize = 14;
+const FD_CHECKSUM_STATUS: usize = 16;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
@@ -73,6 +79,11 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("options", "Options", FieldType::Array)
         .optional()
         .with_children(options::OPTION_CHILDREN),
+    // Not emitted by this dissector: the registry's IP fragment reassembly
+    // appends them to the IPv4 layer of the fragment that completes a
+    // datagram (number of fragments, length of the reassembled data).
+    FieldDescriptor::new("fragment_count", "Fragment Count", FieldType::U32).optional(),
+    FieldDescriptor::new("reassembled_length", "Reassembled Length", FieldType::U32).optional(),
     checksum_status_descriptor("checksum_status", "Header Checksum Status"),
 ];
 
@@ -342,10 +353,52 @@ impl Dissector for Ipv4Dissector {
         // past it (e.g. link-layer padding) are not part of the datagram, so
         // the payload handed upward ends at Total Length.
         // https://www.rfc-editor.org/rfc/rfc791#section-3.1
-        Ok(
-            DissectResult::new(header_len, DispatchHint::ByIpProtocol(protocol))
-                .with_payload_len(total_length as usize - header_len),
+        let payload_len = total_length as usize - header_len;
+
+        // RFC 791, Section 3.2 — "The fragmentation strategy is designed so
+        // than an unfragmented datagram has all zero fragmentation
+        // information (MF = 0, fragment offset = 0)."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+        let more_fragments = flags & FLAG_MF != 0;
+        if !more_fragments && fragment_offset == 0 {
+            return Ok(
+                DissectResult::new(header_len, DispatchHint::ByIpProtocol(protocol))
+                    .with_payload_len(payload_len),
+            );
+        }
+
+        // A fragment. Only the first one (offset 0) starts with the
+        // upper-layer header; the data of any other fragment begins in the
+        // middle of the original datagram and must not be dispatched.
+        // RFC 791, Section 3.2 — "The Fragment Offset field identifies the
+        // fragment location, relative to the beginning of the original
+        // unfragmented datagram. Fragments are counted in units of 8 octets."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+        let next = if fragment_offset == 0 {
+            DispatchHint::ByIpProtocol(protocol)
+        } else {
+            DispatchHint::End
+        };
+        // RFC 791, Section 3.2 — "The internet identification field (ID) is
+        // used together with the source and destination address, and the
+        // protocol fields, to identify datagram fragments for reassembly."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+        let ctx = IpFragmentContext::new(
+            (
+                ipv4_mapped(src),
+                ipv4_mapped(dst),
+                protocol,
+                u32::from(identification),
+            ),
+            protocol,
+            usize::from(fragment_offset) * 8,
+            more_fragments,
+            payload_len,
         )
+        .with_unfragmentable_len(header_len);
+        Ok(DissectResult::new(header_len, next)
+            .with_payload_len(payload_len)
+            .with_ip_fragment_context(ctx))
     }
 }
 

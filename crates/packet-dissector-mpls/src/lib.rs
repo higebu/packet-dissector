@@ -15,6 +15,10 @@
 //!   Ethernet header, and the guess is shown in `payload_heuristic`.
 //!
 //! Other bottom labels use the first-nibble heuristic documented in RFC 4928.
+//! A caller that knows the PW type of a label (a decode-as rule) can decode
+//! the payload itself through [`MplsDissector::dissect_with_payload_override`],
+//! for example with [`EthernetPwControlWordDissector`] for an Ethernet PW that
+//! uses the control word.
 //!
 //! ## References
 //! - RFC 3032 (MPLS Label Stack Encoding): <https://www.rfc-editor.org/rfc/rfc3032>
@@ -569,82 +573,164 @@ impl Dissector for PwControlWordDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        if data.len() < CONTROL_WORD_SIZE {
-            return Err(PacketError::Truncated {
-                expected: CONTROL_WORD_SIZE,
-                actual: data.len(),
-            });
-        }
-        let word = read_be_u32(data, 0)?;
-        // RFC 4385, Section 3 — the control word starts with 0000.
-        // https://www.rfc-editor.org/rfc/rfc4385#section-3
-        let nibble = (word >> 28) as u8;
-        if nibble != NIBBLE_CONTROL_WORD {
-            return Err(PacketError::InvalidFieldValue {
-                field: "control_word_nibble",
-                value: u32::from(nibble),
-            });
-        }
-        // |0 0 0 0| Flags (4) | FRG (2) | Length (6) | Sequence Number (16) |
-        let flags = ((word >> 24) & 0x0F) as u8;
-        let frg = ((word >> 22) & 0x03) as u8;
-        let length = ((word >> 16) & 0x3F) as u8;
-        let sequence_number = (word & 0xFFFF) as u16;
+        dissect_control_word(data, buf, offset, PayloadChoice::Heuristic)
+    }
+}
 
-        // The only payload this dissector dispatches is Ethernet, whose
-        // control word reserves bits 4-15: "They MUST be set to 0 when
-        // transmitting, and MUST be ignored upon receipt." (RFC 4448,
-        // Section 4.6). The RFC 4385 Length field is therefore reported but
-        // never used to bound the payload.
+/// Control word dissector for a PW known to be an Ethernet PW (RFC 4448).
+///
+/// Decodes the same Preferred PW MPLS Control Word as
+/// [`PwControlWordDissector`] and emits the same `PW-CW` layer, but always
+/// dispatches the payload as Ethernet, without the `payload_heuristic`
+/// guess. A PW Associated Channel Header in place of the control word
+/// (first nibble 0001, RFC 4385, Section 5) is decoded with
+/// [`AchDissector`]. It is meant for a decode-as rule that binds a PW label to an
+/// Ethernet PW using the control word, since the PW type is signalled out of
+/// band.
+///
+/// - RFC 4385, Section 3: <https://www.rfc-editor.org/rfc/rfc4385#section-3>
+/// - RFC 4385, Section 5: <https://www.rfc-editor.org/rfc/rfc4385#section-5>
+/// - RFC 4448, Section 4.6: <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>
+pub struct EthernetPwControlWordDissector;
+
+impl Dissector for EthernetPwControlWordDissector {
+    fn name(&self) -> &'static str {
+        "PW MPLS Control Word"
+    }
+
+    fn short_name(&self) -> &'static str {
+        "PW-CW"
+    }
+
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        CW_FIELD_DESCRIPTORS
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        CW_REFERENCES
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Tunnel)
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<DissectResult, PacketError> {
+        // RFC 4385, Section 5 — "Bits 0..3 MUST be 0001. This allows the
+        // packet to be distinguished from an IP packet [BCP] and from a PW
+        // data packet."
+        // https://www.rfc-editor.org/rfc/rfc4385#section-5
+        if data.first().map(|b| b >> 4) == Some(NIBBLE_ACH) {
+            return AchDissector.dissect(data, buf, offset);
+        }
+        dissect_control_word(data, buf, offset, PayloadChoice::Ethernet)
+    }
+}
+
+/// How [`dissect_control_word`] chooses the payload after the control word.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PayloadChoice {
+    /// Dispatch as Ethernet only when the payload looks like Ethernet.
+    Heuristic,
+    /// The PW is known to be an Ethernet PW.
+    Ethernet,
+}
+
+/// Decode a Preferred PW MPLS Control Word
+/// `|0 0 0 0|Flags|FRG|Length|Sequence Number|` as a `PW-CW` layer.
+///
+/// RFC 4385, Section 3 — <https://www.rfc-editor.org/rfc/rfc4385#section-3>
+fn dissect_control_word<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    choice: PayloadChoice,
+) -> Result<DissectResult, PacketError> {
+    if data.len() < CONTROL_WORD_SIZE {
+        return Err(PacketError::Truncated {
+            expected: CONTROL_WORD_SIZE,
+            actual: data.len(),
+        });
+    }
+    let word = read_be_u32(data, 0)?;
+    // RFC 4385, Section 3 — the control word starts with 0000.
+    // https://www.rfc-editor.org/rfc/rfc4385#section-3
+    let nibble = (word >> 28) as u8;
+    if nibble != NIBBLE_CONTROL_WORD {
+        return Err(PacketError::InvalidFieldValue {
+            field: "control_word_nibble",
+            value: u32::from(nibble),
+        });
+    }
+    // |0 0 0 0| Flags (4) | FRG (2) | Length (6) | Sequence Number (16) |
+    let flags = ((word >> 24) & 0x0F) as u8;
+    let frg = ((word >> 22) & 0x03) as u8;
+    let length = ((word >> 16) & 0x3F) as u8;
+    let sequence_number = (word & 0xFFFF) as u16;
+
+    // The only payload this dissector dispatches is Ethernet, whose
+    // control word reserves bits 4-15: "They MUST be set to 0 when
+    // transmitting, and MUST be ignored upon receipt." (RFC 4448,
+    // Section 4.6). The RFC 4385 Length field is therefore reported but
+    // never used to bound the payload.
+    // https://www.rfc-editor.org/rfc/rfc4448#section-4.6
+    let payload = &data[CONTROL_WORD_SIZE..];
+
+    buf.begin_layer(
+        "PW-CW",
+        None,
+        CW_FIELD_DESCRIPTORS,
+        offset..offset + CONTROL_WORD_SIZE,
+    );
+    buf.push_field(
+        &CW_FIELD_DESCRIPTORS[FD_CW_FLAGS],
+        FieldValue::U8(flags),
+        offset..offset + 1,
+    );
+    buf.push_field(
+        &CW_FIELD_DESCRIPTORS[FD_CW_FRG],
+        FieldValue::U8(frg),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &CW_FIELD_DESCRIPTORS[FD_CW_LENGTH],
+        FieldValue::U8(length),
+        offset + 1..offset + 2,
+    );
+    buf.push_field(
+        &CW_FIELD_DESCRIPTORS[FD_CW_SEQUENCE_NUMBER],
+        FieldValue::U16(sequence_number),
+        offset + 2..offset + 4,
+    );
+
+    // RFC 4385, Section 3 — "The PW set-up protocol or configuration
+    // mechanism determines whether a PW uses a PWMCW", and the PW type
+    // (hence the payload type) is signalled out of band. Unless the PW is
+    // known to be an Ethernet PW, only a plausible Ethernet header is
+    // decoded, and the guess is recorded.
+    // https://www.rfc-editor.org/rfc/rfc4385#section-3
+    let next = if choice == PayloadChoice::Ethernet {
+        // RFC 4448, Section 4.6 — the PW is known (from configuration) to
+        // carry Ethernet frames, so no guess is recorded.
         // https://www.rfc-editor.org/rfc/rfc4448#section-4.6
-        let payload = &data[CONTROL_WORD_SIZE..];
-
-        buf.begin_layer(
-            self.short_name(),
-            None,
-            CW_FIELD_DESCRIPTORS,
+        DispatchHint::ByEtherType(ETHERTYPE_TEB)
+    } else if looks_like_ethernet(payload) {
+        buf.push_field(
+            &CW_FIELD_DESCRIPTORS[FD_CW_PAYLOAD_HEURISTIC],
+            FieldValue::Str("ethernet"),
             offset..offset + CONTROL_WORD_SIZE,
         );
-        buf.push_field(
-            &CW_FIELD_DESCRIPTORS[FD_CW_FLAGS],
-            FieldValue::U8(flags),
-            offset..offset + 1,
-        );
-        buf.push_field(
-            &CW_FIELD_DESCRIPTORS[FD_CW_FRG],
-            FieldValue::U8(frg),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &CW_FIELD_DESCRIPTORS[FD_CW_LENGTH],
-            FieldValue::U8(length),
-            offset + 1..offset + 2,
-        );
-        buf.push_field(
-            &CW_FIELD_DESCRIPTORS[FD_CW_SEQUENCE_NUMBER],
-            FieldValue::U16(sequence_number),
-            offset + 2..offset + 4,
-        );
+        DispatchHint::ByEtherType(ETHERTYPE_TEB)
+    } else {
+        DispatchHint::End
+    };
+    buf.end_layer();
 
-        // RFC 4385, Section 3 — "The PW set-up protocol or configuration
-        // mechanism determines whether a PW uses a PWMCW", and the PW type
-        // (hence the payload type) is signalled out of band. Only a
-        // plausible Ethernet header is decoded, and the guess is recorded.
-        // https://www.rfc-editor.org/rfc/rfc4385#section-3
-        let next = if looks_like_ethernet(payload) {
-            buf.push_field(
-                &CW_FIELD_DESCRIPTORS[FD_CW_PAYLOAD_HEURISTIC],
-                FieldValue::Str("ethernet"),
-                offset..offset + CONTROL_WORD_SIZE,
-            );
-            DispatchHint::ByEtherType(ETHERTYPE_TEB)
-        } else {
-            DispatchHint::End
-        };
-        buf.end_layer();
-
-        Ok(DissectResult::new(CONTROL_WORD_SIZE, next))
-    }
+    Ok(DissectResult::new(CONTROL_WORD_SIZE, next))
 }
 
 /// Extend the result of a dissector run on the bytes after the label stack
@@ -689,6 +775,51 @@ impl Dissector for MplsDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
+        self.dissect_with_payload_override(data, buf, offset, |_, _, _, _| None)
+    }
+}
+
+impl MplsDissector {
+    /// Dissect like [`Dissector::dissect`], but let `payload_override`
+    /// decode the payload after the label stack.
+    ///
+    /// The PW type, and hence the type of the payload after a PW label, is
+    /// signalled out of band (RFC 4385, Section 3), and the first-nibble
+    /// heuristic cannot tell an Ethernet PW without a control word from IP
+    /// (RFC 4928, Section 3). A caller that knows the payload type of a label
+    /// (for example from a decode-as rule) passes it through this hook.
+    ///
+    /// `payload_override` receives the bottom-of-stack label, the payload
+    /// after the label stack, the buffer and the payload's offset. It is
+    /// consulted only for bottom labels without a fixed meaning: IPv4 and
+    /// IPv6 Explicit NULL (RFC 3032, Section 2.1) and the GAL (RFC 5586,
+    /// Section 4) keep their defined decoding, and a bottom entropy label
+    /// (RFC 6790, Section 3) or extended special-purpose label (RFC 7274,
+    /// Section 3.1) carries an arbitrary value rather than a PW label. Returning `None` keeps the
+    /// default decoding; `Some(result)` is used as the result for the
+    /// payload, extended by the label stack length.
+    ///
+    /// - RFC 4385, Section 3: <https://www.rfc-editor.org/rfc/rfc4385#section-3>
+    /// - RFC 4928, Section 3: <https://www.rfc-editor.org/rfc/rfc4928#section-3>
+    /// - RFC 3032, Section 2.1: <https://www.rfc-editor.org/rfc/rfc3032#section-2.1>
+    /// - RFC 5586, Section 4: <https://www.rfc-editor.org/rfc/rfc5586#section-4>
+    /// - RFC 6790, Section 3: <https://www.rfc-editor.org/rfc/rfc6790#section-3>
+    /// - RFC 7274, Section 3.1: <https://www.rfc-editor.org/rfc/rfc7274#section-3.1>
+    pub fn dissect_with_payload_override<'pkt, F>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+        payload_override: F,
+    ) -> Result<DissectResult, PacketError>
+    where
+        F: FnOnce(
+            u32,
+            &'pkt [u8],
+            &mut DissectBuffer<'pkt>,
+            usize,
+        ) -> Option<Result<DissectResult, PacketError>>,
+    {
         if data.len() < LABEL_ENTRY_SIZE {
             return Err(PacketError::Truncated {
                 expected: LABEL_ENTRY_SIZE,
@@ -846,29 +977,41 @@ impl Dissector for MplsDissector {
                 }
                 DispatchHint::End
             }
-            _ => match first_nibble {
-                // RFC 4928, Section 3 — existing equipment infers IPv4 or
-                // IPv6 from the first nibble of the MPLS payload.
-                // https://www.rfc-editor.org/rfc/rfc4928#section-3
-                Some(4) => DispatchHint::ByEtherType(0x0800),
-                Some(6) => DispatchHint::ByEtherType(0x86DD),
-                // RFC 4385, Section 5 — PW Associated Channel Header. Without
-                // a GAL only the first nibble identifies it, so the
-                // Reserved octet, which "MUST be sent as 0", must be zero too.
-                // https://www.rfc-editor.org/rfc/rfc4385#section-5
-                Some(NIBBLE_ACH) if has_word && payload[1] == 0 => {
-                    return nested(pos, AchDissector.dissect(payload, buf, offset + pos)?);
+            _ => {
+                // An entropy or extended special-purpose label at the bottom
+                // carries an arbitrary value, not a PW label.
+                let result = if bottom_may_be_special {
+                    payload_override(bottom_label, payload, buf, offset + pos)
+                } else {
+                    None
+                };
+                if let Some(result) = result {
+                    return nested(pos, result?);
                 }
-                // RFC 4385, Section 3 — PW MPLS Control Word.
-                // https://www.rfc-editor.org/rfc/rfc4385#section-3
-                Some(NIBBLE_CONTROL_WORD) if has_word => {
-                    return nested(
-                        pos,
-                        PwControlWordDissector.dissect(payload, buf, offset + pos)?,
-                    );
+                match first_nibble {
+                    // RFC 4928, Section 3 — existing equipment infers IPv4 or
+                    // IPv6 from the first nibble of the MPLS payload.
+                    // https://www.rfc-editor.org/rfc/rfc4928#section-3
+                    Some(4) => DispatchHint::ByEtherType(0x0800),
+                    Some(6) => DispatchHint::ByEtherType(0x86DD),
+                    // RFC 4385, Section 5 — PW Associated Channel Header. Without
+                    // a GAL only the first nibble identifies it, so the
+                    // Reserved octet, which "MUST be sent as 0", must be zero too.
+                    // https://www.rfc-editor.org/rfc/rfc4385#section-5
+                    Some(NIBBLE_ACH) if has_word && payload[1] == 0 => {
+                        return nested(pos, AchDissector.dissect(payload, buf, offset + pos)?);
+                    }
+                    // RFC 4385, Section 3 — PW MPLS Control Word.
+                    // https://www.rfc-editor.org/rfc/rfc4385#section-3
+                    Some(NIBBLE_CONTROL_WORD) if has_word => {
+                        return nested(
+                            pos,
+                            PwControlWordDissector.dissect(payload, buf, offset + pos)?,
+                        );
+                    }
+                    _ => DispatchHint::End,
                 }
-                _ => DispatchHint::End,
-            },
+            }
         };
         Ok(DissectResult::new(pos, next))
     }
@@ -916,6 +1059,14 @@ mod tests {
     // | 3032 §2.1   | Truncated mid-stack                | parse_mpls_truncated_mid_stack      |
     // | 3032 §2.1   | Offset handling                    | parse_mpls_with_offset              |
     // | 3032 §2.1   | Reserved label constants           | reserved_label_constants            |
+    // | 4448 §4.6   | Override for the bottom label      | payload_override_decodes_bottom_label |
+    // | 3032 §2.1   | Override skips reserved bottom     | payload_override_skips_reserved_labels |
+    // | 4928 §3     | Override declined → heuristic      | payload_override_declined_keeps_heuristic |
+    // | 3032 §2.1   | Override error propagates          | payload_override_error_propagates   |
+    // | 4448 §4.6   | Ethernet PW CW always → Ethernet   | ethernet_pw_control_word_forces_ethernet |
+    // | 4385 §3     | Ethernet PW CW nibble / truncation | ethernet_pw_control_word_rejects_bad_input |
+    // | 4385 §5     | Ethernet PW with CW: PW-ACH        | ethernet_pw_control_word_decodes_pw_ach |
+    // | 6790 §3     | Override skips bottom entropy label | payload_override_skips_entropy_label |
 
     /// Helper: dissect raw bytes at offset 0 and return the result.
     fn dissect(data: &[u8]) -> Result<(DissectBuffer<'_>, DissectResult), PacketError> {
@@ -1729,6 +1880,184 @@ mod tests {
         ));
     }
 
+    /// A payload override for the bottom label decodes the payload instead
+    /// of the first-nibble heuristic (RFC 4448, Section 4.6: an Ethernet PW
+    /// without a control word whose destination MAC starts with nibble 4).
+    /// <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>
+    #[test]
+    fn payload_override_decodes_bottom_label() {
+        let mut raw = mpls_entry(100, 0, 0, 64).to_vec();
+        raw.extend_from_slice(&mpls_entry(16, 0, 1, 64));
+        raw.extend_from_slice(&[0x40, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        raw.extend_from_slice(&[0x66; 6]);
+        raw.extend_from_slice(&[0x08, 0x00]);
+        let mut buf = DissectBuffer::new();
+        let mut seen = None;
+        let result = MplsDissector
+            .dissect_with_payload_override(&raw, &mut buf, 10, |label, payload, buf, offset| {
+                seen = Some((label, payload.len(), offset));
+                assert!(buf.layer_by_name("MPLS").is_some());
+                Some(Ok(DissectResult::new(0, DispatchHint::ByEtherType(0x6558))))
+            })
+            .expect("dissect failed");
+        assert_eq!(seen, Some((16, 14, 18)));
+        // The override's result is extended by the label stack, and the
+        // nibble-4 payload is not taken for IPv4.
+        assert_eq!(
+            result,
+            DissectResult::new(8, DispatchHint::ByEtherType(0x6558))
+        );
+    }
+
+    /// Bottom-of-stack labels with fixed meaning (RFC 3032, Section 2.1;
+    /// RFC 5586, Section 4) are never handed to the override.
+    /// <https://www.rfc-editor.org/rfc/rfc3032#section-2.1>
+    #[test]
+    fn payload_override_skips_reserved_labels() {
+        for (label, next) in [
+            (0u32, DispatchHint::ByEtherType(0x0800)),
+            (2, DispatchHint::ByEtherType(0x86DD)),
+            (13, DispatchHint::End),
+        ] {
+            let mut raw = mpls_entry(label, 0, 1, 64).to_vec();
+            raw.extend_from_slice(&[0x45, 0x00, 0x00, 0x14]);
+            let mut buf = DissectBuffer::new();
+            let result = MplsDissector
+                .dissect_with_payload_override(&raw, &mut buf, 0, |_, _, _, _| {
+                    panic!("override consulted for reserved label {label}")
+                })
+                .expect("dissect failed");
+            assert_eq!(result.next, next, "label {label}");
+        }
+    }
+
+    /// An override that declines (returns `None`) leaves the RFC 4928
+    /// first-nibble heuristic in place.
+    /// <https://www.rfc-editor.org/rfc/rfc4928#section-3>
+    #[test]
+    fn payload_override_declined_keeps_heuristic() {
+        let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
+        raw.extend_from_slice(&[0x45, 0x00, 0x00, 0x14]);
+        let mut buf = DissectBuffer::new();
+        let result = MplsDissector
+            .dissect_with_payload_override(&raw, &mut buf, 0, |_, _, _, _| None)
+            .expect("dissect failed");
+        assert_eq!(
+            result,
+            DissectResult::new(4, DispatchHint::ByEtherType(0x0800))
+        );
+    }
+
+    /// An error from the override is returned as is.
+    #[test]
+    fn payload_override_error_propagates() {
+        let mut raw = mpls_entry(16, 0, 1, 64).to_vec();
+        raw.extend_from_slice(&[0x10, 0x00]);
+        let mut buf = DissectBuffer::new();
+        let err = MplsDissector
+            .dissect_with_payload_override(&raw, &mut buf, 0, |_, payload, buf, offset| {
+                Some(EthernetPwControlWordDissector.dissect(payload, buf, offset))
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PacketError::Truncated {
+                expected: 4,
+                actual: 2
+            }
+        );
+    }
+
+    /// The Ethernet PW control word dissector always hands the payload to
+    /// Ethernet, even when the heuristic would reject it (RFC 4448,
+    /// Section 4.6), and claims no heuristic.
+    /// <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>
+    #[test]
+    fn ethernet_pw_control_word_forces_ethernet() {
+        let mut raw = vec![0x00, 0x00, 0x00, 0x2A];
+        raw.extend_from_slice(&[0xAA; 14]); // EtherType 0xAAAA is not known
+        let mut buf = DissectBuffer::new();
+        let result = EthernetPwControlWordDissector
+            .dissect(&raw, &mut buf, 20)
+            .expect("dissect failed");
+        assert_eq!(
+            result,
+            DissectResult::new(4, DispatchHint::ByEtherType(0x6558))
+        );
+        let cw = buf.layer_by_name("PW-CW").unwrap();
+        assert_eq!(cw.range, 20..24);
+        assert_eq!(buf.field_u16(cw, "sequence_number"), Some(0x2A));
+        assert!(buf.field_by_name(cw, "payload_heuristic").is_none());
+        assert_eq!(EthernetPwControlWordDissector.short_name(), "PW-CW");
+        assert_eq!(
+            EthernetPwControlWordDissector.field_descriptors(),
+            PwControlWordDissector.field_descriptors()
+        );
+    }
+
+    /// RFC 4385, Section 3 — the control word starts with 0000 (0001 is an
+    /// ACH); anything else is rejected, and a shorter buffer is truncated.
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-3>
+    #[test]
+    fn ethernet_pw_control_word_rejects_bad_input() {
+        let mut buf = DissectBuffer::new();
+        assert_eq!(
+            EthernetPwControlWordDissector.dissect(&[0x20, 0, 0, 0], &mut buf, 0),
+            Err(PacketError::InvalidFieldValue {
+                field: "control_word_nibble",
+                value: 2
+            })
+        );
+        assert_eq!(
+            EthernetPwControlWordDissector.dissect(&[0x00, 0, 0], &mut buf, 0),
+            Err(PacketError::Truncated {
+                expected: 4,
+                actual: 3
+            })
+        );
+    }
+
+    /// A PW Associated Channel Header (first nibble 0001, RFC 4385,
+    /// Section 5) is told apart from a PW data packet, so the Ethernet PW
+    /// control word dissector decodes it as an ACH.
+    /// <https://www.rfc-editor.org/rfc/rfc4385#section-5>
+    #[test]
+    fn ethernet_pw_control_word_decodes_pw_ach() {
+        let raw = [0x10, 0x00, 0x00, 0x07, 0x20, 0x40, 0x05, 0x18];
+        let mut buf = DissectBuffer::new();
+        let result = EthernetPwControlWordDissector
+            .dissect(&raw, &mut buf, 4)
+            .expect("dissect failed");
+        assert_eq!(
+            result,
+            DissectResult::new(4, DispatchHint::ByAchChannelType(7))
+        );
+        let ach = buf.layer_by_name("ACH").unwrap();
+        assert_eq!(ach.range, 4..8);
+        assert!(buf.layer_by_name("PW-CW").is_none());
+    }
+
+    /// A bottom-of-stack entropy label (RFC 6790, Section 3) carries an
+    /// arbitrary value, so it is never looked up as a PW label.
+    /// <https://www.rfc-editor.org/rfc/rfc6790#section-3>
+    #[test]
+    fn payload_override_skips_entropy_label() {
+        let mut raw = mpls_entry(1000, 0, 0, 64).to_vec();
+        raw.extend_from_slice(&mpls_entry(7, 0, 0, 64));
+        raw.extend_from_slice(&mpls_entry(16, 0, 1, 0));
+        raw.extend_from_slice(&[0x45, 0x00, 0x00, 0x14]);
+        let mut buf = DissectBuffer::new();
+        let result = MplsDissector
+            .dissect_with_payload_override(&raw, &mut buf, 0, |label, _, _, _| {
+                panic!("override consulted for entropy label {label}")
+            })
+            .expect("dissect failed");
+        assert_eq!(
+            result,
+            DissectResult::new(12, DispatchHint::ByEtherType(0x0800))
+        );
+    }
+
     #[test]
     fn references_and_layer_are_populated() {
         fn check(dissector: &dyn Dissector, layer: ProtocolLayer) {
@@ -1743,6 +2072,7 @@ mod tests {
         check(&MplsDissector, ProtocolLayer::Network);
         check(&AchDissector, ProtocolLayer::Network);
         check(&PwControlWordDissector, ProtocolLayer::Tunnel);
+        check(&EthernetPwControlWordDissector, ProtocolLayer::Tunnel);
         assert_eq!(AchDissector.short_name(), "ACH");
         assert_eq!(AchDissector.field_descriptors().len(), 3);
         assert_eq!(PwControlWordDissector.short_name(), "PW-CW");
