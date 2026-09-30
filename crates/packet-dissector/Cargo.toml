@@ -109,8 +109,15 @@ geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
 vxlan = ["dep:packet-dissector-vxlan"]
 lldp = ["dep:packet-dissector-lldp"]
-# EAP is also decoded inside PPP (Protocol 0xC227) when both are enabled.
-eap = ["dep:packet-dissector-eap", "packet-dissector-ppp?/eap"]
+# EAP is also decoded inside the carriers that are enabled: PPP (0xC227),
+# RADIUS EAP-Message, Diameter EAP-Payload and the IKEv2 EAP payload.
+eap = [
+  "dep:packet-dissector-eap",
+  "packet-dissector-ppp?/eap",
+  "packet-dissector-radius?/eap",
+  "packet-dissector-diameter?/eap",
+  "packet-dissector-ike?/eap",
+]
 stp = ["dep:packet-dissector-stp"]
 mpls = ["dep:packet-dissector-mpls"]
 ntp = ["dep:packet-dissector-ntp"]

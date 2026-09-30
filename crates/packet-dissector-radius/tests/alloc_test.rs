@@ -89,3 +89,23 @@ fn zero_alloc_dissect_radius_extended_attributes() {
         "RADIUS extended attribute dissect allocated {allocs} times"
     );
 }
+
+#[cfg(feature = "eap")]
+#[test]
+fn zero_alloc_dissect_radius_eap_message() {
+    // EAP-Message (79) with an EAP Response/Identity (RFC 3579, Section 3.1 —
+    // https://www.rfc-editor.org/rfc/rfc3579#section-3.1).
+    let eap = build_attr(79, &[0x02, 0x01, 0x00, 0x08, 0x01, b'b', b'o', b'b']);
+    let raw = build_radius(1, 7, &[0xAA; 16], &eap);
+    let mut buf = DissectBuffer::new();
+    RadiusDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        RadiusDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "RADIUS EAP-Message dissect allocated {allocs} times"
+    );
+}

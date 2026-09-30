@@ -16,6 +16,7 @@
 //! | Ethernet → EAPOL → EAP (Identity, padded frame) | integration_ethernet_eapol_eap_identity      |
 //! | Ethernet → EAPOL-Start / EAPOL-Key             | integration_ethernet_eapol_start_and_key      |
 //! | PPP (HDLC) → EAP (inline, 0xC227)               | integration_ppp_eap_inline                    |
+//! | Ethernet → IPv4 → UDP → RADIUS (EAP-Message → EAP) | integration_radius_eap_message             |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -4891,6 +4892,48 @@ fn integration_ethernet_eapol_start_and_key() {
     assert_eq!(
         buf.field_by_name(eapol, "body").unwrap().value,
         FieldValue::Bytes(&[0x00, 0x8A, 0x00, 0x10])
+    );
+}
+
+#[test]
+fn integration_radius_eap_message() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 40000, 1812);
+    // RADIUS Access-Request with EAP-Message (RFC 3579, Section 3.1 —
+    // https://www.rfc-editor.org/rfc/rfc3579#section-3.1) carrying an EAP
+    // Response/Identity "bob".
+    let eap = [0x02, 0x01, 0x00, 0x08, 0x01, b'b', b'o', b'b'];
+    let length = (20 + 2 + eap.len()) as u16;
+    pkt.extend_from_slice(&[0x01, 0x07]);
+    pkt.extend_from_slice(&length.to_be_bytes());
+    pkt.extend_from_slice(&[0xAA; 16]);
+    pkt.extend_from_slice(&[79, (2 + eap.len()) as u8]);
+    pkt.extend_from_slice(&eap);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let radius = buf.layer_by_name("RADIUS").unwrap();
+    let eap_obj = buf
+        .layer_fields(radius)
+        .iter()
+        .find(|f| f.name() == "eap")
+        .expect("eap object");
+    let FieldValue::Object(r) = &eap_obj.value else {
+        panic!("eap must be an Object");
+    };
+    assert_eq!(
+        buf.resolve_nested_display_name(r, "type_name"),
+        Some("Identity")
     );
 }
 

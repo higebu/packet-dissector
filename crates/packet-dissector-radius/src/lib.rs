@@ -22,8 +22,9 @@
 //!   <https://www.3gpp.org/ftp/Specs/archive/29_series/29.061/>
 //! - IANA RADIUS Types: <https://www.iana.org/assignments/radius-types/radius-types.xhtml>
 //!
-//! EAP-Message (79) values are emitted as raw bytes; EAP packets are not
-//! reassembled or decoded here.
+//! EAP-Message (79) values are emitted as raw bytes. With the `eap` feature
+//! an EAP packet that fits in one EAP-Message is also decoded into an `eap`
+//! Object; packets split over several attributes are not reassembled.
 //!
 //! RFC 2865 is also updated by the following RFCs. They do not alter the
 //! wire format parsed here, but are recorded for completeness:
@@ -74,6 +75,10 @@ const MAX_PACKET_LENGTH: usize = 4096;
 ///
 /// RFC 2865, Section 5.26 — <https://www.rfc-editor.org/rfc/rfc2865#section-5.26>
 const ATTR_VENDOR_SPECIFIC: u8 = 26;
+/// EAP-Message attribute type.
+/// RFC 3579, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc3579#section-3.1>
+#[cfg(feature = "eap")]
+const ATTR_EAP_MESSAGE: u8 = 79;
 
 /// Minimum Vendor-Specific value size: Vendor-Id(4).
 ///
@@ -98,6 +103,8 @@ const AFD_EXTENDED_TYPE: usize = 9;
 const AFD_MORE: usize = 10;
 const AFD_VENDOR_TYPE: usize = 11;
 const AFD_VENDOR_ATTRIBUTES: usize = 12;
+#[cfg(feature = "eap")]
+const AFD_EAP: usize = 13;
 
 /// Field descriptor indices for [`VSA_CHILD_FIELDS`].
 const VFD_TYPE: usize = 0;
@@ -252,6 +259,9 @@ static ATTR_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("vendor_attributes", "Vendor Attributes", FieldType::Array)
         .optional()
         .with_children(&VSA_CHILD_FIELDS),
+    // RFC 3579, Section 3.1 — https://www.rfc-editor.org/rfc/rfc3579#section-3.1
+    #[cfg(feature = "eap")]
+    packet_dissector_eap::EAP_OBJECT_DESCRIPTOR,
 ];
 
 /// Field descriptors for the RADIUS dissector.
@@ -662,6 +672,8 @@ fn push_vendor_attributes<'pkt>(
 /// `buf_offset` is the absolute byte position of `attr_data[0]` in the original
 /// packet, used to produce accurate `range` values.
 fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_offset: usize) {
+    #[cfg(feature = "eap")]
+    let single_eap_message = count_attrs(attr_data, ATTR_EAP_MESSAGE) == 1;
     let mut pos = 0;
 
     while pos + MIN_ATTR_SIZE <= attr_data.len() {
@@ -740,11 +752,43 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
                 value_data,
                 value_start,
             );
+            // RFC 3579, Section 3.1 — "If multiple EAP-Message attributes
+            // are present in a packet their values should be concatenated;
+            // this allows EAP packets longer than 253 octets to be
+            // transported by RADIUS." An EAP packet is decoded only when
+            // it is carried by a single EAP-Message; one split over several
+            // attributes stays raw (reassembly would need a copy).
+            // <https://www.rfc-editor.org/rfc/rfc3579#section-3.1>
+            #[cfg(feature = "eap")]
+            if attr_type_code == ATTR_EAP_MESSAGE && single_eap_message {
+                packet_dissector_eap::push_eap_object(
+                    &ATTR_CHILD_FIELDS[AFD_EAP],
+                    value_data,
+                    value_start,
+                    buf,
+                );
+            }
         }
 
         buf.end_container(obj_idx);
         pos += attr_len;
     }
+}
+
+/// Number of well-formed top-level attributes of type `attr_type`.
+#[cfg(feature = "eap")]
+fn count_attrs(attr_data: &[u8], attr_type: u8) -> usize {
+    let mut count = 0;
+    let mut pos = 0;
+    while pos + MIN_ATTR_SIZE <= attr_data.len() {
+        let attr_len = usize::from(attr_data[pos + 1]);
+        if attr_len < MIN_ATTR_SIZE || pos + attr_len > attr_data.len() {
+            break;
+        }
+        count += usize::from(attr_data[pos] == attr_type);
+        pos += attr_len;
+    }
+    count
 }
 
 /// RADIUS dissector.
@@ -982,6 +1026,9 @@ mod tests {
     // | 2869 § 5.1-2  | Acct-Input/Output-Gigawords          | test_acct_gigawords                    |
     // | 2869 § 5.3    | Event-Timestamp (Time)               | test_event_timestamp                   |
     // | 2869 § 5.13   | EAP-Message (raw)                    | test_eap_message_and_authenticator     |
+    // | 3579 § 3.1    | EAP-Message decoded as EAP (eap)     | test_eap_message_decoded               |
+    // | 3579 § 3.1    | Fragmented EAP-Message stays raw     | test_eap_message_fragment_stays_raw    |
+    // | 3579 § 3.1    | Continuation fragment not decoded    | test_eap_message_continuation_not_decoded |
     // | 2869 § 5.14   | Message-Authenticator                | test_eap_message_and_authenticator     |
     // | 3162 § 2.1    | NAS-IPv6-Address                     | test_nas_ipv6_address                  |
     // | 3162 § 2.3    | Framed-IPv6-Prefix                   | test_framed_ipv6_prefix                |
@@ -1594,6 +1641,65 @@ mod tests {
             *obj_field_value(&buf, &obj, "value"),
             FieldValue::Bytes(&[0x11; 16])
         );
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn test_eap_message_decoded() {
+        // RFC 3579, Section 3.1 — EAP-Message carries an EAP packet.
+        // https://www.rfc-editor.org/rfc/rfc3579#section-3.1
+        let buf = dissect_single_attr(79, &[0x02, 0x01, 0x00, 0x08, 0x01, b'b', b'o', b'b']);
+        let obj = first_attr(&buf);
+        // The raw value stays for filtering.
+        assert!(has_field(&buf, &obj, "value"));
+        let FieldValue::Object(eap) = obj_field_value(&buf, &obj, "eap") else {
+            panic!("eap must be an Object");
+        };
+        assert_eq!(
+            buf.resolve_nested_display_name(eap, "code_name"),
+            Some("Response")
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(eap, "type_name"),
+            Some("Identity")
+        );
+        let identity = buf
+            .nested_fields(eap)
+            .iter()
+            .find(|f| f.name() == "identity")
+            .unwrap();
+        assert_eq!(identity.value, FieldValue::Bytes(b"bob"));
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn test_eap_message_fragment_stays_raw() {
+        // An EAP packet split over several EAP-Message attributes (RFC 3579,
+        // Section 3.1 — https://www.rfc-editor.org/rfc/rfc3579#section-3.1)
+        // is longer than the first attribute; only the raw value is shown.
+        let buf = dissect_single_attr(79, &[0x01, 0x02, 0x01, 0x00, 0x0D, 0x80]);
+        let obj = first_attr(&buf);
+        assert!(has_field(&buf, &obj, "value"));
+        assert!(!has_field(&buf, &obj, "eap"));
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn test_eap_message_continuation_not_decoded() {
+        // RFC 3579, Section 3.1 — several EAP-Message attributes form one EAP
+        // packet (https://www.rfc-editor.org/rfc/rfc3579#section-3.1). A
+        // continuation fragment that happens to look like a whole EAP packet
+        // must not be decoded on its own.
+        let first = build_attr(79, &[0x01, 0x02, 0x00, 0x0A, 0x0D, 0x00]);
+        let second = build_attr(79, &[0x03, 0x02, 0x00, 0x04]);
+        let data = build_radius(11, 2, &auth(), &[first, second].concat());
+        let mut buf = DissectBuffer::new();
+        RadiusDissector.dissect(&data, &mut buf, 0).unwrap();
+        let attrs = attrs_array_range(&buf);
+        for n in 0..2 {
+            let obj = nth_object_range(&buf, &attrs, n);
+            assert!(!has_field(&buf, &obj, "eap"), "attribute {n}");
+        }
     }
 
     #[test]
