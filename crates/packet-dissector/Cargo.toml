@@ -56,6 +56,7 @@ default = [
   "stp",
   "cdp",
   "mpls",
+  "nsh",
   "ntp",
   "ospf",
   "vrrp",
@@ -131,6 +132,7 @@ stp = ["dep:packet-dissector-stp"]
 # Ethernet crate decodes.
 cdp = ["dep:packet-dissector-cdp", "ethernet"]
 mpls = ["dep:packet-dissector-mpls"]
+nsh = ["dep:packet-dissector-nsh"]
 ntp = ["dep:packet-dissector-ntp"]
 ospf = ["dep:packet-dissector-ospf"]
 vrrp = ["dep:packet-dissector-vrrp"]
@@ -191,7 +193,7 @@ application = [
   "quic",
   "stun",
 ]
-tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
+tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = [
@@ -255,6 +257,7 @@ packet-dissector-eap = { workspace = true, optional = true }
 packet-dissector-stp = { workspace = true, optional = true }
 packet-dissector-cdp = { workspace = true, optional = true }
 packet-dissector-mpls = { workspace = true, optional = true }
+packet-dissector-nsh = { workspace = true, optional = true }
 packet-dissector-ntp = { workspace = true, optional = true }
 packet-dissector-ospf = { workspace = true, optional = true }
 packet-dissector-vrrp = { workspace = true, optional = true }

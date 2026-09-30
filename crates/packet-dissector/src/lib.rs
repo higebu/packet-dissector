@@ -180,6 +180,9 @@ pub mod dissectors {
     #[cfg(feature = "mpls")]
     pub use packet_dissector_mpls as mpls;
 
+    #[cfg(feature = "nsh")]
+    pub use packet_dissector_nsh as nsh;
+
     #[cfg(feature = "vxlan")]
     pub use packet_dissector_vxlan as vxlan;
 

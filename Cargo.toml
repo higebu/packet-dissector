@@ -45,6 +45,7 @@ packet-dissector-diameter = { version = "0.5.0", path = "crates/packet-dissector
 packet-dissector-geneve = { version = "0.5.0", path = "crates/packet-dissector-geneve" }
 packet-dissector-gre = { version = "0.5.0", path = "crates/packet-dissector-gre" }
 packet-dissector-mpls = { version = "0.5.0", path = "crates/packet-dissector-mpls" }
+packet-dissector-nsh = { version = "0.5.0", path = "crates/packet-dissector-nsh" }
 packet-dissector-vxlan = { version = "0.5.0", path = "crates/packet-dissector-vxlan" }
 packet-dissector-lacp = { version = "0.5.0", path = "crates/packet-dissector-lacp" }
 packet-dissector-lldp = { version = "0.5.0", path = "crates/packet-dissector-lldp" }

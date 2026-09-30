@@ -149,6 +149,10 @@
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
 //! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ipv4      |
 //! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ethernet |
+//! | Ethernet → NSH (MD Type 1) → IPv4 → UDP | integration_ethernet_nsh_md1_ipv4 |
+//! | Ethernet → IPv4 → GRE → NSH (MD Type 2) → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_gre_nsh_ethernet |
+//! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → NSH → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_nsh |
+//! | Ethernet → NSH (Next Protocol NSH) → NSH → MPLS → IPv4 → UDP | integration_ethernet_nsh_nsh_mpls |
 //! | Ethernet → IPv4 → UDP → VXLAN-GBP → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gbp      |
 //! | Ethernet → IPv4 → UDP → VXLAN (I=0) → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_i_flag_clear |
 //! | Ethernet → IPv4 → UDP → L2TP → PPP → IPv4 → UDP          | ethernet_ipv4_udp_l2tp_ppp_ipv4_udp              |
@@ -10731,4 +10735,112 @@ fn integration_ethernet_ipv6_srv6_ethernet_ipv4_udp() {
         names,
         ["Ethernet", "IPv6", "SRv6", "Ethernet", "IPv4", "UDP"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// NSH tests (RFC 8300 — https://www.rfc-editor.org/rfc/rfc8300)
+// ---------------------------------------------------------------------------
+
+/// NSH Base Header + Service Path Header (RFC 8300, Sections 2.2-2.3 —
+/// <https://www.rfc-editor.org/rfc/rfc8300#section-2.2>): Ver 0, TTL 63,
+/// SPI 0x000001, SI 255.
+fn push_nsh(pkt: &mut Vec<u8>, length: u8, md_type: u8, next_protocol: u8) {
+    let w0: u32 = (63 << 22)
+        | (u32::from(length) << 16)
+        | (u32::from(md_type) << 8)
+        | u32::from(next_protocol);
+    pkt.extend_from_slice(&w0.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00, 0x01, 0xFF]);
+}
+
+/// Ethernet (0x894F) → NSH MD Type 1 → IPv4 → UDP (RFC 8300, Sections 2.4
+/// and 10.1 — <https://www.rfc-editor.org/rfc/rfc8300#section-10.1>).
+#[test]
+fn integration_ethernet_nsh_md1_ipv4() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x894F);
+    push_nsh(&mut pkt, 6, 1, 1);
+    pkt.extend_from_slice(&[0u8; 16]);
+    push_inner_ipv4_udp(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "NSH", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let nsh = buf.layer_by_name("NSH").unwrap();
+    assert_eq!(buf.field_u32(nsh, "spi"), Some(1));
+    assert_eq!(buf.field_u8(nsh, "si"), Some(255));
+}
+
+/// Ethernet → IPv4 → GRE (Protocol Type 0x894F) → NSH MD Type 2 with one
+/// Context Header → Ethernet → IPv4 → UDP (RFC 8300, Section 2.5.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8300#section-2.5.1>).
+#[test]
+fn integration_ethernet_ipv4_gre_nsh_ethernet() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_gre(&mut pkt, 0x894F);
+    push_nsh(&mut pkt, 4, 2, 3);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x00, 0x64]);
+    push_ethernet(&mut pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+    push_inner_ipv4_udp(&mut pkt);
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv4", "GRE", "NSH", "Ethernet", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+    let nsh = buf.layer_by_name("NSH").unwrap();
+    assert!(buf.field_by_name(nsh, "context_headers").is_some());
+}
+
+/// Ethernet → IPv4 → UDP(4790) → VXLAN-GPE (Next Protocol 0x04) → NSH →
+/// IPv4 → UDP (draft-ietf-nvo3-vxlan-gpe-13 §3.2 —
+/// <https://datatracker.ietf.org/doc/html/draft-ietf-nvo3-vxlan-gpe-13#section-3.2>)
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gpe_nsh() {
+    let reg = DissectorRegistry::default();
+    // Ver 0, I=1, P=1; Next Protocol 0x04 (NSH); VNI 100
+    let gpe = [0x0C, 0x00, 0x00, 0x04, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4790, &gpe, |pkt| {
+        push_nsh(pkt, 2, 2, 1);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv4", "UDP", "VXLAN-GPE", "NSH", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → NSH (Next Protocol 0x4, NSH) → NSH (Next Protocol 0x5, MPLS)
+/// → MPLS → IPv4 → UDP (RFC 8300, Section 2.2 —
+/// <https://www.rfc-editor.org/rfc/rfc8300#section-2.2>).
+#[test]
+fn integration_ethernet_nsh_nsh_mpls() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x894F);
+    push_nsh(&mut pkt, 2, 2, 4);
+    push_nsh(&mut pkt, 2, 2, 5);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x01, 0x40]); // label 16, S=1, TTL 64
+    push_inner_ipv4_udp(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "NSH", "NSH", "MPLS", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
 }
