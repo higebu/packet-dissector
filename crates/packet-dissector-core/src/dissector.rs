@@ -108,6 +108,14 @@ pub enum DispatchHint {
         /// Subsystem number of the calling party address (0 when absent).
         calling: u8,
     },
+    /// Look up the next dissector in the link-layer type table, by pcap
+    /// `LINKTYPE_` value.
+    ///
+    /// Used by pseudo-headers that precede another link-layer frame, e.g.
+    /// radiotap (`LINKTYPE_IEEE802_11_RADIOTAP`, 127) followed by an IEEE
+    /// 802.11 frame (`LINKTYPE_IEEE802_11`, 105) —
+    /// <https://www.tcpdump.org/linktypes.html>.
+    ByLinkType(u32),
     /// No further dissection is needed.
     End,
 }
