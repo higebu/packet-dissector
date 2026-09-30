@@ -232,7 +232,7 @@
 //! | RFC 6368 §5 | ATTR_SET shorter than 4 octets / bad nested attribute kept raw | `parse_bgp_update_attr_set_malformed_is_raw` |
 //! | RFC 9015 §3.2.1 | SFP attribute TLVs; overrunning TLV kept raw | `parse_bgp_update_sfp_attribute` |
 //! | RFC 9026 §3.1.6 | BFD Discriminator with Source IP Address TLV | `parse_bgp_update_bfd_discriminator` |
-//! | RFC 9026 §3.1.6 | Malformed BFD Discriminator kept as raw bytes | `parse_bgp_update_bfd_discriminator_malformed_is_raw` |
+//! | RFC 9026 §3.1.6 | Malformed BFD Discriminator (including a Source IP Address TLV Length other than 4 / 16) kept as raw bytes | `parse_bgp_update_bfd_discriminator_malformed_is_raw` |
 //! | IANA BGP Parameters | Path attribute, PMSI, tunnel, BGP-LS, AIGP, SFP, BFD name tables | `path_attribute_value_name_tables` |
 //! | RFC 4271 §4.3 | Schema of the new `value` union members | `field_schema_exposes_new_path_attribute_value_children` |
 //!
@@ -293,6 +293,7 @@
 //! | §5.2 | SAFI 72 RD; unknown NLRI type, overrunning descriptors and truncated body kept as `value` | `parse_bgp_update_mp_reach_bgp_ls_vpn_unknown_and_malformed` |
 //! | §5.2; RFC 7911 §3 | Withdrawn NLRI, ADD-PATH block, truncated tail kept raw | `parse_bgp_update_bgp_ls_withdrawn_add_path_and_tail` |
 //! | §5.5 | IPv4 next hop (SAFI 71) and RD + IPv6 next hop (SAFI 72) | `parse_bgp_update_mp_reach_bgp_ls_next_hop` |
+//! | §5.5 | RD + IPv6 global + link-local next hop (SAFI 72, 40 octets) | `parse_bgp_update_mp_reach_bgp_ls_vpn_next_hop_link_local` |
 //! | IANA BGP-LS | NLRI Type and Protocol-ID names | `bgp_ls_nlri_name_tables` |
 //!
 //! # Route Target Membership NLRI Coverage (RFC 4684)
@@ -307,7 +308,7 @@
 //! | RFC Section | Description | Test |
 //! |-------------|-------------|------|
 //! | §2.1 | Distinguisher, Color, IPv4 / IPv6 Endpoint; IPv4 and IPv6 + link-local next hops independent of the NLRI AFI | `parse_bgp_update_mp_reach_sr_policy` |
-//! | §2.1; RFC 7911 §3 | NLRI Length other than 96 (AFI 1) / 192 (AFI 2) and truncated NLRI kept raw; withdrawn NLRI; ADD-PATH blocks; malformed tail kept plain | `parse_bgp_update_sr_policy_malformed_withdrawn_add_path` |
+//! | §2.1; RFC 7911 §3 | NLRI Length other than 96 (AFI 1) / 192 (AFI 2) and truncated NLRI kept raw; withdrawn NLRI; ADD-PATH blocks (including Path Identifiers starting with 96 / 192); malformed tail kept plain | `parse_bgp_update_sr_policy_malformed_withdrawn_add_path` |
 //!
 //! # MCAST-VPN NLRI Coverage (RFC 6514 / RFC 6515 / RFC 6625 / RFC 7441)
 //!
@@ -315,6 +316,7 @@
 //! |-------------|-------------|------|
 //! | RFC 6514 §4.1-4.6 | Route Types 1-7: RD, Originating Router's IP Address, Source AS, Multicast Source / Group, Route Key | `parse_bgp_update_mp_reach_mcast_vpn_route_types` |
 //! | RFC 6514 §4; RFC 6515 §2; RFC 6625 §2 | AFI 2 C-S / C-G, IPv6 Originating Router's IP Address under AFI 1, wildcards | `parse_bgp_update_mcast_vpn_ipv6_and_wildcards` |
+//! | RFC 6515 §2 | IPv4 / IPv6 next hop independent of the AFI; other lengths kept raw | `parse_bgp_update_mp_reach_mcast_vpn_next_hop` |
 //! | RFC 6515 §2; RFC 7441 §3; RFC 7524 §6.2.2; RFC 7911 §3 | Malformed bodies (including Leaf A-D Route Keys and Global Table Multicast Route Keys), mLDP and unassigned Route Types kept as `value`; overrun kept raw; withdrawn routes; ADD-PATH block | `parse_bgp_update_mcast_vpn_malformed_withdrawn_add_path` |
 //! | RFC 6514 §10; RFC 7911 §3 | SAFI 129 RD + prefix NLRI, ADD-PATH, IPv6 withdrawal, overlong prefix kept raw | `parse_bgp_update_multicast_vpn_safi_129` |
 //! | IANA BGP MCAST-VPN Route Types | Route Type names | `mcast_vpn_route_type_name_table` |
@@ -4476,7 +4478,8 @@ const BFD_TLV_SOURCE_IP_ADDRESS: u16 = 1;
 ///
 /// BFD Mode, BFD Discriminator and Optional TLVs. Returns `false` (nothing
 /// left pushed) when the value is shorter than 11 octets or the Optional TLVs
-/// are "not well formed".
+/// are "not well formed" — including a Source IP Address TLV whose Length is
+/// not 4 or 16, which "is considered malformed".
 fn parse_bfd_discriminator<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
@@ -4525,8 +4528,13 @@ fn parse_bfd_discriminator<'pkt>(
             };
             let len = tlv.value.len();
             // Source IP Address TLV: "The Length field is 4 for the IPv4
-            // address family and 16 for the IPv6 address family."
-            if tlv.tlv_type == BFD_TLV_SOURCE_IP_ADDRESS && (len == 4 || len == 16) {
+            // address family and 16 for the IPv6 address family.  The TLV is
+            // considered malformed if the field is set to any other value."
+            if tlv.tlv_type == BFD_TLV_SOURCE_IP_ADDRESS {
+                if len != 4 && len != 16 {
+                    buf.truncate_fields(mark);
+                    return false;
+                }
                 buf.push_field(
                     &BFD_TLV_CHILDREN[FD_BFDT_SOURCE_ADDRESS],
                     format_address(tlv.value, len == 16),
@@ -7099,15 +7107,19 @@ fn sr_policy_block_framed_len(data: &[u8], path_id_len: usize, ipv6: bool) -> us
 }
 
 /// Returns `true` when an SR Policy NLRI block carries RFC 7911 ADD-PATH
-/// Path Identifiers: its first NLRI does not frame without them — the first
-/// octet of a Path Identifier is rarely the NLRI Length 96 / 192 — and does
-/// with them. A block whose first NLRI frames is plain, even with a
-/// malformed tail.
+/// Path Identifiers: as in [`detect_add_path_prefixes`], it does when it
+/// frames exactly with them and not without them — a Path Identifier whose
+/// first octet is the NLRI Length 96 / 192 lets the first NLRI frame without
+/// Path Identifiers too, so the first NLRI alone does not decide. A block
+/// that frames exactly neither way is ADD-PATH when its first NLRI frames
+/// only with Path Identifiers; plain encoding wins when both readings frame
+/// exactly.
 ///
 /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
 fn detect_add_path_sr_policy(data: &[u8], ipv6: bool) -> bool {
-    sr_policy_block_framed_len(data, 0, ipv6) == 0
-        && sr_policy_block_framed_len(data, PATH_ID_SIZE, ipv6) != 0
+    let plain = sr_policy_block_framed_len(data, 0, ipv6);
+    let with_path_id = sr_policy_block_framed_len(data, PATH_ID_SIZE, ipv6);
+    (with_path_id == data.len() && plain != data.len()) || (plain == 0 && with_path_id != 0)
 }
 
 /// Parses an SR Policy NLRI block (AFI 1 / 2, SAFI 73) into one object per
@@ -7729,8 +7741,11 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 /// - AFI 1 or 25 (L2VPN), non-VPN SAFI, length 4: IPv4 address.
 /// - AFI 25 (L2VPN), non-VPN SAFI, length 16 or 32: IPv6 address(es), as
 ///   for AFI 2 (RFC 7432, Section 9.2.1).
-/// - AFI 16388 (BGP-LS): as AFI 1 / 2, with SAFI 72 as the VPN SAFI
-///   (RFC 9552, Section 5.5).
+/// - AFI 16388 (BGP-LS): as AFI 1 / 2, with SAFI 72 as the VPN SAFI; a
+///   40 octet SAFI 72 next hop is one RD followed by a global and a
+///   link-local IPv6 address (RFC 9552, Section 5.5).
+/// - SAFI 5 (MCAST-VPN): an IPv4 (4 octets) or IPv6 (16 octets) address
+///   for AFI 1 and 2 alike (RFC 6515, Section 2).
 /// - SAFI 73 (SR Policy): 4, 16 or 32 octets as above for AFI 1 and 2
 ///   alike, "independent of the SR Policy AFI" (RFC 9830, Section 2.1).
 /// - AFI 1 or 2, non-VPN SAFI, length 16 or 32: IPv6 global address,
@@ -7753,6 +7768,7 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 /// RFC 7432, Section 9.2.1 — <https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1>
 /// RFC 9552, Section 5.5 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.5>
 /// RFC 9830, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>
+/// RFC 6515, Section 2 — <https://www.rfc-editor.org/rfc/rfc6515#section-2>
 fn parse_mp_next_hop<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     afi: u16,
@@ -7776,16 +7792,27 @@ fn parse_mp_next_hop<'pkt>(
     // updates may be either a 4-octet IPv4 address or a 16-octet IPv6
     // address, independent of the SR Policy AFI." (RFC 9830, Section 2.1 —
     // https://www.rfc-editor.org/rfc/rfc9830#section-2.1).
+    // MCAST-VPN: "it is always clear whether the address is an IPv4 address
+    // (length is 4) or an IPv6 address (length is 16).  If the length of the
+    // next hop address is neither 4 nor 16, the MP_REACH_NLRI attribute MUST
+    // be considered to be "incorrect"" (RFC 6515, Section 2 —
+    // https://www.rfc-editor.org/rfc/rfc6515#section-2).
     let bgp_ls = afi == AFI_BGP_LS;
     let sr_policy = ip_afi && safi == SAFI_SR_POLICY;
+    let mcast_vpn = ip_afi && safi == SAFI_MCAST_VPN;
     let vpn = is_vpn_next_hop_safi(safi) || (bgp_ls && safi == SAFI_BGP_LS_VPN);
     let other_afi = (afi == AFI_L2VPN || bgp_ls || sr_policy) && !vpn;
     // Length of the Route Distinguisher preceding each address, if any.
     let rd_len = match (vpn, nh.len()) {
+        (false, 4 | 16) if mcast_vpn => 0,
         (false, 4) if afi == AFI_IPV4 || other_afi => 0,
-        (false, 16 | 32) if ip_afi || other_afi => 0,
+        (false, 16 | 32) if (ip_afi && !mcast_vpn) || other_afi => 0,
         (true, 12) if afi == AFI_IPV4 || bgp_ls => RD_SIZE,
         (true, 24 | 48) if ip_afi || bgp_ls => RD_SIZE,
+        // BGP-LS-VPN: a single RD prepended to a global + link-local IPv6
+        // next hop (RFC 9552, Section 5.5 —
+        // https://www.rfc-editor.org/rfc/rfc9552#section-5.5).
+        (true, 40) if bgp_ls => RD_SIZE,
         _ => {
             buf.push_field(
                 &MP_CHILDREN[FD_MP_NEXT_HOP],
@@ -7797,11 +7824,15 @@ fn parse_mp_next_hop<'pkt>(
     };
 
     // A 32 / 48 octet next hop is a global address followed by a link-local
-    // address of the same shape.
+    // address of the same shape; a 40 octet one is an RD followed by a
+    // global and a link-local address.
     let entry_len = match nh.len() {
         32 | 48 => nh.len() / 2,
+        40 => RD_SIZE + 16,
         len => len,
     };
+    // Only the 48 octet shape repeats the RD before the link-local address.
+    let link_local_rd_len = if nh.len() == 48 { rd_len } else { 0 };
     let has_link_local = entry_len != nh.len();
 
     if rd_len != 0 {
@@ -7824,17 +7855,19 @@ fn parse_mp_next_hop<'pkt>(
     );
 
     if has_link_local {
-        if rd_len != 0 {
+        if link_local_rd_len != 0 {
             buf.push_field(
                 &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL_RD],
-                FieldValue::Bytes(&nh[entry_len..entry_len + rd_len]),
-                offset + entry_len..offset + entry_len + rd_len,
+                FieldValue::Bytes(&nh[entry_len..entry_len + link_local_rd_len]),
+                offset + entry_len..offset + entry_len + link_local_rd_len,
             );
         }
         buf.push_field(
             &MP_CHILDREN[FD_MP_NEXT_HOP_LINK_LOCAL],
-            FieldValue::Ipv6Addr(read_ipv6_addr(nh, entry_len + rd_len).unwrap_or_default()),
-            offset + entry_len + rd_len..offset + nh.len(),
+            FieldValue::Ipv6Addr(
+                read_ipv6_addr(nh, entry_len + link_local_rd_len).unwrap_or_default(),
+            ),
+            offset + entry_len + link_local_rd_len..offset + nh.len(),
         );
     }
 }
@@ -14476,6 +14509,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_bgp_update_mp_reach_bgp_ls_vpn_next_hop_link_local() {
+        // RFC 9552, Section 5.5 (https://www.rfc-editor.org/rfc/rfc9552#section-5.5):
+        // "if the next-hop length is 32, then there is one global IPv6
+        // address followed by an IPv6 link-local address. ... For VPN
+        // Subsequent Address Family Identifier (SAFI), as per custom, an
+        // 8-byte Route Distinguisher set to all zero is prepended to the next
+        // hop." — one RD before both addresses, 40 octets in all.
+        let mut next_hop = vec![0u8; 8];
+        next_hop.extend_from_slice(&NH_V6_GLOBAL);
+        next_hop.extend_from_slice(&NH_V6_LL);
+        assert_eq!(
+            mp_reach_next_hop_fields(16388, 72, &next_hop),
+            vec![
+                nh("next_hop_rd", FieldValue::Bytes(&[0; 8])),
+                nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL)),
+                nh("next_hop_link_local", FieldValue::Ipv6Addr(NH_V6_LL)),
+            ]
+        );
+        // The 40-octet shape is specific to BGP-LS-VPN.
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 128, &next_hop),
+            vec![nh("next_hop", FieldValue::Bytes(&next_hop))]
+        );
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_mcast_vpn_next_hop() {
+        // RFC 6515, Section 2 (https://www.rfc-editor.org/rfc/rfc6515#section-2):
+        // the MCAST-VPN next hop "is an IPv4 address (length is 4) or an IPv6
+        // address (length is 16)", whatever the AFI.
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 5, &[192, 0, 2, 1]),
+            vec![nh("next_hop", FieldValue::Ipv4Addr([192, 0, 2, 1]))]
+        );
+        assert_eq!(
+            mp_reach_next_hop_fields(1, 5, &NH_V6_GLOBAL),
+            vec![nh("next_hop", FieldValue::Ipv6Addr(NH_V6_GLOBAL))]
+        );
+        // "If the length of the next hop address is neither 4 nor 16, the
+        // MP_REACH_NLRI attribute MUST be considered to be "incorrect"".
+        let mut next_hop = NH_V6_GLOBAL.to_vec();
+        next_hop.extend_from_slice(&NH_V6_LL);
+        assert_eq!(
+            mp_reach_next_hop_fields(2, 5, &next_hop),
+            vec![nh("next_hop", FieldValue::Bytes(&next_hop))]
+        );
+    }
+
     // -------------------------------------------------------------------
     // Labeled unicast (RFC 8277, Sections 2.2-2.4 —
     // https://www.rfc-editor.org/rfc/rfc8277#section-2.2) and VPN-IPv4 /
@@ -15781,6 +15863,10 @@ mod tests {
             &[1, 0, 0, 0, 1][..],
             &[1, 0, 0, 0, 1, 1, 4, 192, 0][..],
             &[1, 0, 0, 0, 1, 1, 4, 192, 0, 2, 1, 250, 5, 0][..],
+            // Source IP Address TLV: "The Length field is 4 for the IPv4
+            // address family and 16 for the IPv6 address family.  The TLV is
+            // considered malformed if the field is set to any other value."
+            &[1, 0, 0, 0, 1, 1, 5, 192, 0, 2, 1, 9][..],
         ] {
             let data = build_update(&build_attr(0xc0, 38, val), &[]);
             let mut buf = DissectBuffer::new();
@@ -18570,11 +18656,33 @@ mod tests {
         add_path.extend(&v4);
         assert!(detect_add_path_sr_policy(&add_path, false));
         assert!(!detect_add_path_sr_policy(&v4, false));
-        // A plain NLRI whose Distinguisher starts with the NLRI Length,
-        // followed by a malformed tail, stays plain.
-        let mut tail = vec![96, 0, 0, 0, 96, 0, 0, 0, 100, 192, 0, 2, 1];
+        // A plain NLRI followed by a malformed tail stays plain.
+        let mut tail = v4.clone();
         tail.extend_from_slice(&[1, 2, 3, 4]);
         assert!(!detect_add_path_sr_policy(&tail, false));
+        // A Path Identifier whose first octet is the NLRI Length 96 / 192
+        // frames one NLRI without Path Identifiers too, but the block frames
+        // further with them.
+        for (path_id, ipv6, nlri) in [
+            (0x6000_0001u32, false, v4.clone()),
+            (0xc0a8_0101, true, sr_policy_nlri(&SR_POLICY_V6_ENDPOINT)),
+        ] {
+            let mut block = path_id.to_be_bytes().to_vec();
+            block.extend(&nlri);
+            assert!(detect_add_path_sr_policy(&block, ipv6));
+            with_mp_reach_nlri(if ipv6 { 2 } else { 1 }, 73, &block, |buf, mp, entries| {
+                assert!(nested_field_by_name_opt(buf, mp, "nlri_raw").is_none());
+                assert_eq!(entries.len(), 1);
+                assert_eq!(
+                    *nested_field_value(buf, &entries[0], "path_id"),
+                    FieldValue::U32(path_id)
+                );
+                assert_eq!(
+                    *nested_field_value(buf, &entries[0], "color"),
+                    FieldValue::U32(100)
+                );
+            });
+        }
         let mut add_path_v6 = 7u32.to_be_bytes().to_vec();
         add_path_v6.extend(sr_policy_nlri(&SR_POLICY_V6_ENDPOINT));
         with_mp_reach_nlri(2, 73, &add_path_v6, |buf, mp, entries| {
