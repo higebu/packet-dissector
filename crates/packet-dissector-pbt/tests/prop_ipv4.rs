@@ -7,10 +7,11 @@
 //! | 3.1         | Header Format — never-panic         | ipv4_no_panic_on_arbitrary_bytes |
 //! | 3.1         | Header Format — valid packet parses | ipv4_valid_packet_always_parses  |
 //! | 3.1         | IHL → consumed bytes == IHL × 4     | ipv4_valid_packet_consumes_ihl   |
-//! | 3.1         | Protocol → DispatchHint             | ipv4_valid_packet_dispatch_hint  |
+//! | 3.1 / 3.2   | Protocol → DispatchHint; non-initial fragments end | ipv4_valid_packet_dispatch_hint |
 //!
 //! References:
 //! - RFC 791, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
+//! - RFC 791, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc791#section-3.2>
 
 use packet_dissector_core::dissector::{DispatchHint, Dissector};
 use packet_dissector_core::packet::DissectBuffer;
@@ -56,13 +57,28 @@ proptest! {
     }
 
     /// `DispatchHint::ByIpProtocol` carries the header's Protocol byte
-    /// unchanged (RFC 791, Section 3.1).
+    /// unchanged (RFC 791, Section 3.1), except for non-initial fragments,
+    /// which end the chain; every fragment carries a reassembly context
+    /// (RFC 791, Section 3.2).
     #[test]
     fn ipv4_valid_packet_dispatch_hint(packet in arb_valid_ipv4_packet()) {
         let mut buf = DissectBuffer::new();
         let result = Ipv4Dissector
             .dissect(&packet, &mut buf, 0)
             .expect("valid generator must always parse");
-        prop_assert_eq!(result.next, DispatchHint::ByIpProtocol(packet[9]));
+        // RFC 791, Section 3.2 — a fragment with a non-zero Fragment Offset
+        // starts mid-datagram and carries no upper-layer header.
+        let fragment_offset = u16::from_be_bytes([packet[6], packet[7]]) & 0x1FFF;
+        let expected = if fragment_offset == 0 {
+            DispatchHint::ByIpProtocol(packet[9])
+        } else {
+            DispatchHint::End
+        };
+        prop_assert_eq!(result.next, expected);
+        let more_fragments = packet[6] & 0x20 != 0;
+        prop_assert_eq!(
+            result.ip_fragment_context.is_some(),
+            more_fragments || fragment_offset != 0
+        );
     }
 }
