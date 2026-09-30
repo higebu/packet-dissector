@@ -32,6 +32,9 @@
 
 #![deny(missing_docs)]
 
+use packet_dissector_core::checksum::{
+    ChecksumStatus, checksum_status_descriptor, crc32c, ip_payload,
+};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -318,6 +321,7 @@ const FD_DST_PORT: usize = 1;
 const FD_VERIFICATION_TAG: usize = 2;
 const FD_CHECKSUM: usize = 3;
 const FD_CHUNKS: usize = 4;
+const FD_CHECKSUM_STATUS: usize = 5;
 
 /// Child field descriptor indices for [`CHUNK_CHILD_FIELDS`].
 const CFD_TYPE: usize = 0;
@@ -605,7 +609,38 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("chunks", "Chunks", FieldType::Array)
         .optional()
         .with_children(CHUNK_CHILD_FIELDS),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
+
+/// Verify the CRC32c checksum of the SCTP packet `data` at `offset`.
+///
+/// RFC 9260, Section 6.8 — the receiver MUST "Replace the 32 bits of the
+/// checksum field in the received SCTP packet with 0 and calculate a CRC32c
+/// checksum value of the whole received packet"; the value is transmitted
+/// least significant byte first (Appendix A). The packet is the whole IP
+/// payload, so a snaplen-cut capture or a fragment is `unverified`.
+/// <https://www.rfc-editor.org/rfc/rfc9260#section-6.8>
+///
+/// RFC 9653, Section 5.3 — with an alternate error detection method a
+/// packet may carry "an incorrect checksum value of zero", reported as
+/// `not_present`.
+/// <https://www.rfc-editor.org/rfc/rfc9653#section-5.3>
+fn checksum_status(buf: &DissectBuffer<'_>, offset: usize, data: &[u8]) -> ChecksumStatus {
+    let Some(packet) = ip_payload(buf, offset, data) else {
+        return ChecksumStatus::Unverified;
+    };
+    let Some(received) = packet.get(8..COMMON_HEADER_SIZE) else {
+        return ChecksumStatus::Unverified;
+    };
+    let crc = crc32c(&[&packet[..8], &[0; 4], &packet[COMMON_HEADER_SIZE..]]);
+    if crc.to_le_bytes() == received {
+        ChecksumStatus::Good
+    } else if received == [0; 4] {
+        ChecksumStatus::NotPresent
+    } else {
+        ChecksumStatus::Bad
+    }
+}
 
 /// Specification references for the SCTP dissector.
 static REFERENCES: &[SpecReference] = &[
@@ -708,6 +743,13 @@ impl Dissector for SctpDissector {
             FieldValue::U32(checksum),
             offset + 8..offset + 12,
         );
+        if buf.verify_checksums() {
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                checksum_status(buf, offset, data).to_field_value(),
+                offset + 8..offset + 12,
+            );
+        }
 
         // RFC 9260, Section 3.2 — Parse chunks
         let mut pos = COMMON_HEADER_SIZE;

@@ -9,6 +9,9 @@
 
 #![deny(missing_docs)]
 
+use packet_dissector_core::checksum::{
+    ChecksumStatus, checksum_status_descriptor, internet_checksum, verify_pseudo_header_checksum,
+};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -157,6 +160,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::Bytes,
     )
     .optional(),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// Index constants for `FIELD_DESCRIPTORS`.
@@ -172,6 +176,10 @@ const FD_ADDRESSES: usize = 8;
 const FD_AUTH_TYPE: usize = 9;
 const FD_ADVERT_INT: usize = 10;
 const FD_AUTHENTICATION_DATA: usize = 11;
+const FD_CHECKSUM_STATUS: usize = 12;
+
+/// IP protocol number of VRRP, used in the IPv6 checksum pseudo-header.
+const IP_PROTO_VRRP: u8 = 112;
 
 /// VRRP dissector.
 ///
@@ -346,6 +354,26 @@ impl Dissector for VrrpDissector {
             FieldValue::U16(checksum),
             offset + 6..offset + 8,
         );
+        if buf.verify_checksums() {
+            // RFC 9568, Section 5.2.8 — "For the IPv4 address family, the
+            // checksum calculation only includes the VRRP message starting
+            // with the Version field and ending after the last IPv4
+            // address"; for IPv6 it "also includes a prepended
+            // "pseudo-header"". RFC 3768, Section 5.3.8 — VRRPv2 covers the
+            // entire VRRP message (including Authentication Data).
+            // https://www.rfc-editor.org/rfc/rfc9568#section-5.2.8
+            // https://www.rfc-editor.org/rfc/rfc3768#section-5.3.8
+            let status = if ipv6 {
+                verify_pseudo_header_checksum(buf, offset, IP_PROTO_VRRP, data, Some(total_pos))
+            } else {
+                ChecksumStatus::from_valid(internet_checksum(&[&data[..total_pos]]) == 0)
+            };
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 6..offset + 8,
+            );
+        }
 
         if count > 0 {
             let array_idx = buf.begin_container(
@@ -415,6 +443,8 @@ mod tests {
     // | 5.2.7       | Max Advertise Interval        | parse_vrrp_ipv4_advertisement       |
     // | 5.2.7       | Max Advertise Interval 12-bit | parse_vrrp_max_advert_int_12bit_max |
     // | 5.2.8       | Checksum                      | parse_vrrp_ipv4_advertisement       |
+    // | 5.2.8       | Checksum verified (IPv4)      | checksum_status_ipv4                |
+    // | 5.2.8       | IPv6 without IP addresses     | checksum_status_ipv6_without_ip_layer_fields |
     // | 5.2.9       | IPvX Addresses (IPv4)         | parse_vrrp_ipv4_advertisement       |
     // | 5.2.9       | IPvX Addresses (IPv6)         | parse_vrrp_ipv6_advertisement       |
     // | 5.2.9       | Address serialization         | address_child_field_has_no_format_fn|
@@ -433,6 +463,7 @@ mod tests {
     // | 5.3.7       | Adver Int (seconds)           | parse_vrrpv2_ipv4_advertisement     |
     // | 5.3.9       | IP Address(es)                | parse_vrrpv2_ipv4_advertisement     |
     // | 5.3.10      | Authentication Data           | parse_vrrpv2_auth_type_reserved     |
+    // | 5.3.8       | Checksum verified (VRRPv2)    | checksum_status_vrrpv2              |
 
     /// Helper: builds a DissectBuffer with an IPv4 layer already present, simulating
     /// the registry dispatch chain.
@@ -954,5 +985,77 @@ mod tests {
             assert!(reference.url.starts_with("https://"));
         }
         assert_eq!(VrrpDissector.layer(), Some(ProtocolLayer::Network));
+    }
+
+    fn checksum_status(buf: &DissectBuffer<'_>) -> Option<u8> {
+        let layer = buf.layer_by_name("VRRP").unwrap();
+        buf.field_by_name(layer, "checksum_status")
+            .and_then(|f| f.value.as_u8())
+    }
+
+    #[test]
+    fn checksum_status_ipv4() {
+        // RFC 9568, Section 5.2.8 — for IPv4 no pseudo-header; the message
+        // ends after the last IPv4 address.
+        // https://www.rfc-editor.org/rfc/rfc9568#section-5.2.8
+        let mut raw = vec![
+            0x31, 0x01, 0x64, 0x01, 0x00, 0x64, 0x00, 0x00, 192, 168, 1, 1,
+        ];
+        let c = packet_dissector_core::checksum::internet_checksum(&[&raw]);
+        raw[6..8].copy_from_slice(&c.to_be_bytes());
+        raw.extend_from_slice(&[0xEE, 0xEE]); // trailing bytes are not covered
+
+        let mut buf = buf_with_ipv4_layer();
+        VrrpDissector.dissect(&raw, &mut buf, 20).unwrap();
+        assert_eq!(checksum_status(&buf), None);
+
+        let mut buf = buf_with_ipv4_layer();
+        buf.set_verify_checksums(true);
+        VrrpDissector.dissect(&raw, &mut buf, 20).unwrap();
+        assert_eq!(checksum_status(&buf), Some(1));
+        let layer = buf.layer_by_name("VRRP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "checksum_status").unwrap().range,
+            26..28
+        );
+
+        raw[2] = 0x65;
+        let mut buf = buf_with_ipv4_layer();
+        buf.set_verify_checksums(true);
+        VrrpDissector.dissect(&raw, &mut buf, 20).unwrap();
+        assert_eq!(checksum_status(&buf), Some(0));
+    }
+
+    #[test]
+    fn checksum_status_vrrpv2() {
+        // RFC 3768, Section 5.3.8 — checksum over the entire VRRP message,
+        // including the Authentication Data.
+        // https://www.rfc-editor.org/rfc/rfc3768#section-5.3.8
+        let mut raw = vec![0x21, 0x01, 0x64, 0x01, 0x00, 0x01, 0x00, 0x00, 10, 0, 0, 1];
+        raw.extend_from_slice(&[0u8; 8]);
+        let c = packet_dissector_core::checksum::internet_checksum(&[&raw]);
+        raw[6..8].copy_from_slice(&c.to_be_bytes());
+        let mut buf = buf_with_ipv4_layer();
+        buf.set_verify_checksums(true);
+        VrrpDissector.dissect(&raw, &mut buf, 20).unwrap();
+        assert_eq!(checksum_status(&buf), Some(1));
+
+        raw[19] = 1; // Authentication Data
+        let mut buf = buf_with_ipv4_layer();
+        buf.set_verify_checksums(true);
+        VrrpDissector.dissect(&raw, &mut buf, 20).unwrap();
+        assert_eq!(checksum_status(&buf), Some(0));
+    }
+
+    #[test]
+    fn checksum_status_ipv6_without_ip_layer_fields() {
+        // The IPv6 pseudo-header needs the IPv6 addresses; the helper layer
+        // has none, so the checksum cannot be verified.
+        let mut raw = vec![0x31, 0x01, 0x64, 0x01, 0x00, 0x64, 0x00, 0x00];
+        raw.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let mut buf = buf_with_ipv6_layer();
+        buf.set_verify_checksums(true);
+        VrrpDissector.dissect(&raw, &mut buf, 40).unwrap();
+        assert_eq!(checksum_status(&buf), Some(2));
     }
 }

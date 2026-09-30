@@ -22,6 +22,9 @@
 
 #![deny(missing_docs)]
 
+use packet_dissector_core::checksum::{
+    ChecksumStatus, checksum_status_descriptor, verify_ip_payload_checksum,
+};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -108,6 +111,7 @@ const FD_CALL_ID: usize = 17;
 const FD_ACK_NUMBER: usize = 18;
 const FD_VSID: usize = 19;
 const FD_FLOW_ID: usize = 20;
+const FD_CHECKSUM_STATUS: usize = 21;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("checksum_present", "Checksum Present", FieldType::U8),
@@ -151,6 +155,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // https://www.rfc-editor.org/rfc/rfc7637#section-3.2
     FieldDescriptor::new("vsid", "Virtual Subnet ID", FieldType::U32).optional(),
     FieldDescriptor::new("flow_id", "FlowID", FieldType::U8).optional(),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// GRE dissector.
@@ -460,6 +465,26 @@ fn dissect_v0<'pkt>(
         let fd = if r_flag { FD_OFFSET } else { FD_RESERVED1 };
         push_u16(buf, fd, second, offset + pos + 2..offset + pos + 4);
         pos += 4;
+    }
+    if buf.verify_checksums() {
+        // RFC 2784, Section 2.5 — "the Checksum field contains the IP (one's
+        // complement) checksum sum of the all the 16 bit words in the GRE
+        // header and the payload packet." It is present only with C=1
+        // (Section 2.1); otherwise the status sits on the C bit.
+        // https://www.rfc-editor.org/rfc/rfc2784#section-2.5
+        let (status, range) = if c_flag {
+            (
+                verify_ip_payload_checksum(buf, offset, data),
+                offset + MIN_HEADER_SIZE..offset + MIN_HEADER_SIZE + 2,
+            )
+        } else {
+            (ChecksumStatus::NotPresent, offset..offset + 1)
+        };
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+            status.to_field_value(),
+            range,
+        );
     }
 
     // RFC 2890, Section 2.1 — Key

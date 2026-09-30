@@ -146,7 +146,8 @@ dissector with `register_by_link_type()` to handle it.
 ## Checksum Verification
 
 Checksums are not verified by default. Enable verification with
-`registry.set_verify_checksums(true)`: the IPv4, ICMP, ICMPv6, TCP and UDP
+`registry.set_verify_checksums(true)`: the IPv4, ICMP (including RFC 4884
+extensions), ICMPv6, TCP, UDP, SCTP (CRC32c), IGMP, GRE, VRRP and OSPF
 dissectors then add an optional `checksum_status` field next to the checksum
 (`good`, `bad`, `unverified` or `not_present`; see
 `packet_dissector::checksum::ChecksumStatus`). A bad checksum is never a

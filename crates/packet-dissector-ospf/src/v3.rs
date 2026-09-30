@@ -9,6 +9,7 @@
 //! - RFC 8666 (Segment Routing): <https://www.rfc-editor.org/rfc/rfc8666>
 //! - RFC 9513 (SRv6): <https://www.rfc-editor.org/rfc/rfc9513>
 
+use packet_dissector_core::checksum::{checksum_status_descriptor, verify_pseudo_header_checksum};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -121,6 +122,11 @@ const FD_LSAS: usize = 21;
 // Data after the packet
 const FD_LLS: usize = 22;
 const FD_AUTH_TRAILER: usize = 23;
+// Index 24 is UNPARSED_DESCRIPTOR.
+const FD_CHECKSUM_STATUS: usize = 25;
+
+/// IP protocol number of OSPF, used in the checksum pseudo-header.
+const IP_PROTO_OSPF: u8 = 89;
 
 /// L-bit in the OSPFv3 Options field.
 ///
@@ -201,6 +207,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     AUTH_TRAILER_DESCRIPTOR,
     // Bytes after the last LSA / LSA header that could be delimited.
     UNPARSED_DESCRIPTOR,
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// OSPFv3 dissector.
@@ -345,6 +352,20 @@ impl Dissector for Ospfv3Dissector {
             FieldValue::U16(checksum),
             offset + 12..offset + 14,
         );
+        if buf.verify_checksums() {
+            // RFC 5340, Appendix A.3.1 — the standard IPv6 upper-layer
+            // checksum; "The "Upper-Layer Packet Length" in the pseudo-header
+            // is set to the value of the OSPF packet header's length field.
+            // The Next Header value used in the pseudo-header is 89."
+            // https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.1
+            let status =
+                verify_pseudo_header_checksum(buf, offset, IP_PROTO_OSPF, data, Some(total_len));
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 12..offset + 14,
+            );
+        }
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_INSTANCE_ID],
             FieldValue::U8(instance_id),
