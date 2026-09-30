@@ -223,6 +223,9 @@ pub mod dissectors {
     #[cfg(feature = "ipfix")]
     pub use packet_dissector_ipfix as ipfix;
 
+    #[cfg(feature = "snmp")]
+    pub use packet_dissector_snmp as snmp;
+
     #[cfg(feature = "m3ua")]
     pub use packet_dissector_m3ua as m3ua;
 

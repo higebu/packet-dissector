@@ -670,6 +670,7 @@ dependencies = [
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
  "packet-dissector-sip",
+ "packet-dissector-snmp",
  "packet-dissector-srv6",
  "packet-dissector-stp",
  "packet-dissector-stun",
@@ -1194,6 +1195,7 @@ dependencies = [
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
+ "packet-dissector-snmp",
  "packet-dissector-tcap",
  "packet-dissector-tcp",
  "packet-dissector-xnap",
@@ -1342,6 +1344,15 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "httparse",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-snmp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]

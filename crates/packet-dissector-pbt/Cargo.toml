@@ -48,5 +48,6 @@ packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcap = { workspace = true }
 packet-dissector-sgsap = { workspace = true }
+packet-dissector-snmp = { workspace = true }
 packet-dissector-tcp = { workspace = true }
 packet-dissector-xnap = { workspace = true }
