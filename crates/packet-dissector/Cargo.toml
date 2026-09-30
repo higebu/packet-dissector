@@ -33,6 +33,7 @@ default = [
   "dhcpv6",
   "srv6",
   "gtpv1u",
+  "gtpv1c",
   "gtpv2c",
   "pfcp",
   "http",
@@ -95,6 +96,7 @@ dhcp = ["dep:packet-dissector-dhcp"]
 dhcpv6 = ["dep:packet-dissector-dhcpv6"]
 srv6 = ["dep:packet-dissector-srv6"]
 gtpv1u = ["dep:packet-dissector-gtpv1u"]
+gtpv1c = ["dep:packet-dissector-gtpv1c"]
 gtpv2c = ["dep:packet-dissector-gtpv2c"]
 pfcp = ["dep:packet-dissector-pfcp"]
 http = ["dep:packet-dissector-http"]
@@ -165,7 +167,7 @@ application = [
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
-3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]
+3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "ngap"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -191,6 +193,7 @@ packet-dissector-dhcp = { workspace = true, optional = true }
 packet-dissector-dhcpv6 = { workspace = true, optional = true }
 packet-dissector-srv6 = { workspace = true, optional = true }
 packet-dissector-gtpv1u = { workspace = true, optional = true }
+packet-dissector-gtpv1c = { workspace = true, optional = true }
 packet-dissector-gtpv2c = { workspace = true, optional = true }
 packet-dissector-pfcp = { workspace = true, optional = true }
 packet-dissector-http = { workspace = true, optional = true }

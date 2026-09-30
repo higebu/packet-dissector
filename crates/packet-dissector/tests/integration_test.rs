@@ -64,6 +64,9 @@
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
 //! | Ethernet → IPv4 → UDP → GTPv2-C + piggyback      | integration_ethernet_ipv4_udp_gtpv2c_piggyback      |
+//! | Ethernet → IPv4 → UDP → GTPv1-C (Create PDP Ctx) | integration_ethernet_ipv4_udp_gtpv1c_create_pdp_context |
+//! | UDP 2123: GTPv1-C / GTPv2-C by version            | integration_udp_2123_mixed_gtp_versions             |
+//! | UDP 2123: unsupported GTP version                 | integration_udp_2123_unsupported_gtp_version        |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
@@ -3676,6 +3679,111 @@ fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
         buf.field_by_name(gtpv2c, "sequence_number").unwrap().value,
         FieldValue::U32(0x42)
     );
+}
+
+// ---------------------------------------------------------------------------
+// GTPv1-C integration tests
+// ---------------------------------------------------------------------------
+
+/// GTPv1-C header with S=1 (12 bytes) followed by `ies`.
+fn push_gtpv1c(pkt: &mut Vec<u8>, msg_type: u8, teid: u32, seq: u16, ies: &[u8]) {
+    // Octet 1: Version=1, PT=1, E=0, S=1, PN=0 (3GPP TS 29.060, Section 8.2)
+    pkt.push(0x32);
+    pkt.push(msg_type);
+    pkt.extend_from_slice(&((4 + ies.len()) as u16).to_be_bytes());
+    pkt.extend_from_slice(&teid.to_be_bytes());
+    pkt.extend_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(&[0, 0]); // N-PDU Number, Next Extension Header Type
+    pkt.extend_from_slice(ies);
+}
+
+/// Build Ethernet → IPv4 → UDP (2123) around one GTP-C message.
+fn gtpc_packet(build: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xAA; 6], [0xBB; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 40000, 2123);
+    build(&mut pkt);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    pkt
+}
+
+/// Ethernet → IPv4 → UDP → GTPv1-C (Create PDP Context Request)
+#[test]
+fn integration_ethernet_ipv4_udp_gtpv1c_create_pdp_context() {
+    let reg = DissectorRegistry::default();
+    let ies: &[u8] = &[
+        2, 0x21, 0x43, 0x65, 0x87, 0x09, 0x21, 0x43, 0xF5, // IMSI
+        14, 0x01, // Recovery
+        16, 0x00, 0x00, 0x00, 0x01, // TEID Data I
+        17, 0x00, 0x00, 0x00, 0x02, // TEID Control Plane
+        20, 0x05, // NSAPI
+        128, 0x00, 0x02, 0xF1, 0x21, // End User Address
+        131, 0x00, 0x04, 3, b'a', b'p', b'n', // APN
+        133, 0x00, 0x04, 10, 0, 0, 1, // GSN Address
+        135, 0x00, 0x04, 0x02, 0x23, 0x92, 0x1F, // QoS Profile
+    ];
+    let pkt = gtpc_packet(|p| push_gtpv1c(p, 16, 0, 7, ies));
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "GTPv1-C");
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].range.end, pkt.len());
+
+    let gtp = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(gtp, "version").unwrap().value,
+        FieldValue::U8(1)
+    );
+    assert_eq!(
+        display_name_for(&buf, gtp, "message_type"),
+        Some("Create PDP Context Request")
+    );
+    assert_eq!(
+        buf.field_by_name(gtp, "sequence_number").unwrap().value,
+        FieldValue::U16(7)
+    );
+    assert!(buf.field_by_name(gtp, "ies").is_some());
+}
+
+/// GTPv1-C and GTPv2-C share UDP port 2123 (3GPP TS 29.060, Section
+/// 10.1.1.1; TS 29.274, Section 4.2): the version field selects the
+/// dissector.
+#[test]
+fn integration_udp_2123_mixed_gtp_versions() {
+    let reg = DissectorRegistry::default();
+    let v1 = gtpc_packet(|p| push_gtpv1c(p, 1, 0, 1, &[]));
+    let v2 = gtpc_packet(|p| {
+        push_gtpv2c_without_teid(p, 1, 1, &[3, 0, 1, 0, 5]);
+    });
+    let v1_again = gtpc_packet(|p| push_gtpv1c(p, 2, 0, 1, &[14, 0x05]));
+
+    for (pkt, name) in [(&v1, "GTPv1-C"), (&v2, "GTPv2-C"), (&v1_again, "GTPv1-C")] {
+        let mut buf = DissectBuffer::new();
+        reg.dissect(pkt, &mut buf).unwrap();
+        assert_eq!(buf.layers().len(), 4, "{name}");
+        assert_eq!(buf.layers()[3].name, name);
+        assert_layers_contiguous(&buf);
+    }
+}
+
+/// A GTP' or GTPv0 header on UDP port 2123 is not decoded as GTP-C.
+#[test]
+fn integration_udp_2123_unsupported_gtp_version() {
+    let reg = DissectorRegistry::default();
+    let pkt = gtpc_packet(|p| {
+        push_gtpv1c(p, 1, 0, 1, &[]);
+        let gtp = p.len() - 12;
+        p[gtp] = 0x12; // version 0
+    });
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_eq!(buf.layers().len(), 3);
+    assert_eq!(buf.layers()[2].name, "UDP");
 }
 
 // ---------------------------------------------------------------------------
