@@ -838,8 +838,10 @@ impl DissectorRegistry {
     /// - `9` — `LINKTYPE_PPP` (`ppp`)
     /// - `50` — `LINKTYPE_PPP_HDLC` (`ppp`)
     /// - `101` — `LINKTYPE_RAW` (`raw_ip`)
+    /// - `105` — `LINKTYPE_IEEE802_11` (`ieee80211`)
     /// - `108` — `LINKTYPE_LOOP` (`null`)
     /// - `113` — `LINKTYPE_LINUX_SLL` (`linux_sll`)
+    /// - `127` — `LINKTYPE_IEEE802_11_RADIOTAP` (`radiotap`)
     /// - `228` — `LINKTYPE_IPV4` (`raw_ip`)
     /// - `229` — `LINKTYPE_IPV6` (`raw_ip`)
     /// - `276` — `LINKTYPE_LINUX_SLL2` (`linux_sll2`)
@@ -1196,6 +1198,7 @@ impl DissectorRegistry {
             DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
             DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
             DispatchHint::ByAchChannelType(ct) => self.get_by_ach_channel_type(*ct),
+            DispatchHint::ByLinkType(lt) => self.get_by_link_type(*lt),
             DispatchHint::BySnap { oui, pid } => self.get_by_snap(*oui, *pid),
         }
     }
@@ -1731,6 +1734,9 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+        // BMP is registered by decode-as name only.
+        #[cfg(feature = "bmp")]
+        push(&packet_dissector_bmp::BmpDissector);
         // The MPLS dissector emits ACH and PW control word layers itself
         // (RFC 5586, Section 2.1 — https://www.rfc-editor.org/rfc/rfc5586#section-2.1;
         // RFC 4385, Section 3 — https://www.rfc-editor.org/rfc/rfc4385#section-3).
@@ -2564,6 +2570,22 @@ impl Default for DissectorRegistry {
             );
         }
 
+        // LINKTYPE_IEEE802_11 (105) — IEEE 802.11 wireless LAN
+        // https://www.tcpdump.org/linktypes.html
+        #[cfg(feature = "ieee80211")]
+        assert_builtin(reg.register_by_link_type(
+            105,
+            Box::new(packet_dissector_ieee80211::Ieee80211Dissector),
+        ));
+
+        // LINKTYPE_IEEE802_11_RADIOTAP (127) — radiotap header followed by
+        // an 802.11 frame (dispatched through link type 105)
+        // https://www.tcpdump.org/linktypes.html
+        #[cfg(feature = "radiotap")]
+        assert_builtin(
+            reg.register_by_link_type(127, Box::new(packet_dissector_radiotap::RadiotapDissector)),
+        );
+
         // Transparent Ethernet Bridging (0x6558) — used by tunneling
         // protocols (VXLAN, GRE) to encapsulate inner Ethernet frames.
         #[cfg(feature = "ethernet")]
@@ -2714,7 +2736,12 @@ impl Default for DissectorRegistry {
         // SNAP follows an IEEE 802.2 LLC header with SAP 0xAA
         // (RFC 1042 — https://www.rfc-editor.org/rfc/rfc1042). Ethernet and
         // Linux cooked captures (protocol type 0x0004) both carry LLC.
-        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        #[cfg(any(
+            feature = "ethernet",
+            feature = "linux_sll",
+            feature = "linux_sll2",
+            feature = "ieee80211"
+        ))]
         assert_builtin(reg.register_by_llc_sap(
             packet_dissector_ethernet::llc::SAP_SNAP,
             Box::new(packet_dissector_ethernet::SnapDissector),
@@ -3337,6 +3364,13 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("bgp", || Box::new(packet_dissector_bgp::BgpDissector));
         }
 
+        // BMP has no assigned port: "The passive party is configured to
+        // listen on a particular TCP port" (RFC 7854, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc7854#section-3.2), so it is only
+        // available by decode-as name.
+        #[cfg(feature = "bmp")]
+        reg.register_dissector_factory("bmp", || Box::new(packet_dissector_bmp::BmpDissector));
+
         // Register TLS for the common HTTPS port 443 (RFC 5246, RFC 8446)
         // and for the ports whose assigned service runs over implicit TLS
         // (the TLS handshake is the first data exchanged on the connection):
@@ -3932,6 +3966,8 @@ mod tests {
         assert!(reg.create_dissector_by_name("tls").is_some());
         #[cfg(feature = "bgp")]
         assert!(reg.create_dissector_by_name("bgp").is_some());
+        #[cfg(feature = "bmp")]
+        assert!(reg.create_dissector_by_name("bmp").is_some());
         #[cfg(feature = "sip")]
         assert!(reg.create_dissector_by_name("sip").is_some());
         #[cfg(feature = "sip")]
@@ -4078,6 +4114,22 @@ mod tests {
         );
         assert!(
             reg.lookup_dissector(&DispatchHint::ByAchChannelType(0x0008))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lookup_dissector_by_link_type_hint() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_link_type(105, Box::new(StubDissector("802.11")))
+            .unwrap();
+        assert_eq!(
+            reg.lookup_dissector(&DispatchHint::ByLinkType(105))
+                .map(|d| d.short_name()),
+            Some("802.11")
+        );
+        assert!(
+            reg.lookup_dissector(&DispatchHint::ByLinkType(127))
                 .is_none()
         );
     }
@@ -5053,6 +5105,12 @@ mod tests {
 
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_link_type(1).is_some());
+
+        #[cfg(feature = "ieee80211")]
+        assert!(reg.get_by_link_type(105).is_some());
+
+        #[cfg(feature = "radiotap")]
+        assert!(reg.get_by_link_type(127).is_some());
 
         #[cfg(feature = "null")]
         {

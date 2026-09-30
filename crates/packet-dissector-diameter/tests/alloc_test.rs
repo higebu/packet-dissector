@@ -111,3 +111,33 @@ fn zero_alloc_dissect_diameter_typed_avps() {
         "Diameter typed AVP dissect allocated {allocs} times"
     );
 }
+
+#[cfg(feature = "eap")]
+#[test]
+fn zero_alloc_dissect_diameter_eap_payload() {
+    // Diameter-EAP-Request (268) with EAP-Payload (462) carrying an EAP
+    // Response/Identity (RFC 4072, Section 4.1.1 —
+    // https://www.rfc-editor.org/rfc/rfc4072#section-4.1.1).
+    let eap = [0x02, 0x01, 0x00, 0x08, 0x01, b'b', b'o', b'b'];
+    let avp_len = 8 + eap.len();
+    let total = 20 + avp_len;
+    let mut raw = vec![1, 0, 0, total as u8, 0xC0, 0x00, 0x01, 0x0C];
+    raw.extend_from_slice(&5u32.to_be_bytes()); // Application-ID 5 (Diameter EAP)
+    raw.extend_from_slice(&1u32.to_be_bytes());
+    raw.extend_from_slice(&1u32.to_be_bytes());
+    raw.extend_from_slice(&462u32.to_be_bytes());
+    raw.extend_from_slice(&[0x40, 0, 0, avp_len as u8]);
+    raw.extend_from_slice(&eap);
+    let mut buf = DissectBuffer::new();
+    DiameterDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        DiameterDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "Diameter EAP-Payload dissect allocated {allocs} times"
+    );
+    assert!(buf.fields().iter().any(|f| f.name() == "eap"));
+}
