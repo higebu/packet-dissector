@@ -575,6 +575,8 @@ mod tests {
     //! | 4.3     | Type III BSO / Gra / D names                  | type3_display_names                    |
     //! | 4.3     | Type III Ver must be 2                        | type3_version_mismatch                 |
     //! | 4.3     | Type III truncated header                     | type3_truncated                        |
+    //! | 4.1-4.2 | Non-GRE layer or GRE without S: Ver nibble    | version_nibble_fallback                |
+    //! | 4.2-4.3 | Display functions ignore other value types    | display_fns_ignore_other_types         |
     //! | —       | Dissector metadata                            | dissector_metadata                     |
 
     use super::*;
@@ -928,6 +930,43 @@ mod tests {
                 actual: 11
             })
         );
+    }
+
+    /// Without a GRE layer carrying the S flag directly before it, the Ver
+    /// nibble chooses between Type I and Type II.
+    #[test]
+    fn version_nibble_fallback() {
+        // The previous layer is not GRE.
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("IPv4", None, &[], 0..20);
+        buf.end_layer();
+        let r = ErspanDissector
+            .dissect(&TYPE2_HEADER, &mut buf, 20)
+            .unwrap();
+        assert_eq!(r.bytes_consumed, 8);
+
+        // A GRE layer without `sequence_number_present`.
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("GRE", None, &[], 0..4);
+        buf.end_layer();
+        let data = [0x00u8; 14];
+        let r = ErspanDissector.dissect(&data, &mut buf, 4).unwrap();
+        assert_eq!(r.bytes_consumed, 0);
+    }
+
+    #[test]
+    fn display_fns_ignore_other_types() {
+        for fd in [
+            FD_ENCAP_TYPE,
+            FD_BSO,
+            FD_FRAME_TYPE,
+            FD_DIRECTION,
+            FD_GRANULARITY,
+        ] {
+            let display = FIELD_DESCRIPTORS[fd].display_fn.unwrap();
+            assert!(display(&FieldValue::U8(0), &[]).is_some());
+            assert_eq!(display(&FieldValue::U16(0), &[]), None);
+        }
     }
 
     #[test]
