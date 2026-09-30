@@ -22,6 +22,7 @@ packet-dissector-tcp = { version = "0.5.0", path = "crates/packet-dissector-tcp"
 packet-dissector-udp = { version = "0.5.0", path = "crates/packet-dissector-udp" }
 packet-dissector-dns = { version = "0.5.0", path = "crates/packet-dissector-dns" }
 packet-dissector-mdns = { version = "0.5.0", path = "crates/packet-dissector-mdns" }
+packet-dissector-sgsap = { version = "0.5.0", path = "crates/packet-dissector-sgsap" }
 packet-dissector-sctp = { version = "0.5.0", path = "crates/packet-dissector-sctp" }
 packet-dissector-dhcp = { version = "0.5.0", path = "crates/packet-dissector-dhcp" }
 packet-dissector-dhcpv6 = { version = "0.5.0", path = "crates/packet-dissector-dhcpv6" }
@@ -46,6 +47,7 @@ packet-dissector-mpls = { version = "0.5.0", path = "crates/packet-dissector-mpl
 packet-dissector-vxlan = { version = "0.5.0", path = "crates/packet-dissector-vxlan" }
 packet-dissector-lacp = { version = "0.5.0", path = "crates/packet-dissector-lacp" }
 packet-dissector-lldp = { version = "0.5.0", path = "crates/packet-dissector-lldp" }
+packet-dissector-eap = { version = "0.5.0", path = "crates/packet-dissector-eap" }
 packet-dissector-ntp = { version = "0.5.0", path = "crates/packet-dissector-ntp" }
 packet-dissector-ospf = { version = "0.5.0", path = "crates/packet-dissector-ospf" }
 packet-dissector-pim = { version = "0.5.0", path = "crates/packet-dissector-pim" }

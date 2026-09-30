@@ -44,10 +44,12 @@ default = [
   "nas5g",
   "nas-eps",
   "ngap",
+  "sgsap",
   "geneve",
   "gre",
   "vxlan",
   "lldp",
+  "eap",
   "stp",
   "mpls",
   "ntp",
@@ -111,10 +113,13 @@ diameter = ["dep:packet-dissector-diameter"]
 nas5g = ["dep:packet-dissector-nas5g"]
 nas-eps = ["dep:packet-dissector-nas-eps"]
 ngap = ["dep:packet-dissector-ngap", "nas5g"]
+sgsap = ["dep:packet-dissector-sgsap"]
 geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
 vxlan = ["dep:packet-dissector-vxlan"]
 lldp = ["dep:packet-dissector-lldp"]
+# EAP is also decoded inside PPP (Protocol 0xC227) when both are enabled.
+eap = ["dep:packet-dissector-eap", "packet-dissector-ppp?/eap"]
 stp = ["dep:packet-dissector-stp"]
 mpls = ["dep:packet-dissector-mpls"]
 ntp = ["dep:packet-dissector-ntp"]
@@ -153,6 +158,7 @@ layer2 = [
   "arp",
   "lacp",
   "lldp",
+  "eap",
   "stp",
   "ppp",
   "pppoe",
@@ -179,7 +185,16 @@ application = [
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp", "pim"]
 ipsec = ["ah", "esp", "ike"]
-3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap"]
+3gpp = [
+  "gtpv1u",
+  "gtpv1c",
+  "gtpv2c",
+  "pfcp",
+  "nas5g",
+  "nas-eps",
+  "ngap",
+  "sgsap",
+]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -216,10 +231,12 @@ packet-dissector-diameter = { workspace = true, optional = true }
 packet-dissector-nas5g = { workspace = true, optional = true }
 packet-dissector-nas-eps = { workspace = true, optional = true }
 packet-dissector-ngap = { workspace = true, optional = true }
+packet-dissector-sgsap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }
 packet-dissector-gre = { workspace = true, optional = true }
 packet-dissector-vxlan = { workspace = true, optional = true }
 packet-dissector-lldp = { workspace = true, optional = true }
+packet-dissector-eap = { workspace = true, optional = true }
 packet-dissector-stp = { workspace = true, optional = true }
 packet-dissector-mpls = { workspace = true, optional = true }
 packet-dissector-ntp = { workspace = true, optional = true }
