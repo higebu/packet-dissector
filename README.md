@@ -17,7 +17,7 @@ packet-dissector = "0.3"
 
 ## Features
 
-- **Zero-copy on the normal path** — dissectors borrow directly from `&[u8]` slices when parsing a single packet; TCP reassembly and decrypted-payload paths copy into auxiliary storage
+- **Zero-copy on the normal path** — dissectors borrow directly from `&[u8]` slices when parsing a single packet; TCP reassembly, IP fragment reassembly and decrypted-payload paths copy into auxiliary storage
 - **Extensible** — add new protocols by implementing the `Dissector` trait
 - **Layered dissection** — automatic chaining from Ethernet through IP, TCP/UDP, to application protocols
 - **Safe Rust** — minimal `unsafe` in the registry only, documented with `// SAFETY:` comments
@@ -64,6 +64,7 @@ Representative feature flags:
 - 3GPP: `gtpv1u`, `gtpv2c`, `pfcp`, `nas5g`, `ngap`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
+- `ip-reassembly` enables IPv4 / IPv6 fragment reassembly in the registry (without it, non-initial fragments still end the chain after the IP layer)
 
 Convenience groups:
 
