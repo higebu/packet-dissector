@@ -1100,6 +1100,7 @@ mod tests {
     //! | 9.2.4.1                   | Frame Control truncated                          | truncated_frame_control               |
     //! | 9.2.4.1                   | Protocol version ≠ 0: Frame Control only         | protocol_version_1_frame_control_only |
     //! | 9.2.4.1.3, Table 9-1      | Type / subtype names                             | type_and_subtype_names                |
+    //! | Table 9-1, 9.4.1.1, 9-51  | Name tables and display functions                | name_tables                           |
     //! | 9.3.2.1, 9.2.4.5          | QoS Data, To DS, LLC/SNAP dispatch               | qos_data_to_ds_llc_snap               |
     //! | 9.3.2.1, Table 9-30       | Four-address (WDS) data frame                    | four_address_data_frame               |
     //! | 9.3.2.1, Table 9-30       | From DS data frame, non-QoS                      | from_ds_data_frame                    |
@@ -1286,6 +1287,39 @@ mod tests {
             Some("Vendor-specific")
         );
         assert_eq!(category_name(17), None);
+    }
+
+    #[test]
+    fn name_tables() {
+        let types = (0..=255u8)
+            .filter(|t| frame_type_name(*t).is_some())
+            .count();
+        assert_eq!(types, 4);
+        let subtypes = (0..4u8)
+            .flat_map(|t| (0..16u8).map(move |s| (t, s)))
+            .filter(|(t, s)| subtype_name(*t, *s).is_some())
+            .count();
+        assert_eq!(subtypes, 14 + 14 + 9 + 2);
+        let algorithms = (0..=u16::MAX)
+            .filter(|a| auth_algorithm_name(*a).is_some())
+            .count();
+        assert_eq!(algorithms, 8);
+        let categories = (0..=255u8).filter(|c| category_name(*c).is_some()).count();
+        assert_eq!(categories, 22);
+        let type_fd = &FIELD_DESCRIPTORS[FD_TYPE];
+        assert_eq!(
+            (type_fd.display_fn.unwrap())(&FieldValue::U16(0), &[]),
+            None
+        );
+        let subtype_fd = &FIELD_DESCRIPTORS[FD_SUBTYPE];
+        assert_eq!(
+            (subtype_fd.display_fn.unwrap())(&FieldValue::U8(0), &[]),
+            None
+        );
+        for fd in [FD_AUTH_ALGORITHM, FD_CATEGORY] {
+            let f = FIELD_DESCRIPTORS[fd].display_fn.unwrap();
+            assert_eq!(f(&FieldValue::U32(0), &[]), None);
+        }
     }
 
     #[test]
