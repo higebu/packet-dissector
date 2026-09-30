@@ -1,5 +1,9 @@
 //! RTP (Real-time Transport Protocol) dissector.
 //!
+//! With the `rtcp-mux` feature, packets whose second octet is an RTCP packet
+//! type (RTP and RTCP multiplexed on one port, RFC 5761, Section 4 —
+//! <https://www.rfc-editor.org/rfc/rfc5761#section-4>) are dissected as RTCP.
+//!
 //! ## References
 //! - RFC 3550, Section 5.1 — RTP Fixed Header Fields:
 //!   <https://www.rfc-editor.org/rfc/rfc3550#section-5.1>
@@ -22,6 +26,7 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+#[cfg(feature = "rtcp-mux")]
 use packet_dissector_rtcp::RtcpDissector;
 
 /// Minimum RTP header size in bytes (fixed header without CSRC list or extension).
@@ -42,6 +47,7 @@ const RTP_VERSION: u8 = 2;
 /// 194-199, so that only the RTP payload types in the range 64-95 are
 /// blocked." and "payload type values in the range 64-95 MUST NOT be used."
 /// <https://www.rfc-editor.org/rfc/rfc5761#section-4>
+#[cfg(feature = "rtcp-mux")]
 const RTCP_MUX_PACKET_TYPES: core::ops::RangeInclusive<u8> = 192..=223;
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
@@ -306,15 +312,24 @@ impl Dissector for RtpDissector {
         // position in the packet as the combination of the RTP marker (M)
         // bit and the RTP payload type (PT). This field can be used to
         // distinguish RTP and RTCP packets". A version-2 packet whose second
-        // octet is an RTCP packet type is handed to the RTCP dissector. When
-        // it is not a well-formed RTCP packet (RTCP rejects it before
-        // pushing anything), it is decoded as RTP below, so a stream that is
-        // not multiplexed and uses M=1 with PT 64-95 is still shown as RTP.
+        // octet is an RTCP packet type is handed to the RTCP dissector
+        // (enabled by the `rtcp-mux` feature). If it is not a well-formed
+        // RTCP packet, anything RTCP pushed is rolled back and the packet is
+        // decoded as RTP below.
         // https://www.rfc-editor.org/rfc/rfc5761#section-4
+        #[cfg(feature = "rtcp-mux")]
         if let [byte0, byte1, ..] = *data {
             if byte0 >> 6 == RTP_VERSION && RTCP_MUX_PACKET_TYPES.contains(&byte1) {
-                if let Ok(result) = RtcpDissector.dissect(data, buf, offset) {
-                    return Ok(result);
+                let layers = buf.layers().len();
+                let fields = buf.field_count();
+                match RtcpDissector.dissect(data, buf, offset) {
+                    Ok(result) => return Ok(result),
+                    Err(_) => {
+                        while buf.layers().len() > layers {
+                            buf.pop_layer();
+                        }
+                        buf.truncate_fields(fields as usize);
+                    }
                 }
             }
         }
@@ -670,7 +685,7 @@ mod tests {
     // | 6           | Static payload type names (Tables 4/5) | payload_type_names                        |
     // | 6           | Dynamic range 96-127                   | payload_type_names                        |
     //
-    // # RFC 5761 (RTP/RTCP Multiplexing) Coverage
+    // # RFC 5761 (RTP/RTCP Multiplexing) Coverage (`rtcp-mux` feature)
     //
     // | RFC Section | Description                            | Test                                      |
     // |-------------|----------------------------------------|-------------------------------------------|
@@ -1425,6 +1440,7 @@ mod tests {
         assert_eq!(RtpDissector.layer(), Some(ProtocolLayer::Application));
     }
 
+    #[cfg(feature = "rtcp-mux")]
     #[test]
     fn rfc5761_rtcp_packet_types_go_to_rtcp() {
         // Minimal RR: V=2 RC=0, PT=201, length 1, SSRC — seen as RTP it would
@@ -1463,6 +1479,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rtcp-mux")]
     #[test]
     fn rfc5761_invalid_rtcp_falls_back_to_rtp() {
         // M=1, PT=72 (octet 2 = 200 = SR) but the "length" (the RTP sequence

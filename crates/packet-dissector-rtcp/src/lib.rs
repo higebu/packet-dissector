@@ -1,7 +1,9 @@
 //! RTCP (RTP Control Protocol) dissector.
 //!
-//! Decodes a compound RTCP datagram (RFC 3550, Section 6.1) packet by packet,
-//! including reduced-size (non-compound) RTCP (RFC 5506).
+//! Decodes a compound RTCP datagram (RFC 3550, Section 6.1 —
+//! <https://www.rfc-editor.org/rfc/rfc3550#section-6.1>) packet by packet,
+//! including reduced-size (non-compound) RTCP (RFC 5506 —
+//! <https://www.rfc-editor.org/rfc/rfc5506>).
 //!
 //! ## References
 //! - RFC 3550, Sections 6.4-6.7 — SR, RR, SDES, BYE and APP packets:
@@ -440,6 +442,7 @@ static PACKET_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
     FieldDescriptor::new("padding", "Padding", FieldType::U8),
     // RFC 3550, Section 6.4.1 — SR/RR "reception report count (RC)".
+    // https://www.rfc-editor.org/rfc/rfc3550#section-6.4.1
     FieldDescriptor::new(
         "reception_report_count",
         "Reception Report Count",
@@ -447,14 +450,18 @@ static PACKET_FIELDS: &[FieldDescriptor] = &[
     )
     .optional(),
     // RFC 3550, Sections 6.5, 6.6 — SDES/BYE "source count (SC)".
+    // https://www.rfc-editor.org/rfc/rfc3550#section-6.5
     FieldDescriptor::new("source_count", "Source Count", FieldType::U8).optional(),
     // RFC 3550, Section 6.7 — APP "subtype".
+    // https://www.rfc-editor.org/rfc/rfc3550#section-6.7
     FieldDescriptor::new("subtype", "Subtype", FieldType::U8).optional(),
     // RFC 4585, Section 6.1 — "Feedback message type (FMT)".
+    // https://www.rfc-editor.org/rfc/rfc4585#section-6.1
     FieldDescriptor::new("fmt", "Feedback Message Type", FieldType::U8)
         .optional()
         .with_display_fn(fmt_display),
     // RFC 3611, Section 2 — XR "reserved".
+    // https://www.rfc-editor.org/rfc/rfc3611#section-2
     FieldDescriptor::new("reserved", "Reserved", FieldType::U8).optional(),
     // The 5-bit count field of a packet type this dissector does not decode.
     FieldDescriptor::new("count", "Count", FieldType::U8).optional(),
@@ -827,21 +834,15 @@ fn emit_report<'pkt>(
     Ok(())
 }
 
-/// Emit the items of one SDES chunk starting at `start` (just after the
-/// SSRC/CSRC). Returns the offset of the next chunk, or `None` when the item
-/// list is malformed; in that case nothing has been pushed.
+/// Scan the item list of one SDES chunk starting at `start` (just after the
+/// SSRC/CSRC). Returns `(items_end, next_chunk)`: the offset of the null item
+/// that ends the list and the offset of the next chunk, or `None` when the
+/// item list is malformed.
 ///
 /// RFC 3550, Section 6.5 — <https://www.rfc-editor.org/rfc/rfc3550#section-6.5>
-fn emit_sdes_items<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    body: &'pkt [u8],
-    base: usize,
-    start: usize,
-) -> Option<usize> {
-    // First pass: find the terminating null item so that malformed chunks
-    // leave no partial fields behind.
+fn scan_sdes_items(body: &[u8], start: usize) -> Option<(usize, usize)> {
     let mut pos = start;
-    let end = loop {
+    loop {
         let item_type = *body.get(pos)?;
         if item_type == 0 {
             // RFC 3550, Section 6.5 — "The list of items in each chunk MUST
@@ -852,76 +853,86 @@ fn emit_sdes_items<'pkt>(
             // the next 32-bit boundary."
             // https://www.rfc-editor.org/rfc/rfc3550#section-6.5
             let next = (pos + 1).next_multiple_of(4);
-            if next > body.len() {
-                return None;
-            }
-            break pos;
+            return (next <= body.len()).then_some((pos, next));
         }
         let len = usize::from(*body.get(pos + 1)?);
         if pos + 2 + len > body.len() {
             return None;
         }
+        // RFC 3550, Section 6.5.8 — the PRIV text starts with an 8-bit prefix
+        // length that must fit in the item.
+        // https://www.rfc-editor.org/rfc/rfc3550#section-6.5.8
         if item_type == SDES_PRIV && (len == 0 || 1 + usize::from(body[pos + 2]) > len) {
             return None;
         }
         pos += 2 + len;
-    };
-
-    if end > start {
-        let arr = buf.begin_container(
-            &SDES_CHUNK_FIELDS[CH_ITEMS],
-            FieldValue::Array(0..0),
-            base + start..base + end,
-        );
-        let mut pos = start;
-        while pos < end {
-            let item_type = body[pos];
-            let len = usize::from(body[pos + 1]);
-            let obj = buf.begin_container(
-                &FD_SDES_ITEM,
-                FieldValue::Object(0..0),
-                base + pos..base + pos + 2 + len,
-            );
-            buf.push_field(
-                &SDES_ITEM_FIELDS[IT_TYPE],
-                FieldValue::U8(item_type),
-                base + pos..base + pos + 1,
-            );
-            buf.push_field(
-                &SDES_ITEM_FIELDS[IT_LENGTH],
-                FieldValue::U8(body[pos + 1]),
-                base + pos + 1..base + pos + 2,
-            );
-            let mut text_start = pos + 2;
-            if item_type == SDES_PRIV {
-                // RFC 3550, Section 6.5.8 — "PRIV: Private Extensions SDES
-                // Item" with an 8-bit prefix length, prefix string and value
-                // string. https://www.rfc-editor.org/rfc/rfc3550#section-6.5.8
-                let plen = usize::from(body[text_start]);
-                buf.push_field(
-                    &SDES_ITEM_FIELDS[IT_PREFIX_LENGTH],
-                    FieldValue::U8(body[text_start]),
-                    base + text_start..base + text_start + 1,
-                );
-                buf.push_field(
-                    &SDES_ITEM_FIELDS[IT_PREFIX],
-                    FieldValue::Bytes(&body[text_start + 1..text_start + 1 + plen]),
-                    base + text_start + 1..base + text_start + 1 + plen,
-                );
-                text_start += 1 + plen;
-            }
-            let text_end = pos + 2 + len;
-            buf.push_field(
-                &SDES_ITEM_FIELDS[IT_TEXT],
-                FieldValue::Bytes(&body[text_start..text_end]),
-                base + text_start..base + text_end,
-            );
-            buf.end_container(obj);
-            pos = text_end;
-        }
-        buf.end_container(arr);
     }
-    Some((end + 1).next_multiple_of(4))
+}
+
+/// Emit the items `body[start..end]` of one SDES chunk, already validated by
+/// [`scan_sdes_items`].
+fn emit_sdes_items<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    body: &'pkt [u8],
+    base: usize,
+    start: usize,
+    end: usize,
+) {
+    if end == start {
+        return;
+    }
+    let arr = buf.begin_container(
+        &SDES_CHUNK_FIELDS[CH_ITEMS],
+        FieldValue::Array(0..0),
+        base + start..base + end,
+    );
+    let mut pos = start;
+    while pos < end {
+        let item_type = body[pos];
+        let len = usize::from(body[pos + 1]);
+        let obj = buf.begin_container(
+            &FD_SDES_ITEM,
+            FieldValue::Object(0..0),
+            base + pos..base + pos + 2 + len,
+        );
+        buf.push_field(
+            &SDES_ITEM_FIELDS[IT_TYPE],
+            FieldValue::U8(item_type),
+            base + pos..base + pos + 1,
+        );
+        buf.push_field(
+            &SDES_ITEM_FIELDS[IT_LENGTH],
+            FieldValue::U8(body[pos + 1]),
+            base + pos + 1..base + pos + 2,
+        );
+        let mut text_start = pos + 2;
+        if item_type == SDES_PRIV {
+            // RFC 3550, Section 6.5.8 — "PRIV: Private Extensions SDES
+            // Item" with an 8-bit prefix length, prefix string and value
+            // string. https://www.rfc-editor.org/rfc/rfc3550#section-6.5.8
+            let plen = usize::from(body[text_start]);
+            buf.push_field(
+                &SDES_ITEM_FIELDS[IT_PREFIX_LENGTH],
+                FieldValue::U8(body[text_start]),
+                base + text_start..base + text_start + 1,
+            );
+            buf.push_field(
+                &SDES_ITEM_FIELDS[IT_PREFIX],
+                FieldValue::Bytes(&body[text_start + 1..text_start + 1 + plen]),
+                base + text_start + 1..base + text_start + 1 + plen,
+            );
+            text_start += 1 + plen;
+        }
+        let text_end = pos + 2 + len;
+        buf.push_field(
+            &SDES_ITEM_FIELDS[IT_TEXT],
+            FieldValue::Bytes(&body[text_start..text_end]),
+            base + text_start..base + text_end,
+        );
+        buf.end_container(obj);
+        pos = text_end;
+    }
+    buf.end_container(arr);
 }
 
 /// SDES body (RFC 3550, Section 6.5 —
@@ -935,51 +946,47 @@ fn emit_sdes<'pkt>(
     base: usize,
     sc: u8,
 ) -> Result<(), PacketError> {
-    let mut pos = 0;
-    let mut arr = None;
-    for _ in 0..sc {
-        if body.len() < pos + 4 {
+    // Find the well-formed chunks first so every range is known up front.
+    let mut valid_end = 0;
+    let mut chunks = 0;
+    while chunks < sc && body.len() >= valid_end + 4 {
+        let Some((_, next)) = scan_sdes_items(body, valid_end + 4) else {
             break;
-        }
-        let mark = buf.field_count();
-        let arr_idx = *arr.get_or_insert_with(|| {
-            buf.begin_container(
-                &PACKET_FIELDS[PF_CHUNKS],
-                FieldValue::Array(0..0),
-                base..base + body.len(),
-            )
-        });
-        let obj = buf.begin_container(
-            &FD_SDES_CHUNK,
-            FieldValue::Object(0..0),
-            base + pos..base + pos,
+        };
+        valid_end = next;
+        chunks += 1;
+    }
+
+    if chunks > 0 {
+        let arr = buf.begin_container(
+            &PACKET_FIELDS[PF_CHUNKS],
+            FieldValue::Array(0..0),
+            base..base + valid_end,
         );
-        push_u32(buf, &SDES_CHUNK_FIELDS[CH_SSRC], body, pos, base)?;
-        match emit_sdes_items(buf, body, base, pos + 4) {
-            Some(next) => {
-                buf.end_container(obj);
-                if let Some(f) = buf.field_mut(obj as usize) {
-                    f.range = base + pos..base + next;
-                }
-                pos = next;
-            }
-            None => {
-                // Roll back this chunk (and the array if it was just opened).
-                buf.truncate_fields(mark as usize);
-                if arr_idx >= mark {
-                    arr = None;
-                }
+        let mut pos = 0;
+        while pos < valid_end {
+            let Some((items_end, next)) = scan_sdes_items(body, pos + 4) else {
                 break;
-            }
+            };
+            let obj = buf.begin_container(
+                &FD_SDES_CHUNK,
+                FieldValue::Object(0..0),
+                base + pos..base + next,
+            );
+            push_u32(buf, &SDES_CHUNK_FIELDS[CH_SSRC], body, pos, base)?;
+            emit_sdes_items(buf, body, base, pos + 4, items_end);
+            buf.end_container(obj);
+            pos = next;
         }
+        buf.end_container(arr);
     }
-    if let Some(arr_idx) = arr {
-        buf.end_container(arr_idx);
-        if let Some(f) = buf.field_mut(arr_idx as usize) {
-            f.range = base..base + pos;
-        }
-    }
-    push_bytes(buf, &PACKET_FIELDS[PF_DATA], &body[pos..], pos, base);
+    push_bytes(
+        buf,
+        &PACKET_FIELDS[PF_DATA],
+        &body[valid_end..],
+        valid_end,
+        base,
+    );
     Ok(())
 }
 
@@ -1274,6 +1281,7 @@ fn emit_xr_block_contents<'pkt>(
                 let c = read_be_u16(chunks, at)?;
                 // RFC 3611, Section 4.1 — "If the chunk is all zeroes, then
                 // it is a terminating null chunk."
+                // https://www.rfc-editor.org/rfc/rfc3611#section-4.1
                 if c == 0 {
                     continue;
                 }
@@ -1527,14 +1535,7 @@ impl Dissector for RtcpDissector {
         // lower-layer datagram may differ from 200 or 201 (SR or RR)." Only
         // the first packet's header is required to be valid.
         // https://www.rfc-editor.org/rfc/rfc5506#section-3.4.2
-        let first = check_packet(data, 0)?;
-        let mut end = first.total;
-        while end < data.len() {
-            match check_packet(data, end) {
-                Ok(h) => end += h.total,
-                Err(_) => break,
-            }
-        }
+        let mut header = check_packet(data, 0)?;
 
         buf.begin_layer(
             self.short_name(),
@@ -1545,15 +1546,25 @@ impl Dissector for RtcpDissector {
         let arr = buf.begin_container(
             &FIELD_DESCRIPTORS[FD_PACKETS],
             FieldValue::Array(0..0),
-            offset..offset + end,
+            offset..offset,
         );
-        let mut pos = 0;
-        while pos < end {
-            let h = check_packet(data, pos)?;
-            emit_packet(buf, &data[pos..pos + h.total], &h, offset + pos)?;
-            pos += h.total;
+        let mut end = 0;
+        loop {
+            emit_packet(buf, &data[end..end + header.total], &header, offset + end)?;
+            end += header.total;
+            if end == data.len() {
+                break;
+            }
+            // Stop at the first octets that are not a well-formed packet.
+            match check_packet(data, end) {
+                Ok(next) => header = next,
+                Err(_) => break,
+            }
         }
         buf.end_container(arr);
+        if let Some(f) = buf.field_mut(arr as usize) {
+            f.range = offset..offset + end;
+        }
 
         if end < data.len() {
             buf.push_field(
@@ -1800,6 +1811,7 @@ mod tests {
     fn report_block_negative_cumulative_lost() {
         // RFC 3550, Section 6.4.1 — "the loss may be negative if there are
         // duplicates": 0xFFFFFE is -2 as a signed 24-bit value.
+        // https://www.rfc-editor.org/rfc/rfc3550#section-6.4.1
         let mut body = 0x1u32.to_be_bytes().to_vec();
         body.extend(report_block(0x2, 0, [0xFF, 0xFF, 0xFE], 1));
         let data = pkt(1, 201, &body);
@@ -2120,7 +2132,8 @@ mod tests {
 
     #[test]
     fn rtpfb_tmmbn() {
-        // TMMBN may carry zero entries (RFC 5104, Section 4.2.2.1), and a
+        // TMMBN may carry zero entries (RFC 5104, Section 4.2.2.1 —
+        // https://www.rfc-editor.org/rfc/rfc5104#section-4.2.2.1), and a
         // partial trailing entry is kept raw.
         let data = fb(4, 205, &[]);
         let (buf, _) = dissect(&data);

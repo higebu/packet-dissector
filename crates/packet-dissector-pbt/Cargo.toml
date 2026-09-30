@@ -25,7 +25,7 @@ packet-dissector-mdns = { workspace = true }
 packet-dissector-ntp = { workspace = true }
 packet-dissector-ospf = { workspace = true }
 packet-dissector-rtcp = { workspace = true }
-packet-dissector-rtp = { workspace = true }
+packet-dissector-rtp = { workspace = true, features = ["rtcp-mux"] }
 packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcp = { workspace = true }
