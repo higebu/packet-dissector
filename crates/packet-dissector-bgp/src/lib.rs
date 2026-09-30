@@ -125,6 +125,7 @@
 //! | 4.2.2 | AS4_AGGREGATOR in the UPDATE selects 2-octet AS_PATH | `parse_bgp_update_as_path_two_octet_hint_from_as4_aggregator` |
 //! | 4.1 | AGGREGATOR length (6 / 8) selects the AS_PATH AS number size | `parse_bgp_update_as_path_size_hint_from_aggregator_length` |
 //! | 4.1 | A hint that does not fit the AS_PATH is ignored | `parse_bgp_update_as_path_hint_ignored_when_it_does_not_fit` |
+//! | 4.1 | AS number size known from the encapsulating protocol (e.g. BMP) | `dissect_message_known_two_octet_as_size`, `dissect_message_known_four_octet_as_size_overrides_inference`, `dissect_message_known_size_that_does_not_fit_falls_back` |
 //! | 3 | Malformed AS4_PATH kept as raw bytes | `parse_bgp_update_as4_path_malformed_is_raw` |
 //!
 //! # RFC 7606 (Revised Error Handling) Coverage
@@ -7954,6 +7955,7 @@ fn parse_update<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
+    as_size: Option<AsNumberSize>,
 ) -> Result<(), PacketError> {
     if data.len() < MIN_UPDATE_SIZE {
         return Err(PacketError::Truncated {
@@ -8023,7 +8025,12 @@ fn parse_update<'pkt>(
         let before = buf.field_count();
         let mut pos = 0;
         let attr_data = &data[pa_start..pa_end];
-        let ctx = AttrContext::for_update(attr_data);
+        let mut ctx = AttrContext::for_update(attr_data);
+        // A size known from outside the message (e.g. the BMP A flag) takes
+        // precedence over the size inferred from the other attributes.
+        if let Some(as_size) = as_size {
+            ctx.as_size_hint = Some(as_size.octets());
+        }
         while pos < attr_data.len() {
             if let Some((consumed, mp_afi_safi)) =
                 parse_path_attribute(buf, &attr_data[pos..], offset + pa_start + pos, ctx)
@@ -10155,6 +10162,7 @@ fn dissect_one_message<'pkt>(
     data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
+    as_size: Option<AsNumberSize>,
 ) -> Result<usize, PacketError> {
     if data.len() < HEADER_SIZE {
         return Err(PacketError::Truncated {
@@ -10210,7 +10218,7 @@ fn dissect_one_message<'pkt>(
 
     match msg_type {
         MSG_OPEN => parse_open(buf, msg_data, offset)?,
-        MSG_UPDATE => parse_update(buf, msg_data, offset)?,
+        MSG_UPDATE => parse_update(buf, msg_data, offset, as_size)?,
         MSG_NOTIFICATION => parse_notification(buf, msg_data, offset)?,
         MSG_ROUTE_REFRESH => parse_route_refresh(buf, msg_data, offset)?,
         // KEEPALIVE is only the header (RFC 4271, Section 4.4 —
@@ -10605,8 +10613,63 @@ static REFERENCES: &[SpecReference] = &[
     ),
 ];
 
+/// Size of the AS numbers in the AS_PATH attribute of an UPDATE.
+///
+/// Between NEW BGP speakers AS_PATH carries 4-octet AS numbers, and towards
+/// an OLD speaker 2-octet ones (RFC 6793, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc6793#section-4>). The size is
+/// negotiated in OPEN, so a lone UPDATE does not say which one it uses; an
+/// encapsulating protocol may (e.g. the BMP per-peer header A flag, RFC 7854,
+/// Section 4.2 — <https://www.rfc-editor.org/rfc/rfc7854#section-4.2>).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AsNumberSize {
+    /// 2-octet AS numbers ("the legacy 2-byte AS_PATH format").
+    TwoOctet,
+    /// 4-octet AS numbers (RFC 6793).
+    FourOctet,
+}
+
+impl AsNumberSize {
+    /// Number of octets of one AS number.
+    const fn octets(self) -> usize {
+        match self {
+            Self::TwoOctet => 2,
+            Self::FourOctet => 4,
+        }
+    }
+}
+
 /// BGP-4 dissector.
 pub struct BgpDissector;
+
+impl BgpDissector {
+    /// Dissects the single BGP message at the start of `data` and appends
+    /// one `BGP` layer. Returns the number of bytes the message occupies
+    /// (its Length field); bytes after it are left alone.
+    ///
+    /// This is the entry point for protocols that carry BGP messages, such
+    /// as BMP (RFC 7854, Section 4 —
+    /// <https://www.rfc-editor.org/rfc/rfc7854#section-4>). `as_size` is the
+    /// AS number size of AS_PATH when the carrier knows it; it is preferred
+    /// over the size inferred from the UPDATE itself, which is used when the
+    /// AS_PATH does not fit it. `None` infers the size as
+    /// [`Dissector::dissect`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`PacketError::Truncated`] when `data` is shorter than the header or
+    /// the message Length, and the errors of [`Dissector::dissect`] for a
+    /// malformed message.
+    pub fn dissect_message<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+        as_size: Option<AsNumberSize>,
+    ) -> Result<usize, PacketError> {
+        dissect_one_message(data, buf, offset, as_size)
+    }
+}
 
 impl Dissector for BgpDissector {
     fn name(&self) -> &'static str {
@@ -10640,7 +10703,7 @@ impl Dissector for BgpDissector {
         // A single TCP segment may carry multiple BGP messages back-to-back.
         // Parse each one as a separate BGP layer.
         while pos + HEADER_SIZE <= data.len() {
-            let consumed = dissect_one_message(&data[pos..], buf, offset + pos)?;
+            let consumed = dissect_one_message(&data[pos..], buf, offset + pos, None)?;
             pos += consumed;
         }
 
@@ -14807,6 +14870,80 @@ mod tests {
             dissect_ambiguous_as_path_with(&build_attr(0xC0, 7, &[0, 1, 0, 0, 192, 0, 2, 1])),
             (vec![(2, vec![65538, 16_842_755])], Some(4))
         );
+    }
+
+    /// Bytes consumed, AS_PATH segments and `as_number_size` of one UPDATE.
+    type DissectedAsPath = (usize, Vec<(u8, Vec<u32>)>, Option<u8>);
+
+    /// Helper: dissect one UPDATE with [`BgpDissector::dissect_message`].
+    fn dissect_message_as_path(attrs: &[u8], as_size: Option<AsNumberSize>) -> DissectedAsPath {
+        let data = build_update(attrs, &[]);
+        let mut buf = DissectBuffer::new();
+        let consumed = BgpDissector
+            .dissect_message(&data, &mut buf, 0, as_size)
+            .unwrap();
+        let size = first_attr_as_number_size(&buf).and_then(|v| v.as_u8());
+        (consumed, first_attr_as_path_segments(&buf), size)
+    }
+
+    #[test]
+    fn dissect_message_known_two_octet_as_size() {
+        // An encapsulating protocol (e.g. BMP's A flag, RFC 7854, Section
+        // 4.2) says the AS_PATH uses 2-octet AS numbers.
+        let attrs = build_attr(0x40, 2, &AMBIGUOUS_AS_PATH);
+        let (consumed, segments, size) =
+            dissect_message_as_path(&attrs, Some(AsNumberSize::TwoOctet));
+        assert_eq!(consumed, 23 + attrs.len());
+        assert_eq!(segments, vec![(2, vec![1, 2]), (1, vec![3])]);
+        assert_eq!(size, Some(2));
+    }
+
+    #[test]
+    fn dissect_message_known_four_octet_as_size_overrides_inference() {
+        // AS4_PATH would select 2-octet, but the known size wins.
+        let mut attrs = build_attr(0x40, 2, &AMBIGUOUS_AS_PATH);
+        let mut as4_path = vec![2, 1];
+        as4_path.extend_from_slice(&200_000u32.to_be_bytes());
+        attrs.extend_from_slice(&build_attr(0xC0, 17, &as4_path));
+        let (_, segments, size) = dissect_message_as_path(&attrs, Some(AsNumberSize::FourOctet));
+        assert_eq!(segments, vec![(2, vec![65538, 16_842_755])]);
+        assert_eq!(size, Some(4));
+    }
+
+    #[test]
+    fn dissect_message_known_size_that_does_not_fit_falls_back() {
+        // One 2-octet AS number: not a valid 4-octet AS_PATH.
+        let attrs = build_attr(0x40, 2, &[2, 1, 0xFD, 0xE9]);
+        let (_, segments, size) = dissect_message_as_path(&attrs, Some(AsNumberSize::FourOctet));
+        assert_eq!(segments, vec![(2, vec![65001])]);
+        assert_eq!(size, Some(2));
+    }
+
+    #[test]
+    fn dissect_message_without_as_size_infers_and_stops_after_one_message() {
+        let mut data = build_update(&build_attr(0x40, 2, &AMBIGUOUS_AS_PATH), &[]);
+        let first_len = data.len();
+        data.extend_from_slice(&build_keepalive());
+        let mut buf = DissectBuffer::new();
+        let consumed = BgpDissector
+            .dissect_message(&data, &mut buf, 0, None)
+            .unwrap();
+        assert_eq!(consumed, first_len);
+        assert_eq!(buf.layers().len(), 1);
+        assert_eq!(first_attr_as_number_size(&buf), Some(FieldValue::U8(4)));
+    }
+
+    #[test]
+    fn dissect_message_truncated() {
+        let data = build_keepalive();
+        let mut buf = DissectBuffer::new();
+        assert!(matches!(
+            BgpDissector.dissect_message(&data[..10], &mut buf, 0, None),
+            Err(PacketError::Truncated {
+                expected: 19,
+                actual: 10
+            })
+        ));
     }
 
     #[test]

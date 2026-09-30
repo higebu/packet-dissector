@@ -11,6 +11,9 @@
 //! - RFC 7770 (Router Information): <https://www.rfc-editor.org/rfc/rfc7770>
 //! - RFC 8665 (Segment Routing): <https://www.rfc-editor.org/rfc/rfc8665>
 
+use packet_dissector_core::checksum::{
+    ChecksumStatus, InternetChecksum, checksum_status_descriptor,
+};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -114,6 +117,8 @@ const FD_AUTH_DATA_LEN: usize = 24;
 const FD_CRYPTO_SEQUENCE_NUMBER: usize = 25;
 const FD_AUTH_DIGEST: usize = 26;
 const FD_LLS: usize = 27;
+// Index 28 is UNPARSED_DESCRIPTOR.
+const FD_CHECKSUM_STATUS: usize = 29;
 
 /// Authentication type for Cryptographic authentication.
 ///
@@ -203,6 +208,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     LLS_DESCRIPTOR,
     // Bytes after the last LSA / LSA header that could be delimited.
     UNPARSED_DESCRIPTOR,
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// OSPFv2 dissector.
@@ -354,6 +360,32 @@ impl Dissector for Ospfv2Dissector {
             FieldValue::U16(checksum),
             offset + 12..offset + 14,
         );
+        if buf.verify_checksums() {
+            // RFC 2328, Appendix A.3.1 — "The standard IP checksum of the
+            // entire contents of the packet, starting with the OSPF packet
+            // header but excluding the 64-bit authentication field." With
+            // Cryptographic authentication, Appendix D.4.3 — "The checksum
+            // field in the standard OSPF header is not calculated, but is
+            // instead set to 0." The packet ends at Packet length (an LLS
+            // block after it is not covered, RFC 5613, Section 2.2).
+            // https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.1
+            // https://www.rfc-editor.org/rfc/rfc2328#appendix-D.4.3
+            // https://www.rfc-editor.org/rfc/rfc5613#section-2.2
+            let status = if auth_type == AUTH_TYPE_CRYPTOGRAPHIC {
+                ChecksumStatus::NotPresent
+            } else {
+                let sum = InternetChecksum::new()
+                    .add(&data[..16])
+                    .add(&data[HEADER_SIZE..total_len])
+                    .finish();
+                ChecksumStatus::from_valid(sum == 0)
+            };
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 12..offset + 14,
+            );
+        }
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_AUTH_TYPE],
             FieldValue::U16(auth_type),
@@ -703,6 +735,8 @@ mod tests {
     // | RFC 5613 Sec. 2    | LLS data block               | parse_lls_block_after_digest,            |
     // |                    |                              | parse_lls_block_requires_l_bit_and_length, |
     // |                    |                              | parse_lls_block_after_dd                 |
+    // | Appendix A.3.1     | Checksum (Null / simple auth) | checksum_status_verified                |
+    // | Appendix D.4.3     | No checksum with crypto auth | checksum_status_crypto_not_present       |
 
     /// Build an OSPFv2 common header.
     fn build_header(ospf_type: u8, packet_length: u16, router_id: [u8; 4]) -> Vec<u8> {
@@ -1765,5 +1799,62 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let result = Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
         assert_eq!(result.bytes_consumed, 44);
+    }
+
+    fn checksum_status(buf: &DissectBuffer<'_>) -> Option<FieldValue<'static>> {
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        buf.field_by_name(layer, "checksum_status")
+            .map(|f| match f.value {
+                FieldValue::U8(v) => FieldValue::U8(v),
+                _ => unreachable!(),
+            })
+    }
+
+    #[test]
+    fn checksum_status_verified() {
+        // RFC 2328, Appendix A.3.1 — "The standard IP checksum of the entire
+        // contents of the packet, starting with the OSPF packet header but
+        // excluding the 64-bit authentication field."
+        // https://www.rfc-editor.org/rfc/rfc2328#appendix-A.3.1
+        let mut pkt = build_header(5, 24, [1, 1, 1, 1]);
+        pkt[15] = 1; // AuType 1 (simple password)
+        let c = packet_dissector_core::checksum::internet_checksum(&[&pkt[..16]]);
+        pkt[12..14].copy_from_slice(&c.to_be_bytes());
+        // The authentication field is not covered.
+        pkt[16..24].copy_from_slice(b"password");
+
+        let mut buf = DissectBuffer::new();
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(checksum_status(&buf), None);
+
+        let mut buf = DissectBuffer::new();
+        buf.set_verify_checksums(true);
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(checksum_status(&buf), Some(FieldValue::U8(1)));
+        let layer = buf.layer_by_name("OSPFv2").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "checksum_status").unwrap().range,
+            12..14
+        );
+
+        pkt[4] = 9; // Router ID
+        let mut buf = DissectBuffer::new();
+        buf.set_verify_checksums(true);
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(checksum_status(&buf), Some(FieldValue::U8(0)));
+    }
+
+    #[test]
+    fn checksum_status_crypto_not_present() {
+        // RFC 2328, Appendix D.4.3 — "The checksum field in the standard OSPF
+        // header is not calculated, but is instead set to 0."
+        // https://www.rfc-editor.org/rfc/rfc2328#appendix-D.4.3
+        let mut pkt = build_header(5, 24, [1, 1, 1, 1]);
+        pkt[15] = 2; // AuType 2 (cryptographic)
+        pkt[19] = 16; // Auth Data Len
+        let mut buf = DissectBuffer::new();
+        buf.set_verify_checksums(true);
+        Ospfv2Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        assert_eq!(checksum_status(&buf), Some(FieldValue::U8(3)));
     }
 }

@@ -609,6 +609,7 @@ dependencies = [
  "packet-dissector-arp",
  "packet-dissector-bfd",
  "packet-dissector-bgp",
+ "packet-dissector-bmp",
  "packet-dissector-cdp",
  "packet-dissector-core",
  "packet-dissector-dhcp",
@@ -630,6 +631,7 @@ dependencies = [
  "packet-dissector-http2",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
+ "packet-dissector-ieee80211",
  "packet-dissector-igmp",
  "packet-dissector-ike",
  "packet-dissector-ipv4",
@@ -654,6 +656,7 @@ dependencies = [
  "packet-dissector-ppp",
  "packet-dissector-pppoe",
  "packet-dissector-quic",
+ "packet-dissector-radiotap",
  "packet-dissector-radius",
  "packet-dissector-raw-ip",
  "packet-dissector-reassembly",
@@ -718,6 +721,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-bmp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-bgp",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-cdp"
 version = "0.5.0"
 dependencies = [
@@ -757,6 +770,7 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-eap",
  "packet-dissector-test-alloc",
 ]
 
@@ -917,6 +931,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-ieee80211"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-ethernet",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-igmp"
 version = "0.5.0"
 dependencies = [
@@ -930,6 +954,7 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-eap",
  "packet-dissector-test-alloc",
 ]
 
@@ -1104,6 +1129,7 @@ name = "packet-dissector-pbt"
 version = "0.5.0"
 dependencies = [
  "packet-dissector",
+ "packet-dissector-bmp",
  "packet-dissector-cdp",
  "packet-dissector-core",
  "packet-dissector-dns",
@@ -1114,6 +1140,7 @@ dependencies = [
  "packet-dissector-gtpv1c",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
+ "packet-dissector-ieee80211",
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
@@ -1123,6 +1150,7 @@ dependencies = [
  "packet-dissector-ntp",
  "packet-dissector-ospf",
  "packet-dissector-pppoe",
+ "packet-dissector-radiotap",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
@@ -1179,11 +1207,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-radiotap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-radius"
 version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-eap",
  "packet-dissector-test-alloc",
 ]
 
