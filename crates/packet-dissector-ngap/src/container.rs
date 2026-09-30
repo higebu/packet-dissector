@@ -12,9 +12,9 @@ use packet_dissector_core::packet::DissectBuffer;
 
 use packet_dissector_core::error::PacketError;
 
-use crate::aper::{AperReader, Extent, read_extent};
-use crate::ie_parsers::{ensure_consumed, skip_sequence_extension_additions};
 use crate::{criticality_name, ie_id, ie_parsers};
+use packet_dissector_per::ap::{ensure_consumed, skip_sequence_extension_additions};
+use packet_dissector_per::{AperReader, Extent, read_extent};
 
 /// Where an IE container is decoded.
 ///

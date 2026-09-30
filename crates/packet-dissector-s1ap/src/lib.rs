@@ -222,13 +222,14 @@ impl Dissector for S1apDissector {
                 FieldValue::Bytes(&data[pos..total]),
                 r,
             );
-        } else if total - value_start > SEQUENCE_PREAMBLE_SIZE {
+        } else {
             let value = &data[value_start..total];
-            let ie_data = &value[SEQUENCE_PREAMBLE_SIZE..];
-            let ie_offset = offset + value_start + SEQUENCE_PREAMBLE_SIZE;
             // ITU-T Rec. X.691, Section 19.1: the first bit of the message
             // SEQUENCE is its extension bit.
-            let extended = value[0] & 0x80 != 0;
+            let extended = value.first().is_some_and(|b| b & 0x80 != 0);
+            let skip = SEQUENCE_PREAMBLE_SIZE.min(value.len());
+            let ie_data = &value[skip..];
+            let ie_offset = offset + value_start + skip;
             if !container::push_ie_container(
                 buf,
                 &FIELD_DESCRIPTORS[FD_IES],
@@ -242,7 +243,9 @@ impl Dissector for S1apDissector {
                     FieldValue::Str("IE count truncated"),
                     r.clone(),
                 );
-                buf.push_field(&container::FD_UNDECODED_IES, FieldValue::Bytes(ie_data), r);
+                if !ie_data.is_empty() {
+                    buf.push_field(&container::FD_UNDECODED_IES, FieldValue::Bytes(ie_data), r);
+                }
             }
         }
 

@@ -12,12 +12,14 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 
-use crate::aper::AperReader;
 use crate::container::{self, IeContext};
 use crate::ie_parsers::{
-    FD_SD, FD_SST, ensure_consumed, push_cause_fields, push_nas_pdu_octets, read_aligned_octets,
-    read_cause, read_s_nssai, read_sequence_preamble, shift, skip_protocol_ie_single_container,
-    skip_sequence_tail,
+    FD_SD, FD_SST, push_cause_fields, push_nas_pdu_octets, read_cause, read_s_nssai,
+    read_sequence_preamble, shift,
+};
+use packet_dissector_per::AperReader;
+use packet_dissector_per::ap::{
+    ensure_consumed, read_aligned_octets, skip_protocol_ie_single_container, skip_sequence_tail,
 };
 
 // ── Field descriptors ──────────────────────────────────────────────────

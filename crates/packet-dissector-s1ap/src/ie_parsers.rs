@@ -23,7 +23,7 @@ use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_per::AperReader;
 use packet_dissector_per::ap::{
     ensure_consumed, read_aligned_octets, read_bit_string_field, read_sequence_preamble,
-    skip_protocol_ie_single_container, skip_sequence_tail,
+    skip_sequence_tail,
 };
 
 use crate::container::{self, IeContext};
@@ -761,10 +761,8 @@ fn push_e_rab_list<'pkt>(
         f.range = out.offset + start..out.offset + start + pos;
     }
     out.buf.end_container(arr);
-    // Advance the reader past the items with the same framing.
-    for _ in 0..count {
-        skip_protocol_ie_single_container(r)?;
-    }
+    // Advance the reader past the decoded items.
+    r.read_octets(pos)?;
     Ok(())
 }
 

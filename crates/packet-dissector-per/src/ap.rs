@@ -105,10 +105,10 @@ pub fn skip_protocol_ie_single_container(r: &mut AperReader<'_>) -> Result<(), P
 /// extension bit was set.
 ///
 /// ITU-T Rec. X.691, Section 19.8–19.9: a normally small length giving
-/// the size of the presence bitmap, the bitmap, then each present
-/// addition as an open type.
+/// the size of the presence bitmap (Section 11.9.3.4), the bitmap, then
+/// each present addition as an open type.
 pub fn skip_sequence_extension_additions(r: &mut AperReader<'_>) -> Result<(), PacketError> {
-    let count = r.read_normally_small()?.saturating_add(1);
+    let count = r.read_normally_small_length()?;
     let mut present = 0u64;
     for _ in 0..count {
         if r.read_bit()? {
