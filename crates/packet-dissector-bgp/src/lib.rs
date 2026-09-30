@@ -22,6 +22,8 @@
 //! - RFC 4659 (BGP-MPLS IP VPN Extension for IPv6 VPN): <https://www.rfc-editor.org/rfc/rfc4659>
 //! - RFC 4684 (Constrained Route Distribution for BGP/MPLS IP VPNs): <https://www.rfc-editor.org/rfc/rfc4684>
 //! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
+//! - RFC 4761 (VPLS Using BGP for Auto-Discovery and Signaling): <https://www.rfc-editor.org/rfc/rfc4761>
+//! - RFC 6074 (Provisioning, Auto-Discovery, and Signaling in L2VPNs): <https://www.rfc-editor.org/rfc/rfc6074>
 //! - RFC 6368 (Internal BGP as PE-CE Protocol / ATTR_SET): <https://www.rfc-editor.org/rfc/rfc6368>
 //! - RFC 6514 (BGP Encodings for Multicast in MPLS/BGP IP VPNs / PMSI Tunnel): <https://www.rfc-editor.org/rfc/rfc6514>
 //! - RFC 6515 (IPv4 and IPv6 Infrastructure Addresses in BGP Updates for Multicast VPN): <https://www.rfc-editor.org/rfc/rfc6515>
@@ -316,6 +318,13 @@
 //! | RFC 6514 §10; RFC 7911 §3 | SAFI 129 RD + prefix NLRI, ADD-PATH, IPv6 withdrawal, overlong prefix kept raw | `parse_bgp_update_multicast_vpn_safi_129` |
 //! | IANA BGP MCAST-VPN Route Types | Route Type names | `mcast_vpn_route_type_name_table` |
 //!
+//! # VPLS NLRI Coverage (RFC 4761 / RFC 6074)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 4761 §3.2.2; RFC 6074 §3.2.2.1 | VPLS NLRI (RD, VE ID, VE Block Offset / Size, Label Base) and BGP-AD NLRI (RD, PE_addr); IPv4 next hop | `parse_bgp_update_mp_reach_vpls` |
+//! | RFC 6074 §7; RFC 7911 §3 | Other lengths kept as `value`; overrun and Lengths shorter than an RD kept raw; withdrawn NLRI; ADD-PATH blocks, including a malformed tail | `parse_bgp_update_vpls_malformed_withdrawn_add_path` |
+//!
 //! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
 //!
 //! | RFC Section | Description | Test |
@@ -471,6 +480,9 @@ const SAFI_MUP: u8 = 85;
 /// AFI for L2VPN (IANA Address Family Numbers; RFC 7432, Section 7 —
 /// <https://www.rfc-editor.org/rfc/rfc7432#section-7>).
 const AFI_L2VPN: u16 = 25;
+/// SAFI for VPLS (RFC 4761, Section 3.2.2 —
+/// <https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2>).
+const SAFI_VPLS: u8 = 65;
 /// SAFI for EVPN (RFC 7432, Section 7 —
 /// <https://www.rfc-editor.org/rfc/rfc7432#section-7>).
 const SAFI_EVPN: u8 = 70;
@@ -5460,6 +5472,10 @@ enum MpNlriEncoding {
     /// SAFI 129 NLRI: an RD and a prefix, without a label (RFC 6514,
     /// Section 10 — <https://www.rfc-editor.org/rfc/rfc6514#section-10>).
     MulticastVpnPrefixes { ipv6: bool },
+    /// VPLS and BGP-AD NLRI (RFC 4761, Section 3.2.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2>; RFC 6074,
+    /// Section 3.2.2.1 — <https://www.rfc-editor.org/rfc/rfc6074#section-3.2.2.1>).
+    Vpls,
 }
 
 /// Shape of a labeled NLRI block.
@@ -7443,6 +7459,153 @@ fn push_mcast_vpn_body<'pkt>(
     }
 }
 
+/// Length field of a VPLS / BGP-AD NLRI: "The Length field is in octets"
+/// (RFC 4761, Section 3.2.2 — <https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2>).
+const VPLS_LENGTH_SIZE: usize = 2;
+/// Length of a VPLS NLRI: "VPLS-BGP [RFC4761] uses a 17-byte NLRI length"
+/// (RFC 6074, Section 7 — <https://www.rfc-editor.org/rfc/rfc6074#section-7>).
+const VPLS_NLRI_LENGTH: u16 = 17;
+/// Length of a BGP-AD NLRI: "The BGP-AD NLRI has an NLRI length of 12
+/// bytes, containing only an 8-byte RD and a 4-byte VSI-ID" (RFC 6074,
+/// Section 7 — <https://www.rfc-editor.org/rfc/rfc6074#section-7>).
+const VPLS_AD_NLRI_LENGTH: u16 = 12;
+
+/// Returns how many leading octets of `data` frame as VPLS / BGP-AD NLRI
+/// of 12 or 17 octets, each preceded by `path_id_len` octets of Path
+/// Identifier.
+fn vpls_block_framed_len(data: &[u8], path_id_len: usize) -> usize {
+    let mut pos = 0;
+    while let Ok(len) = read_be_u16(data, pos + path_id_len) {
+        let end = pos + path_id_len + VPLS_LENGTH_SIZE + usize::from(len);
+        if (len != VPLS_NLRI_LENGTH && len != VPLS_AD_NLRI_LENGTH) || end > data.len() {
+            break;
+        }
+        pos = end;
+    }
+    pos
+}
+
+/// Returns `true` when a VPLS NLRI block carries RFC 7911 ADD-PATH Path
+/// Identifiers: it does not frame fully as 12- / 17-octet NLRI without them
+/// — a Path Identifier usually starts with zero octets, which would read as
+/// a zero Length — and frames further with them.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_vpls(data: &[u8]) -> bool {
+    let plain = vpls_block_framed_len(data, 0);
+    plain != data.len() && vpls_block_framed_len(data, PATH_ID_SIZE) > plain
+}
+
+/// Parses a VPLS NLRI block (AFI 25, SAFI 65) into one object per NLRI and
+/// returns the number of octets consumed.
+///
+/// Both VPLS and BGP-AD NLRI use this AFI / SAFI, and "the NLRI length must
+/// be used as a demultiplexer" (RFC 6074, Section 7 —
+/// <https://www.rfc-editor.org/rfc/rfc6074#section-7>):
+///
+/// - 17 octets: RD, VE ID, VE Block Offset, VE Block Size and Label Base
+///   (RFC 4761, Section 3.2.2 —
+///   <https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2>). RFC 4761 gives
+///   the Label Base only as "3 octets"; like labeled NLRI (RFC 8277,
+///   Section 2.2 — <https://www.rfc-editor.org/rfc/rfc8277#section-2.2>), the
+///   label is taken from its high-order 20 bits.
+/// - 12 octets: RD and PE_addr (RFC 6074, Section 3.2.2.1 —
+///   <https://www.rfc-editor.org/rfc/rfc6074#section-3.2.2.1>).
+///
+/// NLRI of other lengths keep a `value`; the framing stops at a Length too
+/// short for an RD, and the rest stays raw.
+fn parse_vpls_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+) -> usize {
+    let f = &VPLS_NLRI_FIELDS;
+    let id_len = if detect_add_path_vpls(data) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
+    let mut pos = 0;
+    while pos + id_len + VPLS_LENGTH_SIZE <= data.len() {
+        let len_pos = pos + id_len;
+        let len = read_be_u16(data, len_pos).unwrap_or_default();
+        let body_start = len_pos + VPLS_LENGTH_SIZE;
+        let end = body_start + usize::from(len);
+        if usize::from(len) < RD_SIZE || end > data.len() {
+            break;
+        }
+        let abs = base_offset + pos;
+        let obj_idx = buf.begin_container(
+            &VPLS_NLRI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + end,
+        );
+        if id_len != 0 {
+            buf.push_field(
+                &f[FD_VPLS_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+        buf.push_field(
+            &f[FD_VPLS_NLRI_LENGTH],
+            FieldValue::U16(len),
+            base_offset + len_pos..base_offset + body_start,
+        );
+        let o = base_offset + body_start;
+        let body = &data[body_start..end];
+        let push_rd = |buf: &mut DissectBuffer<'pkt>| {
+            buf.push_field(
+                &f[FD_VPLS_RD],
+                FieldValue::Bytes(&body[..RD_SIZE]),
+                o..o + RD_SIZE,
+            );
+        };
+        match len {
+            VPLS_NLRI_LENGTH => {
+                push_rd(buf);
+                for (i, fd) in [
+                    FD_VPLS_VE_ID,
+                    FD_VPLS_VE_BLOCK_OFFSET,
+                    FD_VPLS_VE_BLOCK_SIZE,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let at = RD_SIZE + 2 * i;
+                    buf.push_field(
+                        &f[fd],
+                        FieldValue::U16(read_be_u16(body, at).unwrap_or_default()),
+                        o + at..o + at + 2,
+                    );
+                }
+                let label_at = RD_SIZE + 6;
+                buf.push_field(
+                    &f[FD_VPLS_LABEL_BASE],
+                    FieldValue::U32(read_be_u24(body, label_at).unwrap_or_default() >> 4),
+                    o + label_at..o + body.len(),
+                );
+            }
+            VPLS_AD_NLRI_LENGTH => {
+                push_rd(buf);
+                buf.push_field(
+                    &f[FD_VPLS_PE_ADDRESS],
+                    FieldValue::Ipv4Addr(read_ipv4_addr(body, RD_SIZE).unwrap_or_default()),
+                    o + RD_SIZE..o + body.len(),
+                );
+            }
+            _ => buf.push_field(
+                &f[FD_VPLS_VALUE],
+                FieldValue::Bytes(body),
+                o..o + body.len(),
+            ),
+        }
+        buf.end_container(obj_idx);
+        pos = end;
+    }
+    pos
+}
+
 /// Selects the NLRI encoding for an (AFI, SAFI) pair.
 ///
 /// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
@@ -7465,6 +7628,7 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
         (AFI_IPV4 | AFI_IPV6, SAFI_MPLS_VPN) => Some(MpNlriEncoding::Labeled { ipv6, vpn: true }),
         (_, SAFI_MUP) => Some(MpNlriEncoding::Mup { ipv6 }),
         (AFI_L2VPN, SAFI_EVPN) => Some(MpNlriEncoding::Evpn),
+        (AFI_L2VPN, SAFI_VPLS) => Some(MpNlriEncoding::Vpls),
         (AFI_BGP_LS, SAFI_BGP_LS) => Some(MpNlriEncoding::BgpLs { vpn: false }),
         (AFI_BGP_LS, SAFI_BGP_LS_VPN) => Some(MpNlriEncoding::BgpLs { vpn: true }),
         (AFI_IPV4, SAFI_RT_CONSTRAINT) => Some(MpNlriEncoding::RtConstraint),
@@ -7527,6 +7691,7 @@ fn parse_mp_nlri_block<'pkt>(
             MpNlriEncoding::RtConstraint => parse_rt_constraint_nlri(buf, data, offset),
             MpNlriEncoding::SrPolicy { ipv6 } => parse_sr_policy_nlri(buf, data, offset, ipv6),
             MpNlriEncoding::McastVpn => parse_mcast_vpn_nlri(buf, data, offset),
+            MpNlriEncoding::Vpls => parse_vpls_nlri(buf, data, offset),
             MpNlriEncoding::MulticastVpnPrefixes { ipv6 } => {
                 parse_labeled_nlri(buf, data, offset, &LabeledNlri::unlabeled_vpn(ipv6))
             }
@@ -8017,7 +8182,7 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// Specification entries, SAFI 71 / 72 yield Link-State NLRI entries,
 /// SAFI 132 yields Route Target membership entries, SAFI 73 yields SR
 /// Policy entries, SAFI 5 yields MCAST-VPN entries, SAFI 129 yields `rd` and
-/// `prefix` entries,
+/// `prefix` entries, AFI 25 / SAFI 65 yields VPLS / BGP-AD entries,
 /// SAFI 4 / 128 yield labeled entries (`label_stack` or `compatibility`, `rd`
 /// for SAFI 128, `prefix`), and SAFI 1 / 2 yield plain prefix entries. All
 /// fields are therefore optional.
@@ -8030,9 +8195,10 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// RFC 4684, Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>
 /// RFC 9830, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>
 /// RFC 6514, Sections 4 and 10 — <https://www.rfc-editor.org/rfc/rfc6514#section-4>
+/// RFC 4761, Section 3.2.2 — <https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 49] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 54] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
@@ -8133,6 +8299,15 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 49] = [
     MCAST_VPN_NLRI_FIELDS[FD_MVPN_GROUP_LENGTH],
     MCAST_VPN_NLRI_FIELDS[FD_MVPN_GROUP],
     MCAST_VPN_NLRI_FIELDS[FD_MVPN_ORIGINATING_ROUTER_IP],
+    // VPLS / BGP-AD NLRI fields (RFC 4761, Section 3.2.2 —
+    // https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2; RFC 6074,
+    // Section 3.2.2.1 — https://www.rfc-editor.org/rfc/rfc6074#section-3.2.2.1);
+    // `path_id`, `nlri_length`, `rd` and `value` are listed above.
+    VPLS_NLRI_FIELDS[FD_VPLS_VE_ID],
+    VPLS_NLRI_FIELDS[FD_VPLS_VE_BLOCK_OFFSET],
+    VPLS_NLRI_FIELDS[FD_VPLS_VE_BLOCK_SIZE],
+    VPLS_NLRI_FIELDS[FD_VPLS_LABEL_BASE],
+    VPLS_NLRI_FIELDS[FD_VPLS_PE_ADDRESS],
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
@@ -8448,6 +8623,39 @@ const MCAST_VPN_NLRI_FIELDS: [FieldDescriptor; 12] = [
 static MCAST_VPN_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("mcast_vpn_nlri", "MCAST-VPN NLRI", FieldType::Object)
         .with_children(&MCAST_VPN_NLRI_FIELDS);
+
+/// Field descriptor indices for [`VPLS_NLRI_FIELDS`].
+const FD_VPLS_PATH_ID: usize = 0;
+const FD_VPLS_NLRI_LENGTH: usize = 1;
+const FD_VPLS_RD: usize = 2;
+const FD_VPLS_VE_ID: usize = 3;
+const FD_VPLS_VE_BLOCK_OFFSET: usize = 4;
+const FD_VPLS_VE_BLOCK_SIZE: usize = 5;
+const FD_VPLS_LABEL_BASE: usize = 6;
+const FD_VPLS_PE_ADDRESS: usize = 7;
+const FD_VPLS_VALUE: usize = 8;
+
+/// Child field descriptors of a VPLS / BGP-AD NLRI entry; `nlri_length` is
+/// in octets.
+///
+/// RFC 4761, Section 3.2.2 — <https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2>
+/// RFC 6074, Section 3.2.2.1 — <https://www.rfc-editor.org/rfc/rfc6074#section-3.2.2.1>
+const VPLS_NLRI_FIELDS: [FieldDescriptor; 9] = [
+    PATH_ID_FIELD,
+    FLOWSPEC_NLRI_FIELDS[FD_FS_NLRI_LENGTH],
+    MUP_NLRI_FIELDS[FD_MUP_RD],
+    FieldDescriptor::new("ve_id", "VE ID", FieldType::U16).optional(),
+    FieldDescriptor::new("ve_block_offset", "VE Block Offset", FieldType::U16).optional(),
+    FieldDescriptor::new("ve_block_size", "VE Block Size", FieldType::U16).optional(),
+    FieldDescriptor::new("label_base", "Label Base", FieldType::U32).optional(),
+    FieldDescriptor::new("pe_address", "PE Address", FieldType::Ipv4Addr).optional(),
+    MUP_NLRI_FIELDS[FD_MUP_VALUE],
+];
+
+/// Object descriptor for VPLS / BGP-AD NLRI entries.
+static VPLS_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("vpls_nlri", "VPLS NLRI", FieldType::Object)
+        .with_children(&VPLS_NLRI_FIELDS);
 
 /// Field descriptor indices for [`BGP_LS_DESCRIPTOR_FIELDS`].
 const FD_LSD_SUB_TLVS: usize = 2;
@@ -10136,6 +10344,11 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc4760",
     ),
     SpecReference::new(
+        "RFC 4761",
+        "Virtual Private LAN Service (VPLS) Using BGP for Auto-Discovery and Signaling",
+        "https://www.rfc-editor.org/rfc/rfc4761",
+    ),
+    SpecReference::new(
         "RFC 5065",
         "Autonomous System Confederations for BGP",
         "https://www.rfc-editor.org/rfc/rfc5065",
@@ -10244,6 +10457,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 6368",
         "Internal BGP as the Provider/Customer Edge Protocol for BGP/MPLS IP Virtual Private Networks (VPNs)",
         "https://www.rfc-editor.org/rfc/rfc6368",
+    ),
+    SpecReference::new(
+        "RFC 6074",
+        "Provisioning, Auto-Discovery, and Signaling in Layer 2 Virtual Private Networks (L2VPNs)",
+        "https://www.rfc-editor.org/rfc/rfc6074",
     ),
     SpecReference::new(
         "RFC 6514",
@@ -18597,5 +18815,153 @@ mod tests {
             Some("Source Tree Join route for C-multicast mLDP")
         );
         assert_eq!(mcast_vpn_route_type_name(0), None);
+    }
+
+    const VPLS_RD: [u8; 8] = [0, 0, 0xfd, 0xe8, 0, 0, 0, 10];
+
+    /// Helper: a VPLS NLRI (RFC 4761, Section 3.2.2) with VE ID 1, VE Block
+    /// Offset 1, VE Block Size 8 and Label Base 800000.
+    fn vpls_nlri() -> Vec<u8> {
+        let mut raw = 17u16.to_be_bytes().to_vec();
+        raw.extend_from_slice(&VPLS_RD);
+        raw.extend_from_slice(&[0, 1, 0, 1, 0, 8]);
+        raw.extend_from_slice(&(800_000u32 << 4 | 1).to_be_bytes()[1..]);
+        raw
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_vpls() {
+        // RFC 4761, Section 3.2.2 (https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2):
+        // Length (in octets), RD, VE ID, VE Block Offset, VE Block Size,
+        // Label Base. RFC 6074, Section 3.2.2.1
+        // (https://www.rfc-editor.org/rfc/rfc6074#section-3.2.2.1): the
+        // BGP-AD NLRI is Length, RD and PE_addr.
+        let mut nlri = vpls_nlri();
+        nlri.extend_from_slice(&12u16.to_be_bytes());
+        nlri.extend_from_slice(&VPLS_RD);
+        nlri.extend_from_slice(&[192, 0, 2, 1]);
+        let data = build_single_attr_update(14, &build_mp_reach(25, 65, &[192, 0, 2, 1], &nlri));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        assert!(nested_field_by_name_opt(&buf, &mp, "nlri_raw").is_none());
+        let entries = array_objs(&buf, &mp, "nlri");
+        assert_eq!(entries.len(), 2);
+        let e = &entries[0];
+        assert_eq!(
+            *nested_field_value(&buf, e, "nlri_length"),
+            FieldValue::U16(17)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e, "rd"),
+            FieldValue::Bytes(&VPLS_RD)
+        );
+        assert_eq!(*nested_field_value(&buf, e, "ve_id"), FieldValue::U16(1));
+        assert_eq!(
+            *nested_field_value(&buf, e, "ve_block_offset"),
+            FieldValue::U16(1)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e, "ve_block_size"),
+            FieldValue::U16(8)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e, "label_base"),
+            FieldValue::U32(800_000)
+        );
+        let e = &entries[1];
+        assert_eq!(
+            *nested_field_value(&buf, e, "nlri_length"),
+            FieldValue::U16(12)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e, "rd"),
+            FieldValue::Bytes(&VPLS_RD)
+        );
+        assert_eq!(
+            *nested_field_value(&buf, e, "pe_address"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        assert!(nested_field_by_name_opt(&buf, e, "ve_id").is_none());
+    }
+
+    #[test]
+    fn parse_bgp_update_vpls_malformed_withdrawn_add_path() {
+        // RFC 6074, Section 7 (https://www.rfc-editor.org/rfc/rfc6074#section-7):
+        // "the NLRI length must be used as a demultiplexer" between the
+        // 12-octet BGP-AD and 17-octet VPLS NLRI; other lengths keep a
+        // `value`, and an NLRI that overruns the block stays raw.
+        let mut nlri = vpls_nlri();
+        nlri.extend_from_slice(&[0, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        nlri.extend_from_slice(&[0, 9, 1]);
+        with_mp_reach_nlri(25, 65, &nlri, |buf, mp, entries| {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "value"),
+                FieldValue::Bytes(&[1, 2, 3, 4, 5, 6, 7, 8, 9])
+            );
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&[0, 9, 1])
+            );
+        });
+        // A Length too short for an RD ends the decoded entries.
+        let mut short = vpls_nlri();
+        short.extend_from_slice(&[0, 0, 0, 1, 7]);
+        with_mp_reach_nlri(25, 65, &short, |buf, mp, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&[0, 0, 0, 1, 7])
+            );
+        });
+
+        // Withdrawn VPLS NLRI.
+        let data = build_single_attr_update(15, &build_mp_unreach(25, 65, &vpls_nlri()));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let withdrawn = array_objs(&buf, &mp, "withdrawn_routes");
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &withdrawn[0], "ve_block_size"),
+            FieldValue::U16(8)
+        );
+
+        // RFC 7911, Section 3 (https://www.rfc-editor.org/rfc/rfc7911#section-3).
+        let mut add_path = 2u32.to_be_bytes().to_vec();
+        add_path.extend(vpls_nlri());
+        assert!(detect_add_path_vpls(&add_path));
+        assert!(!detect_add_path_vpls(&vpls_nlri()));
+        // An ADD-PATH block with a malformed tail is still ADD-PATH.
+        let mut tail = add_path.clone();
+        tail.push(0);
+        assert!(detect_add_path_vpls(&tail));
+        with_mp_reach_nlri(25, 65, &tail, |buf, mp, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(2)
+            );
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&[0])
+            );
+        });
+        with_mp_reach_nlri(25, 65, &add_path, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(2)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "ve_id"),
+                FieldValue::U16(1)
+            );
+        });
     }
 }

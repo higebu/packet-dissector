@@ -407,3 +407,36 @@ fn zero_alloc_dissect_bgp_update_mcast_vpn() {
         "BGP MCAST-VPN update dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_update_vpls() {
+    // MP_REACH_NLRI (AFI 25, SAFI 65) with a VPLS NLRI (RFC 4761, Section
+    // 3.2.2 — https://www.rfc-editor.org/rfc/rfc4761#section-3.2.2).
+    let mut mp_reach = vec![0x00, 25, 65, 4, 192, 0, 2, 1, 0];
+    mp_reach.extend_from_slice(&17u16.to_be_bytes()); // Length
+    mp_reach.extend_from_slice(&[0, 0, 0xfd, 0xe8, 0, 0, 0, 10]); // RD
+    mp_reach.extend_from_slice(&[0, 1, 0, 1, 0, 8, 0xc3, 0x50, 0x01]);
+    let mut attrs = vec![0x90, 14];
+    attrs.extend_from_slice(&(mp_reach.len() as u16).to_be_bytes());
+    attrs.extend_from_slice(&mp_reach);
+
+    let mut raw = vec![0xFF; 16]; // Marker
+    let total_len = 19 + 2 + 2 + attrs.len();
+    raw.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+    raw.push(2); // Type = UPDATE
+    raw.extend_from_slice(&0u16.to_be_bytes()); // Withdrawn Routes Length
+    raw.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    raw.extend_from_slice(&attrs);
+
+    let mut buf = DissectBuffer::new();
+    BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP VPLS update dissect allocated {allocs} times"
+    );
+}
