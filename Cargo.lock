@@ -634,6 +634,7 @@ dependencies = [
  "packet-dissector-ieee80211",
  "packet-dissector-igmp",
  "packet-dissector-ike",
+ "packet-dissector-ipfix",
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
@@ -645,6 +646,7 @@ dependencies = [
  "packet-dissector-linux-sll2",
  "packet-dissector-lldp",
  "packet-dissector-m3ua",
+ "packet-dissector-map",
  "packet-dissector-mdns",
  "packet-dissector-mpls",
  "packet-dissector-nas-eps",
@@ -655,6 +657,7 @@ dependencies = [
  "packet-dissector-null",
  "packet-dissector-ospf",
  "packet-dissector-pfcp",
+ "packet-dissector-pim",
  "packet-dissector-ppp",
  "packet-dissector-pppoe",
  "packet-dissector-quic",
@@ -671,6 +674,7 @@ dependencies = [
  "packet-dissector-srv6",
  "packet-dissector-stp",
  "packet-dissector-stun",
+ "packet-dissector-tcap",
  "packet-dissector-tcp",
  "packet-dissector-test-alloc",
  "packet-dissector-tls",
@@ -962,6 +966,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-ipfix"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-ipv4"
 version = "0.5.0"
 dependencies = [
@@ -1059,6 +1072,16 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-map"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-tcap",
  "packet-dissector-test-alloc",
 ]
 
@@ -1163,22 +1186,26 @@ dependencies = [
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
  "packet-dissector-ieee80211",
+ "packet-dissector-ipfix",
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
  "packet-dissector-ldp",
  "packet-dissector-m3ua",
+ "packet-dissector-map",
  "packet-dissector-mdns",
  "packet-dissector-nas-eps",
  "packet-dissector-nsh",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
+ "packet-dissector-pim",
  "packet-dissector-pppoe",
  "packet-dissector-radiotap",
  "packet-dissector-sccp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
+ "packet-dissector-tcap",
  "packet-dissector-tcp",
  "packet-dissector-xnap",
  "proptest",
@@ -1193,6 +1220,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-pfcp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-pim"
 version = "0.5.0"
 dependencies = [
  "criterion",
@@ -1341,6 +1377,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-stun"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-tcap"
 version = "0.5.0"
 dependencies = [
  "criterion",

@@ -63,8 +63,10 @@ default = [
   "nsh",
   "ntp",
   "ospf",
+  "pim",
   "vrrp",
   "bfd",
+  "ipfix",
   "isis",
   "bgp",
   "bmp",
@@ -85,6 +87,8 @@ default = [
   "ip-reassembly",
   "m3ua",
   "sccp",
+  "tcap",
+  "map",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
 # SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
@@ -155,8 +159,10 @@ ldp = ["dep:packet-dissector-ldp"]
 nsh = ["dep:packet-dissector-nsh"]
 ntp = ["dep:packet-dissector-ntp"]
 ospf = ["dep:packet-dissector-ospf"]
+pim = ["dep:packet-dissector-pim"]
 vrrp = ["dep:packet-dissector-vrrp"]
 bfd = ["dep:packet-dissector-bfd"]
+ipfix = ["dep:packet-dissector-ipfix"]
 isis = ["dep:packet-dissector-isis"]
 bgp = ["dep:packet-dissector-bgp"]
 # BMP carries BGP messages, which are dissected as BGP layers.
@@ -181,6 +187,9 @@ stun = ["dep:packet-dissector-stun"]
 ip-reassembly = ["dep:packet-dissector-reassembly"]
 m3ua = ["dep:packet-dissector-m3ua"]
 sccp = ["dep:packet-dissector-sccp"]
+tcap = ["dep:packet-dissector-tcap"]
+# MAP emits the TCAP layer itself (it decodes TCAP components).
+map = ["dep:packet-dissector-map", "tcap"]
 
 ## Convenience feature groups
 layer2 = [
@@ -218,6 +227,7 @@ application = [
   "tls",
   "quic",
   "stun",
+  "ipfix",
 ]
 tunneling = [
   "gre",
@@ -229,7 +239,7 @@ tunneling = [
   "mpls",
   "nsh",
 ]
-routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "ldp"]
+routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "pim", "ldp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = [
   "gtpv1u",
@@ -244,7 +254,7 @@ ipsec = ["ah", "esp", "ike"]
   "e1ap",
   "sgsap",
 ]
-sigtran = ["m3ua", "sccp"]
+sigtran = ["m3ua", "sccp", "tcap", "map"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -300,8 +310,10 @@ packet-dissector-ldp = { workspace = true, optional = true }
 packet-dissector-nsh = { workspace = true, optional = true }
 packet-dissector-ntp = { workspace = true, optional = true }
 packet-dissector-ospf = { workspace = true, optional = true }
+packet-dissector-pim = { workspace = true, optional = true }
 packet-dissector-vrrp = { workspace = true, optional = true }
 packet-dissector-bfd = { workspace = true, optional = true }
+packet-dissector-ipfix = { workspace = true, optional = true }
 packet-dissector-isis = { workspace = true, optional = true }
 packet-dissector-bgp = { workspace = true, optional = true }
 packet-dissector-bmp = { workspace = true, optional = true }
@@ -319,6 +331,8 @@ packet-dissector-quic = { workspace = true, optional = true }
 packet-dissector-stun = { workspace = true, optional = true }
 packet-dissector-m3ua = { workspace = true, optional = true }
 packet-dissector-sccp = { workspace = true, optional = true }
+packet-dissector-tcap = { workspace = true, optional = true }
+packet-dissector-map = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

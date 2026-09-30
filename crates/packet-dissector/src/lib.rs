@@ -211,17 +211,29 @@ pub mod dissectors {
     #[cfg(feature = "ospf")]
     pub use packet_dissector_ospf as ospf;
 
+    #[cfg(feature = "pim")]
+    pub use packet_dissector_pim as pim;
+
     #[cfg(feature = "vrrp")]
     pub use packet_dissector_vrrp as vrrp;
 
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
 
+    #[cfg(feature = "ipfix")]
+    pub use packet_dissector_ipfix as ipfix;
+
     #[cfg(feature = "m3ua")]
     pub use packet_dissector_m3ua as m3ua;
 
     #[cfg(feature = "sccp")]
     pub use packet_dissector_sccp as sccp;
+
+    #[cfg(feature = "tcap")]
+    pub use packet_dissector_tcap as tcap;
+
+    #[cfg(feature = "map")]
+    pub use packet_dissector_map as map;
 
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
