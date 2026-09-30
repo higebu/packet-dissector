@@ -1000,11 +1000,12 @@ static NOTIFICATION: MessageIes = MessageIes {
 ///
 /// DETACH REQUEST (0x45) has two layouts with the same message type
 /// (Sections 8.2.11.1 and 8.2.11.2) and the direction is not carried in the
-/// message. The UE originating layout ends with a mandatory EPS mobile
-/// identity whose length octet, at octet 4 of the message, covers exactly
-/// the rest of the message; the UE terminated layout has only optional IEs
-/// after octet 3, whose first octet is an IEI. The layout is chosen by that
-/// test.
+/// message. In the UE originating layout octet 4 is the length of the
+/// mandatory EPS mobile identity, whose contents are 4 to 11 octets
+/// (Section 9.9.3.12: IMSI or IMEI digits, or an 11-octet GUTI). In the UE
+/// terminated layout octet 4, if present, is the IEI of an optional IE, and
+/// every IEI in that table (0x1C to 0x53) lies outside 4 to 11. The layout
+/// is chosen by that octet.
 pub(crate) fn emm_message_ies(message_type: u8, body: &[u8]) -> Option<&'static MessageIes> {
     Some(match message_type {
         0x41 => &ATTACH_REQUEST,
@@ -1012,9 +1013,7 @@ pub(crate) fn emm_message_ies(message_type: u8, body: &[u8]) -> Option<&'static 
         0x43 => &ATTACH_COMPLETE,
         0x44 => &ATTACH_REJECT,
         0x45 => match body {
-            [_, len, rest @ ..] if usize::from(*len) == rest.len() => {
-                &DETACH_REQUEST_UE_ORIGINATING
-            }
+            [_, 4..=11, ..] => &DETACH_REQUEST_UE_ORIGINATING,
             _ => &DETACH_REQUEST_UE_TERMINATED,
         },
         0x46 => &DETACH_ACCEPT,

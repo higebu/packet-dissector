@@ -146,20 +146,6 @@ pub(crate) struct OptionalIe {
 
 // ── Name tables ────────────────────────────────────────────────────────
 
-/// EMM cause value name.
-///
-/// 3GPP TS 24.301, Section 9.9.3.9, Table 9.9.3.9.1.
-pub(crate) fn emm_cause_name(cause: u8) -> Option<&'static str> {
-    crate::names::emm_cause_name(cause)
-}
-
-/// ESM cause value name.
-///
-/// 3GPP TS 24.301, Section 9.9.4.4, Table 9.9.4.4.1.
-pub(crate) fn esm_cause_name(cause: u8) -> Option<&'static str> {
-    crate::names::esm_cause_name(cause)
-}
-
 /// Type of identity of an EPS mobile identity.
 ///
 /// 3GPP TS 24.301, Section 9.9.3.12, Table 9.9.3.12.1.
@@ -531,8 +517,18 @@ plain!(
 );
 
 // Causes.
-named_u8!(FD_EMM_CAUSE, "cause", "EMM Cause", emm_cause_name);
-named_u8!(FD_ESM_CAUSE, "cause", "ESM Cause", esm_cause_name);
+named_u8!(
+    FD_EMM_CAUSE,
+    "cause",
+    "EMM Cause",
+    crate::names::emm_cause_name
+);
+named_u8!(
+    FD_ESM_CAUSE,
+    "cause",
+    "ESM Cause",
+    crate::names::esm_cause_name
+);
 
 // Tracking area identity list (9.9.3.33).
 static TAI_CHILDREN: &[FieldDescriptor] = &[
@@ -588,6 +584,7 @@ plain!(FD_EIA, "eia", "EPS Integrity Algorithms", U8);
 plain!(FD_UEA, "uea", "UMTS Encryption Algorithms", U8);
 plain!(FD_UIA, "uia", "UMTS Integrity Algorithms", U8);
 plain!(FD_GEA, "gea", "GPRS Encryption Algorithms", U8);
+plain!(FD_UCS2, "ucs2", "UCS2", U8);
 plain!(
     FD_ADDITIONAL_OCTETS,
     "additional_octets",
@@ -667,6 +664,7 @@ pub(crate) static IE_CHILDREN: &[FieldDescriptor] = &[
     FD_UEA,
     FD_UIA,
     FD_GEA,
+    FD_UCS2,
     FD_ADDITIONAL_OCTETS,
     FD_ESM_MESSAGE,
     FD_APN,
@@ -1360,7 +1358,8 @@ fn push_nas_security_algorithms(buf: &mut DissectBuffer<'_>, data: &[u8], offset
 /// encryption algorithms (EEA0 in bit 8 ... EEA7 in bit 1), octet 4 the EPS
 /// integrity algorithms, and the optional octets 5 and 6 the UMTS
 /// encryption and integrity algorithms (UIA1 to UIA7 in bits 7 to 1 of
-/// octet 6). Octet 7 of the UE security capability carries the GPRS
+/// octet 6; bit 8 is UCS2 in the UE network capability and spare in the UE
+/// security capability). Octet 7 of the UE security capability carries the GPRS
 /// encryption algorithms (bits 7 to 1); the remaining octets of the UE
 /// network capability are feature flags, kept as `additional_octets`.
 fn push_security_capability<'pkt>(
@@ -1385,6 +1384,14 @@ fn push_security_capability<'pkt>(
             desc,
             FieldValue::U8(data[i] & mask),
             offset + i..offset + i + 1,
+        );
+    }
+    // 9.9.3.34 — bit 8 of octet 6 of the UE network capability is UCS2.
+    if let (false, Some(&octet6)) = (ue_security_capability, data.get(3)) {
+        buf.push_field(
+            &FD_UCS2,
+            FieldValue::U8(octet6 >> 7),
+            offset + 3..offset + 4,
         );
     }
     if data.len() > known {
@@ -1516,8 +1523,6 @@ mod tests {
         assert_eq!(count(ciphering_algorithm_name), 8);
         assert_eq!(count(integrity_algorithm_name), 8);
         assert_eq!(count(gprs_timer_unit_name), 4);
-        assert_eq!(emm_cause_name(3), Some("Illegal UE"));
-        assert_eq!(esm_cause_name(8), Some("Operator Determined Barring"));
     }
 
     #[test]

@@ -10,6 +10,8 @@
 //! | 4.4.5, 9.3.1  | Partially ciphered: container not decoded    | partially_ciphered_container_raw       |
 //! | 9.1, 9.3.1    | EMM TRANSPORT: data container ciphered       | emm_transport_ciphered                 |
 //! | 8.2.25        | SERVICE REQUEST header (1100..1111)          | service_request                        |
+//! | 8.2.25        | Octets after the short MAC kept raw          | service_request_trailing_octets        |
+//! | 9.3.1 NOTE 4  | Partially ciphered only for CPSR             | partially_ciphered_other_message_raw   |
 //! | 9.3.1         | Reserved security header type                | reserved_security_header_type          |
 //! | 9.1           | Inner message must be plain                  | nested_security_protected_not_decoded  |
 //! | 9.1           | Security protected without payload           | security_protected_without_payload     |
@@ -26,7 +28,7 @@
 //! | 9.9.2.2       | Location area identification                 | tai_and_tai_list                       |
 //! | 9.9.3.23      | NAS security algorithms                      | security_mode_command                  |
 //! | 9.9.3.36      | UE security capability                       | security_mode_command                  |
-//! | 9.9.3.34      | UE network capability                        | attach_request_with_esm_container      |
+//! | 9.9.3.34      | UE network capability (incl. UCS2)           | attach_request_with_esm_container, security_mode_command |
 //! | 9.9.4.9       | PDN address (IPv4, IPv6, IPv4v6, non IP)     | pdn_address_variants                   |
 //! | 9.9.4.3       | EPS QoS                                      | activate_default_bearer_request        |
 //! | 9.9.3.16      | GPRS timer                                   | attach_accept                          |
@@ -388,6 +390,21 @@ fn partially_ciphered_container_raw() {
 }
 
 #[test]
+fn partially_ciphered_other_message_raw() {
+    // TS 24.301, Table 9.3.1 NOTE 4 — "This codepoint may be used only for a
+    // CONTROL PLANE SERVICE REQUEST message." Anything else is kept raw.
+    let mut data = vec![0x57, 0, 0, 0, 0, 0x01];
+    data.extend_from_slice(&attach_request());
+    let buf = dissect(&data);
+    assert!(top(&buf, "plain_nas_message").is_none());
+    assert_eq!(
+        top(&buf, "raw_nas_message"),
+        Some(&FieldValue::Bytes(&data[6..]))
+    );
+    assert!(ies(&buf).is_empty());
+}
+
+#[test]
 fn emm_transport_ciphered() {
     let data = [0xB7, 1, 2, 3, 4, 9, 0xDE, 0xAD];
     let buf = dissect(&data);
@@ -410,11 +427,22 @@ fn service_request() {
         assert_eq!(top(&buf, "sequence_number"), Some(&FieldValue::U8(5)));
         assert_eq!(top(&buf, "short_mac"), Some(&FieldValue::U16(0x1234)));
         assert!(top(&buf, "message_type").is_none());
+        assert!(top(&buf, "undecoded_octets").is_none());
         assert_eq!(
             buf.resolve_display_name(&buf.layers()[0], "security_header_type_name"),
             Some("Security header for the SERVICE REQUEST message")
         );
     }
+}
+
+#[test]
+fn service_request_trailing_octets() {
+    let data = [0xC7, 0x05, 0x12, 0x34, 0xAA, 0xBB];
+    let buf = dissect(&data);
+    assert_eq!(
+        top(&buf, "undecoded_octets"),
+        Some(&FieldValue::Bytes(&[0xAA, 0xBB]))
+    );
 }
 
 #[test]
@@ -434,12 +462,10 @@ fn nested_security_protected_not_decoded() {
     let mut data = vec![0x17, 0, 0, 0, 0, 0];
     data.extend_from_slice(&[0x17, 0, 0, 0, 0, 0, 0x07, 0x43]);
     let buf = dissect(&data);
-    let Some(FieldValue::Object(inner)) = top(&buf, "plain_nas_message") else {
-        panic!("no plain NAS message")
-    };
+    assert!(top(&buf, "plain_nas_message").is_none());
     assert_eq!(
-        get(buf.nested_fields(inner), "raw_nas_message"),
-        &FieldValue::Bytes(&data[6..])
+        top(&buf, "raw_nas_message"),
+        Some(&FieldValue::Bytes(&data[6..]))
     );
 }
 
@@ -474,6 +500,26 @@ fn detach_request_both_directions() {
         &FieldValue::U8(2)
     );
     assert_eq!(get(ie(&buf, "EMM cause"), "cause"), &FieldValue::U8(7));
+
+    // UE terminated with a Forbidden TAI list whose IEI (0x1D) equals the
+    // remaining length: still the UE terminated layout.
+    let mut term = vec![0x07, 0x45, 0x02, 0x1D, 0x1B];
+    term.extend_from_slice(&[0x0C, 0x00, 0xF1, 0x10]);
+    term.extend(std::iter::repeat_n(0u8, 0x1B - 4));
+    let buf = dissect(&term);
+    assert!(
+        ies(&buf)
+            .iter()
+            .any(|(n, _)| n.starts_with("Forbidden TAI"))
+    );
+
+    // UE originating with a truncated EPS mobile identity: reported as a
+    // missing mandatory IE.
+    let buf = dissect(&[0x07, 0x45, 0x19, 0x0B, 0xF6, 0x00]);
+    assert_eq!(
+        top(&buf, "missing_mandatory_ie"),
+        Some(&FieldValue::Str("EPS mobile identity"))
+    );
 }
 
 #[test]
@@ -579,7 +625,8 @@ fn truncated_optional_ie() {
 #[test]
 fn eps_mobile_identity() {
     let with_id = |id: &[u8]| {
-        let mut d = vec![0x07, 0x45, 0x01, id.len() as u8];
+        // Attach request: the EPS mobile identity follows the half octets.
+        let mut d = vec![0x07, 0x41, 0x71, id.len() as u8];
         d.extend_from_slice(id);
         d
     };
@@ -735,6 +782,17 @@ fn security_mode_command() {
         get(uenc, "additional_octets"),
         &FieldValue::Bytes(&[0x11, 0x22])
     );
+    assert_eq!(get(uenc, "ucs2"), &FieldValue::U8(0));
+
+    // UCS2 (bit 8 of octet 6) is reported separately from UIA1 to UIA7.
+    let mut tau = vec![
+        0x07, 0x48, 0x00, 0x0B, 0xF6, 0, 0xF1, 0x10, 0, 1, 2, 0, 0, 0, 1,
+    ];
+    tau.extend_from_slice(&[0x58, 0x04, 0xE0, 0xE0, 0xC0, 0xC0]);
+    let buf = dissect(&tau);
+    let uenc = ie(&buf, "UE network capability");
+    assert_eq!(get(uenc, "ucs2"), &FieldValue::U8(1));
+    assert_eq!(get(uenc, "uia"), &FieldValue::U8(0x40));
 }
 
 #[test]

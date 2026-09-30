@@ -69,6 +69,11 @@ const SECURITY_HEADER_SIZE: usize = 6;
 /// 3GPP TS 24.301, Section 8.2.25, Table 8.2.25.1.
 const SERVICE_REQUEST_SIZE: usize = 4;
 
+/// Message type of CONTROL PLANE SERVICE REQUEST.
+///
+/// 3GPP TS 24.301, Section 9.8, Table 9.8.1.
+const MT_CONTROL_PLANE_SERVICE_REQUEST: u8 = 0x4d;
+
 // Security header types — 3GPP TS 24.301, Section 9.3.1, Table 9.3.1.
 
 /// Plain NAS message, not security protected.
@@ -264,14 +269,7 @@ pub(crate) fn push_esm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], of
 /// 3GPP TS 24.301, Sections 9.1 and 9.3.1.
 fn push_emm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
     let sht = data[0] >> 4;
-    let o1 = offset..offset + 1;
-    push(
-        buf,
-        FD_SECURITY_HEADER_TYPE,
-        FieldValue::U8(sht),
-        o1.clone(),
-    );
-    push(buf, FD_PROTOCOL_DISCRIMINATOR, FieldValue::U8(PD_EMM), o1);
+    push_emm_header(buf, sht, offset);
     match sht {
         SHT_PLAIN => push_emm_plain_body(buf, data, offset, true),
         SHT_INTEGRITY_PROTECTED..=SHT_PARTIALLY_CIPHERED | SHT_EMM_TRANSPORT => {
@@ -292,6 +290,19 @@ fn push_emm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize
             }
         }
     }
+}
+
+/// Push octet 1 of an EMM message: security header type and protocol
+/// discriminator (TS 24.301, Section 9.1).
+fn push_emm_header(buf: &mut DissectBuffer<'_>, sht: u8, offset: usize) {
+    let o1 = offset..offset + 1;
+    push(
+        buf,
+        FD_SECURITY_HEADER_TYPE,
+        FieldValue::U8(sht),
+        o1.clone(),
+    );
+    push(buf, FD_PROTOCOL_DISCRIMINATOR, FieldValue::U8(PD_EMM), o1);
 }
 
 /// Push the message type and IEs of a plain EMM message (header already
@@ -366,7 +377,22 @@ fn push_security_protected<'pkt>(
     let payload_range = payload_offset..offset + data.len();
     let allow_esm = match sht {
         SHT_INTEGRITY_PROTECTED | SHT_INTEGRITY_PROTECTED_NEW_CONTEXT => true,
-        SHT_PARTIALLY_CIPHERED => false,
+        // Table 9.3.1 NOTE 4 — "This codepoint may be used only for a
+        // CONTROL PLANE SERVICE REQUEST message."
+        SHT_PARTIALLY_CIPHERED
+            if payload.get(..2) == Some(&[PD_EMM, MT_CONTROL_PLANE_SERVICE_REQUEST]) =>
+        {
+            false
+        }
+        SHT_PARTIALLY_CIPHERED => {
+            push(
+                buf,
+                FD_RAW_NAS_MESSAGE,
+                FieldValue::Bytes(payload),
+                payload_range,
+            );
+            return;
+        }
         _ => {
             // Types 2 ("Integrity protected and ciphered") and 4 ("Integrity
             // protected and ciphered with new EPS security context"), and the
@@ -380,56 +406,37 @@ fn push_security_protected<'pkt>(
             return;
         }
     };
-    let obj = buf.begin_container(
-        &FIELD_DESCRIPTORS[FD_PLAIN_NAS_MESSAGE],
-        FieldValue::Object(0..0),
-        payload_range.clone(),
-    );
-    if !push_plain_nas_message(buf, payload, payload_offset, allow_esm) {
+    if !is_plain_nas_message(payload) {
         push(
             buf,
             FD_RAW_NAS_MESSAGE,
             FieldValue::Bytes(payload),
             payload_range,
         );
+        return;
+    }
+    let obj = buf.begin_container(
+        &FIELD_DESCRIPTORS[FD_PLAIN_NAS_MESSAGE],
+        FieldValue::Object(0..0),
+        payload_range,
+    );
+    if payload[0] & 0x0f == PD_ESM {
+        push_esm(buf, payload, payload_offset);
+    } else {
+        push_emm_header(buf, SHT_PLAIN, payload_offset);
+        push_emm_plain_body(buf, payload, payload_offset, allow_esm);
     }
     buf.end_container(obj);
 }
 
-/// Push the plain NAS message carried in octet 7 onwards of a security
-/// protected NAS message.
+/// Returns `true` if `data` is a plain NAS message: an ESM message or an
+/// EMM message with security header type 0.
 ///
-/// Returns `false` when `data` is not a plain NAS message, including an
-/// EMM message that is itself security protected. Such a message is never
-/// decoded, which also bounds the nesting depth.
-///
-/// 3GPP TS 24.301, Section 9.1 — a security protected NAS message ends
-/// with a "plain NAS message, as defined in item 1".
-fn push_plain_nas_message<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    data: &'pkt [u8],
-    offset: usize,
-    allow_esm: bool,
-) -> bool {
-    if is_esm_message(data) {
-        push_esm(buf, data, offset);
-        return true;
-    }
-    match data {
-        [first, _, ..] if *first == (SHT_PLAIN << 4) | PD_EMM => {
-            let o1 = offset..offset + 1;
-            push(
-                buf,
-                FD_SECURITY_HEADER_TYPE,
-                FieldValue::U8(SHT_PLAIN),
-                o1.clone(),
-            );
-            push(buf, FD_PROTOCOL_DISCRIMINATOR, FieldValue::U8(PD_EMM), o1);
-            push_emm_plain_body(buf, data, offset, allow_esm);
-            true
-        }
-        _ => false,
-    }
+/// 3GPP TS 24.301, Section 9.1 — a security protected NAS message ends with
+/// a "plain NAS message, as defined in item 1". A security protected message
+/// nested in another is never decoded, which also bounds the nesting depth.
+fn is_plain_nas_message(data: &[u8]) -> bool {
+    is_esm_message(data) || (data.len() >= EMM_HEADER_SIZE && data[0] == PD_EMM)
 }
 
 /// Push the SERVICE REQUEST message after octet 1.
@@ -437,7 +444,7 @@ fn push_plain_nas_message<'pkt>(
 /// 3GPP TS 24.301, Section 8.2.25 and Section 9.9.3.19: octet 2 is the KSI
 /// (bits 6 to 8) and the sequence number (bits 1 to 5); octets 3 and 4 are
 /// the short MAC (Section 9.9.3.28).
-fn push_service_request(buf: &mut DissectBuffer<'_>, data: &[u8], offset: usize) {
+fn push_service_request<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
     let o2 = offset + 1..offset + 2;
     push(buf, FD_KSI, FieldValue::U8(data[1] >> 5), o2.clone());
     push(buf, FD_SEQUENCE_NUMBER, FieldValue::U8(data[1] & 0x1f), o2);
@@ -446,6 +453,13 @@ fn push_service_request(buf: &mut DissectBuffer<'_>, data: &[u8], offset: usize)
         FD_SHORT_MAC,
         FieldValue::U16(u16::from_be_bytes([data[2], data[3]])),
         offset + 2..offset + 4,
+    );
+    // The message is exactly 4 octets; anything after the short MAC has no
+    // defined meaning.
+    push_undecoded(
+        buf,
+        &data[SERVICE_REQUEST_SIZE..],
+        offset + SERVICE_REQUEST_SIZE,
     );
 }
 
