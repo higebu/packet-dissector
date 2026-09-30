@@ -13,6 +13,9 @@
 //! | Ethernet → ARP                           | integration_ethernet_arp                      |
 //! | Ethernet → LLDP                          | integration_ethernet_lldp                     |
 //! | Ethernet → LLDP (IEEE 802.1 Port VLAN ID TLV)   | integration_ethernet_lldp_org_port_vlan_id    |
+//! | Ethernet → EAPOL → EAP (Identity, padded frame) | integration_ethernet_eapol_eap_identity      |
+//! | Ethernet → EAPOL-Start / EAPOL-Key             | integration_ethernet_eapol_start_and_key      |
+//! | PPP (HDLC) → EAP (inline, 0xC227)               | integration_ppp_eap_inline                    |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -32,6 +35,7 @@
 //! | Ethernet → IPv4 → SCTP(unknown PPID and ports) → no upper layer | integration_ethernet_ipv4_sctp_unknown_ppid_and_port |
 //! | Ethernet → IPv4 → SCTP(unknown PPID, then PPID 46) summary names Diameter | integration_ethernet_ipv4_sctp_summary_uses_first_resolvable_chunk |
 //! | Ethernet → IPv4 → SCTP(9487→40001, PPID 60) → NGAP | integration_ethernet_ipv4_sctp_ppid_ngap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 29118, PPID 0) → SGsAP | integration_ethernet_ipv4_sctp_sgsap_paging_request |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
 //! | 802.1ad QinQ → IPv4 → UDP                | integration_qinq_ipv4_udp                     |
@@ -181,6 +185,9 @@
 //! | Ethernet → IPv4 (snaplen-truncated) → probe                  | integration_ethernet_ipv4_snaplen_payload_ends_at_capture |
 //! | Ethernet → IPv4 → TCP (snaplen) then next segment → HTTP     | integration_ethernet_ipv4_tcp_snaplen_segment_does_not_stall_reassembly |
 //! | Ethernet → IPv6 (Payload Length 0, no HBH) → TCP              | integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded |
+//! | SLL (0x8100) → VLAN → IPv4 → UDP                              | integration_sll_vlan_ipv4_udp                        |
+//! | SLL2 (0x88A8) → VLAN → VLAN → IPv6 → TCP                      | integration_sll2_qinq_ipv6_tcp                       |
+//! | Ethernet → IPv4 → GRE (0x8100) → VLAN → IPv4 → UDP            | integration_ethernet_ipv4_gre_vlan_ipv4              |
 //! | Ethernet → IPv4 → TCP(853, DoT) → TLS                         | integration_ethernet_ipv4_tcp_dot_tls                |
 //! | Ethernet → IPv4 → SCTP(5060, PPID 0) → SIP                    | integration_ethernet_ipv4_sctp_sip_options           |
 //! | Ethernet → IPv4 → UDP(3799) → RADIUS CoA-Request              | integration_ethernet_ipv4_udp_radius_coa_request     |
@@ -4965,6 +4972,109 @@ fn integration_ethernet_lldp() {
 }
 
 // ---------------------------------------------------------------------------
+// EAPOL (IEEE 802.1X-2020, 11.3) and EAP (RFC 3748)
+// https://www.rfc-editor.org/rfc/rfc3748
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_ethernet_eapol_eap_identity() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    // PAE group address 01-80-C2-00-00-03 (IEEE 802.1X-2020, 11.1.1).
+    push_ethernet(
+        &mut pkt,
+        [0x01, 0x80, 0xC2, 0, 0, 0x03],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    // EAPOL v2, EAPOL-EAP, body 10: EAP Response/Identity "alice".
+    pkt.extend_from_slice(&[0x02, 0x00, 0x00, 0x0A]);
+    pkt.extend_from_slice(&[0x02, 0x01, 0x00, 0x0A, 0x01]);
+    pkt.extend_from_slice(b"alice");
+    pkt.resize(60, 0); // Ethernet padding
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "EAPOL", "EAP"]);
+    assert_layers_contiguous(&buf);
+    let eap = buf.layer_by_name("EAP").unwrap();
+    assert_eq!(eap.range, 18..28);
+    assert_eq!(buf.resolve_display_name(eap, "code_name"), Some("Response"));
+    assert_eq!(buf.resolve_display_name(eap, "type_name"), Some("Identity"));
+    assert_eq!(
+        buf.field_by_name(eap, "identity").unwrap().value,
+        FieldValue::Bytes(b"alice")
+    );
+}
+
+#[test]
+fn integration_ethernet_eapol_start_and_key() {
+    let registry = DissectorRegistry::default();
+
+    let mut start = Vec::new();
+    push_ethernet(
+        &mut start,
+        [0x01, 0x80, 0xC2, 0, 0, 0x03],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    start.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+    start.resize(60, 0);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&start, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "EAPOL"]);
+    let eapol = buf.layer_by_name("EAPOL").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(eapol, "packet_type_name"),
+        Some("EAPOL-Start")
+    );
+
+    let mut key = Vec::new();
+    push_ethernet(
+        &mut key,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    key.extend_from_slice(&[0x02, 0x03, 0x00, 0x05, 0x02, 0x00, 0x8A, 0x00, 0x10]);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&key, &mut buf).unwrap();
+    let eapol = buf.layer_by_name("EAPOL").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(eapol, "key_descriptor_type_name"),
+        Some("IEEE 802.11")
+    );
+    assert_eq!(
+        buf.field_by_name(eapol, "body").unwrap().value,
+        FieldValue::Bytes(&[0x00, 0x8A, 0x00, 0x10])
+    );
+}
+
+#[test]
+fn integration_ppp_eap_inline() {
+    let registry = DissectorRegistry::default();
+    // PPP (HDLC framing) Protocol 0xC227 (RFC 3748, Section 3.2.1 —
+    // https://www.rfc-editor.org/rfc/rfc3748#section-3.2.1): EAP Success.
+    let pkt = [0xFF, 0x03, 0xC2, 0x27, 0x03, 0x05, 0x00, 0x04];
+    let mut buf = DissectBuffer::new();
+    registry.dissect_with_link_type(&pkt, 9, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 1);
+    let ppp = buf.layer_by_name("PPP").unwrap();
+    let FieldValue::Object(r) = &buf.field_by_name(ppp, "payload").unwrap().value else {
+        panic!("payload must be an Object");
+    };
+    let eap = buf.nested_fields(r);
+    assert_eq!(eap[0].name(), "code");
+    assert_eq!(eap[0].value, FieldValue::U8(3));
+    assert_eq!(
+        buf.resolve_nested_display_name(r, "code_name"),
+        Some("Success")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // MPLS helpers
 // ---------------------------------------------------------------------------
 
@@ -8293,6 +8403,52 @@ fn integration_ethernet_ipv4_sctp_ngap() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SCTP → SGsAP (SGsAP-PAGING-REQUEST)
+// ---------------------------------------------------------------------------
+
+/// SGsAP-PAGING-REQUEST: IMSI, VLR name and service indicator "CS call
+/// indicator" (3GPP TS 29.118, Section 8.14).
+#[cfg(all(feature = "sctp", feature = "sgsap"))]
+const SGSAP_PAGING_REQUEST: &[u8] = &[
+    0x01, 0x01, 0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98, 0x02, 0x04, 0x03, b'v', b'l',
+    b'r', 0x20, 0x01, 0x01,
+];
+
+/// SGsAP is found by its registered SCTP port 29118; its payload protocol
+/// identifier 0 is "unspecified" and does not select it on another port
+/// (3GPP TS 29.118, Section 6.3).
+#[cfg(all(feature = "sctp", feature = "sgsap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_sgsap_paging_request() {
+    let reg = DissectorRegistry::default();
+    for (dst_port, expected) in [(29118, Some("SGsAP")), (40000, None)] {
+        let mut pkt = Vec::new();
+        push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+        let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+        push_sctp(&mut pkt, 9487, dst_port);
+        push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, SGSAP_PAGING_REQUEST);
+        fixup_ipv4_length(&mut pkt, ip_start);
+
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&pkt, &mut buf).unwrap();
+        assert_eq!(buf.layers().get(3).map(|l| l.name), expected, "{dst_port}");
+        if expected.is_none() {
+            continue;
+        }
+        let sgsap = &buf.layers()[3];
+        assert_eq!(
+            display_name_for(&buf, sgsap, "message_type"),
+            Some("SGsAP-PAGING-REQUEST")
+        );
+        let ies = buf.field_by_name(sgsap, "ies").unwrap();
+        let FieldValue::Array(ref arr) = ies.value else {
+            panic!("expected ies to be Array");
+        };
+        assert_eq!(direct_children(&buf, arr).len(), 3);
+    }
+}
+
 /// NGAP InitialUEMessage with parsed IE values: RAN-UE-NGAP-ID, NAS-PDU
 /// with plain 5GMM Registration Request, UEContextRequest and
 /// RRCEstablishmentCause, all APER-encoded (3GPP TS 38.413, Section 9.5).
@@ -9736,6 +9892,98 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+// ---------------------------------------------------------------------------
+// Standalone IEEE 802.1Q / 802.1ad tag (EtherType 0x8100 / 0x88A8)
+// ---------------------------------------------------------------------------
+
+/// SLL with protocol type 0x8100: the tag follows the cooked header, so it
+/// is reached by EtherType dispatch (IEEE 802.1Q-2022, clause 9.6).
+#[test]
+fn integration_sll_vlan_ipv4_udp() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_sll(&mut pkt, 0, 0x8100);
+    pkt.extend_from_slice(&[0x20, 0x64]); // TCI: PCP=1, DEI=0, VID=100
+    pkt.extend_from_slice(&0x0800u16.to_be_bytes());
+    let ipv4_start = pkt.len();
+    push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 1234, 5678);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 113, &mut buf)
+        .unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL", "VLAN", "IPv4", "UDP"]);
+    let vlan = buf.layer_by_name("VLAN").unwrap();
+    assert_eq!(
+        buf.field_by_name(vlan, "vlan_id").unwrap().value,
+        FieldValue::U16(100)
+    );
+    assert_eq!(
+        buf.field_by_name(vlan, "vlan_pcp").unwrap().value,
+        FieldValue::U8(1)
+    );
+}
+
+/// SLL2 with protocol type 0x88A8 (S-Tag) then a C-Tag: one VLAN layer
+/// per tag.
+#[test]
+fn integration_sll2_qinq_ipv6_tcp() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_sll2(&mut pkt, 0x88A8, 2, 0);
+    pkt.extend_from_slice(&[0x00, 0x0A]); // S-Tag VID=10
+    pkt.extend_from_slice(&0x8100u16.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x14]); // C-Tag VID=20
+    pkt.extend_from_slice(&0x86DDu16.to_be_bytes());
+    let ipv6_start = push_ipv6(&mut pkt, 6, IPV6_SRC, IPV6_DST);
+    push_tcp(&mut pkt, 54321, 8080, 0x02);
+    fixup_ipv6_payload_length(&mut pkt, ipv6_start);
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 276, &mut buf)
+        .unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL2", "VLAN", "VLAN", "IPv6", "TCP"]);
+    let vids: Vec<_> = buf
+        .layers()
+        .iter()
+        .filter(|l| l.name == "VLAN")
+        .map(|l| buf.field_by_name(l, "vlan_id").unwrap().value.clone())
+        .collect();
+    assert_eq!(vids, [FieldValue::U16(10), FieldValue::U16(20)]);
+}
+
+/// GRE with protocol type 0x8100 carries a tagged payload without the MAC
+/// header.
+#[test]
+fn integration_ethernet_ipv4_gre_vlan_ipv4() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let outer_start = push_ipv4(&mut pkt, 47, IPV4_SRC, IPV4_DST);
+    push_gre(&mut pkt, 0x8100);
+    pkt.extend_from_slice(&[0x00, 0x05]); // VID=5
+    pkt.extend_from_slice(&0x0800u16.to_be_bytes());
+    let inner_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 1234, 5678);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, inner_start);
+    fixup_ipv4_length(&mut pkt, outer_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "GRE", "VLAN", "IPv4", "UDP"]);
 }
 
 // ---------------------------------------------------------------------------
