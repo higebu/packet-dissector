@@ -103,7 +103,8 @@ pub(crate) static FD_TRANSFER_UNDECODED_IES: FieldDescriptor = FieldDescriptor::
 
 /// Decodes a ProtocolIE-Container starting at the IE count and pushes the
 /// IEs into an array described by `array_desc`, followed by
-/// `ie_container_error` and `undecoded_octets` when the container is
+/// `ie_container_error` and `undecoded_ies` (`transfer_ie_container_error`
+/// and `transfer_undecoded_ies` in a transfer) when the container is
 /// malformed.
 ///
 /// 3GPP TS 38.413, Section 9.4.4 — `ProtocolIE-Container ::= SEQUENCE

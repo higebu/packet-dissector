@@ -338,7 +338,7 @@ fn decode_item<'pkt>(
 /// A transfer that cannot be decoded at all keeps its octets as `value`.
 /// A transfer whose leading components are decoded but whose remaining
 /// OPTIONAL components or extension additions are not supported here
-/// carries the rest as `undecoded_octets`.
+/// carries the rest as `transfer_undecoded_octets`.
 fn push_transfer<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     kind: TransferKind,
