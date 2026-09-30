@@ -32,6 +32,7 @@
 //! | Ethernet → IPv4 → SCTP(unknown PPID and ports) → no upper layer | integration_ethernet_ipv4_sctp_unknown_ppid_and_port |
 //! | Ethernet → IPv4 → SCTP(unknown PPID, then PPID 46) summary names Diameter | integration_ethernet_ipv4_sctp_summary_uses_first_resolvable_chunk |
 //! | Ethernet → IPv4 → SCTP(9487→40001, PPID 60) → NGAP | integration_ethernet_ipv4_sctp_ppid_ngap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 29118, PPID 0) → SGsAP | integration_ethernet_ipv4_sctp_sgsap_paging_request |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
 //! | 802.1ad QinQ → IPv4 → UDP                | integration_qinq_ipv4_udp                     |
@@ -7784,6 +7785,52 @@ fn integration_ethernet_ipv4_sctp_ngap() {
         assert_eq!(direct_children(&buf, arr).len(), 1);
     } else {
         panic!("expected ies to be Array");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCTP → SGsAP (SGsAP-PAGING-REQUEST)
+// ---------------------------------------------------------------------------
+
+/// SGsAP-PAGING-REQUEST: IMSI, VLR name and service indicator "CS call
+/// indicator" (3GPP TS 29.118, Section 8.14).
+#[cfg(all(feature = "sctp", feature = "sgsap"))]
+const SGSAP_PAGING_REQUEST: &[u8] = &[
+    0x01, 0x01, 0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98, 0x02, 0x05, 0x03, b'v', b'l',
+    b'r', 0x00, 0x20, 0x01, 0x01,
+];
+
+/// SGsAP is found by its registered SCTP port 29118; its payload protocol
+/// identifier 0 is "unspecified" and does not select it on another port
+/// (3GPP TS 29.118, Section 6.3).
+#[cfg(all(feature = "sctp", feature = "sgsap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_sgsap_paging_request() {
+    let reg = DissectorRegistry::default();
+    for (dst_port, expected) in [(29118, Some("SGsAP")), (40000, None)] {
+        let mut pkt = Vec::new();
+        push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+        let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+        push_sctp(&mut pkt, 9487, dst_port);
+        push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, SGSAP_PAGING_REQUEST);
+        fixup_ipv4_length(&mut pkt, ip_start);
+
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&pkt, &mut buf).unwrap();
+        assert_eq!(buf.layers().get(3).map(|l| l.name), expected, "{dst_port}");
+        if expected.is_none() {
+            continue;
+        }
+        let sgsap = &buf.layers()[3];
+        assert_eq!(
+            display_name_for(&buf, sgsap, "message_type"),
+            Some("SGsAP-PAGING-REQUEST")
+        );
+        let ies = buf.field_by_name(sgsap, "ies").unwrap();
+        let FieldValue::Array(ref arr) = ies.value else {
+            panic!("expected ies to be Array");
+        };
+        assert_eq!(direct_children(&buf, arr).len(), 3);
     }
 }
 
