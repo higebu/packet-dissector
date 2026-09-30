@@ -544,7 +544,7 @@ impl SubTlvContext {
 /// Pushes a `sub_tlvs` array for `data`, or nothing when it is empty.
 ///
 /// Walking stops at the first sub-TLV whose length overruns `data`; the
-/// remaining octets are pushed as `unparsed` after the array.
+/// remaining octets are pushed as `raw` after the array.
 ///
 /// RFC 5305, Section 3 — <https://www.rfc-editor.org/rfc/rfc5305#section-3>
 pub(crate) fn push_sub_tlvs<'pkt>(
@@ -553,8 +553,26 @@ pub(crate) fn push_sub_tlvs<'pkt>(
     offset: usize,
     ctx: SubTlvContext,
 ) {
+    let pos = walk_sub_tlvs(buf, data, offset, ctx);
+    let raw = if ctx.nested() {
+        &SUB_SUB_TLV_FIELDS[F_RAW]
+    } else {
+        &SUB_TLV_FIELDS[F_RAW]
+    };
+    push_raw(buf, raw, &data[pos..], offset + pos);
+}
+
+/// Pushes a `sub_tlvs` array for `data`, or nothing when it is empty, and
+/// returns the number of octets its complete sub-TLVs cover. Unlike
+/// [`push_sub_tlvs`], the remaining octets are left to the caller.
+fn walk_sub_tlvs<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    ctx: SubTlvContext,
+) -> usize {
     if data.is_empty() {
-        return;
+        return 0;
     }
     let (array, element, fields) = if ctx.nested() {
         (&FD_SUB_SUB_TLVS, &FD_SUB_SUB_TLV, &SUB_SUB_TLV_FIELDS)
@@ -591,7 +609,7 @@ pub(crate) fn push_sub_tlvs<'pkt>(
     }
     buf.end_container(array_idx);
     set_range_end(buf, array_idx, offset + pos);
-    push_raw(buf, &fields[F_RAW], &data[pos..], offset + pos);
+    pos
 }
 
 /// Pushes `rest` with descriptor `d` unless it is empty.
@@ -752,7 +770,10 @@ fn push_sid(buf: &mut DissectBuffer<'_>, v: &[u8], at: usize, o: usize) -> Optio
     }
 }
 
-/// Pushes the SRv6 SID at `at`, then the length-prefixed sub-sub-TLVs.
+/// Pushes the SRv6 SID at `at`, then the length-prefixed sub-sub-TLVs;
+/// returns the offset after the last complete sub-sub-TLV, so that the
+/// caller pushes any octets left inside and after the Sub-sub-TLV area as a
+/// single `raw` field.
 ///
 /// RFC 9352, Sections 7.2 and 8 — <https://www.rfc-editor.org/rfc/rfc9352#section-7.2>
 fn push_srv6_sid_and_sub_sub_tlvs<'pkt>(
@@ -770,13 +791,8 @@ fn push_srv6_sid_and_sub_sub_tlvs<'pkt>(
     if end > v.len() {
         return len_at;
     }
-    push_sub_tlvs(
-        buf,
-        &v[len_at + 1..end],
-        o + len_at + 1,
-        SubTlvContext::Srv6Sid,
-    );
-    end
+    let start = len_at + 1;
+    start + walk_sub_tlvs(buf, &v[start..end], o + start, SubTlvContext::Srv6Sid)
 }
 
 /// Pushes SRGB / SRLB range descriptors ("Range" + SID/Label sub-TLV);
@@ -1273,5 +1289,29 @@ mod tests {
         let mut buf = DissectBuffer::new();
         push_sub_tlvs(&mut buf, &[2, 1, 0], 0, SubTlvContext::Srv6Sid);
         assert_eq!(named(&buf, "value")[0].value, FieldValue::Bytes(&[0]));
+    }
+
+    /// RFC 9352, Section 7.2 — octets left over inside the Sub-sub-TLV area
+    /// and after it are one `raw` field of the SRv6 End SID sub-TLV, not two
+    /// `raw` keys in the same object.
+    /// <https://www.rfc-editor.org/rfc/rfc9352#section-7.2>
+    #[test]
+    fn srv6_sid_leftovers_are_one_raw_field() {
+        let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        // Flags | Endpoint Behavior | SID | Sub-sub-TLV-len = 3, a
+        // sub-sub-TLV whose length overruns it, then one trailing octet.
+        let mut end = vec![5, 24, 0, 0, 1];
+        end.extend_from_slice(&addr);
+        end.extend_from_slice(&[3, 1, 5, 9, 7]);
+        let mut buf = DissectBuffer::new();
+        push_sub_tlvs(&mut buf, &end, 0, SubTlvContext::Prefix);
+        let raw = named(&buf, "raw");
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].value, FieldValue::Bytes(&[1, 5, 9, 7]));
+        assert_eq!(raw[0].range, 22..26);
+        // The empty sub-sub-TLV array covers none of the leftover octets.
+        let arrays = named(&buf, "sub_tlvs");
+        assert_eq!(arrays.len(), 2);
+        assert_eq!(arrays[1].range, 22..22);
     }
 }
