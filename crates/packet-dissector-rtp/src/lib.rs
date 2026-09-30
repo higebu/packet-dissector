@@ -10,6 +10,8 @@
 //!   <https://www.rfc-editor.org/rfc/rfc8285#section-4>
 //! - RFC 3551, Section 6 — static payload types:
 //!   <https://www.rfc-editor.org/rfc/rfc3551#section-6>
+//! - RFC 5761, Section 4 — RTP and RTCP multiplexed on a single port:
+//!   <https://www.rfc-editor.org/rfc/rfc5761#section-4>
 
 #![deny(missing_docs)]
 
@@ -20,6 +22,7 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_core::util::{read_be_u16, read_be_u32};
+use packet_dissector_rtcp::RtcpDissector;
 
 /// Minimum RTP header size in bytes (fixed header without CSRC list or extension).
 /// RFC 3550, Section 5.1 — "The first twelve octets are present in every RTP packet"
@@ -30,6 +33,16 @@ const MIN_HEADER_SIZE: usize = 12;
 /// RFC 3550, Section 5.1 — "The version defined by this specification is two (2)."
 /// <https://www.rfc-editor.org/rfc/rfc3550#section-5.1>
 const RTP_VERSION: u8 = 2;
+
+/// Values of the second octet that are RTCP packet types when RTP and RTCP
+/// share a port (seen as RTP they are M=1 with payload types 64-95).
+///
+/// RFC 5761, Section 4 — "future RTCP packet type assignments SHOULD be made
+/// after the current assignments in the range 209-223, then in the range
+/// 194-199, so that only the RTP payload types in the range 64-95 are
+/// blocked." and "payload type values in the range 64-95 MUST NOT be used."
+/// <https://www.rfc-editor.org/rfc/rfc5761#section-4>
+const RTCP_MUX_PACKET_TYPES: core::ops::RangeInclusive<u8> = 192..=223;
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_VERSION: usize = 0;
@@ -289,6 +302,23 @@ impl Dissector for RtpDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
+        // RFC 5761, Section 4 — "the RTCP packet type field occupies the same
+        // position in the packet as the combination of the RTP marker (M)
+        // bit and the RTP payload type (PT). This field can be used to
+        // distinguish RTP and RTCP packets". A version-2 packet whose second
+        // octet is an RTCP packet type is handed to the RTCP dissector. When
+        // it is not a well-formed RTCP packet (RTCP rejects it before
+        // pushing anything), it is decoded as RTP below, so a stream that is
+        // not multiplexed and uses M=1 with PT 64-95 is still shown as RTP.
+        // https://www.rfc-editor.org/rfc/rfc5761#section-4
+        if let [byte0, byte1, ..] = *data {
+            if byte0 >> 6 == RTP_VERSION && RTCP_MUX_PACKET_TYPES.contains(&byte1) {
+                if let Ok(result) = RtcpDissector.dissect(data, buf, offset) {
+                    return Ok(result);
+                }
+            }
+        }
+
         // RFC 3550, Section 5.1 — minimum 12-byte fixed header
         // https://www.rfc-editor.org/rfc/rfc3550#section-5.1
         if data.len() < MIN_HEADER_SIZE {
@@ -639,6 +669,14 @@ mod tests {
     // |-------------|----------------------------------------|-------------------------------------------|
     // | 6           | Static payload type names (Tables 4/5) | payload_type_names                        |
     // | 6           | Dynamic range 96-127                   | payload_type_names                        |
+    //
+    // # RFC 5761 (RTP/RTCP Multiplexing) Coverage
+    //
+    // | RFC Section | Description                            | Test                                      |
+    // |-------------|----------------------------------------|-------------------------------------------|
+    // | 4           | Octet 2 in 192-223 dissected as RTCP   | rfc5761_rtcp_packet_types_go_to_rtcp      |
+    // | 4           | M=1 with PT outside 64-95 stays RTP    | rfc5761_marker_outside_rtcp_range_is_rtp  |
+    // | 4           | Not well-formed RTCP falls back to RTP | rfc5761_invalid_rtcp_falls_back_to_rtp    |
 
     /// Build a minimal RTP header (12 bytes): V=2, P=0, X=0, CC=0, M=0, PT=0.
     fn minimal_rtp_header(pt: u8, seq: u16, ts: u32, ssrc: u32) -> Vec<u8> {
@@ -1385,5 +1423,61 @@ mod tests {
             assert!(reference.url.starts_with("https://"));
         }
         assert_eq!(RtpDissector.layer(), Some(ProtocolLayer::Application));
+    }
+
+    #[test]
+    fn rfc5761_rtcp_packet_types_go_to_rtcp() {
+        // Minimal RR: V=2 RC=0, PT=201, length 1, SSRC — seen as RTP it would
+        // be M=1, PT=73.
+        let data = [0x80, 0xC9, 0x00, 0x01, 0x12, 0x34, 0x56, 0x78];
+        let mut buf = DissectBuffer::new();
+        let result = RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 8);
+        assert_eq!(result.next, DispatchHint::End);
+        assert_eq!(buf.layers().len(), 1);
+        assert_eq!(buf.layers()[0].name, "RTCP");
+
+        // Both ends of the RTCP range (192 and 223) are delegated too.
+        for pt in [192u8, 223] {
+            let data = [0x80, pt, 0x00, 0x00];
+            let mut buf = DissectBuffer::new();
+            RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+            assert_eq!(buf.layers()[0].name, "RTCP", "octet 2 = {pt}");
+        }
+    }
+
+    #[test]
+    fn rfc5761_marker_outside_rtcp_range_is_rtp() {
+        // M=1 with PT 63 (octet 2 = 191) and PT 96 (octet 2 = 224) are RTP.
+        for byte1 in [0xBFu8, 0xE0] {
+            let mut data = minimal_rtp_header(0, 1, 2, 3);
+            data[1] = byte1;
+            let mut buf = DissectBuffer::new();
+            RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            assert_eq!(layer.name, "RTP");
+            assert_eq!(
+                buf.field_by_name(layer, "marker").unwrap().value,
+                FieldValue::U8(1)
+            );
+        }
+    }
+
+    #[test]
+    fn rfc5761_invalid_rtcp_falls_back_to_rtp() {
+        // M=1, PT=72 (octet 2 = 200 = SR) but the "length" (the RTP sequence
+        // number) overruns the datagram, so it is not RTCP.
+        let mut data = minimal_rtp_header(72, 0x1234, 2, 3);
+        data[1] |= 0x80;
+        let mut buf = DissectBuffer::new();
+        let result = RtpDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 12);
+        assert_eq!(buf.layers().len(), 1);
+        let layer = &buf.layers()[0];
+        assert_eq!(layer.name, "RTP");
+        assert_eq!(
+            buf.field_by_name(layer, "payload_type").unwrap().value,
+            FieldValue::U8(72)
+        );
     }
 }

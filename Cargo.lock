@@ -648,6 +648,7 @@ dependencies = [
  "packet-dissector-radius",
  "packet-dissector-raw-ip",
  "packet-dissector-reassembly",
+ "packet-dissector-rtcp",
  "packet-dissector-rtp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
@@ -1019,6 +1020,8 @@ dependencies = [
  "packet-dissector-mdns",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
+ "packet-dissector-rtcp",
+ "packet-dissector-rtp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
@@ -1088,11 +1091,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-rtcp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-rtp"
 version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-rtcp",
  "packet-dissector-test-alloc",
 ]
 

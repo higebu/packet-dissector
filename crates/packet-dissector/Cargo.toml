@@ -64,6 +64,7 @@ default = [
   "esp-decrypt",
   "ike",
   "rtp",
+  "rtcp",
   "quic",
   "quic-decrypt",
   "stun",
@@ -126,6 +127,7 @@ esp = ["dep:packet-dissector-esp"]
 ike = ["dep:packet-dissector-ike"]
 esp-decrypt = ["esp", "packet-dissector-esp/decrypt"]
 rtp = ["dep:packet-dissector-rtp"]
+rtcp = ["dep:packet-dissector-rtcp"]
 quic = ["dep:packet-dissector-quic"]
 quic-decrypt = ["quic", "packet-dissector-quic/decrypt"]
 stun = ["dep:packet-dissector-stun"]
@@ -158,6 +160,7 @@ application = [
   "ntp",
   "radius",
   "rtp",
+  "rtcp",
   "tls",
   "quic",
   "stun",
@@ -221,6 +224,7 @@ packet-dissector-ah = { workspace = true, optional = true }
 packet-dissector-esp = { workspace = true, optional = true }
 packet-dissector-ike = { workspace = true, optional = true }
 packet-dissector-rtp = { workspace = true, optional = true }
+packet-dissector-rtcp = { workspace = true, optional = true }
 packet-dissector-quic = { workspace = true, optional = true }
 packet-dissector-stun = { workspace = true, optional = true }
 
