@@ -75,6 +75,10 @@
 //! | Ethernet → IPv4 → TCP → HTTP 200 OK           | integration_ethernet_ipv4_tcp_http_response         |
 //! | Ethernet → IPv4 → UDP → SIP INVITE            | integration_ethernet_ipv4_udp_sip_invite            |
 //! | Ethernet → IPv4 → TCP → SIP 200 OK            | integration_ethernet_ipv4_tcp_sip_response          |
+//! | Ethernet → IPv4 → PIM Hello                   | ethernet_ipv4_pim_hello                             |
+//! | Ethernet → IPv6 → PIM Hello                   | ethernet_ipv6_pim_hello                             |
+//! | Ethernet → IPv4 → PIM Register → IPv4 → UDP   | ethernet_ipv4_pim_register_ipv4_udp                 |
+//! | Ethernet → IPv6 → PIM Null-Register → IPv6 → PIM | ethernet_ipv6_pim_null_register                  |
 //! | Ethernet → IPv4 → TCP → BMP ×2 → BGP (decode-as) | ethernet_ipv4_tcp_bmp_decode_as                |
 //! | Ethernet → IPv4 → UDP → SIP INVITE → SDP      | integration_ethernet_ipv4_udp_sip_invite_with_sdp   |
 //! | Ethernet → IPv4 → TCP → HTTP 200 → SDP        | integration_ethernet_ipv4_tcp_http_response_sdp_body |
@@ -10532,6 +10536,113 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+// ---------------------------------------------------------------------------
+// PIM
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ethernet_ipv4_pim_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x01, 0x00, 0x5e, 0, 0, 13], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 103, [10, 0, 0, 1], [224, 0, 0, 13]);
+    pkt.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]); // PIMv2 Hello
+    pkt.extend_from_slice(&[0, 1, 0, 2, 0, 105]); // Holdtime 105
+    pkt.extend_from_slice(&[0, 19, 0, 4, 0, 0, 0, 1]); // DR Priority 1
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "PIM"]);
+    assert_layers_contiguous(&buf);
+    let pim = buf.layer_by_name("PIM").unwrap();
+    assert_eq!(display_name_for(&buf, pim, "type"), Some("Hello"));
+}
+
+#[test]
+fn ethernet_ipv6_pim_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x33, 0x33, 0, 0, 0, 13], [0x02; 6], 0x86DD);
+    let mut src = [0u8; 16];
+    src[..2].copy_from_slice(&[0xfe, 0x80]);
+    src[15] = 1;
+    let mut dst = [0u8; 16];
+    dst[..2].copy_from_slice(&[0xff, 0x02]);
+    dst[15] = 13;
+    let ip_start = push_ipv6(&mut pkt, 103, src, dst);
+    pkt.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]); // PIMv2 Hello
+    pkt.extend_from_slice(&[0, 24, 0, 18, 2, 0]); // Address List (IPv6)
+    pkt.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    fixup_ipv6_payload_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "PIM"]);
+    assert_layers_contiguous(&buf);
+}
+
+#[test]
+fn ethernet_ipv4_pim_register_ipv4_udp() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x0800);
+    let outer = pkt.len();
+    push_ipv4(&mut pkt, 103, [10, 0, 0, 1], [10, 0, 0, 100]);
+    pkt.extend_from_slice(&[0x21, 0x00, 0x00, 0x00]); // PIMv2 Register
+    pkt.extend_from_slice(&[0, 0, 0, 0]); // B=0, N=0
+    let inner = pkt.len();
+    push_ipv4(&mut pkt, 17, [192, 0, 2, 1], [239, 1, 1, 1]);
+    let udp = push_udp(&mut pkt, 5000, 5001);
+    pkt.extend_from_slice(b"data");
+    fixup_udp_length(&mut pkt, udp);
+    fixup_ipv4_length(&mut pkt, inner);
+    fixup_ipv4_length(&mut pkt, outer);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "PIM", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let pim = buf.layer_by_name("PIM").unwrap();
+    assert_eq!(display_name_for(&buf, pim, "type"), Some("Register"));
+}
+
+#[test]
+fn ethernet_ipv6_pim_null_register() {
+    // IPv6 Null-Register: a dummy IPv6 header followed by a dummy PIM
+    // header (RFC 7761, Section 4.9.3).
+    let registry = DissectorRegistry::default();
+
+    let mut src = [0u8; 16];
+    src[..2].copy_from_slice(&[0x20, 0x01]);
+    src[15] = 1;
+    let mut group = [0u8; 16];
+    group[..2].copy_from_slice(&[0xff, 0x3e]);
+    group[15] = 1;
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x86DD);
+    let outer = push_ipv6(&mut pkt, 103, src, src);
+    pkt.extend_from_slice(&[0x21, 0x00, 0x00, 0x00]); // PIMv2 Register
+    pkt.extend_from_slice(&[0x40, 0, 0, 0]); // N=1
+    let inner = push_ipv6(&mut pkt, 103, src, group);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x12, 0x34]); // dummy PIM header
+    fixup_ipv6_payload_length(&mut pkt, inner);
+    fixup_ipv6_payload_length(&mut pkt, outer);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "PIM", "IPv6", "PIM"]);
+    assert_layers_contiguous(&buf);
 }
 
 // ---------------------------------------------------------------------------

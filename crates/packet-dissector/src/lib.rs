@@ -211,6 +211,9 @@ pub mod dissectors {
     #[cfg(feature = "ospf")]
     pub use packet_dissector_ospf as ospf;
 
+    #[cfg(feature = "pim")]
+    pub use packet_dissector_pim as pim;
+
     #[cfg(feature = "vrrp")]
     pub use packet_dissector_vrrp as vrrp;
 
