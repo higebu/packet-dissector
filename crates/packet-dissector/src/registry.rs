@@ -2903,6 +2903,23 @@ impl Default for DissectorRegistry {
             reg.register_by_ip_protocol(47, Box::new(packet_dissector_gre::GreDissector)),
         );
 
+        // ERSPAN is carried in GRE with Protocol Type 0x88BE (Type I and II)
+        // or 0x22EB (Type III) (draft-foschiano-erspan-03, Section 4 —
+        // https://datatracker.ietf.org/doc/html/draft-foschiano-erspan-03#section-4).
+        #[cfg(feature = "erspan")]
+        {
+            assert_builtin(
+                reg.register_by_ethertype(
+                    0x88BE,
+                    Box::new(packet_dissector_erspan::ErspanDissector),
+                ),
+            );
+            assert_builtin(reg.register_by_ethertype(
+                0x22EB,
+                Box::new(packet_dissector_erspan::ErspanType3Dissector),
+            ));
+        }
+
         // L2TPv3 is IP protocol number 115 (RFC 3931)
         #[cfg(feature = "l2tpv3")]
         assert_builtin(
@@ -5051,6 +5068,12 @@ mod tests {
 
         #[cfg(feature = "gre")]
         assert!(reg.get_by_ip_protocol(47).is_some());
+
+        #[cfg(feature = "erspan")]
+        {
+            assert!(reg.get_by_ethertype(0x88BE).is_some());
+            assert!(reg.get_by_ethertype(0x22EB).is_some());
+        }
 
         #[cfg(feature = "ospf")]
         assert!(reg.get_by_ip_protocol(89).is_some());

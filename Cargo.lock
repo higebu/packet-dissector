@@ -618,6 +618,7 @@ dependencies = [
  "packet-dissector-dns",
  "packet-dissector-e1ap",
  "packet-dissector-eap",
+ "packet-dissector-erspan",
  "packet-dissector-esp",
  "packet-dissector-ethernet",
  "packet-dissector-f1ap",
@@ -794,6 +795,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-eap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-erspan"
 version = "0.5.0"
 dependencies = [
  "criterion",
@@ -1125,6 +1135,7 @@ dependencies = [
  "packet-dissector-dns",
  "packet-dissector-e1ap",
  "packet-dissector-eap",
+ "packet-dissector-erspan",
  "packet-dissector-f1ap",
  "packet-dissector-gtpv1c",
  "packet-dissector-icmp",

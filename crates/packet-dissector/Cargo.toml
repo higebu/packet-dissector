@@ -52,6 +52,7 @@ default = [
   "sgsap",
   "geneve",
   "gre",
+  "erspan",
   "vxlan",
   "lldp",
   "eap",
@@ -130,6 +131,7 @@ e1ap = ["dep:packet-dissector-e1ap"]
 sgsap = ["dep:packet-dissector-sgsap"]
 geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
+erspan = ["dep:packet-dissector-erspan"]
 vxlan = ["dep:packet-dissector-vxlan"]
 lldp = ["dep:packet-dissector-lldp"]
 # EAP is also decoded inside the carriers that are enabled: PPP (0xC227),
@@ -211,7 +213,16 @@ application = [
   "quic",
   "stun",
 ]
-tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]
+tunneling = [
+  "gre",
+  "erspan",
+  "geneve",
+  "vxlan",
+  "l2tp",
+  "l2tpv3",
+  "mpls",
+  "nsh",
+]
 routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = [
@@ -271,6 +282,7 @@ packet-dissector-e1ap = { workspace = true, optional = true }
 packet-dissector-sgsap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }
 packet-dissector-gre = { workspace = true, optional = true }
+packet-dissector-erspan = { workspace = true, optional = true }
 packet-dissector-vxlan = { workspace = true, optional = true }
 packet-dissector-lldp = { workspace = true, optional = true }
 packet-dissector-eap = { workspace = true, optional = true }
