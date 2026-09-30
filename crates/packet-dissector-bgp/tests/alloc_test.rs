@@ -337,3 +337,38 @@ fn zero_alloc_dissect_bgp_update_rt_constraint() {
         "BGP RT Constraint update dissect allocated {allocs} times"
     );
 }
+
+#[test]
+fn zero_alloc_dissect_bgp_update_sr_policy() {
+    // MP_REACH_NLRI (AFI 2, SAFI 73) with an IPv4 next hop and an SR Policy
+    // NLRI (RFC 9830, Section 2.1 —
+    // https://www.rfc-editor.org/rfc/rfc9830#section-2.1).
+    let mut mp_reach = vec![0x00, 0x02, 73, 4, 192, 0, 2, 1, 0];
+    mp_reach.push(192); // NLRI Length
+    mp_reach.extend_from_slice(&1u32.to_be_bytes()); // Distinguisher
+    mp_reach.extend_from_slice(&100u32.to_be_bytes()); // Color
+    mp_reach.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    let mut attrs = vec![0x90, 14];
+    attrs.extend_from_slice(&(mp_reach.len() as u16).to_be_bytes());
+    attrs.extend_from_slice(&mp_reach);
+
+    let mut raw = vec![0xFF; 16]; // Marker
+    let total_len = 19 + 2 + 2 + attrs.len();
+    raw.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+    raw.push(2); // Type = UPDATE
+    raw.extend_from_slice(&0u16.to_be_bytes()); // Withdrawn Routes Length
+    raw.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    raw.extend_from_slice(&attrs);
+
+    let mut buf = DissectBuffer::new();
+    BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        BgpDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "BGP SR Policy update dissect allocated {allocs} times"
+    );
+}
