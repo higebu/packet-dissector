@@ -130,6 +130,22 @@ const F_EXTENDED_OPTIONS: usize = 49;
 const F_SEQUENCE_NUMBER: usize = 50;
 const F_AUTH_DATA: usize = 51;
 
+/// Maximum nesting depth of decoded sub-TLVs; a top-level TLV's sub-TLVs
+/// are at depth 1.
+///
+/// RFC 9513 defines SRv6 Locator LSA sub-TLVs "at any level of nesting"
+/// (Section 13.9 — <https://www.rfc-editor.org/rfc/rfc9513#section-13.9>),
+/// and the SRv6 End SID and End.X SID sub-TLVs carry sub-TLVs of the same
+/// registry as themselves (Sections 8 and 9.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9513#section-8>,
+/// <https://www.rfc-editor.org/rfc/rfc9513#section-9.1>), so a crafted LSA
+/// could otherwise recurse until the stack overflows. The specification
+/// itself nests only two levels, an SRv6 SID Structure sub-TLV inside an
+/// End SID or End.X SID (Section 10 —
+/// <https://www.rfc-editor.org/rfc/rfc9513#section-10>), so the limit
+/// leaves headroom; deeper octets are pushed as `unparsed`.
+pub(crate) const MAX_SUB_TLV_DEPTH: usize = 4;
+
 /// Number of fields in a TLV object schema.
 const TLV_FIELD_COUNT: usize = 52;
 
@@ -740,12 +756,16 @@ impl TlvContext {
     /// Returns the number of value octets decoded, or `None` when the type is
     /// unknown or the value is too short for its fixed part (nothing is
     /// pushed in that case).
+    ///
+    /// `depth` is the nesting depth of the TLV being decoded (0 for a
+    /// top-level TLV); see [`MAX_SUB_TLV_DEPTH`].
     fn decode<'pkt>(
         self,
         buf: &mut DissectBuffer<'pkt>,
         t: u16,
         v: &'pkt [u8],
         o: usize,
+        depth: usize,
     ) -> Option<usize> {
         match self {
             Self::Te => decode_te(buf, t, v, o),
@@ -761,9 +781,9 @@ impl TlvContext {
             Self::ExtLink => decode_ext_link(buf, t, v, o),
             Self::ExtLinkSub => decode_ext_link_sub(buf, t, v, o),
             Self::V3ExtLsa => decode_v3_ext_lsa(buf, t, v, o),
-            Self::V3ExtLsaSub => decode_v3_ext_lsa_sub(buf, t, v, o),
+            Self::V3ExtLsaSub => decode_v3_ext_lsa_sub(buf, t, v, o, depth),
             Self::Srv6Locator => decode_srv6_locator(buf, t, v, o),
-            Self::Srv6LocatorSub => decode_srv6_locator_sub(buf, t, v, o),
+            Self::Srv6LocatorSub => decode_srv6_locator_sub(buf, t, v, o, depth),
             Self::Lls => decode_lls(buf, t, v, o),
         }
     }
@@ -785,18 +805,34 @@ pub(crate) fn push_tlvs<'pkt>(
     offset: usize,
     ctx: TlvContext,
 ) {
-    walk(buf, data, offset, ctx, &FD_TLVS, &FD_TLV);
+    walk(buf, data, offset, ctx, &FD_TLVS, &FD_TLV, 0);
 }
 
-/// Pushes a `sub_tlvs` array, or nothing when `data` is empty.
+/// Pushes a `sub_tlvs` array of top-level TLV `ctx`'s sub-TLVs (depth 1),
+/// or nothing when `data` is empty.
 fn push_sub_tlvs<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     data: &'pkt [u8],
     offset: usize,
     ctx: TlvContext,
 ) {
-    if !data.is_empty() {
-        walk(buf, data, offset, ctx, &FD_SUB_TLVS, &FD_SUB_TLV);
+    push_nested_sub_tlvs(buf, data, offset, ctx, 1);
+}
+
+/// Pushes a `sub_tlvs` array of sub-TLVs at nesting `depth`, or nothing
+/// when `data` is empty. Beyond [`MAX_SUB_TLV_DEPTH`] the octets are
+/// pushed as `unparsed` instead.
+fn push_nested_sub_tlvs<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+    ctx: TlvContext,
+    depth: usize,
+) {
+    if depth > MAX_SUB_TLV_DEPTH {
+        push_unparsed(buf, data, offset);
+    } else if !data.is_empty() {
+        walk(buf, data, offset, ctx, &FD_SUB_TLVS, &FD_SUB_TLV, depth);
     }
 }
 
@@ -807,6 +843,7 @@ fn walk<'pkt>(
     ctx: TlvContext,
     array: &'static FieldDescriptor,
     element: &'static FieldDescriptor,
+    depth: usize,
 ) {
     let array_idx =
         buf.begin_container(array, FieldValue::Array(0..0), offset..offset + data.len());
@@ -834,6 +871,7 @@ fn walk<'pkt>(
             t,
             &data[value_start..value_end],
             offset + value_start,
+            depth,
         );
         buf.end_container(obj_idx);
         // RFC 3630, Section 2.3.2: "The TLV is padded to four-octet alignment"
@@ -852,8 +890,9 @@ fn push_value<'pkt>(
     t: u16,
     v: &'pkt [u8],
     o: usize,
+    depth: usize,
 ) {
-    match ctx.decode(buf, t, v, o) {
+    match ctx.decode(buf, t, v, o, depth) {
         Some(n) => push_unparsed(buf, &v[n.min(v.len())..], o + n),
         None => buf.push_field(&TLV_FIELDS[F_VALUE], FieldValue::Bytes(v), o..o + v.len()),
     }
@@ -1411,6 +1450,7 @@ fn decode_srv6_end_x<'pkt>(
     lan: bool,
     v: &'pkt [u8],
     o: usize,
+    depth: usize,
 ) -> Option<usize> {
     let sid_at = if lan { 12 } else { 8 };
     if v.len() < sid_at + 16 {
@@ -1425,7 +1465,7 @@ fn decode_srv6_end_x<'pkt>(
     }
     push_ipv6(buf, F_SRV6_SID, v, sid_at, o);
     let end = sid_at + 16;
-    push_sub_tlvs(buf, &v[end..], o + end, TlvContext::V3ExtLsaSub);
+    push_nested_sub_tlvs(buf, &v[end..], o + end, TlvContext::V3ExtLsaSub, depth + 1);
     Some(v.len())
 }
 
@@ -1438,6 +1478,7 @@ fn decode_v3_ext_lsa_sub<'pkt>(
     t: u16,
     v: &'pkt [u8],
     o: usize,
+    depth: usize,
 ) -> Option<usize> {
     match t {
         // IPv6-Forwarding-Address — RFC 8362, Section 3.10
@@ -1485,8 +1526,8 @@ fn decode_v3_ext_lsa_sub<'pkt>(
         // SID/Label — RFC 8666, Section 3.1
         // <https://www.rfc-editor.org/rfc/rfc8666#section-3.1>
         7 => push_sid(buf, v, 0, o),
-        31 => decode_srv6_end_x(buf, false, v, o),
-        32 => decode_srv6_end_x(buf, true, v, o),
+        31 => decode_srv6_end_x(buf, false, v, o, depth),
+        32 => decode_srv6_end_x(buf, true, v, o, depth),
         _ => None,
     }
 }
@@ -1527,6 +1568,7 @@ fn decode_srv6_locator_sub<'pkt>(
     t: u16,
     v: &'pkt [u8],
     o: usize,
+    depth: usize,
 ) -> Option<usize> {
     match t {
         // SRv6 End SID — RFC 9513, Section 8
@@ -1536,7 +1578,7 @@ fn decode_srv6_locator_sub<'pkt>(
             push_u8(buf, F_FLAGS, v, 0, o);
             push_u16(buf, F_ENDPOINT_BEHAVIOR, v, 2, o);
             push_ipv6(buf, F_SRV6_SID, v, 4, o);
-            push_sub_tlvs(buf, &v[20..], o + 20, TlvContext::Srv6LocatorSub);
+            push_nested_sub_tlvs(buf, &v[20..], o + 20, TlvContext::Srv6LocatorSub, depth + 1);
             Some(v.len())
         }
         // IPv6-Forwarding-Address and Route-Tag — RFC 9513, Section 7.2

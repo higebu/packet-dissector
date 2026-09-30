@@ -707,6 +707,8 @@ mod tests {
     // | RFC 8666 Sec. 3.1, 6, 7 | SID/Label, Prefix-SID, Adj-SID | parse_e_router_lsa, parse_extended_lsas |
     // | RFC 9513 Sec. 7-8   | SRv6 Locator LSA, End SID     | parse_srv6_locator_lsa                    |
     // | RFC 9513 Sec. 9     | SRv6 End.X / LAN End.X SID    | parse_e_router_lsa                        |
+    // | RFC 9513 Sec. 13.9  | Nested sub-TLV depth limit    | nested_srv6_end_sids_are_depth_limited,   |
+    // |                     |                               | nested_srv6_end_x_sids_are_depth_limited  |
     // | RFC 5613 Sec. 2     | LLS data block                | parse_hello_lls_and_auth_trailer          |
     // | RFC 7166 Sec. 2.1, 4.1 | Authentication Trailer     | parse_hello_lls_and_auth_trailer,         |
     // |                     |                               | parse_hello_without_at_bit_ignores_trailer, |
@@ -1613,6 +1615,87 @@ mod tests {
         assert_child(&buf, &tag, "route_tag", FieldValue::U32(8));
         let fwd = item_range(&buf, &l, "sub_tlvs", 2);
         assert!(has_child(&buf, &fwd, "forwarding_address"));
+    }
+
+    /// Wraps `levels` SRv6 sub-TLVs of type `t`, each nested in the
+    /// Sub-TLVs field of the previous one after `fixed` octets.
+    fn nest_sub_tlvs(t: u16, fixed: &[u8], levels: usize) -> Vec<u8> {
+        let mut inner = Vec::new();
+        for _ in 0..levels {
+            let mut v = fixed.to_vec();
+            v.extend_from_slice(&inner);
+            inner = tlv(t, &v);
+        }
+        inner
+    }
+
+    fn count_named(buf: &DissectBuffer<'_>, name: &str) -> usize {
+        buf.fields()
+            .iter()
+            .filter(|f| f.descriptor.name == name)
+            .count()
+    }
+
+    /// RFC 9513, Section 13.9 — Locator sub-TLVs are defined "at any level
+    /// of nesting"; decoding stops at a fixed depth and keeps the deeper
+    /// octets as `unparsed` instead of recursing without bound.
+    /// <https://www.rfc-editor.org/rfc/rfc9513#section-13.9>
+    #[test]
+    fn nested_srv6_end_sids_are_depth_limited() {
+        let mut end = vec![0, 0, 0, 1];
+        end.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        for (levels, decoded) in [
+            (crate::tlv::MAX_SUB_TLV_DEPTH, crate::tlv::MAX_SUB_TLV_DEPTH),
+            (
+                crate::tlv::MAX_SUB_TLV_DEPTH + 1,
+                crate::tlv::MAX_SUB_TLV_DEPTH,
+            ),
+            (2700, crate::tlv::MAX_SUB_TLV_DEPTH),
+        ] {
+            let mut loc = vec![1, 0, 48, 0, 0, 0, 0, 10];
+            loc.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0]);
+            loc.extend(nest_sub_tlvs(1, &end, levels));
+            let pkt = build_lsu(&[build_lsa(0xA02A, &tlv(1, &loc))]);
+            let mut buf = DissectBuffer::new();
+            assert!(pkt.len() <= usize::from(u16::MAX), "levels {levels}");
+            Ospfv3Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+            assert_eq!(count_named(&buf, "sub_tlv"), decoded, "levels {levels}");
+            assert_eq!(
+                count_named(&buf, "unparsed"),
+                usize::from(levels > decoded),
+                "levels {levels}"
+            );
+        }
+    }
+
+    /// RFC 9513, Section 9.1 — End.X SID sub-TLVs nest under the same
+    /// depth limit.
+    /// <https://www.rfc-editor.org/rfc/rfc9513#section-9.1>
+    #[test]
+    fn nested_srv6_end_x_sids_are_depth_limited() {
+        let mut end_x = vec![0, 5, 0, 0, 0, 1, 0, 0];
+        end_x.extend_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x41,
+        ]);
+        // 2300 levels of 28 octets each keep every length within 16 bits.
+        for (levels, decoded) in [
+            (
+                crate::tlv::MAX_SUB_TLV_DEPTH + 1,
+                crate::tlv::MAX_SUB_TLV_DEPTH,
+            ),
+            (2300, crate::tlv::MAX_SUB_TLV_DEPTH),
+        ] {
+            let mut link = vec![1, 0, 0, 10, 0, 0, 0, 5, 0, 0, 0, 6, 2, 2, 2, 2];
+            link.extend(nest_sub_tlvs(31, &end_x, levels));
+            let mut body = vec![0x01, 0, 0, 0x13];
+            body.extend(tlv(1, &link));
+            let pkt = build_lsu(&[build_lsa(0xA021, &body)]);
+            let mut buf = DissectBuffer::new();
+            assert!(pkt.len() <= usize::from(u16::MAX), "levels {levels}");
+            Ospfv3Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+            assert_eq!(count_named(&buf, "sub_tlv"), decoded, "levels {levels}");
+            assert_eq!(count_named(&buf, "unparsed"), 1, "levels {levels}");
+        }
     }
 
     /// Unknown function codes keep a raw body; malformed Extended-LSA TLVs
