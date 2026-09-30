@@ -284,7 +284,7 @@ pub(crate) fn push_ie_value<'pkt>(
         64 => ies::push_plmn_identity(buf, data, offset),
         // SN-to-MN-Container — OCTET STRING, Section 9.1.2.2.
         72 => ies::push_octet_string(buf, &FD_SN_TO_MN_CONTAINER, data, offset),
-        // TimeToWait — Section 9.2.3.28.
+        // TimeToWait — Section 9.2.3.56.
         76 => ies::push_time_to_wait(buf, data, offset),
         // Target2SourceNG-RANnodeTranspContainer — OCTET STRING, Section
         // 9.1.1.2.
@@ -292,7 +292,7 @@ pub(crate) fn push_ie_value<'pkt>(
         // targetCellGlobalID / requestedTargetCellGlobalID — Target-CGI,
         // Section 9.2.3.25.
         78 | 161 => push_target_cgi(buf, data, offset),
-        // InterfaceInstanceIndication — Section 9.2.3.x.
+        // InterfaceInstanceIndication — Section 9.2.2.39.
         130 => ies::push_extensible_unsigned(
             buf,
             &FD_INTERFACE_INSTANCE_INDICATION,
@@ -418,7 +418,7 @@ fn push_global_ng_ran_node_id<'pkt>(
 /// choice-extension }`, with `E-UTRA-CGI ::= SEQUENCE { plmn-id,
 /// e-utra-CI BIT STRING (SIZE(28)), iE-Extension OPTIONAL, ... }`.
 ///
-/// 3GPP TS 38.423, Sections 9.2.2.9, 9.2.2.11 and 9.3.5; ITU-T Rec. X.691,
+/// 3GPP TS 38.423, Sections 9.2.3.25, 9.2.2.7, 9.2.2.8 and 9.3.5; ITU-T Rec. X.691,
 /// Sections 16.10, 19 and 23.
 fn push_target_cgi<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) -> bool {
     ies::push_value_with(buf, data, |buf, r| {
@@ -466,7 +466,7 @@ fn push_target_cgi<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset
 /// DataForwardingInfoFromTargetNGRANnode OPTIONAL, iE-Extensions
 /// OPTIONAL, ... }`.
 ///
-/// 3GPP TS 38.423, Sections 9.2.1.2, 9.2.1.3 and 9.3.5; ITU-T Rec. X.691,
+/// 3GPP TS 38.423, Sections 9.2.1.2, 9.2.1.4, 9.2.1.16 and 9.3.5; ITU-T Rec. X.691,
 /// Sections 19, 20.
 fn push_pdu_session_resources_admitted_list<'pkt>(
     buf: &mut DissectBuffer<'pkt>,

@@ -153,16 +153,16 @@ mod tests {
     //! | Spec Section | Description                                          | Test                              |
     //! |--------------|------------------------------------------------------|-----------------------------------|
     //! | 9.3.3        | XnAP-PDU initiatingMessage, Xn Setup Request         | xn_setup_request                  |
-    //! | 9.2.2.1      | Global NG-RAN Node ID (gNB), Interface Instance Ind. | xn_setup_request                  |
+    //! | 9.2.2.1, 9.2.2.39 | Global NG-RAN Node ID (gNB), Interface Instance Ind. | xn_setup_request                  |
     //! | 9.3.3        | successfulOutcome, Xn Setup Response                 | xn_setup_response_ng_enb          |
     //! | 9.2.2.2      | Global NG-RAN Node ID (ng-eNB, long macro eNB ID)    | xn_setup_response_ng_enb          |
     //! | 9.3.3        | unsuccessfulOutcome, Xn Setup Failure                | xn_setup_failure                  |
-    //! | 9.2.3.2      | Cause (extension value), Time To Wait                | xn_setup_failure                  |
+    //! | 9.2.3.2, 9.2.3.56 | Cause (extension value), Time To Wait                | xn_setup_failure                  |
     //! | 9.1.1.2      | Handover Request Acknowledge                         | handover_request_acknowledge      |
     //! | 9.2.3.16     | NG-RAN node UE XnAP ID                               | handover_request_acknowledge      |
     //! | 9.2.1.2      | PDU Session Resources Admitted List                  | handover_request_acknowledge      |
     //! | 9.2.1.16     | Data Forwarding Info from target (GTP-TEID)          | handover_request_acknowledge      |
-    //! | 9.1.1.3      | Handover Preparation Failure, Target Cell Global ID  | handover_preparation_failure      |
+    //! | 9.1.1.3, 9.2.3.25 | Handover Preparation Failure, Target Cell Global ID  | handover_preparation_failure      |
     //! | 9.1.1.5      | UE Context Release                                   | ue_context_release                |
     //! | 9.3.4        | Malformed admitted list kept raw                     | malformed_admitted_list_kept_raw  |
     //! | 9.3.3        | PDU extension rejected                               | pdu_extension_rejected            |

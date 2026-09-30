@@ -162,12 +162,12 @@ mod tests {
     //! | 9.3.1.12     | NR CGI                                             | initial_ul_rrc_message_transfer   |
     //! | 9.3.1.32     | C-RNTI                                             | initial_ul_rrc_message_transfer   |
     //! | 9.3.1.6      | RRC-Container (raw)                                | initial_ul_rrc_message_transfer   |
-    //! | 9.3.1.26     | DU to CU RRC Container (raw)                       | initial_ul_rrc_message_transfer   |
+    //! | 9.2.3.1      | DU to CU RRC Container (raw)                       | initial_ul_rrc_message_transfer   |
     //! | 9.2.3.3      | UL RRC Message Transfer, SRB ID, PLMN identity     | ul_rrc_message_transfer           |
     //! | 9.2.2.2      | UE Context Setup Response, DRBs Setup List         | ue_context_setup_response         |
     //! | 9.3.2.1      | UP Transport Layer Information (GTP-TEID)          | ue_context_setup_response         |
     //! | 9.2.2.8      | UE Context Modification Response, DRB lists        | ue_context_modification_response  |
-    //! | 9.3.1.4/5    | Malformed IE values kept raw                       | malformed_values_kept_raw         |
+    //! | 9.3.1.4, 9.3.1.7 | Malformed IE values kept raw                       | malformed_values_kept_raw         |
     //! | 9.4.3        | choice-extension PDU rejected                      | choice_extension_rejected         |
     //! | —            | Dissector metadata                                 | dissector_metadata                |
 

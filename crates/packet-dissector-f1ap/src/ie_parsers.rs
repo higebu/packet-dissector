@@ -189,7 +189,7 @@ pub(crate) fn push_ie_value<'pkt>(
             depth + 1,
             MAX_CELL_IN_GNB_DU,
         ),
-        // gNB-DU-Name — Section 9.3.1.12a.
+        // gNB-DU-Name — PrintableString in F1 SETUP REQUEST, Section 9.2.1.4.
         45 => ies::push_printable_string(buf, &FD_GNB_DU_NAME, 1, NAME_MAX, data, offset),
         // RRCContainer — Section 9.3.1.6.
         50 => ies::push_octet_string(buf, &FD_RRC_CONTAINER, data, offset),
@@ -204,11 +204,11 @@ pub(crate) fn push_ie_value<'pkt>(
         78 => {
             ies::push_extensible_unsigned(buf, &FD_TRANSACTION_ID, TRANSACTION_ID_MAX, data, offset)
         }
-        // gNB-CU-Name — Section 9.3.1.41.
+        // gNB-CU-Name — PrintableString in F1 SETUP RESPONSE, Section 9.2.1.5.
         82 => ies::push_printable_string(buf, &FD_GNB_CU_NAME, 1, NAME_MAX, data, offset),
         // C-RNTI — Section 9.3.1.32.
         95 => ies::push_extensible_unsigned(buf, &FD_C_RNTI, C_RNTI_MAX, data, offset),
-        // DUtoCURRCContainer — Section 9.3.1.26.
+        // DUtoCURRCContainer — OCTET STRING in INITIAL UL RRC MESSAGE TRANSFER, Section 9.2.3.1.
         128 => ies::push_octet_string(buf, &FD_DU_TO_CU_RRC_CONTAINER, data, offset),
         // ServingPLMN / PLMNAssistanceInfoForNetShar / SelectedPLMNID —
         // PLMN-Identity, Section 9.3.1.14.

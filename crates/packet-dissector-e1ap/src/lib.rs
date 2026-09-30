@@ -155,15 +155,15 @@ mod tests {
     //! | 9.4.3        | E1AP-PDU initiatingMessage                           | gnb_cu_up_e1_setup_request        |
     //! | 9.2.1.4      | gNB-CU-UP E1 Setup Request IEs                       | gnb_cu_up_e1_setup_request        |
     //! | 9.3.1.15     | gNB-CU-UP ID                                         | gnb_cu_up_e1_setup_request        |
-    //! | 9.3.1.20     | CN Support                                           | gnb_cu_up_e1_setup_request        |
+    //! | 9.2.1.4      | CN Support                                           | gnb_cu_up_e1_setup_request        |
     //! | 9.4.3        | unsuccessfulOutcome, E1 Setup Failure                | gnb_cu_up_e1_setup_failure        |
-    //! | 9.3.1.2      | Cause, Time To Wait                                  | gnb_cu_up_e1_setup_failure        |
+    //! | 9.3.1.2, 9.3.1.6 | Cause, Time To Wait                                  | gnb_cu_up_e1_setup_failure        |
     //! | 9.2.2.2      | Bearer Context Setup Response (NG-RAN)               | bearer_context_setup_response_ng_ran |
-    //! | 9.3.3.x      | PDU Session Resource Setup List, DRB / QoS lists     | bearer_context_setup_response_ng_ran |
+    //! | 9.3.3.5      | PDU Session Resource Setup List, DRB / QoS lists     | bearer_context_setup_response_ng_ran |
     //! | 9.3.2.1      | UP TNL Information (GTP-TEID)                        | bearer_context_setup_response_ng_ran |
     //! | 9.2.2.2      | Bearer Context Setup Response (E-UTRAN)              | bearer_context_setup_response_eutran |
-    //! | 9.3.3.x      | DRB Setup List E-UTRAN, UP Parameters                | bearer_context_setup_response_eutran |
-    //! | 9.2.2.5      | Bearer Context Release Command                       | bearer_context_release_command    |
+    //! | 9.3.3.3, 9.3.1.13 | DRB Setup List E-UTRAN, UP Parameters                | bearer_context_setup_response_eutran |
+    //! | 9.2.2.9      | Bearer Context Release Command                       | bearer_context_release_command    |
     //! | 9.4.4        | Malformed nested list kept raw                       | malformed_nested_list_kept_raw    |
     //! | 9.4.3        | PDU extension rejected                               | pdu_extension_rejected            |
     //! | —            | Dissector metadata                                   | dissector_metadata                |

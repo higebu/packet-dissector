@@ -310,11 +310,11 @@ pub(crate) fn push_ie_value<'pkt>(
         3 => ies::push_unsigned(buf, &FD_GNB_CU_UP_UE_E1AP_ID, UE_E1AP_ID_MAX, data, offset),
         // gNB-CU-UP-ID — Section 9.3.1.15.
         7 => ies::push_unsigned(buf, &FD_GNB_CU_UP_ID, GNB_CU_UP_ID_MAX, data, offset),
-        // gNB-CU-UP-Name — Section 9.3.1.16.
+        // gNB-CU-UP-Name — PrintableString in GNB-CU-UP E1 SETUP REQUEST, Section 9.2.1.4.
         8 => ies::push_printable_string(buf, &FD_GNB_CU_UP_NAME, 1, NAME_MAX, data, offset),
-        // gNB-CU-CP-Name — Section 9.3.1.17.
+        // gNB-CU-CP-Name — PrintableString in GNB-CU-UP E1 SETUP RESPONSE, Section 9.2.1.5.
         9 => ies::push_printable_string(buf, &FD_GNB_CU_CP_NAME, 1, NAME_MAX, data, offset),
-        // CNSupport — Section 9.3.1.20.
+        // CNSupport — ENUMERATED in GNB-CU-UP E1 SETUP REQUEST, Section 9.2.1.4.
         10 => ies::push_enumerated(
             buf,
             &FD_CN_SUPPORT,
@@ -323,7 +323,7 @@ pub(crate) fn push_ie_value<'pkt>(
             data,
             offset,
         ),
-        // TimeToWait — Section 9.3.1.18.
+        // TimeToWait — Section 9.3.1.6.
         12 => ies::push_time_to_wait(buf, data, offset),
         // System-BearerContextSetupRequest / -SetupResponse /
         // -ModificationRequest / -ModificationResponse /
@@ -341,7 +341,7 @@ pub(crate) fn push_ie_value<'pkt>(
         }
         // Serving-PLMN — PLMN-Identity, Section 9.3.1.7.
         58 => ies::push_plmn_identity(buf, data, offset),
-        // gNB-CU-UP-Capacity — Section 9.3.1.30.
+        // gNB-CU-UP-Capacity — Section 9.3.1.56.
         64 => ies::push_unsigned(
             buf,
             &FD_GNB_CU_UP_CAPACITY,
@@ -401,7 +401,7 @@ fn push_system_bearer_context<'pkt>(
 /// OPTIONAL, uL-UP-Transport-Parameters UP-Parameters, s1-DL-UP-Unchanged
 /// ENUMERATED {true, ...} OPTIONAL, iE-Extensions OPTIONAL, ... }`.
 ///
-/// 3GPP TS 37.483, Sections 9.3.3.x and 9.4.5; ITU-T Rec. X.691, Sections
+/// 3GPP TS 37.483, Sections 9.3.3.3 and 9.4.5; ITU-T Rec. X.691, Sections
 /// 19, 20.
 fn push_drb_setup_list_eutran<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
@@ -439,7 +439,7 @@ fn push_drb_setup_list_eutran<'pkt>(
 /// {true, ...} OPTIONAL, dRB-Setup-List-NG-RAN, dRB-Failed-List-NG-RAN
 /// OPTIONAL, iE-Extensions OPTIONAL, ... }`.
 ///
-/// 3GPP TS 37.483, Sections 9.3.3.x and 9.4.5; ITU-T Rec. X.691, Sections
+/// 3GPP TS 37.483, Sections 9.3.3.5 and 9.4.5; ITU-T Rec. X.691, Sections
 /// 19, 20.
 fn push_pdu_session_resource_setup_list<'pkt>(
     buf: &mut DissectBuffer<'pkt>,

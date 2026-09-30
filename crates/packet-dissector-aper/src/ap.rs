@@ -549,7 +549,7 @@ mod tests {
     //! | X.691 19.8                 | Extension additions after the IEs       | container_extension_additions_skipped  |
     //! | X.691 11.9.3.8             | Fragmented message value                | fragmented_message_value               |
     //! | X.691 11.9.3.8             | Fragmented IE value                     | fragmented_ie_value                    |
-    //! | TS 38.473 9.2.1.x          | Private Message kept raw                | private_message_kept_raw               |
+    //! | TS 38.473 9.4.4, 9.4.8     | Private Message kept raw                | private_message_kept_raw               |
     //! | —                          | Empty message value                     | empty_message_value                    |
     //! | X.691 20.6                 | SingleContainer list                    | single_container_list                  |
     //! | X.691 20.6                 | SingleContainer list, bad count         | single_container_list_bad_count        |
