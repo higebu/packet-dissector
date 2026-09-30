@@ -58,6 +58,8 @@
 //! | Ethernet → IPv4 → TCP → HTTP 200 OK           | integration_ethernet_ipv4_tcp_http_response         |
 //! | Ethernet → IPv4 → UDP → SIP INVITE            | integration_ethernet_ipv4_udp_sip_invite            |
 //! | Ethernet → IPv4 → TCP → SIP 200 OK            | integration_ethernet_ipv4_tcp_sip_response          |
+//! | Ethernet → IPv4 → UDP → LDP Hello             | ethernet_ipv4_udp_ldp_hello                         |
+//! | Ethernet → IPv4 → TCP → LDP ×2 (KeepAlive)    | ethernet_ipv4_tcp_ldp_keepalives                    |
 //! | Ethernet → IPv4 → UDP → SIP INVITE → SDP      | integration_ethernet_ipv4_udp_sip_invite_with_sdp   |
 //! | Ethernet → IPv4 → TCP → HTTP 200 → SDP        | integration_ethernet_ipv4_tcp_http_response_sdp_body |
 //! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
@@ -9230,4 +9232,59 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+// ---------------------------------------------------------------------------
+// LDP
+// ---------------------------------------------------------------------------
+
+/// Push an LDP PDU with one Hello message (RFC 5036, Section 3.5.2).
+fn push_ldp_hello(pkt: &mut Vec<u8>) {
+    pkt.extend_from_slice(&[0, 1, 0, 30, 10, 0, 0, 1, 0, 0]); // PDU header
+    pkt.extend_from_slice(&[0x01, 0x00, 0, 20, 0, 0, 0, 1]); // Hello
+    pkt.extend_from_slice(&[0x04, 0x00, 0, 4, 0, 15, 0, 0]); // Common Hello Parameters
+    pkt.extend_from_slice(&[0x04, 0x01, 0, 4, 10, 0, 0, 1]); // IPv4 Transport Address
+}
+
+#[test]
+fn ethernet_ipv4_udp_ldp_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x01, 0x00, 0x5e, 0, 0, 2], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [224, 0, 0, 2]);
+    let udp = push_udp(&mut pkt, 646, 646);
+    push_ldp_hello(&mut pkt);
+    fixup_udp_length(&mut pkt, udp);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "UDP", "LDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+#[test]
+fn ethernet_ipv4_tcp_ldp_keepalives() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 646, 50000, 0x18);
+    // Two PDUs, each with one KeepAlive message.
+    for id in [1u8, 2] {
+        pkt.extend_from_slice(&[0, 1, 0, 14, 10, 0, 0, 1, 0, 0]);
+        pkt.extend_from_slice(&[0x02, 0x01, 0, 4, 0, 0, 0, id]);
+    }
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "TCP", "LDP", "LDP"]);
+    assert_layers_contiguous(&buf);
 }

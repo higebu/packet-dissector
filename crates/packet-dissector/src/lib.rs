@@ -199,6 +199,9 @@ pub mod dissectors {
     #[cfg(feature = "l2tpv3")]
     pub use packet_dissector_l2tpv3 as l2tpv3;
 
+    #[cfg(feature = "ldp")]
+    pub use packet_dissector_ldp as ldp;
+
     #[cfg(feature = "tls")]
     pub use packet_dissector_tls as tls;
 
