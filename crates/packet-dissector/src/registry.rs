@@ -3056,6 +3056,22 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("ntp", || Box::new(packet_dissector_ntp::NtpDissector));
         }
 
+        // LDP uses UDP port 646 for discovery and TCP port 646 for sessions
+        // (RFC 5036, Section 3.10.1 —
+        // https://www.rfc-editor.org/rfc/rfc5036#section-3.10.1).
+        #[cfg(feature = "ldp")]
+        {
+            #[cfg(feature = "udp")]
+            assert_builtin(
+                reg.register_by_udp_port(646, Box::new(packet_dissector_ldp::LdpDissector)),
+            );
+            #[cfg(feature = "tcp")]
+            assert_builtin(
+                reg.register_by_tcp_port(646, Box::new(packet_dissector_ldp::LdpDissector)),
+            );
+            reg.register_dissector_factory("ldp", || Box::new(packet_dissector_ldp::LdpDissector));
+        }
+
         // BFD Control runs over UDP on ports 3784 (single-hop, RFC 5881),
         // 4784 (multihop, RFC 5883), 6784 (Micro-BFD on LAG members,
         // RFC 7130, Section 2.2) and 7784 (S-BFD, RFC 7881, Section 2).
@@ -4269,6 +4285,8 @@ mod tests {
         assert!(reg.create_dissector_by_name("tls").is_some());
         #[cfg(feature = "bgp")]
         assert!(reg.create_dissector_by_name("bgp").is_some());
+        #[cfg(feature = "ldp")]
+        assert!(reg.create_dissector_by_name("ldp").is_some());
         #[cfg(feature = "bmp")]
         assert!(reg.create_dissector_by_name("bmp").is_some());
         #[cfg(feature = "sip")]
@@ -5682,6 +5700,12 @@ mod tests {
 
         #[cfg(all(feature = "ntp", feature = "udp"))]
         assert!(reg.get_by_udp_port(123).is_some());
+
+        #[cfg(all(feature = "ldp", feature = "udp"))]
+        assert!(reg.get_by_udp_port(646).is_some());
+
+        #[cfg(all(feature = "ldp", feature = "tcp"))]
+        assert!(reg.get_by_tcp_port(646).is_some());
 
         #[cfg(all(feature = "bfd", feature = "udp"))]
         {

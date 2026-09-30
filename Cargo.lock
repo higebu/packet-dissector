@@ -641,6 +641,7 @@ dependencies = [
  "packet-dissector-l2tp",
  "packet-dissector-l2tpv3",
  "packet-dissector-lacp",
+ "packet-dissector-ldp",
  "packet-dissector-linux-sll",
  "packet-dissector-linux-sll2",
  "packet-dissector-lldp",
@@ -1030,6 +1031,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-ldp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-linux-sll"
 version = "0.5.0"
 dependencies = [
@@ -1182,6 +1192,7 @@ dependencies = [
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
+ "packet-dissector-ldp",
  "packet-dissector-m3ua",
  "packet-dissector-map",
  "packet-dissector-mdns",

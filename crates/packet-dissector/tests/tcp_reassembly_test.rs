@@ -25,6 +25,7 @@
 //! | —                    | Zero-length success from the upper dissector is an error | zero_length_upper_result_is_error                       |
 //! | —                    | Body dispatcher that never consumes does not loop         | stalled_body_dispatch_terminates                        |
 //! | —                    | Body parse error still consumes the body                 | body_parse_error_does_not_desync_stream                 |
+//! | RFC 5036 3.1         | LDP PDU split across segments                            | ldp_pdu_reassembled                                     |
 //! | RFC 7854 4.6         | BMP Route Monitoring split across segments (decode-as)   | bmp_route_monitoring_reassembled                        |
 
 use packet_dissector::dissector::{DispatchHint, DissectResult, Dissector};
@@ -163,6 +164,43 @@ fn sip_body_bounded_by_content_length_reassembled() {
     );
     assert_eq!(str_fields(&buf, "SIP", "method"), ["INVITE", "OPTIONS"]);
     assert!(!reassembly_in_progress(&buf));
+}
+
+#[cfg(feature = "ldp")]
+#[test]
+fn ldp_pdu_reassembled() {
+    let reg = DissectorRegistry::default();
+    // LDP PDU (RFC 5036, Section 3.1) with an Address message.
+    let mut pdu = vec![0, 1, 0, 28, 10, 0, 0, 1, 0, 0];
+    pdu.extend_from_slice(&[0x03, 0x00, 0, 18, 0, 0, 0, 1]); // Address
+    pdu.extend_from_slice(&[0x01, 0x01, 0, 10, 0, 1, 10, 0, 0, 1, 10, 0, 0, 2]);
+    let split = 12;
+
+    let pkt = c2s(646, 1000, PSH_ACK, &pdu[..split]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert!(reassembly_in_progress(&buf));
+
+    let pkt = c2s(646, 1000 + split as u32, PSH_ACK, &pdu[split..]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "TCP", "LDP"]);
+    assert!(!reassembly_in_progress(&buf));
+    let ldp = buf.layer_by_name("LDP").unwrap();
+    let addresses: Vec<_> = buf
+        .layer_fields(ldp)
+        .iter()
+        .filter(|f| f.name() == "address")
+        .map(|f| f.value.clone())
+        .collect();
+    assert_eq!(
+        addresses,
+        [
+            FieldValue::Ipv4Addr([10, 0, 0, 1]),
+            FieldValue::Ipv4Addr([10, 0, 0, 2])
+        ]
+    );
+    assert!(buf.layer_fields(ldp).iter().all(|f| f.name() != "data"));
 }
 
 /// BMP Route Monitoring (IPv4 Global Instance Peer) carrying a BGP UPDATE
