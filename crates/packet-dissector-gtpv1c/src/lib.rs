@@ -723,6 +723,23 @@ mod tests {
     }
 
     #[test]
+    fn display_fns_reject_other_values() {
+        for d in FIELD_DESCRIPTORS
+            .iter()
+            .chain(EXT_HEADER_FIELD_DESCRIPTORS)
+            .chain([&FD_EXTENSION_HEADER])
+        {
+            if let Some(f) = d.display_fn {
+                assert_eq!(f(&FieldValue::U16(0), &[]), None, "{}", d.name);
+            }
+        }
+        assert_eq!(
+            extension_header_type_name(0),
+            Some("No more extension headers")
+        );
+    }
+
+    #[test]
     fn offset_is_applied() {
         let mut buf = DissectBuffer::new();
         Gtpv1cDissector.dissect(ECHO_REQUEST, &mut buf, 42).unwrap();

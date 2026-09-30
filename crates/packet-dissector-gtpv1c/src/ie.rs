@@ -1513,6 +1513,32 @@ mod tests {
     }
 
     #[test]
+    fn display_and_format_fns_reject_other_values() {
+        let ctx = packet_dissector_core::field::FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        for d in IE_FIELD_DESCRIPTORS.iter().chain([&FD_IE]) {
+            if let Some(f) = d.display_fn {
+                assert_eq!(f(&FieldValue::U16(0), &[]), None, "{}", d.name);
+            }
+            if let Some(f) = d.format_fn {
+                let mut out = Vec::new();
+                f(&FieldValue::U8(0), &ctx, &mut out).unwrap();
+                assert!(out.starts_with(b"\""), "{}", d.name);
+            }
+        }
+        // PDP Type Number without an organisation sibling.
+        let number = &IE_FIELD_DESCRIPTORS[FD_PDP_TYPE_NUMBER];
+        assert_eq!(
+            (number.display_fn.unwrap())(&FieldValue::U8(0x21), &[]),
+            None
+        );
+    }
+
+    #[test]
     fn tbcd_special_digits() {
         let mut out = Vec::new();
         format_tbcd_to(&[0xBA, 0xDC, 0xFE], &mut out).unwrap();

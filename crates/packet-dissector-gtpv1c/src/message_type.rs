@@ -104,6 +104,16 @@ mod tests {
     }
 
     #[test]
+    fn message_type_table_size() {
+        // TS 29.060, Table 1: every assigned value, including the GTP' and
+        // GTP-U only types.
+        let assigned = (0..=255u8)
+            .filter(|t| message_type_name(*t).is_some())
+            .count();
+        assert_eq!(assigned, 70);
+    }
+
+    #[test]
     fn unassigned_message_types() {
         for v in [
             0u8, 8, 15, 24, 25, 38, 47, 63, 69, 71, 95, 106, 111, 122, 130, 239, 242, 252,
