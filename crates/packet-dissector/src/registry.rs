@@ -2542,6 +2542,13 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // EPS NAS is carried inside S1AP; register as a factory for
+        // standalone use (e.g., `bask read --dissector nas-eps`).
+        #[cfg(feature = "nas-eps")]
+        reg.register_dissector_factory("nas-eps", || {
+            Box::new(packet_dissector_nas_eps::NasEpsDissector)
+        });
+
         // BGP runs over TCP on port 179 (RFC 4271)
         #[cfg(feature = "bgp")]
         {
@@ -4329,6 +4336,9 @@ mod tests {
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());
+
+        #[cfg(feature = "nas-eps")]
+        assert!(reg.create_dissector_by_name("nas-eps").is_some());
 
         #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
         assert!(reg.create_dissector_by_name("l2tp").is_some());
