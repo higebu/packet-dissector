@@ -2289,6 +2289,24 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // SNMP runs over UDP on ports 161 (agent) and 162 (notifications).
+        // RFC 3417, Section 3.2 — https://www.rfc-editor.org/rfc/rfc3417#section-3.2
+        #[cfg(feature = "snmp")]
+        {
+            #[cfg(feature = "udp")]
+            for port in [
+                packet_dissector_snmp::SNMP_PORT,
+                packet_dissector_snmp::SNMP_TRAP_PORT,
+            ] {
+                assert_builtin(
+                    reg.register_by_udp_port(port, Box::new(packet_dissector_snmp::SnmpDissector)),
+                );
+            }
+            reg.register_dissector_factory("snmp", || {
+                Box::new(packet_dissector_snmp::SnmpDissector)
+            });
+        }
+
         // DNS runs over both TCP and UDP (RFC 1035)
         #[cfg(feature = "dns")]
         {
@@ -4210,6 +4228,14 @@ mod tests {
             assert!(reg.get_by_udp_port(7784).is_some());
         }
 
+        // SNMP: RFC 3417, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc3417#section-3.2
+        #[cfg(all(feature = "snmp", feature = "udp"))]
+        {
+            assert!(reg.get_by_udp_port(161).is_some());
+            assert!(reg.get_by_udp_port(162).is_some());
+        }
+
         #[cfg(all(feature = "mdns", feature = "udp"))]
         assert!(reg.get_by_udp_port(5353).is_some());
 
@@ -4291,6 +4317,9 @@ mod tests {
             assert!(reg.create_dissector_by_name("bfd").is_some());
             assert!(reg.create_dissector_by_name("bfd.echo").is_some());
         }
+
+        #[cfg(feature = "snmp")]
+        assert!(reg.create_dissector_by_name("snmp").is_some());
 
         #[cfg(feature = "dhcp")]
         assert!(reg.create_dissector_by_name("dhcp").is_some());

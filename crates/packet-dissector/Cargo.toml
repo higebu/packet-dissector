@@ -52,6 +52,7 @@ default = [
   "ospf",
   "vrrp",
   "bfd",
+  "snmp",
   "isis",
   "bgp",
   "l2tp",
@@ -114,6 +115,7 @@ ntp = ["dep:packet-dissector-ntp"]
 ospf = ["dep:packet-dissector-ospf"]
 vrrp = ["dep:packet-dissector-vrrp"]
 bfd = ["dep:packet-dissector-bfd"]
+snmp = ["dep:packet-dissector-snmp"]
 isis = ["dep:packet-dissector-isis"]
 bgp = ["dep:packet-dissector-bgp"]
 l2tp = ["dep:packet-dissector-l2tp"]
@@ -161,6 +163,7 @@ application = [
   "tls",
   "quic",
   "stun",
+  "snmp",
 ]
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
@@ -210,6 +213,7 @@ packet-dissector-ntp = { workspace = true, optional = true }
 packet-dissector-ospf = { workspace = true, optional = true }
 packet-dissector-vrrp = { workspace = true, optional = true }
 packet-dissector-bfd = { workspace = true, optional = true }
+packet-dissector-snmp = { workspace = true, optional = true }
 packet-dissector-isis = { workspace = true, optional = true }
 packet-dissector-bgp = { workspace = true, optional = true }
 packet-dissector-l2tp = { workspace = true, optional = true }

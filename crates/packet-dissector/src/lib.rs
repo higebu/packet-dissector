@@ -187,6 +187,9 @@ pub mod dissectors {
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
 
+    #[cfg(feature = "snmp")]
+    pub use packet_dissector_snmp as snmp;
+
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
 
