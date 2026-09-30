@@ -7,6 +7,9 @@
 
 #![deny(missing_docs)]
 
+use packet_dissector_core::checksum::{
+    ChecksumStatus, checksum_status_descriptor, verify_pseudo_header_checksum,
+};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -23,12 +26,17 @@ const FD_SRC_PORT: usize = 0;
 const FD_DST_PORT: usize = 1;
 const FD_LENGTH: usize = 2;
 const FD_CHECKSUM: usize = 3;
+const FD_CHECKSUM_STATUS: usize = 4;
+
+/// IP protocol number of UDP, used in the checksum pseudo-header.
+const IP_PROTO_UDP: u8 = 17;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("src_port", "Source Port", FieldType::U16),
     FieldDescriptor::new("dst_port", "Destination Port", FieldType::U16),
     FieldDescriptor::new("length", "Length", FieldType::U16),
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// UDP dissector.
@@ -135,6 +143,38 @@ impl Dissector for UdpDissector {
             FieldValue::U16(checksum),
             offset + 6..offset + 8,
         );
+        if buf.verify_checksums() {
+            let status = if checksum == 0 {
+                // RFC 768 — "An all zero transmitted checksum value means
+                // that the transmitter generated no checksum". Over IPv6 a
+                // zero checksum is only allowed in zero-checksum mode for
+                // tunnels (RFC 8200, Section 8.1; RFC 6936); either way no
+                // checksum was sent.
+                // https://www.rfc-editor.org/rfc/rfc768
+                // https://www.rfc-editor.org/rfc/rfc8200#section-8.1
+                ChecksumStatus::NotPresent
+            } else {
+                // RFC 768 — the checksum covers a pseudo-header, the UDP
+                // header and the data; the pseudo-header carries the UDP
+                // Length, which also bounds the checksummed data. RFC 9868,
+                // Section 8 — the surplus area "is not otherwise covered by
+                // the UDP checksum".
+                // https://www.rfc-editor.org/rfc/rfc768
+                // https://www.rfc-editor.org/rfc/rfc9868#section-8
+                verify_pseudo_header_checksum(
+                    buf,
+                    offset,
+                    IP_PROTO_UDP,
+                    data,
+                    Some(length as usize),
+                )
+            };
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 6..offset + 8,
+            );
+        }
         buf.end_layer();
 
         Ok(
@@ -168,7 +208,7 @@ mod tests {
     // | RFC 768 §Header                        | Non-zero dissect offset propagates to field ranges | parse_with_offset                 |
     // | RFC 768 §Header                        | Dispatch hint carries both ports in order          | dispatch_hint_carries_both_ports  |
     // | ---                                    | Dissector metadata                                 | dissector_metadata                |
-    // | ---                                    | Field descriptors ordering                         | field_descriptors_ordering        |
+    // | ---                                    | Field descriptors ordering (incl. checksum_status) | field_descriptors_ordering        |
 
     /// Build a UDP datagram sized to the declared `length`, with a zero payload.
     fn build_udp(src_port: u16, dst_port: u16, length: u16, checksum: u16) -> Vec<u8> {
@@ -387,14 +427,18 @@ mod tests {
         // The field descriptor ordering is part of the public contract and
         // must match the documented RFC 768 header layout.
         let fds = UdpDissector.field_descriptors();
-        assert_eq!(fds.len(), 4);
+        assert_eq!(fds.len(), 5);
         assert_eq!(fds[FD_SRC_PORT].name, "src_port");
         assert_eq!(fds[FD_DST_PORT].name, "dst_port");
         assert_eq!(fds[FD_LENGTH].name, "length");
         assert_eq!(fds[FD_CHECKSUM].name, "checksum");
-        for fd in fds {
+        for fd in &fds[..FD_CHECKSUM_STATUS] {
             assert_eq!(fd.field_type, FieldType::U16);
         }
+        // Optional status, only emitted when checksum verification is on.
+        assert_eq!(fds[FD_CHECKSUM_STATUS].name, "checksum_status");
+        assert_eq!(fds[FD_CHECKSUM_STATUS].field_type, FieldType::U8);
+        assert!(fds[FD_CHECKSUM_STATUS].optional);
     }
 
     #[test]
