@@ -414,6 +414,7 @@ mod tests {
     //! | 7.2.2      | Echo Response with Recovery                   | parse_echo_response_with_recovery            |
     //! | 7.3.1      | Create PDP Context Request                    | parse_create_pdp_context_request             |
     //! | 7.7        | IE decoding                                   | ie::tests::*                                 |
+    //! | 7.7.40     | Extension Header Type List one-octet Length   | ie::tests::tlv_extension_header_type_list_one_octet_length |
     //! | 8.2        | PN=1 accepted                                 | parse_pn_flag_set                            |
 
     use super::*;

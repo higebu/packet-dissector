@@ -27,6 +27,7 @@ fn arb_ie() -> impl Strategy<Value = Vec<u8>> {
             Just(132),
             Just(133),
             Just(137),
+            Just(141),
             Just(152),
             Just(238),
             Just(255),
@@ -36,7 +37,10 @@ fn arb_ie() -> impl Strategy<Value = Vec<u8>> {
     )
         .prop_map(|(ie_type, body)| {
             let mut ie = vec![ie_type];
-            if ie_type & 0x80 != 0 {
+            // 3GPP TS 29.060, Section 7.7.40 — IE 141 has a one-octet Length.
+            if ie_type == 141 {
+                ie.push(body.len() as u8);
+            } else if ie_type & 0x80 != 0 {
                 ie.extend_from_slice(&(body.len() as u16).to_be_bytes());
             }
             ie.extend_from_slice(&body);

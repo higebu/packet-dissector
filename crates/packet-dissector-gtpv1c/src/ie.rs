@@ -63,6 +63,8 @@ const IE_MSISDN: u8 = 134;
 const IE_QOS_PROFILE: u8 = 135;
 /// IE type: Traffic Flow Template (TLV). Section 7.7.36.
 const IE_TFT: u8 = 137;
+/// IE type: Extension Header Type List (TLV, one-octet Length). Section 7.7.40.
+const IE_EXT_HEADER_TYPE_LIST: u8 = 141;
 /// IE type: Common Flags (TLV). Section 7.7.48.
 const IE_COMMON_FLAGS: u8 = 148;
 /// IE type: RAT Type (TLV). Section 7.7.50.
@@ -452,7 +454,8 @@ const FD_GEOGRAPHIC_LOCATION_TYPE: usize = 47;
 const FD_IMEISV: usize = 48;
 const FD_EXTENSION_IDENTIFIER: usize = 49;
 const FD_EXTENSION_VALUE: usize = 50;
-const FD_VALUE: usize = 51;
+const FD_EXT_HEADER_TYPES: usize = 51;
+const FD_VALUE: usize = 52;
 
 /// Child fields of an IE object (the union over all decoded IE types).
 pub(crate) static IE_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
@@ -612,6 +615,12 @@ pub(crate) static IE_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     )
     .optional(),
     FieldDescriptor::new("extension_value", "Extension Value", FieldType::Bytes).optional(),
+    FieldDescriptor::new(
+        "extension_header_types",
+        "Extension Header Types",
+        FieldType::Bytes,
+    )
+    .optional(),
     FieldDescriptor::new("value", "Value", FieldType::Bytes).optional(),
 ];
 
@@ -639,16 +648,23 @@ pub(crate) fn parse_ies<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], b
                 .filter(|len| pos + 1 + len <= data.len())
                 .map(|len| (pos + 1, len))
         } else {
-            // TLV: two-octet Length excluding the Type and Length fields.
-            match read_be_u16(data, pos + 1).map(usize::from) {
-                Ok(len) if pos + 3 + len <= data.len() => {
+            // TLV: Length excluding the Type and Length fields. It is two
+            // octets, except for the Extension Header Type List whose Length
+            // is one octet (Section 7.7.40, Figure 55).
+            let (len_size, len) = if ie_type == IE_EXT_HEADER_TYPE_LIST {
+                (1, data.get(pos + 1).map(|l| usize::from(*l)))
+            } else {
+                (2, read_be_u16(data, pos + 1).ok().map(usize::from))
+            };
+            match len {
+                Some(len) if pos + 1 + len_size + len <= data.len() => {
                     push(
                         buf,
                         FD_LENGTH,
                         FieldValue::U16(len as u16),
-                        start + 1..start + 3,
+                        start + 1..start + 1 + len_size,
                     );
-                    Some((pos + 3, len))
+                    Some((pos + 1 + len_size, len))
                 }
                 _ => None,
             }
@@ -786,6 +802,15 @@ fn push_ie_value<'pkt>(buf: &mut DissectBuffer<'pkt>, ie_type: u8, v: &'pkt [u8]
                 &IE_FIELD_DESCRIPTORS[FD_TFT],
                 &(off..off + v.len()),
                 buf,
+            );
+            true
+        }
+        IE_EXT_HEADER_TYPE_LIST => {
+            push(
+                buf,
+                FD_EXT_HEADER_TYPES,
+                FieldValue::Bytes(v),
+                off..off + v.len(),
             );
             true
         }
@@ -1338,6 +1363,79 @@ mod tests {
             assert!(has(ie, "value"), "{ie:?}");
         }
         assert_eq!(get(ies[4], "apn"), &FieldValue::Bytes(&[]));
+    }
+
+    #[test]
+    fn tlv_extension_header_type_list_one_octet_length() {
+        // 3GPP TS 29.060, Section 7.7.40, Figure 55 — octet 2 is the
+        // Length (one octet), followed by the list.
+        let buf = parse(&[141, 0x02, 0x01, 0x02, 14, 0x05]);
+        let ies = ie_list(&buf);
+        assert_eq!(ies.len(), 2);
+        assert_eq!(get(ies[0], "length"), &FieldValue::U16(2));
+        assert_eq!(
+            get(ies[0], "extension_header_types"),
+            &FieldValue::Bytes(&[0x01, 0x02])
+        );
+        assert_eq!(get(ies[1], "restart_counter"), &FieldValue::U8(5));
+
+        // Length past the end of the message ends the walk.
+        let buf = parse(&[141, 0x05, 0x01]);
+        let ies = ie_list(&buf);
+        assert_eq!(get(ies[0], "value"), &FieldValue::Bytes(&[0x05, 0x01]));
+    }
+
+    #[test]
+    fn name_tables_are_complete() {
+        let count =
+            |f: fn(u8) -> Option<&'static str>| (0..=255u8).filter(|v| f(*v).is_some()).count();
+        // Table 37: 27 TV types + 97 TLV types + 238, 251, 255.
+        assert_eq!(count(ie_type_name), 125);
+        // Table 38: 10 request, 3 acceptance and 42 rejection causes.
+        assert_eq!(count(cause_name), 55);
+        assert_eq!(count(rat_type_name), 6);
+        assert_eq!(count(selection_mode_name), 4);
+        assert_eq!(count(geographic_location_type_name), 3);
+        assert_eq!(pdp_type_organization_name(0), Some("ETSI"));
+        assert_eq!(pdp_type_organization_name(1), Some("IETF"));
+        assert_eq!(pdp_type_organization_name(2), None);
+        for t in 0..=255u8 {
+            assert_eq!(
+                tv_value_len(t).is_some(),
+                t < 128 && ie_type_name(t).is_some(),
+                "{t}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_names_resolve() {
+        let buf = parse(&[
+            1, 192, // Cause
+            15, 0x02, // Selection Mode
+            128, 0x00, 0x02, 0xF1, 0x57, // End User Address
+            151, 0x00, 0x01, 0x02, // RAT Type
+            152, 0x00, 0x08, 0x02, 0x62, 0xF2, 0x10, 0x00, 0x01, 0x07, 0xFF, // ULI
+        ]);
+        let objs: Vec<_> = buf
+            .fields()
+            .iter()
+            .filter_map(|f| match (f.name(), &f.value) {
+                ("ie", FieldValue::Object(r)) => Some(r.clone()),
+                _ => None,
+            })
+            .collect();
+        let name = |i: usize, n: &str| buf.resolve_nested_display_name(&objs[i], n);
+        assert_eq!(name(0, "type_name"), Some("Cause"));
+        assert_eq!(name(0, "cause_name"), Some("Non-existent"));
+        assert_eq!(
+            name(1, "selection_mode_name"),
+            Some("Network provided APN, subscription not verified")
+        );
+        assert_eq!(name(2, "pdp_type_organization_name"), Some("IETF"));
+        assert_eq!(name(2, "pdp_type_number_name"), Some("IPv6"));
+        assert_eq!(name(3, "rat_type_name"), Some("GERAN"));
+        assert_eq!(name(4, "geographic_location_type_name"), Some("RAI"));
     }
 
     #[test]
