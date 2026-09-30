@@ -1861,6 +1861,10 @@ impl DissectorRegistry {
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
+        // DTLS may be reachable only through `DtlsDemux`, which reports the
+        // schema of the protocol it shares a port with.
+        #[cfg(feature = "dtls")]
+        push(&packet_dissector_tls::DtlsDissector);
         // RTCP has no dispatch key (decode-as only), yet its layers are also
         // produced by the RTP dissector when RTP and RTCP share a port
         // (RFC 5761, Section 4 — https://www.rfc-editor.org/rfc/rfc5761#section-4).
@@ -2602,6 +2606,90 @@ impl Dissector for GtpcDispatcher {
                 value: u32::from(version),
             }),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DTLS first-octet demultiplexer — UDP ports shared by DTLS and another
+// protocol (STUN/TURN on 3478, DNS over QUIC on 853).
+// ---------------------------------------------------------------------------
+
+/// Routes a UDP payload to DTLS when its first octet is in 20..=63 and to
+/// `other` otherwise.
+///
+/// RFC 9443, Section 3 — <https://www.rfc-editor.org/rfc/rfc9443#section-3>:
+/// "If the value is between 20 and 63 (inclusive), then the packet is DTLS."
+/// The same range is listed for the TURN port in RFC 8656, Section 12 —
+/// <https://www.rfc-editor.org/rfc/rfc8656#section-12>.
+///
+/// It reports `other`'s names and schema, so it can replace `other`'s
+/// registration without changing the registry's schema output; the DTLS
+/// schema is exposed by `for_each_unique_dissector`.
+#[cfg(all(
+    feature = "udp",
+    feature = "dtls",
+    any(feature = "stun", feature = "quic")
+))]
+struct DtlsDemux {
+    other: &'static (dyn Dissector + Sync),
+}
+
+#[cfg(all(
+    feature = "udp",
+    feature = "dtls",
+    any(feature = "stun", feature = "quic")
+))]
+impl Dissector for DtlsDemux {
+    fn name(&self) -> &'static str {
+        self.other.name()
+    }
+
+    fn short_name(&self) -> &'static str {
+        self.other.short_name()
+    }
+
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        self.other.field_descriptors()
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        self.other.references()
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        self.other.layer()
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        // RFC 9443, Section 3 — "[20..63] -+--> forward to DTLS"
+        // https://www.rfc-editor.org/rfc/rfc9443#section-3
+        const DTLS_FIRST_OCTET: core::ops::RangeInclusive<u8> = 20..=63;
+        if data.first().is_some_and(|b| DTLS_FIRST_OCTET.contains(b)) {
+            // DTLS rejects some octets in that range (27..=31 are not
+            // assigned, RFC 9147, Section 4.1 —
+            // https://www.rfc-editor.org/rfc/rfc9147#section-4.1), and a
+            // QUIC packet with the QUIC bit greased can start with any of
+            // them (RFC 9287, Section 3.1 —
+            // https://www.rfc-editor.org/rfc/rfc9287#section-3.1). Undo
+            // whatever DTLS pushed and let the other protocol try.
+            let layers = buf.layers().len();
+            let fields = buf.field_count() as usize;
+            match packet_dissector_tls::DtlsDissector.dissect(data, buf, offset) {
+                Ok(result) => return Ok(result),
+                Err(_) => {
+                    while buf.layers().len() > layers {
+                        buf.pop_layer();
+                    }
+                    buf.truncate_fields(fields);
+                }
+            }
+        }
+        self.other.dissect(data, buf, offset)
     }
 }
 
@@ -3756,6 +3844,42 @@ impl Default for DissectorRegistry {
             // Section 12.5 — https://www.rfc-editor.org/rfc/rfc8656#section-12.5).
             reg.register_dissector_factory("stun.tcp", || {
                 Box::new(packet_dissector_stun::StunTcpDissector)
+            });
+        }
+
+        // DTLS (RFC 9147, RFC 6347) over UDP.
+        #[cfg(feature = "dtls")]
+        {
+            // DNS over DTLS runs on UDP port 853 (RFC 8094, Section 3.1 —
+            // https://www.rfc-editor.org/rfc/rfc8094#section-3.1), which DNS
+            // over QUIC shares (RFC 9250, Section 8.2 —
+            // https://www.rfc-editor.org/rfc/rfc9250#section-8.2); the two
+            // are told apart by the first octet (RFC 9443, Section 3 —
+            // https://www.rfc-editor.org/rfc/rfc9443#section-3).
+            #[cfg(all(feature = "udp", feature = "quic"))]
+            assert_builtin(reg.register_by_udp_port(
+                853,
+                Box::new(DtlsDemux {
+                    other: &packet_dissector_quic::QuicDissector,
+                }),
+            ));
+            #[cfg(all(feature = "udp", not(feature = "quic")))]
+            assert_builtin(
+                reg.register_by_udp_port(853, Box::new(packet_dissector_tls::DtlsDissector)),
+            );
+            // The STUN/TURN port multiplexes DTLS by its first octet
+            // (RFC 8656, Section 12 —
+            // https://www.rfc-editor.org/rfc/rfc8656#section-12), so the
+            // STUN registration above is wrapped in the demultiplexer.
+            #[cfg(all(feature = "udp", feature = "stun"))]
+            reg.register_by_udp_port_or_replace(
+                3478,
+                Box::new(DtlsDemux {
+                    other: &packet_dissector_stun::StunDissector,
+                }),
+            );
+            reg.register_dissector_factory("dtls", || {
+                Box::new(packet_dissector_tls::DtlsDissector)
             });
         }
 
@@ -6060,6 +6184,19 @@ mod tests {
 
         #[cfg(feature = "quic")]
         assert!(reg.create_dissector_by_name("quic").is_some());
+
+        #[cfg(feature = "dtls")]
+        {
+            let dtls = reg.create_dissector_by_name("dtls").unwrap();
+            assert_eq!(dtls.short_name(), "DTLS");
+            assert!(
+                reg.all_field_schemas()
+                    .iter()
+                    .any(|s| s.short_name == "DTLS")
+            );
+            #[cfg(feature = "udp")]
+            assert!(reg.get_by_udp_port(853).is_some());
+        }
 
         #[cfg(feature = "stun")]
         {

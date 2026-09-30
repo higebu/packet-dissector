@@ -249,6 +249,11 @@
 //! | Ethernet → IPv4 → UDP(3799) → RADIUS CoA-Request              | integration_ethernet_ipv4_udp_radius_coa_request     |
 //! | Ethernet (0x8035) → ARP (RARP request)                        | integration_ethernet_rarp_request                    |
 //! | Ethernet → IPv6 → SRv6 (NH 143) → Ethernet → IPv4 → UDP       | integration_ethernet_ipv6_srv6_ethernet_ipv4_udp     |
+//! | Ethernet → IPv4 → UDP (853) → DTLS ClientHello + CCS         | integration_ethernet_ipv4_udp_dtls_client_hello_two_records |
+//! | Ethernet → IPv4 → UDP (853) → QUIC (RFC 9443 §3 demux)      | integration_ethernet_ipv4_udp_853_quic_not_dtls      |
+//! | Ethernet → IPv4 → UDP (3478) → DTLS 1.3 (RFC 9443 §3 demux) | integration_ethernet_ipv4_udp_stun_port_dtls         |
+//! | Ethernet → IPv4 → UDP (853) → DTLS reject → QUIC fallback    | integration_ethernet_ipv4_udp_853_dtls_reject_falls_back_to_quic |
+//! | Ethernet → IPv4 → UDP (3478) → DTLS reject → STUN fallback   | integration_ethernet_ipv4_udp_stun_port_dtls_reject_falls_back_to_stun |
 
 use packet_dissector::checksum::{ChecksumStatus, crc32c, internet_checksum};
 use packet_dissector::dissector::{
@@ -12389,6 +12394,194 @@ fn integration_ethernet_ipv4_gre_erspan_type3_ip() {
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "GRE", "ERSPAN", "IPv4", "UDP"]);
     assert_layers_contiguous(&buf);
+}
+
+// ---------------------------------------------------------------------------
+// DTLS
+// ---------------------------------------------------------------------------
+
+/// A DTLSPlaintext record (RFC 6347, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc6347#section-4.1>).
+fn dtls_record(ct: u8, epoch: u16, seq: u64, fragment: &[u8]) -> Vec<u8> {
+    let mut rec = vec![ct, 0xFE, 0xFD];
+    rec.extend_from_slice(&epoch.to_be_bytes());
+    rec.extend_from_slice(&seq.to_be_bytes()[2..]);
+    rec.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
+    rec.extend_from_slice(fragment);
+    rec
+}
+
+/// DNS over DTLS on UDP port 853 (RFC 8094, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8094#section-3.1>): a ClientHello with
+/// a cookie followed by a ChangeCipherSpec record in the same datagram.
+#[test]
+fn integration_ethernet_ipv4_udp_dtls_client_hello_two_records() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 853);
+    let dtls_start = pkt.len();
+
+    let mut body = vec![0xFE, 0xFD];
+    body.extend_from_slice(&[0x11; 32]); // random
+    body.push(0); // session_id
+    body.push(4); // cookie length
+    body.extend_from_slice(&[0xC0, 0x0C, 0x1E, 0x00]); // cookie
+    body.extend_from_slice(&[0x00, 0x02, 0xC0, 0x2B]); // cipher_suites
+    body.extend_from_slice(&[0x01, 0x00]); // compression_methods
+    let len = (body.len() as u32).to_be_bytes();
+    let mut hs = vec![
+        1, len[1], len[2], len[3], // msg_type, length
+        0x00, 0x01, // message_seq
+        0, 0, 0, // fragment_offset
+        len[1], len[2], len[3], // fragment_length
+    ];
+    hs.extend_from_slice(&body);
+    let first = dtls_record(22, 0, 1, &hs);
+    let first_len = first.len();
+    pkt.extend_from_slice(&first);
+    pkt.extend_from_slice(&dtls_record(20, 0, 2, &[1]));
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "UDP", "DTLS", "DTLS"]);
+    let hello = &buf.layers()[3];
+    assert_eq!(hello.range, dtls_start..dtls_start + first_len);
+    assert_eq!(hello.display_name, Some("DTLSv1.2"));
+    assert_eq!(buf.layers()[4].range.end, pkt.len());
+
+    let arr = buf.field_by_name(hello, "handshake_messages").unwrap();
+    let range = arr.value.as_container_range().unwrap().clone();
+    let msg = &buf.nested_fields(&range)[0];
+    let msg_fields = buf.nested_fields(msg.value.as_container_range().unwrap());
+    let cookie = msg_fields.iter().find(|f| f.name() == "cookie").unwrap();
+    assert_eq!(cookie.value, FieldValue::Bytes(&[0xC0, 0x0C, 0x1E, 0x00]));
+    let seq = msg_fields
+        .iter()
+        .find(|f| f.name() == "message_seq")
+        .unwrap();
+    assert_eq!(seq.value, FieldValue::U16(1));
+
+    let ccs = &buf.layers()[4];
+    assert_eq!(
+        buf.resolve_display_name(ccs, "content_type_name"),
+        Some("Change Cipher Spec")
+    );
+    assert_eq!(
+        buf.field_by_name(ccs, "sequence_number").unwrap().value,
+        FieldValue::U64(2)
+    );
+}
+
+/// UDP port 853 is shared by DNS over DTLS and DNS over QUIC; a first octet
+/// outside 20..=63 is QUIC (RFC 9443, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc9443#section-3>; RFC 9250,
+/// Section 8.2 — <https://www.rfc-editor.org/rfc/rfc9250#section-8.2>).
+#[test]
+fn integration_ethernet_ipv4_udp_853_quic_not_dtls() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 853, 54321);
+    // QUIC short header: header_form=0, fixed_bit=1.
+    pkt.push(0x40);
+    pkt.extend_from_slice(&[0xBB; 20]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "QUIC");
+}
+
+/// A first octet in 20..=63 that DTLS rejects (27..=31 are unassigned in
+/// RFC 9147, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9147#section-4.1>)
+/// falls back to QUIC on port 853, e.g. a packet with the QUIC bit greased
+/// (RFC 9287, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9287#section-3.1>).
+#[test]
+fn integration_ethernet_ipv4_udp_853_dtls_reject_falls_back_to_quic() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 853, 54321);
+    // QUIC short header with fixed_bit=0 (greased): first octet 0x1B.
+    pkt.push(0x1B);
+    pkt.extend_from_slice(&[0xBB; 20]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "QUIC");
+}
+
+/// A first octet in 20..=63 that DTLS rejects falls back to STUN on the
+/// STUN/TURN port (RFC 9443, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc9443#section-3>).
+#[test]
+fn integration_ethernet_ipv4_udp_stun_port_dtls_reject_falls_back_to_stun() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 3478);
+    // STUN header: message type 0x1B01, length 0, magic cookie, transaction ID.
+    pkt.extend_from_slice(&[0x1B, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42]);
+    pkt.extend_from_slice(&[0x11; 12]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "STUN");
+}
+
+/// A DTLS 1.3 record on the STUN/TURN port is DTLS by its first octet
+/// (RFC 8656, Section 12 — <https://www.rfc-editor.org/rfc/rfc8656#section-12>;
+/// RFC 9443, Section 3 — <https://www.rfc-editor.org/rfc/rfc9443#section-3>).
+#[test]
+fn integration_ethernet_ipv4_udp_stun_port_dtls() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 3478);
+    // Unified header 001 C=0 S=1 L=1 E=01, sequence 0x0102, length 3.
+    pkt.extend_from_slice(&[0x2D, 0x01, 0x02, 0x00, 0x03, 0xAA, 0xBB, 0xCC]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers().len(), 4);
+    let dtls = &buf.layers()[3];
+    assert_eq!(dtls.name, "DTLS");
+    assert_eq!(dtls.display_name, Some("DTLSv1.3"));
+    assert_eq!(
+        buf.field_by_name(dtls, "encrypted_sequence_number")
+            .unwrap()
+            .value,
+        FieldValue::U16(0x0102)
+    );
 }
 
 /// LLMNR query (RFC 4795, Section 2.1.1): ID, flags C=0 TC=0 T=0, one

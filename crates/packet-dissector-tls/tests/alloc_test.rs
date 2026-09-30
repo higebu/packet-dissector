@@ -3,7 +3,7 @@
 use packet_dissector_core::dissector::Dissector;
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_test_alloc::{count_allocs, setup_counting_allocator};
-use packet_dissector_tls::TlsDissector;
+use packet_dissector_tls::{DtlsDissector, TlsDissector};
 
 setup_counting_allocator!();
 
@@ -248,4 +248,48 @@ fn zero_alloc_dissect_tls_handshake_bodies_and_heartbeat() {
         allocs, 0,
         "TLS handshake body dissect allocated {allocs} times"
     );
+}
+
+/// A DTLSPlaintext record: type, version, epoch, 48-bit sequence number,
+/// length, fragment (RFC 6347, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc6347#section-4.1>).
+fn dtls_record(ct: u8, epoch: u16, fragment: &[u8]) -> Vec<u8> {
+    let mut rec = vec![ct, 0xFE, 0xFD];
+    rec.extend_from_slice(&epoch.to_be_bytes());
+    rec.extend_from_slice(&[0, 0, 0, 0, 0, 1]);
+    rec.extend_from_slice(&vec_n(2, fragment));
+    rec
+}
+
+#[test]
+fn zero_alloc_dissect_dtls_client_hello_ack_and_unified_header() {
+    // DTLS 1.2 ClientHello with a cookie (RFC 6347, Section 4.2.1 —
+    // <https://www.rfc-editor.org/rfc/rfc6347#section-4.2.1>).
+    let mut body = vec![0xFE, 0xFD];
+    body.extend_from_slice(&[0x11; 32]);
+    body.push(0); // session_id
+    body.extend_from_slice(&vec_n(1, &[0xAB; 20])); // cookie
+    body.extend_from_slice(&vec_n(2, &[0xC0, 0x2B]));
+    body.extend_from_slice(&vec_n(1, &[0]));
+    body.extend_from_slice(&vec_n(2, &ext(43, &vec_n(1, &[0xFE, 0xFC, 0xFE, 0xFD]))));
+    let len = (body.len() as u32).to_be_bytes();
+    let mut hs = vec![
+        1, len[1], len[2], len[3], 0, 0, 0, 0, 0, len[1], len[2], len[3],
+    ];
+    hs.extend_from_slice(&body);
+    let mut raw = dtls_record(22, 0, &hs);
+    // An ACK (RFC 9147, Section 7 — <https://www.rfc-editor.org/rfc/rfc9147#section-7>)
+    // and a DTLS 1.3 unified header record.
+    raw.extend_from_slice(&dtls_record(26, 0, &vec_n(2, &[0u8; 16])));
+    raw.extend_from_slice(&[0x2E, 0x00, 0x01, 0x00, 0x03, 0xAA, 0xBB, 0xCC]);
+
+    let mut buf = DissectBuffer::new();
+    DtlsDissector.dissect(&raw, &mut buf, 0).unwrap();
+    assert_eq!(buf.layers().len(), 3);
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        DtlsDissector.dissect(&raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "DTLS dissect allocated {allocs} times");
 }

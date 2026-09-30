@@ -1226,6 +1226,7 @@ dependencies = [
  "packet-dissector-snmp",
  "packet-dissector-tcap",
  "packet-dissector-tcp",
+ "packet-dissector-tls",
  "packet-dissector-xnap",
  "proptest",
 ]

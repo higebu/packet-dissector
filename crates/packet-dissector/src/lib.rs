@@ -293,6 +293,11 @@ pub mod dissectors {
 
     #[cfg(feature = "stun")]
     pub use packet_dissector_stun as stun;
+
+    /// DTLS is implemented in the TLS crate
+    /// ([`DtlsDissector`](packet_dissector_tls::DtlsDissector)).
+    #[cfg(feature = "dtls")]
+    pub use packet_dissector_tls as dtls;
 }
 
 #[cfg(feature = "ip-reassembly")]

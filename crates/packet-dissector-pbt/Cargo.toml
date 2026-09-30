@@ -55,4 +55,5 @@ packet-dissector-tcap = { workspace = true }
 packet-dissector-sgsap = { workspace = true }
 packet-dissector-snmp = { workspace = true }
 packet-dissector-tcp = { workspace = true }
+packet-dissector-tls = { workspace = true }
 packet-dissector-xnap = { workspace = true }
