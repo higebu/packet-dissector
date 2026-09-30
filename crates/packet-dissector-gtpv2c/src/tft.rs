@@ -183,11 +183,15 @@ static FD_IP_FLOW: FieldDescriptor =
 static FD_UNDECODED: FieldDescriptor =
     FieldDescriptor::new("undecoded", "Undecoded", FieldType::Bytes);
 
-/// Decode a Bearer TFT value (TS 24.008 octets 3 onwards) into `buf`.
+/// Decode a Traffic Flow Template value (TS 24.008 octets 3 onwards) into `buf`.
+///
+/// Shared by the GTPv2-C Bearer TFT IE and the GTPv1-C Traffic Flow Template
+/// IE (3GPP TS 29.060, Section 7.7.36), both of which carry the TS 24.008
+/// Section 10.5.6.12 value.
 ///
 /// Structural problems (a length or count that runs past the value) stop the
 /// walk; the octets from that point on are kept in an `undecoded` field.
-pub(crate) fn push_tft<'pkt>(
+pub fn push_tft<'pkt>(
     data: &'pkt [u8],
     offset: usize,
     value_desc: &'static FieldDescriptor,

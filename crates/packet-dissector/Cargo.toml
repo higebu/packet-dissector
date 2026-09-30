@@ -33,6 +33,7 @@ default = [
   "dhcpv6",
   "srv6",
   "gtpv1u",
+  "gtpv1c",
   "gtpv2c",
   "pfcp",
   "http",
@@ -59,6 +60,7 @@ default = [
   "l2tpv3",
   "tls",
   "ppp",
+  "pppoe",
   "radius",
   "ah",
   "esp",
@@ -68,6 +70,7 @@ default = [
   "quic",
   "quic-decrypt",
   "stun",
+  "ip-reassembly",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
 # SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
@@ -96,6 +99,7 @@ dhcp = ["dep:packet-dissector-dhcp"]
 dhcpv6 = ["dep:packet-dissector-dhcpv6"]
 srv6 = ["dep:packet-dissector-srv6"]
 gtpv1u = ["dep:packet-dissector-gtpv1u"]
+gtpv1c = ["dep:packet-dissector-gtpv1c"]
 gtpv2c = ["dep:packet-dissector-gtpv2c"]
 pfcp = ["dep:packet-dissector-pfcp"]
 http = ["dep:packet-dissector-http"]
@@ -122,6 +126,8 @@ l2tp = ["dep:packet-dissector-l2tp"]
 l2tpv3 = ["dep:packet-dissector-l2tpv3"]
 tls = ["dep:packet-dissector-tls"]
 ppp = ["dep:packet-dissector-ppp"]
+# A PPPoE Session payload is a PPP frame (RFC 2516, Section 6).
+pppoe = ["dep:packet-dissector-pppoe", "ppp"]
 radius = ["dep:packet-dissector-radius"]
 ah = ["dep:packet-dissector-ah"]
 esp = ["dep:packet-dissector-esp"]
@@ -131,6 +137,9 @@ rtp = ["dep:packet-dissector-rtp"]
 quic = ["dep:packet-dissector-quic"]
 quic-decrypt = ["quic", "packet-dissector-quic/decrypt"]
 stun = ["dep:packet-dissector-stun"]
+# IPv4 / IPv6 fragment reassembly in the registry. Without it, non-initial
+# fragments still end the dissection chain after the IP layer.
+ip-reassembly = ["dep:packet-dissector-reassembly"]
 
 ## Convenience feature groups
 layer2 = [
@@ -144,6 +153,7 @@ layer2 = [
   "lldp",
   "stp",
   "ppp",
+  "pppoe",
 ]
 layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]
 layer4 = ["tcp", "udp", "sctp"]
@@ -167,7 +177,7 @@ application = [
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
-3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]
+3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "ngap"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -193,6 +203,7 @@ packet-dissector-dhcp = { workspace = true, optional = true }
 packet-dissector-dhcpv6 = { workspace = true, optional = true }
 packet-dissector-srv6 = { workspace = true, optional = true }
 packet-dissector-gtpv1u = { workspace = true, optional = true }
+packet-dissector-gtpv1c = { workspace = true, optional = true }
 packet-dissector-gtpv2c = { workspace = true, optional = true }
 packet-dissector-pfcp = { workspace = true, optional = true }
 packet-dissector-http = { workspace = true, optional = true }
@@ -219,6 +230,7 @@ packet-dissector-l2tp = { workspace = true, optional = true }
 packet-dissector-l2tpv3 = { workspace = true, optional = true }
 packet-dissector-tls = { workspace = true, optional = true }
 packet-dissector-ppp = { workspace = true, optional = true }
+packet-dissector-pppoe = { workspace = true, optional = true }
 packet-dissector-radius = { workspace = true, optional = true }
 packet-dissector-ah = { workspace = true, optional = true }
 packet-dissector-esp = { workspace = true, optional = true }
