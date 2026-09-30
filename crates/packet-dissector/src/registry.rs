@@ -2458,6 +2458,17 @@ impl Default for DissectorRegistry {
             Box::new(packet_dissector_ethernet::EthernetDissector),
         ));
 
+        // IEEE 802.1Q C-Tag (0x8100) and IEEE 802.1ad S-Tag (0x88A8) reached
+        // by EtherType dispatch (e.g. SLL/SLL2 protocol type, GRE protocol
+        // type); tags right after an Ethernet header are parsed inline by
+        // the Ethernet dissector.
+        // IEEE 802.1Q-2022, clause 9.6 — https://standards.ieee.org/ieee/802.1Q/10323/
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_builtin(
+                reg.register_by_ethertype(tpid, Box::new(packet_dissector_ethernet::VlanDissector)),
+            );
+        }
         // IP protocol 143 (Ethernet) — carries an Ethernet frame directly,
         // e.g. SRv6 L2 services (End.DX2 / End.DT2U / End.DT2M).
         // RFC 8986, Section 10.1 — https://www.rfc-editor.org/rfc/rfc8986#section-10.1
@@ -3073,6 +3084,13 @@ impl Default for DissectorRegistry {
                 Box::new(packet_dissector_nas5g::Nas5gDissector)
             });
         }
+
+        // EPS NAS is carried inside S1AP; register as a factory for
+        // standalone use (e.g., `bask read --dissector nas-eps`).
+        #[cfg(feature = "nas-eps")]
+        reg.register_dissector_factory("nas-eps", || {
+            Box::new(packet_dissector_nas_eps::NasEpsDissector)
+        });
 
         // BGP runs over TCP on port 179 (RFC 4271)
         #[cfg(feature = "bgp")]
@@ -4630,6 +4648,15 @@ mod tests {
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_ethertype(0x6558).is_some());
 
+        // IEEE 802.1Q-2022, clause 9.6 — standalone C-Tag / S-Tag.
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_eq!(
+                reg.get_by_ethertype(tpid).map(|d| d.short_name()),
+                Some("VLAN")
+            );
+        }
+
         #[cfg(feature = "ipv4")]
         {
             assert!(reg.get_by_ethertype(0x0800).is_some());
@@ -5010,6 +5037,9 @@ mod tests {
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());
+
+        #[cfg(feature = "nas-eps")]
+        assert!(reg.create_dissector_by_name("nas-eps").is_some());
 
         #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
         assert!(reg.create_dissector_by_name("l2tp").is_some());
