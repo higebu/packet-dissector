@@ -566,6 +566,7 @@ mod tests {
     // | TS 38.415 5.5.2.1           | DL PDU SESSION INFORMATION           | test_pdu_session_container_dl_ppi_and_sequence_number      |
     // | TS 38.415 5.5.2.1           | DL optional fields                   | test_pdu_session_container_dl_all_optional_fields          |
     // | TS 38.415 5.5.2.2           | UL optional fields / New IE Flags    | test_pdu_session_container_ul_all_optional_fields          |
+    // | TS 38.415 A.1.1             | New IE Flags extension octets        | test_pdu_session_container_ul_new_ie_flags_extension       |
     // | TS 38.415 5.5.2             | Short content falls back to raw      | test_pdu_session_container_short_content_falls_back_to_raw |
     // | TS 38.415 5.5.3.1           | Reserved PDU Type is raw             | test_pdu_session_container_unknown_pdu_type_is_raw         |
     // | TS 38.415 6.5.2.1           | PDU Set Information Container        | test_pdu_set_information_container                         |
@@ -1357,6 +1358,44 @@ mod tests {
         assert_eq!(*get(ext, "dl_congestion_information"), FieldValue::U16(100));
         assert_eq!(*get(ext, "ul_available_bitrate"), FieldValue::U32(1000));
         assert_eq!(*get(ext, "dl_available_bitrate"), FieldValue::U32(2000));
+    }
+
+    #[test]
+    fn test_pdu_session_container_ul_new_ie_flags_extension() {
+        // TS 38.415, Annex A.1.1 — "Extension octets of the New IE Flags IE
+        // shall follow directly after the first octet of the New IE Flags
+        // IE." With E (bit 7) set, D1 UL PDCP Delay Result Ind follows the
+        // extension octets, not the first flags octet.
+        let content = [
+            0x10, // PDU Type 1, no optional fields
+            0x45, // New IE Flag = 1, QFI 5
+            0x83, // New IE Flags: E, UL Congestion, D1
+            0x80, // extension octet 1 (E = 1)
+            0x00, // extension octet 2 (E = 0)
+            0x01, // D1 UL PDCP Delay Result Ind
+            0x12, 0x34, // UL Congestion Information
+            0x00, 0x00, 0x00, 0x00, // padding
+        ];
+        let pkt = make_gpdu_with_ext(0x85, 4, &content, &[]);
+        let mut buf = DissectBuffer::new();
+        Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let ext = ext_header(&buf, 0);
+        assert_eq!(*get(ext, "qfi"), FieldValue::U8(5));
+        assert_eq!(*get(ext, "new_ie_flags"), FieldValue::U8(0x83));
+        assert_eq!(*get(ext, "d1_ul_pdcp_delay_result_ind"), FieldValue::U8(1));
+        assert_eq!(
+            *get(ext, "ul_congestion_information"),
+            FieldValue::U16(0x1234)
+        );
+
+        // Every octet announces another extension octet, so the chain runs
+        // past the content: keep the header raw.
+        let pkt = make_gpdu_with_ext(0x85, 2, &[0x10, 0x45, 0x81, 0x80, 0x80, 0x80], &[]);
+        let mut buf = DissectBuffer::new();
+        Gtpv1uDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let ext = ext_header(&buf, 0);
+        assert!(!has(ext, "qfi"));
+        assert!(!has(ext, "d1_ul_pdcp_delay_result_ind"));
     }
 
     #[test]
