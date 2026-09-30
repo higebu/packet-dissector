@@ -1,9 +1,11 @@
 //! LLMNR (Link-Local Multicast Name Resolution) dissector.
 //!
-//! LLMNR reuses the DNS message format (RFC 1035, Section 4) on UDP and TCP
-//! port 5355, with a different meaning for three header bits: the bits DNS
-//! uses for AA, RD and RA are C (Conflict), T (Tentative) and a 4-bit
-//! reserved Z field; TC keeps its meaning (RFC 4795, Section 2.1.1). The
+//! LLMNR reuses the DNS message format (RFC 1035, Section 4 —
+//! <https://www.rfc-editor.org/rfc/rfc1035#section-4>) on UDP and TCP port
+//! 5355, with its own header flags (RFC 4795, Section 2.1.1 —
+//! <https://www.rfc-editor.org/rfc/rfc4795#section-2.1.1>): C (Conflict) and
+//! T (Tentative) take the positions of the DNS AA and RD bits, TC keeps its
+//! meaning, and a 4-bit reserved Z field covers the DNS RA, Z, AD and CD bits. The
 //! layer is labelled "LLMNR" and carries `c`, `tc`, `t` and `z` instead of
 //! the DNS flag fields; questions and resource records match the DNS
 //! dissector's fields.
@@ -80,7 +82,8 @@ impl Dissector for LlmnrDissector {
 }
 
 /// LLMNR dissector for TCP (unicast, port 5355), where each message is
-/// preceded by the 2-octet length field of RFC 1035, Section 4.2.2.
+/// preceded by the 2-octet length field of RFC 1035, Section 4.2.2 —
+/// <https://www.rfc-editor.org/rfc/rfc1035#section-4.2.2>.
 ///
 /// RFC 4795, Section 2.4 — "Unicast LLMNR queries MUST be done using TCP and
 /// the responses MUST be sent using the same TCP connection as the query."
