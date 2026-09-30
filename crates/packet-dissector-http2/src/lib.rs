@@ -1,18 +1,30 @@
 //! HTTP/2 dissector.
 //!
 //! Parses HTTP/2 frames as defined in RFC 9113. Handles the connection preface
-//! (24-byte client magic) and all standard frame types. HPACK header blocks
-//! are decoded using the static table and literal representations (RFC 7541).
-//! Dynamic table references are reported as unresolved since the dissector is
-//! stateless.
+//! (24-byte client magic), all standard frame types, and the ALTSVC, ORIGIN
+//! and PRIORITY_UPDATE extension frames.
+//!
+//! [`Http2Dissector`] decodes each frame on its own: HPACK header blocks are
+//! decoded with the static table and literal representations (RFC 7541), and
+//! dynamic table references are reported as unresolved.
+//! [`Http2ConnectionDissector`] keeps per-connection state for TCP streams:
+//! one HPACK dynamic table per direction, and header blocks split across
+//! HEADERS / PUSH_PROMISE and CONTINUATION frames are decoded as a whole.
 //!
 //! ## References
 //! - RFC 9113: HTTP/2 <https://www.rfc-editor.org/rfc/rfc9113>
 //! - RFC 7541: HPACK <https://www.rfc-editor.org/rfc/rfc7541>
+//! - RFC 7838: HTTP Alternative Services (ALTSVC) <https://www.rfc-editor.org/rfc/rfc7838>
+//! - RFC 8336: The ORIGIN HTTP/2 Frame <https://www.rfc-editor.org/rfc/rfc8336>
+//! - RFC 8441: Bootstrapping WebSockets with HTTP/2 <https://www.rfc-editor.org/rfc/rfc8441>
+//! - RFC 9218: Extensible Prioritization Scheme for HTTP <https://www.rfc-editor.org/rfc/rfc9218>
 
 #![deny(missing_docs)]
 
+mod connection;
 mod hpack;
+
+pub use connection::Http2ConnectionDissector;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -33,6 +45,26 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 7541",
         "HPACK: Header Compression for HTTP/2",
         "https://www.rfc-editor.org/rfc/rfc7541",
+    ),
+    SpecReference::new(
+        "RFC 7838",
+        "HTTP Alternative Services",
+        "https://www.rfc-editor.org/rfc/rfc7838",
+    ),
+    SpecReference::new(
+        "RFC 8336",
+        "The ORIGIN HTTP/2 Frame",
+        "https://www.rfc-editor.org/rfc/rfc8336",
+    ),
+    SpecReference::new(
+        "RFC 8441",
+        "Bootstrapping WebSockets with HTTP/2",
+        "https://www.rfc-editor.org/rfc/rfc8441",
+    ),
+    SpecReference::new(
+        "RFC 9218",
+        "Extensible Prioritization Scheme for HTTP",
+        "https://www.rfc-editor.org/rfc/rfc9218",
     ),
 ];
 
@@ -69,6 +101,15 @@ const FRAME_TYPE_GOAWAY: u8 = 0x07;
 const FRAME_TYPE_WINDOW_UPDATE: u8 = 0x08;
 /// CONTINUATION frame type.
 const FRAME_TYPE_CONTINUATION: u8 = 0x09;
+/// ALTSVC frame type.
+/// RFC 7838, Section 4 — <https://www.rfc-editor.org/rfc/rfc7838#section-4>
+const FRAME_TYPE_ALTSVC: u8 = 0x0a;
+/// ORIGIN frame type.
+/// RFC 8336, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc8336#section-2.1>
+const FRAME_TYPE_ORIGIN: u8 = 0x0c;
+/// PRIORITY_UPDATE frame type.
+/// RFC 9218, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc9218#section-7.1>
+const FRAME_TYPE_PRIORITY_UPDATE: u8 = 0x10;
 
 // ---------------------------------------------------------------------------
 // Frame flag constants
@@ -77,6 +118,8 @@ const FRAME_TYPE_CONTINUATION: u8 = 0x09;
 
 /// ACK flag (SETTINGS, PING).
 const FLAG_ACK: u8 = 0x01;
+/// END_HEADERS flag (HEADERS, PUSH_PROMISE, CONTINUATION).
+const FLAG_END_HEADERS: u8 = 0x04;
 /// PADDED flag (DATA, HEADERS, PUSH_PROMISE).
 const FLAG_PADDED: u8 = 0x08;
 /// PRIORITY flag (HEADERS).
@@ -105,18 +148,35 @@ const FD_PRIORITY_EXCLUSIVE: usize = 15;
 const FD_PRIORITY_STREAM_DEPENDENCY: usize = 16;
 const FD_PRIORITY_WEIGHT: usize = 17;
 const FD_HEADERS: usize = 18;
+const FD_HPACK_ERROR: usize = 19;
+const FD_PRIORITIZED_STREAM_ID: usize = 20;
+const FD_PRIORITY_FIELD_VALUE: usize = 21;
+const FD_ORIGINS: usize = 22;
+const FD_ORIGIN: usize = 23;
+const FD_ALT_SVC_FIELD_VALUE: usize = 24;
 
 const SC_ID: usize = 0;
 const SC_VALUE: usize = 1;
 
 const HC_NAME: usize = 0;
 const HC_VALUE: usize = 1;
+const HC_INDEX: usize = 2;
 
 /// Child descriptors for decoded header name/value pairs.
+///
+/// A header whose dynamic table entry is not known carries the HPACK
+/// `index` of its name (or of the whole field) instead of the name
+/// (RFC 7541, Section 2.3.3 —
+/// <https://www.rfc-editor.org/rfc/rfc7541#section-2.3.3>).
 static HEADER_CHILDREN: &[FieldDescriptor] = &[
-    FieldDescriptor::new("name", "Name", FieldType::Str),
-    FieldDescriptor::new("value", "Value", FieldType::Str),
+    FieldDescriptor::new("name", "Name", FieldType::Str).optional(),
+    FieldDescriptor::new("value", "Value", FieldType::Str).optional(),
+    FieldDescriptor::new("index", "Index", FieldType::U32).optional(),
 ];
+
+/// Child descriptor for each ORIGIN frame entry.
+static ORIGIN_CHILDREN: &[FieldDescriptor] =
+    &[FieldDescriptor::new("origin", "Origin", FieldType::Str)];
 
 /// Descriptor for the HTTP/2 header Object container.
 ///
@@ -183,6 +243,24 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("headers", "Decoded Headers", FieldType::Array)
         .optional()
         .with_children(HEADER_CHILDREN),
+    FieldDescriptor::new("hpack_error", "HPACK Decoding Error", FieldType::Str).optional(),
+    FieldDescriptor::new(
+        "prioritized_stream_id",
+        "Prioritized Stream ID",
+        FieldType::U32,
+    )
+    .optional(),
+    FieldDescriptor::new(
+        "priority_field_value",
+        "Priority Field Value",
+        FieldType::Str,
+    )
+    .optional(),
+    FieldDescriptor::new("origins", "Origins", FieldType::Array)
+        .optional()
+        .with_children(ORIGIN_CHILDREN),
+    FieldDescriptor::new("origin", "Origin", FieldType::Str).optional(),
+    FieldDescriptor::new("alt_svc_field_value", "Alt-Svc Field Value", FieldType::Str).optional(),
 ];
 
 // ---------------------------------------------------------------------------
@@ -204,6 +282,12 @@ fn frame_type_name(
         FieldValue::U8(0x07) => Some("GOAWAY"),
         FieldValue::U8(0x08) => Some("WINDOW_UPDATE"),
         FieldValue::U8(0x09) => Some("CONTINUATION"),
+        // RFC 7838, Section 4 — <https://www.rfc-editor.org/rfc/rfc7838#section-4>
+        FieldValue::U8(0x0a) => Some("ALTSVC"),
+        // RFC 8336, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc8336#section-2.1>
+        FieldValue::U8(0x0c) => Some("ORIGIN"),
+        // RFC 9218, Section 7.1 — <https://www.rfc-editor.org/rfc/rfc9218#section-7.1>
+        FieldValue::U8(0x10) => Some("PRIORITY_UPDATE"),
         _ => None,
     }
 }
@@ -219,6 +303,10 @@ fn settings_id_name(
         FieldValue::U16(0x04) => Some("INITIAL_WINDOW_SIZE"),
         FieldValue::U16(0x05) => Some("MAX_FRAME_SIZE"),
         FieldValue::U16(0x06) => Some("MAX_HEADER_LIST_SIZE"),
+        // RFC 8441, Section 3 — <https://www.rfc-editor.org/rfc/rfc8441#section-3>
+        FieldValue::U16(0x08) => Some("ENABLE_CONNECT_PROTOCOL"),
+        // RFC 9218, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9218#section-2.1>
+        FieldValue::U16(0x09) => Some("NO_RFC7540_PRIORITIES"),
         _ => None,
     }
 }
@@ -352,122 +440,180 @@ impl Dissector for Http2Dissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        let mut pos = 0;
+        dissect_frame(data, buf, offset, None)
+    }
+}
 
-        let has_preface = data.starts_with(CONNECTION_PREFACE);
+/// Dissect the optional connection preface and one frame.
+///
+/// `state` is the decoding state of the frame's direction of a connection
+/// ([`Http2ConnectionDissector`]); without it the frame is decoded on its
+/// own. The state is changed only when the whole frame is available.
+fn dissect_frame<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    mut state: Option<&mut connection::DirectionState>,
+) -> Result<DissectResult, PacketError> {
+    let mut pos = 0;
 
-        buf.begin_layer("HTTP2", None, FIELD_DESCRIPTORS, offset..offset);
+    let has_preface = data.starts_with(CONNECTION_PREFACE);
 
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_MAGIC],
-            FieldValue::U8(u8::from(has_preface)),
-            offset
-                ..offset
-                    + if has_preface {
-                        CONNECTION_PREFACE.len()
-                    } else {
-                        0
-                    },
-        );
-        if has_preface {
-            pos += CONNECTION_PREFACE.len();
-        }
+    buf.begin_layer("HTTP2", None, FIELD_DESCRIPTORS, offset..offset);
 
-        if data.len() < pos + FRAME_HEADER_LEN {
-            if let Some(layer) = buf.last_layer_mut() {
-                layer.range = offset..offset + pos;
-            }
-            buf.end_layer();
-            return Err(PacketError::Truncated {
-                expected: pos + FRAME_HEADER_LEN,
-                actual: data.len(),
-            });
-        }
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_MAGIC],
+        FieldValue::U8(u8::from(has_preface)),
+        offset
+            ..offset
+                + if has_preface {
+                    CONNECTION_PREFACE.len()
+                } else {
+                    0
+                },
+    );
+    if has_preface {
+        pos += CONNECTION_PREFACE.len();
+    }
 
-        let frame_data = &data[pos..];
-        let frame_length = read_be_u24(frame_data, 0)?;
-        let frame_type = frame_data[3];
-        let flags = frame_data[4];
-        let stream_id = read_be_u32(frame_data, 5)? & 0x7FFF_FFFF;
-
-        let frame_header_offset = offset + pos;
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_FRAME_LENGTH],
-            FieldValue::U32(frame_length),
-            frame_header_offset..frame_header_offset + 3,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_FRAME_TYPE],
-            FieldValue::U8(frame_type),
-            frame_header_offset + 3..frame_header_offset + 4,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_FLAGS],
-            FieldValue::U8(flags),
-            frame_header_offset + 4..frame_header_offset + 5,
-        );
-        buf.push_field(
-            &FIELD_DESCRIPTORS[FD_STREAM_ID],
-            FieldValue::U32(stream_id),
-            frame_header_offset + 5..frame_header_offset + 9,
-        );
-
-        pos += FRAME_HEADER_LEN;
-        let payload_len = frame_length as usize;
-
-        if data.len() < pos + payload_len {
-            if let Some(layer) = buf.last_layer_mut() {
-                layer.range = offset..offset + pos;
-            }
-            buf.end_layer();
-            return Err(PacketError::Truncated {
-                expected: pos + payload_len,
-                actual: data.len(),
-            });
-        }
-
-        let payload = &data[pos..pos + payload_len];
-        let payload_offset = offset + pos;
-
-        if !payload.is_empty() {
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_PAYLOAD],
-                FieldValue::Bytes(payload),
-                payload_offset..payload_offset + payload_len,
-            );
-        }
-
-        parse_frame_payload(frame_type, flags, payload, payload_offset, buf)?;
-
-        let total = pos + payload_len;
+    if data.len() < pos + FRAME_HEADER_LEN {
         if let Some(layer) = buf.last_layer_mut() {
-            layer.range = offset..offset + total;
+            layer.range = offset..offset + pos;
         }
         buf.end_layer();
-
-        Ok(DissectResult::new(total, DispatchHint::End))
+        return Err(PacketError::Truncated {
+            expected: pos + FRAME_HEADER_LEN,
+            actual: data.len(),
+        });
     }
+
+    let frame_data = &data[pos..];
+    let frame_length = read_be_u24(frame_data, 0)?;
+    let frame_type = frame_data[3];
+    let flags = frame_data[4];
+    let stream_id = read_be_u32(frame_data, 5)? & 0x7FFF_FFFF;
+
+    let frame_header_offset = offset + pos;
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_FRAME_LENGTH],
+        FieldValue::U32(frame_length),
+        frame_header_offset..frame_header_offset + 3,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_FRAME_TYPE],
+        FieldValue::U8(frame_type),
+        frame_header_offset + 3..frame_header_offset + 4,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_FLAGS],
+        FieldValue::U8(flags),
+        frame_header_offset + 4..frame_header_offset + 5,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_STREAM_ID],
+        FieldValue::U32(stream_id),
+        frame_header_offset + 5..frame_header_offset + 9,
+    );
+
+    pos += FRAME_HEADER_LEN;
+    let payload_len = frame_length as usize;
+
+    if data.len() < pos + payload_len {
+        if let Some(layer) = buf.last_layer_mut() {
+            layer.range = offset..offset + pos;
+        }
+        buf.end_layer();
+        return Err(PacketError::Truncated {
+            expected: pos + payload_len,
+            actual: data.len(),
+        });
+    }
+
+    let payload = &data[pos..pos + payload_len];
+    let payload_offset = offset + pos;
+
+    if !payload.is_empty() {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_PAYLOAD],
+            FieldValue::Bytes(payload),
+            payload_offset..payload_offset + payload_len,
+        );
+    }
+
+    let frame = Frame {
+        frame_type,
+        flags,
+        stream_id,
+    };
+    if let Err(e) = parse_frame_payload(&frame, payload, payload_offset, buf, state.as_deref_mut())
+    {
+        // A header block that cannot be decoded may have changed the
+        // encoder's dynamic table: stop following it.
+        if let Some(state) = state {
+            if matches!(
+                frame_type,
+                FRAME_TYPE_HEADERS | FRAME_TYPE_PUSH_PROMISE | FRAME_TYPE_CONTINUATION
+            ) {
+                state.desynchronize();
+            }
+        }
+        return Err(e);
+    }
+
+    let total = pos + payload_len;
+    if let Some(layer) = buf.last_layer_mut() {
+        layer.range = offset..offset + total;
+    }
+    buf.end_layer();
+
+    Ok(DissectResult::new(total, DispatchHint::End))
+}
+
+/// Frame header fields the payload parsers need.
+struct Frame {
+    frame_type: u8,
+    flags: u8,
+    stream_id: u32,
 }
 
 /// Parse frame-type-specific payload fields.
 fn parse_frame_payload<'pkt>(
-    frame_type: u8,
-    flags: u8,
+    frame: &Frame,
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
+    mut state: Option<&mut connection::DirectionState>,
 ) -> Result<(), PacketError> {
-    match frame_type {
+    // RFC 9113, Section 4.3 — "Each field block is processed as a discrete
+    // unit. Field blocks MUST be transmitted as a contiguous sequence of
+    // frames, with no interleaved frames of any other type or from any
+    // other stream." — <https://www.rfc-editor.org/rfc/rfc9113#section-4.3>
+    if let Some(state) = state.as_deref_mut() {
+        if frame.frame_type != FRAME_TYPE_CONTINUATION {
+            state.interrupt_block();
+        }
+    }
+    let flags = frame.flags;
+    match frame.frame_type {
         FRAME_TYPE_DATA => parse_data(flags, payload, payload_offset, buf),
-        FRAME_TYPE_HEADERS => parse_headers(flags, payload, payload_offset, buf),
+        FRAME_TYPE_HEADERS => parse_headers(frame, payload, payload_offset, buf, state),
         FRAME_TYPE_PRIORITY => parse_priority(payload, payload_offset, buf),
         FRAME_TYPE_RST_STREAM => parse_rst_stream(payload, payload_offset, buf),
         FRAME_TYPE_SETTINGS => parse_settings(flags, payload, payload_offset, buf),
-        FRAME_TYPE_PUSH_PROMISE => parse_push_promise(flags, payload, payload_offset, buf),
+        FRAME_TYPE_PUSH_PROMISE => parse_push_promise(frame, payload, payload_offset, buf, state),
         FRAME_TYPE_PING => parse_ping(payload, payload_offset, buf),
         FRAME_TYPE_GOAWAY => parse_goaway(payload, payload_offset, buf),
         FRAME_TYPE_WINDOW_UPDATE => parse_window_update(payload, payload_offset, buf),
-        FRAME_TYPE_CONTINUATION => parse_continuation(payload, payload_offset, buf),
+        FRAME_TYPE_CONTINUATION => parse_continuation(frame, payload, payload_offset, buf, state),
+        FRAME_TYPE_ALTSVC => {
+            parse_altsvc(payload, payload_offset, buf);
+            Ok(())
+        }
+        FRAME_TYPE_ORIGIN => {
+            parse_origin(payload, payload_offset, buf);
+            Ok(())
+        }
+        FRAME_TYPE_PRIORITY_UPDATE => parse_priority_update(payload, payload_offset, buf),
         // Unknown frame types: payload already emitted as raw bytes
         _ => Ok(()),
     }
@@ -516,11 +662,13 @@ fn parse_data<'pkt>(
 
 // RFC 9113, Section 6.2 — HEADERS frame. <https://www.rfc-editor.org/rfc/rfc9113#section-6.2>
 fn parse_headers<'pkt>(
-    flags: u8,
+    frame: &Frame,
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
+    state: Option<&mut connection::DirectionState>,
 ) -> Result<(), PacketError> {
+    let flags = frame.flags;
     // When PADDED is set, `strip_padding` consumes the leading 1-octet Pad
     // Length field. Content (priority fields / header block fragment) begins
     // at `payload[1]`; trailing padding lives at the END of the payload. The
@@ -541,106 +689,150 @@ fn parse_headers<'pkt>(
         let dep_offset = payload_offset + inner_pos;
         push_priority_fields(unpadded, dep_offset, buf)?;
         inner_pos += 5;
+    }
 
-        let fragment = &unpadded[5..];
-        if !fragment.is_empty() {
-            let frag_offset = payload_offset + inner_pos;
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_HEADER_BLOCK_FRAGMENT],
-                FieldValue::Bytes(fragment),
-                frag_offset..frag_offset + fragment.len(),
-            );
-            push_decoded_headers(fragment, frag_offset, buf);
-        }
-    } else if !unpadded.is_empty() {
-        let frag_offset = payload_offset + inner_pos;
+    let fragment = &unpadded[inner_pos - unpadded_start..];
+    let frag_offset = payload_offset + inner_pos;
+    if !fragment.is_empty() {
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_HEADER_BLOCK_FRAGMENT],
-            FieldValue::Bytes(unpadded),
-            frag_offset..frag_offset + unpadded.len(),
+            FieldValue::Bytes(fragment),
+            frag_offset..frag_offset + fragment.len(),
         );
-        push_decoded_headers(unpadded, frag_offset, buf);
     }
+    start_header_block(frame, fragment, frag_offset, buf, state);
 
     Ok(())
 }
 
-/// Resolve a HeaderString to a `&'pkt str` or `&'static str`.
-/// For Huffman-encoded strings, we decode them and store in scratch buffer.
-fn resolve_header_string<'pkt>(
-    hs: &hpack::HeaderString,
-    fragment: &'pkt [u8],
-    buf: &mut DissectBuffer<'pkt>,
-) -> FieldValue<'pkt> {
-    match hs {
-        hpack::HeaderString::Static(s) => FieldValue::Str(s),
-        hpack::HeaderString::Literal(start, end) => {
-            // Direct slice from fragment as UTF-8
-            match core::str::from_utf8(&fragment[*start..*end]) {
-                Ok(s) => FieldValue::Str(s),
-                Err(_) => FieldValue::Bytes(&fragment[*start..*end]),
-            }
-        }
-        hpack::HeaderString::Huffman(start, end) => {
-            // Decode Huffman and store in scratch buffer
-            match hpack::huffman::huffman_decode(&fragment[*start..*end]) {
-                Ok(decoded) => {
-                    let range = buf.push_scratch(&decoded);
-                    FieldValue::Scratch(range)
-                }
-                Err(_) => FieldValue::Bytes(&fragment[*start..*end]),
-            }
-        }
-    }
-}
-
-/// Try to HPACK-decode a header block fragment and push the result as a
-/// `headers` array field. Silently skips on decode failure.
-fn push_decoded_headers<'pkt>(
+/// Handle the first fragment of a header block (HEADERS or PUSH_PROMISE).
+///
+/// Without connection state the fragment is decoded on its own. With it, a
+/// complete block (END_HEADERS set) is decoded in the direction's HPACK
+/// context, and an incomplete one is kept until its CONTINUATION frames
+/// arrive (RFC 9113, Section 4.3 —
+/// <https://www.rfc-editor.org/rfc/rfc9113#section-4.3>).
+fn start_header_block<'pkt>(
+    frame: &Frame,
     fragment: &'pkt [u8],
     frag_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
+    state: Option<&mut connection::DirectionState>,
 ) {
-    let Ok(decoded) = hpack::decode_header_block(fragment) else {
-        return;
-    };
-    if decoded.is_empty() {
-        return;
+    let range = frag_offset..frag_offset + fragment.len();
+    match state {
+        None => {
+            if !fragment.is_empty() {
+                // Decoding errors are reported in the `hpack_error` field.
+                let _ = push_decoded_headers(fragment, Some(fragment), range, None, buf);
+            }
+        }
+        Some(state) if frame.flags & FLAG_END_HEADERS != 0 => {
+            let result = push_decoded_headers(fragment, Some(fragment), range, state.table(), buf);
+            if result.is_err() {
+                state.desynchronize();
+            }
+        }
+        Some(state) => state.begin_block(frame.stream_id, fragment),
     }
+}
 
-    let frag_range = frag_offset..frag_offset + fragment.len();
+/// Field value of an HPACK string.
+///
+/// `packet_block` is the header block when it lies in the packet, so
+/// literal strings can borrow from it; otherwise (a block reassembled from
+/// several frames) they are copied to the scratch buffer, as are Huffman
+/// decoded strings and dynamic table entries.
+fn header_string_value<'pkt>(
+    hs: &hpack::HeaderString<'_>,
+    block: &[u8],
+    packet_block: Option<&'pkt [u8]>,
+    buf: &mut DissectBuffer<'pkt>,
+) -> FieldValue<'pkt> {
+    match *hs {
+        hpack::HeaderString::Static(s) => FieldValue::Str(s),
+        hpack::HeaderString::Literal(start, end) => match packet_block {
+            Some(p) => str_or_bytes(&p[start..end]),
+            None => FieldValue::Scratch(buf.push_scratch(&block[start..end])),
+        },
+        hpack::HeaderString::Huffman(start, end) => {
+            match hpack::huffman::huffman_decode(&block[start..end]) {
+                Ok(decoded) => FieldValue::Scratch(buf.push_scratch(&decoded)),
+                Err(_) => match packet_block {
+                    Some(p) => FieldValue::Bytes(&p[start..end]),
+                    None => FieldValue::Scratch(buf.push_scratch(&block[start..end])),
+                },
+            }
+        }
+        hpack::HeaderString::Owned(bytes) => FieldValue::Scratch(buf.push_scratch(bytes)),
+    }
+}
 
+/// HPACK-decode a header block and push the result as a `headers` array
+/// field, with the `hpack_error` field when decoding fails.
+///
+/// `packet_block` is `block` when the block lies in the packet (see
+/// [`header_string_value`]); `range` is the packet range every decoded
+/// field is attributed to. Headers decoded before an error are kept.
+fn push_decoded_headers<'pkt>(
+    block: &[u8],
+    packet_block: Option<&'pkt [u8]>,
+    range: core::ops::Range<usize>,
+    table: Option<&mut hpack::DynamicTable>,
+    buf: &mut DissectBuffer<'pkt>,
+) -> Result<(), &'static str> {
     let array_idx = buf.begin_container(
         &FIELD_DESCRIPTORS[FD_HEADERS],
         FieldValue::Array(0..0),
-        frag_range.clone(),
+        range.clone(),
     );
 
-    for h in &decoded {
+    let result = hpack::decode_block(block, table, &mut |h| {
+        let obj_idx = buf.begin_container(&FD_HEADER, FieldValue::Object(0..0), range.clone());
         match h {
             hpack::DecodedHeader::Resolved { name, value } => {
-                let obj_idx =
-                    buf.begin_container(&FD_HEADER, FieldValue::Object(0..0), frag_range.clone());
-                let name_val = resolve_header_string(name, fragment, buf);
-                buf.push_field(&HEADER_CHILDREN[HC_NAME], name_val, frag_range.clone());
-                let value_val = resolve_header_string(value, fragment, buf);
-                buf.push_field(&HEADER_CHILDREN[HC_VALUE], value_val, frag_range.clone());
-                buf.end_container(obj_idx);
+                let name = header_string_value(&name, block, packet_block, buf);
+                buf.push_field(&HEADER_CHILDREN[HC_NAME], name, range.clone());
+                let value = header_string_value(&value, block, packet_block, buf);
+                buf.push_field(&HEADER_CHILDREN[HC_VALUE], value, range.clone());
             }
-            hpack::DecodedHeader::Unresolved(_) => {}
+            hpack::DecodedHeader::UnresolvedName { index, value } => {
+                let value = header_string_value(&value, block, packet_block, buf);
+                buf.push_field(&HEADER_CHILDREN[HC_VALUE], value, range.clone());
+                buf.push_field(
+                    &HEADER_CHILDREN[HC_INDEX],
+                    FieldValue::U32(index as u32),
+                    range.clone(),
+                );
+            }
+            hpack::DecodedHeader::Unresolved(index) => {
+                buf.push_field(
+                    &HEADER_CHILDREN[HC_INDEX],
+                    FieldValue::U32(index as u32),
+                    range.clone(),
+                );
+            }
         }
-    }
+        buf.end_container(obj_idx);
+    });
 
     buf.end_container(array_idx);
 
-    // If the array ended up empty (all unresolved), remove it
-    let arr_field = &buf.fields()[array_idx as usize];
-    if let FieldValue::Array(ref r) = arr_field.value {
+    // Drop the array when nothing was decoded (e.g. an empty block).
+    if let FieldValue::Array(ref r) = buf.fields()[array_idx as usize].value {
         if r.start == r.end {
-            // Remove the empty array
             buf.truncate_fields(array_idx as usize);
         }
     }
+
+    if let Err(e) = result {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_HPACK_ERROR],
+            FieldValue::Str(e),
+            range,
+        );
+    }
+    result
 }
 
 /// Push PRIORITY-specific fields (exclusive flag, stream dependency, weight).
@@ -787,11 +979,13 @@ fn parse_settings<'pkt>(
 // RFC 9113, Section 6.6 — PUSH_PROMISE frame.
 // <https://www.rfc-editor.org/rfc/rfc9113#section-6.6>
 fn parse_push_promise<'pkt>(
-    flags: u8,
+    frame: &Frame,
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
+    state: Option<&mut connection::DirectionState>,
 ) -> Result<(), PacketError> {
+    let flags = frame.flags;
     // See `parse_headers` for the unpadded-offset rationale: content begins
     // at `payload[1]` when PADDED is set, not past the trailing padding.
     let unpadded = strip_padding(flags, payload, payload_offset, buf)?;
@@ -812,15 +1006,15 @@ fn parse_push_promise<'pkt>(
     );
 
     let fragment = &unpadded[4..];
+    let frag_offset = id_offset + 4;
     if !fragment.is_empty() {
-        let frag_offset = id_offset + 4;
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_HEADER_BLOCK_FRAGMENT],
             FieldValue::Bytes(fragment),
             frag_offset..frag_offset + fragment.len(),
         );
-        push_decoded_headers(fragment, frag_offset, buf);
     }
+    start_header_block(frame, fragment, frag_offset, buf, state);
 
     Ok(())
 }
@@ -913,20 +1107,137 @@ fn parse_window_update<'pkt>(
 
 // RFC 9113, Section 6.10 — CONTINUATION frame.
 // <https://www.rfc-editor.org/rfc/rfc9113#section-6.10>
+//
+// With connection state, the fragment is appended to the header block begun
+// by the preceding HEADERS / PUSH_PROMISE frame; the whole block is decoded
+// on the frame that sets END_HEADERS. RFC 9113, Section 6.10 — "Any number
+// of CONTINUATION frames can be sent, as long as the preceding frame is on
+// the same stream and is a HEADERS, PUSH_PROMISE, or CONTINUATION frame
+// without the END_HEADERS flag set."
 fn parse_continuation<'pkt>(
+    frame: &Frame,
     payload: &'pkt [u8],
     payload_offset: usize,
     buf: &mut DissectBuffer<'pkt>,
+    state: Option<&mut connection::DirectionState>,
 ) -> Result<(), PacketError> {
+    let range = payload_offset..payload_offset + payload.len();
     if !payload.is_empty() {
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_HEADER_BLOCK_FRAGMENT],
             FieldValue::Bytes(payload),
-            payload_offset..payload_offset + payload.len(),
+            range.clone(),
         );
-        push_decoded_headers(payload, payload_offset, buf);
+    }
+    let Some(state) = state else {
+        if !payload.is_empty() {
+            // Decoding errors are reported in the `hpack_error` field.
+            let _ = push_decoded_headers(payload, Some(payload), range, None, buf);
+        }
+        return Ok(());
+    };
+    let end_headers = frame.flags & FLAG_END_HEADERS != 0;
+    let Some(block) = state.continue_block(frame.stream_id, payload, end_headers) else {
+        return Ok(());
+    };
+    let result = push_decoded_headers(&block, None, range, state.table(), buf);
+    if result.is_err() {
+        state.desynchronize();
     }
     Ok(())
+}
+
+// RFC 7838, Section 4 — ALTSVC frame.
+// <https://www.rfc-editor.org/rfc/rfc7838#section-4>
+//
+// The frame is a non-critical extension ("Endpoints that do not support
+// this frame will ignore it"), so a malformed payload is kept as raw bytes
+// rather than failing the dissection.
+fn parse_altsvc<'pkt>(payload: &'pkt [u8], payload_offset: usize, buf: &mut DissectBuffer<'pkt>) {
+    let Ok(origin_len) = read_be_u16(payload, 0) else {
+        return;
+    };
+    let origin_end = 2 + usize::from(origin_len);
+    let Some(origin) = payload.get(2..origin_end) else {
+        return;
+    };
+    if !origin.is_empty() {
+        buf.push_field(
+            &FIELD_DESCRIPTORS[FD_ORIGIN],
+            str_or_bytes(origin),
+            payload_offset + 2..payload_offset + origin_end,
+        );
+    }
+    let value = &payload[origin_end..];
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_ALT_SVC_FIELD_VALUE],
+        str_or_bytes(value),
+        payload_offset + origin_end..payload_offset + payload.len(),
+    );
+}
+
+// RFC 8336, Section 2.1 — ORIGIN frame: zero or more Origin-Entry fields,
+// each an Origin-Len (16) followed by that many octets of ASCII-Origin.
+// <https://www.rfc-editor.org/rfc/rfc8336#section-2.1>
+//
+// RFC 8336, Section 2.2 — "The ORIGIN frame is a non-critical extension to
+// HTTP/2. Endpoints that do not support this frame can safely ignore it
+// upon receipt." A truncated trailing entry ends the list without an error.
+fn parse_origin<'pkt>(payload: &'pkt [u8], payload_offset: usize, buf: &mut DissectBuffer<'pkt>) {
+    let array_idx = buf.begin_container(
+        &FIELD_DESCRIPTORS[FD_ORIGINS],
+        FieldValue::Array(0..0),
+        payload_offset..payload_offset + payload.len(),
+    );
+    let mut pos = 0;
+    while let Ok(len) = read_be_u16(payload, pos) {
+        let start = pos + 2;
+        let end = start + usize::from(len);
+        let Some(origin) = payload.get(start..end) else {
+            break;
+        };
+        buf.push_field(
+            &ORIGIN_CHILDREN[0],
+            str_or_bytes(origin),
+            payload_offset + start..payload_offset + end,
+        );
+        pos = end;
+    }
+    buf.end_container(array_idx);
+}
+
+// RFC 9218, Section 7.1 — PRIORITY_UPDATE frame: Reserved (1), Prioritized
+// Stream ID (31), Priority Field Value (..).
+// <https://www.rfc-editor.org/rfc/rfc9218#section-7.1>
+fn parse_priority_update<'pkt>(
+    payload: &'pkt [u8],
+    payload_offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> Result<(), PacketError> {
+    let Ok(word) = read_be_u32(payload, 0) else {
+        return Err(PacketError::InvalidHeader(
+            "PRIORITY_UPDATE frame shorter than 4 octets",
+        ));
+    };
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_PRIORITIZED_STREAM_ID],
+        FieldValue::U32(word & 0x7FFF_FFFF),
+        payload_offset..payload_offset + 4,
+    );
+    buf.push_field(
+        &FIELD_DESCRIPTORS[FD_PRIORITY_FIELD_VALUE],
+        str_or_bytes(&payload[4..]),
+        payload_offset + 4..payload_offset + payload.len(),
+    );
+    Ok(())
+}
+
+/// A string field value, or the raw bytes when they are not UTF-8.
+fn str_or_bytes(bytes: &[u8]) -> FieldValue<'_> {
+    match core::str::from_utf8(bytes) {
+        Ok(s) => FieldValue::Str(s),
+        Err(_) => FieldValue::Bytes(bytes),
+    }
 }
 
 #[cfg(test)]
@@ -969,6 +1280,20 @@ mod tests {
     //! | 9113 §4.1, §6     | Frame header heuristic accepts      | looks_like_frame_header_accepts_valid_headers         |
     //! | 9113 §4.1, §6     | Frame header heuristic rejects      | looks_like_frame_header_rejects_invalid_headers       |
     //! | 9113 §3.4         | Heuristic rejects preface/HTTP/1.1  | looks_like_frame_header_rejects_text                  |
+    //! | 7541 §2.2, 9113 §4.3 | Per-connection HPACK / CONTINUATION | connection::tests                                  |
+    //! | 7541 App. B       | Huffman code table                  | hpack::huffman::tests                                 |
+    //! | 7541 App. C.3–C.6 | Request / response sequences        | hpack::tests::rfc7541_c3_… – rfc7541_c6_…             |
+    //! | 7541 §2.3.3       | Unresolved dynamic index reported   | unresolved_dynamic_index_is_reported                  |
+    //! | 7541 §2.3.3       | Unresolved dynamic name reported    | unresolved_dynamic_name_is_reported                   |
+    //! | 7541 §3.1         | Decode error keeps earlier headers  | decode_error_keeps_earlier_headers                    |
+    //! | 8441 §3, 9218 §2.1| SETTINGS 0x8 / 0x9 names            | display_fn_settings_id_extensions                     |
+    //! | 7838 §4, 8336 §2, 9218 §7.1 | Extension frame type names | display_fn_frame_type_extensions                   |
+    //! | 9218 §7.1         | PRIORITY_UPDATE                     | parse_priority_update_frame                           |
+    //! | 9218 §7.1         | PRIORITY_UPDATE too short           | parse_priority_update_frame_too_short                 |
+    //! | 8336 §2.1         | ORIGIN                              | parse_origin_frame                                    |
+    //! | 8336 §2.1         | ORIGIN truncated entry              | parse_origin_frame_truncated_entry                    |
+    //! | 7838 §4           | ALTSVC                              | parse_altsvc_frame, parse_altsvc_frame_on_stream      |
+    //! | 7838 §4           | ALTSVC malformed                    | parse_altsvc_frame_malformed                          |
     //! | -                 | Unknown frame type                  | parse_unknown_frame_type                              |
     //! | -                 | Truncated frame header              | parse_truncated_frame_header                          |
     //! | -                 | Truncated frame payload             | parse_truncated_frame_payload                         |
@@ -978,8 +1303,6 @@ mod tests {
 
     /// END_STREAM flag (DATA, HEADERS).
     const FLAG_END_STREAM: u8 = 0x01;
-    /// END_HEADERS flag (HEADERS, PUSH_PROMISE, CONTINUATION).
-    const FLAG_END_HEADERS: u8 = 0x04;
 
     fn dissect(data: &[u8]) -> Result<DissectBuffer<'_>, PacketError> {
         let dissector = Http2Dissector;
@@ -1823,5 +2146,208 @@ mod tests {
         assert!(!looks_like_frame_header(CONNECTION_PREFACE));
         assert!(!looks_like_frame_header(b"GET / HTTP/1.1\r\n\r\n"));
         assert!(!looks_like_frame_header(b"HTTP/1.1 200 OK\r\n\r\n"));
+    }
+
+    /// Every decoded header as `name: value`, `#index: value` (unknown
+    /// name) or `#index` (unknown entry).
+    fn header_list(
+        buf: &DissectBuffer<'_>,
+        layer: &packet_dissector_core::packet::Layer,
+    ) -> Vec<String> {
+        let Some(headers) = buf.field_by_name(layer, "headers") else {
+            return Vec::new();
+        };
+        let FieldValue::Array(ref array) = headers.value else {
+            panic!("expected Array");
+        };
+        let text = |v: &FieldValue<'_>| match v {
+            FieldValue::Str(s) => s.to_string(),
+            FieldValue::Scratch(r) => {
+                String::from_utf8(buf.scratch()[r.start as usize..r.end as usize].to_vec()).unwrap()
+            }
+            FieldValue::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            other => panic!("unexpected {other:?}"),
+        };
+        buf.nested_fields(array)
+            .iter()
+            .filter_map(|f| match f.value {
+                FieldValue::Object(ref r) => Some(buf.nested_fields(r)),
+                _ => None,
+            })
+            .map(|children| {
+                let get = |n: &str| children.iter().find(|c| c.name() == n).map(|c| &c.value);
+                match (get("name"), get("index"), get("value")) {
+                    (Some(n), _, Some(v)) => format!("{}: {}", text(n), text(v)),
+                    (None, Some(FieldValue::U32(i)), Some(v)) => format!("#{i}: {}", text(v)),
+                    (None, Some(FieldValue::U32(i)), None) => format!("#{i}"),
+                    other => panic!("unexpected header object {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unresolved_dynamic_index_is_reported() {
+        let data = build_frame(FRAME_TYPE_HEADERS, FLAG_END_HEADERS, 1, &[0x82, 0xbe]);
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        assert_eq!(header_list(&buf, layer), [":method: GET", "#62"]);
+    }
+
+    #[test]
+    fn unresolved_dynamic_name_is_reported() {
+        let data = build_frame(
+            FRAME_TYPE_HEADERS,
+            FLAG_END_HEADERS,
+            1,
+            &[0x7e, 0x03, b'f', b'o', b'o'],
+        );
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        assert_eq!(header_list(&buf, layer), ["#62: foo"]);
+    }
+
+    #[test]
+    fn decode_error_keeps_earlier_headers() {
+        // :method GET, then a literal whose name runs past the fragment.
+        let data = build_frame(
+            FRAME_TYPE_HEADERS,
+            FLAG_END_HEADERS,
+            1,
+            &[0x82, 0x04, 0x05, b'a'],
+        );
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        assert_eq!(header_list(&buf, layer), [":method: GET"]);
+        assert_eq!(
+            buf.field_by_name(layer, "hpack_error").unwrap().value,
+            FieldValue::Str("string length exceeds available data")
+        );
+    }
+
+    #[test]
+    fn display_fn_settings_id_extensions() {
+        let f = settings_id_name;
+        assert_eq!(
+            f(&FieldValue::U16(0x08), &[]),
+            Some("ENABLE_CONNECT_PROTOCOL")
+        );
+        assert_eq!(
+            f(&FieldValue::U16(0x09), &[]),
+            Some("NO_RFC7540_PRIORITIES")
+        );
+    }
+
+    #[test]
+    fn display_fn_frame_type_extensions() {
+        let f = frame_type_name;
+        assert_eq!(f(&FieldValue::U8(0x0a), &[]), Some("ALTSVC"));
+        assert_eq!(f(&FieldValue::U8(0x0c), &[]), Some("ORIGIN"));
+        assert_eq!(f(&FieldValue::U8(0x10), &[]), Some("PRIORITY_UPDATE"));
+        assert_eq!(f(&FieldValue::U8(0x0b), &[]), None);
+    }
+
+    #[test]
+    fn parse_priority_update_frame() {
+        let mut payload = 0x8000_0005u32.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"u=1, i");
+        let data = build_frame(FRAME_TYPE_PRIORITY_UPDATE, 0, 0, &payload);
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        let id = buf.field_by_name(layer, "prioritized_stream_id").unwrap();
+        assert_eq!(id.value, FieldValue::U32(5));
+        assert_eq!(id.range, 9..13);
+        let value = buf.field_by_name(layer, "priority_field_value").unwrap();
+        assert_eq!(value.value, FieldValue::Str("u=1, i"));
+        assert_eq!(value.range, 13..19);
+    }
+
+    #[test]
+    fn parse_priority_update_frame_too_short() {
+        let data = build_frame(FRAME_TYPE_PRIORITY_UPDATE, 0, 0, &[0, 0, 5]);
+        assert!(matches!(dissect_err(&data), PacketError::InvalidHeader(_)));
+    }
+
+    #[test]
+    fn parse_origin_frame() {
+        let mut payload = Vec::new();
+        for origin in ["https://a.example", "https://b.example"] {
+            payload.extend_from_slice(&(origin.len() as u16).to_be_bytes());
+            payload.extend_from_slice(origin.as_bytes());
+        }
+        let data = build_frame(FRAME_TYPE_ORIGIN, 0, 0, &payload);
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        let origins = buf.field_by_name(layer, "origins").unwrap();
+        let FieldValue::Array(ref r) = origins.value else {
+            panic!("expected Array");
+        };
+        let entries = buf.nested_fields(r);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].value, FieldValue::Str("https://a.example"));
+        assert_eq!(entries[0].range, 11..28);
+        assert_eq!(entries[1].value, FieldValue::Str("https://b.example"));
+    }
+
+    #[test]
+    fn parse_origin_frame_truncated_entry() {
+        // RFC 8336 §2.2 treats ORIGIN as non-critical: a malformed entry is
+        // not a dissection error, the complete entries before it are kept.
+        let payload = [0, 1, b'x', 0, 9, b'y'];
+        let data = build_frame(FRAME_TYPE_ORIGIN, 0, 0, &payload);
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        let FieldValue::Array(ref r) = buf.field_by_name(layer, "origins").unwrap().value else {
+            panic!("expected Array");
+        };
+        assert_eq!(buf.nested_fields(r).len(), 1);
+    }
+
+    #[test]
+    fn parse_altsvc_frame() {
+        let origin = b"https://example.com";
+        let value = b"h2=\":8000\"";
+        let mut payload = (origin.len() as u16).to_be_bytes().to_vec();
+        payload.extend_from_slice(origin);
+        payload.extend_from_slice(value);
+        let data = build_frame(FRAME_TYPE_ALTSVC, 0, 0, &payload);
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        let o = buf.field_by_name(layer, "origin").unwrap();
+        assert_eq!(o.value, FieldValue::Str("https://example.com"));
+        assert_eq!(o.range, 11..30);
+        let v = buf.field_by_name(layer, "alt_svc_field_value").unwrap();
+        assert_eq!(v.value, FieldValue::Str("h2=\":8000\""));
+        assert_eq!(v.range, 30..40);
+    }
+
+    #[test]
+    fn parse_altsvc_frame_on_stream() {
+        // An empty Origin: the service applies to the stream's origin.
+        let mut payload = vec![0, 0];
+        payload.extend_from_slice(b"clear");
+        let data = build_frame(FRAME_TYPE_ALTSVC, 0, 3, &payload);
+        let buf = dissect(&data).unwrap();
+        let layer = buf.layer_by_name("HTTP2").unwrap();
+        assert!(buf.field_by_name(layer, "origin").is_none());
+        assert_eq!(
+            buf.field_by_name(layer, "alt_svc_field_value")
+                .unwrap()
+                .value,
+            FieldValue::Str("clear")
+        );
+    }
+
+    #[test]
+    fn parse_altsvc_frame_malformed() {
+        // Too short for Origin-Len, and an Origin-Len past the payload: the
+        // raw payload is kept and nothing is decoded.
+        for payload in [&[0u8][..], &[0, 9, b'a']] {
+            let data = build_frame(FRAME_TYPE_ALTSVC, 0, 0, payload);
+            let buf = dissect(&data).unwrap();
+            let layer = buf.layer_by_name("HTTP2").unwrap();
+            assert!(buf.field_by_name(layer, "alt_svc_field_value").is_none());
+            assert!(buf.field_by_name(layer, "payload").is_some());
+        }
     }
 }

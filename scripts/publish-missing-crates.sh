@@ -199,20 +199,39 @@ done
 # stall because crates.io hasn't finished propagating a just-published
 # dependency to its index yet, so tolerate a few stalled passes with a
 # backoff before giving up, instead of failing on the first one.
+#
+# crates.io allows only a few new crates per user in a burst and then one
+# per 10 minutes. Waiting that out would burn Actions minutes, so once it
+# answers 429 for a new crate, the remaining new crates - and anything
+# still stuck on them - are deferred to the next run of this workflow
+# instead of retried here.
 stalls=0
 max_stalls=5
+deferred=()
+new_crate_limited=0
+retry_after=""
+publish_log=$(mktemp)
+trap 'rm -f "$publish_log"' EXIT
 while [ "${#remaining[@]}" -gt 0 ]; do
   next_remaining=()
   progressed=0
   for name in "${remaining[@]}"; do
+    if [ -n "${is_new[$name]:-}" ] && [ "$new_crate_limited" -eq 1 ]; then
+      deferred+=("$name")
+      continue
+    fi
     echo "::group::cargo publish -p ${name}"
     token="$CARGO_REGISTRY_TOKEN"
     if [ -n "${is_new[$name]:-}" ]; then
       token="$NEW_CRATE_TOKEN"
     fi
     published=0
-    if CARGO_REGISTRY_TOKEN="$token" cargo publish -p "$name" --no-verify; then
+    rate_limited=0
+    if CARGO_REGISTRY_TOKEN="$token" cargo publish -p "$name" --no-verify 2>&1 | tee "$publish_log"; then
       published=1
+    elif [ -n "${is_new[$name]:-}" ] && grep -Eq "status 429|too many new crates" "$publish_log"; then
+      rate_limited=1
+      retry_after=$(sed -n 's/.*\(Please try again after [^G]*GMT\).*/\1/p' "$publish_log" | head -n 1)
     elif [ -n "${is_new[$name]:-}" ]; then
       # The upload may have reached crates.io even though cargo failed
       # afterwards; retrying would then only hit "already exists" and the
@@ -228,6 +247,10 @@ while [ "${#remaining[@]}" -gt 0 ]; do
       if [ -n "${is_new[$name]:-}" ]; then
         ensure_trusted_publishing "$name" || failed+=("$name")
       fi
+    elif [ "$rate_limited" -eq 1 ]; then
+      new_crate_limited=1
+      echo "::warning::$(gh_escape "crates.io rate-limited new crates (${retry_after:-no retry time given}). Deferring the remaining new crates to the next run.")"
+      deferred+=("$name")
     else
       echo "::warning::${name} did not publish this pass, will retry"
       next_remaining+=("$name")
@@ -239,6 +262,12 @@ while [ "${#remaining[@]}" -gt 0 ]; do
     break
   fi
   if [ "$progressed" -eq 0 ]; then
+    if [ "$new_crate_limited" -eq 1 ]; then
+      # What is left most likely depends on a deferred new crate; waiting
+      # here cannot help until the rate limit refills.
+      deferred+=("${remaining[@]}")
+      break
+    fi
     stalls=$((stalls + 1))
     if [ "$stalls" -ge "$max_stalls" ]; then
       echo "::error::Could not publish after ${max_stalls} stalled passes: ${remaining[*]}"
@@ -251,6 +280,15 @@ while [ "${#remaining[@]}" -gt 0 ]; do
     stalls=0
   fi
 done
+
+if [ "${#deferred[@]}" -gt 0 ]; then
+  echo "::warning::$(gh_escape "Deferred by the crates.io new-crate rate limit (${retry_after:-no retry time given}); retried on the next push to main, or re-run this workflow after that time: ${deferred[*]}")"
+  # release-plz would try to create these crates with the Trusted
+  # Publishing token and fail, so the workflow skips it while any are left.
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo "deferred=${deferred[*]}" >>"$GITHUB_OUTPUT"
+  fi
+fi
 
 if [ "${#failed[@]}" -gt 0 ]; then
   echo "::error::Not published or missing a Trusted Publishing config: ${failed[*]}"
