@@ -40,6 +40,8 @@
 //! | Ethernet → IPv4 → SCTP(port 2905, PPID 0) → M3UA ASPUP | integration_ethernet_ipv4_sctp_m3ua_port_aspup |
 //! | Ethernet → IPv4 → SCTP → M3UA DATA (SI=5, no ISUP dissector) | integration_ethernet_ipv4_sctp_m3ua_unknown_si |
 //! | Ethernet → IPv4 → SCTP → M3UA → SCCP → SSN 6 user dissector | integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch |
+//! | Ethernet → IPv4 → SCTP → M3UA → SCCP → TCAP → MAP (SendAuthenticationInfo) | integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_map |
+//! | Ethernet → IPv4 → SCTP → M3UA → SCCP (SSN 146) → TCAP | integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_cap_ssn |
 //! | Ethernet → IPv4 → SCTP(port 38422, PPID 0) → XnAP | integration_ethernet_ipv4_sctp_xnap |
 //! | Ethernet → IPv4 → SCTP(40000→40001, PPID 61) → XnAP | integration_ethernet_ipv4_sctp_ppid_xnap_nondefault_port |
 //! | Ethernet → IPv4 → SCTP(port 38472, PPID 0) → F1AP | integration_ethernet_ipv4_sctp_f1ap |
@@ -10421,14 +10423,16 @@ fn sccp_udt(user_data: &[u8]) -> Vec<u8> {
 #[test]
 fn integration_ethernet_ipv4_sctp_m3ua_sccp_udt() {
     let reg = DissectorRegistry::default();
-    let user = [0x62, 0x02, 0x48, 0x00]; // opaque SCCP user data
+    // A minimal TCAP Begin (empty OTID) for SSN 6 (HLR), which carries TCAP.
+    let user = [0x62, 0x02, 0x48, 0x00];
     let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp_udt(&user)));
     let mut buf = DissectBuffer::new();
     reg.dissect(&data, &mut buf).unwrap();
-    assert_eq!(
-        layer_names(&buf),
-        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP"]
-    );
+    let mut expected = vec!["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP"];
+    if cfg!(feature = "tcap") {
+        expected.push("TCAP");
+    }
+    assert_eq!(layer_names(&buf), expected);
 
     let m3ua = &buf.layers()[3];
     assert_eq!(
@@ -10528,7 +10532,7 @@ impl packet_dissector::dissector::Dissector for SccpUserStub {
 #[test]
 fn integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch() {
     let mut reg = DissectorRegistry::default();
-    reg.register_by_sccp_ssn(6, Box::new(SccpUserStub)).unwrap();
+    reg.register_by_sccp_ssn_or_replace(6, Box::new(SccpUserStub));
     let user = [0x62, 0x02, 0x48, 0x00, 0x11];
     let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp_udt(&user)));
     let mut buf = DissectBuffer::new();
@@ -10544,6 +10548,114 @@ fn integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch() {
         sccp.range.end - user.len()..sccp.range.end
     );
     assert_eq!(&data[user_layer.range.clone()], &user);
+}
+
+/// Encode a BER element with a short definite length.
+#[cfg(feature = "tcap")]
+fn ber(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut v = vec![tag, content.len() as u8];
+    v.extend_from_slice(content);
+    v
+}
+
+/// TCAP Begin (ITU-T Q.773, clause 3.1) with an AARQ for MAP infoRetrieval
+/// version 3 and an Invoke of sendAuthenticationInfo (opcode 56,
+/// TS 29.002, clause 17.6.1) with SendAuthenticationInfoArg { imsi [0],
+/// numberOfRequestedVectors } (clause 17.7.1).
+#[cfg(feature = "tcap")]
+fn tcap_begin_sai() -> Vec<u8> {
+    let ac = [0x04, 0x00, 0x00, 0x01, 0x00, 14, 3];
+    let dialogue_as = [0x00, 0x11, 0x86, 0x05, 0x01, 0x01, 0x01];
+    let aarq = ber(0x60, &ber(0xa1, &ber(0x06, &ac)));
+    let external = ber(0x28, &[ber(0x06, &dialogue_as), ber(0xa0, &aarq)].concat());
+    let imsi = [0x00, 0x01, 0x01, 0x21, 0x43, 0x65, 0x87, 0xf9];
+    let arg = ber(0x30, &[ber(0x80, &imsi), ber(0x02, &[5])].concat());
+    let invoke = ber(0xa1, &[ber(0x02, &[1]), ber(0x02, &[56]), arg].concat());
+    ber(
+        0x62,
+        &[
+            ber(0x48, &[1, 2, 3, 4]),
+            ber(0x6b, &external),
+            ber(0x6c, &invoke),
+        ]
+        .concat(),
+    )
+}
+
+/// SCCP UDT from `calling_ssn` to `called_ssn`, routed on SSN.
+#[cfg(feature = "sccp")]
+fn sccp_udt_ssn(called_ssn: u8, calling_ssn: u8, user_data: &[u8]) -> Vec<u8> {
+    let mut m = vec![0x09, 0x00, 0x03, 0x05, 0x07];
+    m.extend_from_slice(&[0x02, 0x42, called_ssn]);
+    m.extend_from_slice(&[0x02, 0x42, calling_ssn]);
+    m.push(user_data.len() as u8);
+    m.extend_from_slice(user_data);
+    m
+}
+
+#[cfg(all(
+    feature = "sctp",
+    feature = "m3ua",
+    feature = "sccp",
+    feature = "tcap",
+    feature = "map"
+))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_map() {
+    let reg = DissectorRegistry::default();
+    let tcap = tcap_begin_sai();
+    let sccp = sccp_udt_ssn(6, 7, &tcap);
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP", "TCAP", "MAP"]
+    );
+    let tcap_layer = &buf.layers()[5];
+    assert_eq!(
+        buf.resolve_display_name(tcap_layer, "message_type_name"),
+        Some("Begin")
+    );
+    let sccp_layer = &buf.layers()[4];
+    assert_eq!(
+        tcap_layer.range,
+        sccp_layer.range.end - tcap.len()..sccp_layer.range.end
+    );
+    let map = &buf.layers()[6];
+    assert_eq!(
+        buf.resolve_display_name(map, "application_context_name"),
+        Some("infoRetrieval")
+    );
+    let FieldValue::Array(r) = &buf.field_by_name(map, "components").unwrap().value else {
+        panic!("components is not an array")
+    };
+    let component = &buf.nested_fields(r)[0];
+    assert_eq!(
+        buf.resolve_container_display_name(r.start),
+        Some("sendAuthenticationInfo")
+    );
+    let FieldValue::Object(cr) = &component.value else {
+        panic!("component is not an object")
+    };
+    assert_eq!(
+        buf.resolve_nested_display_name(cr, "operation_name"),
+        Some("sendAuthenticationInfo")
+    );
+}
+
+#[cfg(all(feature = "sctp", feature = "m3ua", feature = "sccp", feature = "tcap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_cap_ssn() {
+    let reg = DissectorRegistry::default();
+    let sccp = sccp_udt_ssn(146, 146, &tcap_begin_sai());
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP", "TCAP"]
+    );
 }
 
 // ---------------------------------------------------------------------------

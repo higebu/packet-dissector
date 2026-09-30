@@ -16,6 +16,8 @@
 //!   <https://www.itu.int/rec/T-REC-Q.713>
 //! - ITU-T Q.704 (07/96), clause 14.2.1 (Service Indicator 3 = SCCP):
 //!   <https://www.itu.int/rec/T-REC-Q.704>
+//! - 3GPP TS 23.003, clause 8 (subsystem numbers allocated to GSM/UMTS):
+//!   <https://www.3gpp.org/ftp/Specs/archive/23_series/23.003/>
 
 #![deny(missing_docs)]
 
@@ -257,7 +259,10 @@ fn routing_indicator_name(ri: u8) -> Option<&'static str> {
 
 /// Returns the name of a subsystem number.
 ///
-/// ITU-T Q.713, clause 3.4.2.2 — <https://www.itu.int/rec/T-REC-Q.713>
+/// ITU-T Q.713, clause 3.4.2.2 — <https://www.itu.int/rec/T-REC-Q.713> —
+/// for the international codes; 3GPP TS 23.003, clause 8.2 —
+/// <https://www.3gpp.org/ftp/Specs/archive/23_series/23.003/> — for the
+/// national codes allocated to GSM/UMTS (142-150 and 248-254).
 fn ssn_name(ssn: u8) -> Option<&'static str> {
     Some(match ssn {
         0x00 => "SSN not known/not used",
@@ -273,6 +278,21 @@ fn ssn_name(ssn: u8) -> Option<&'static str> {
         0x0b => "ISDN supplementary services",
         0x0d => "broadband ISDN edge-to-edge applications",
         0x0e => "TC test responder",
+        142 => "RANAP",
+        143 => "RNSAP",
+        145 => "GMLC (MAP)",
+        146 => "CAP",
+        147 => "gsmSCF (MAP) or IM-SSF (MAP) or Presence Network Agent",
+        148 => "SIWF (MAP)",
+        149 => "SGSN (MAP)",
+        150 => "GGSN (MAP)",
+        248 => "CSS (MAP)",
+        249 => "PCAP",
+        250 => "BSC (BSSAP-LE)",
+        251 => "MSC (BSSAP-LE)",
+        252 => "SMLC (BSSAP-LE)",
+        253 => "BSS O&M (A interface)",
+        254 => "BSSAP (A interface)",
         _ => return None,
     })
 }
@@ -1525,6 +1545,7 @@ mod tests {
     //! | 1.4, 2.3   | Pointers to mandatory variable parameters       | parse_udt_gt_route                    |
     //! | 2.1        | Message type codes (names)                      | name_tables                           |
     //! | 2.1, 3     | Name table sizes and display functions          | display_fns_and_name_table_sizes      |
+    //! | 23.003 8.2 | 3GPP subsystem number names                     | display_fns_and_name_table_sizes      |
     //! | 2.1        | Unknown message type                            | reject_unknown_message_type           |
     //! | 3.4.1      | Address indicator                               | parse_udt_gt_route                    |
     //! | 3.4.2.1    | Signalling point code (14 bits, LSB first)      | parse_udt_ssn_route_with_pc           |
@@ -2415,7 +2436,7 @@ mod tests {
         assert_eq!(known(255, refusal_cause_name), 19);
         assert_eq!(known(255, global_title_indicator_name), 5);
         assert_eq!(known(255, routing_indicator_name), 2);
-        assert_eq!(known(255, ssn_name), 13);
+        assert_eq!(known(255, ssn_name), 13 + 15);
         assert_eq!(known(255, nature_of_address_name), 5);
         assert_eq!(known(255, numbering_plan_name), 9);
         assert_eq!(known(255, encoding_scheme_name), 4);
