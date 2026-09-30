@@ -53,9 +53,11 @@ packet-dissector-lldp = { version = "0.5.0", path = "crates/packet-dissector-lld
 packet-dissector-eap = { version = "0.5.0", path = "crates/packet-dissector-eap" }
 packet-dissector-ntp = { version = "0.5.0", path = "crates/packet-dissector-ntp" }
 packet-dissector-ospf = { version = "0.5.0", path = "crates/packet-dissector-ospf" }
+packet-dissector-pim = { version = "0.5.0", path = "crates/packet-dissector-pim" }
 packet-dissector-pcap = { version = "0.5.0", path = "crates/packet-dissector-pcap" }
 packet-dissector-vrrp = { version = "0.5.0", path = "crates/packet-dissector-vrrp" }
 packet-dissector-bfd = { version = "0.5.0", path = "crates/packet-dissector-bfd" }
+packet-dissector-ipfix = { version = "0.5.0", path = "crates/packet-dissector-ipfix" }
 packet-dissector-snmp = { version = "0.5.0", path = "crates/packet-dissector-snmp" }
 packet-dissector-m3ua = { version = "0.5.0", path = "crates/packet-dissector-m3ua" }
 packet-dissector-sccp = { version = "0.5.0", path = "crates/packet-dissector-sccp" }

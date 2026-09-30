@@ -88,6 +88,7 @@ changelog_include = [
   "packet-dissector-igmp",
   "packet-dissector-ieee80211",
   "packet-dissector-ike",
+  "packet-dissector-ipfix",
   "packet-dissector-ipv4",
   "packet-dissector-ipv6",
   "packet-dissector-isis",
@@ -111,6 +112,7 @@ changelog_include = [
   "packet-dissector-pbt",
   "packet-dissector-pcap",
   "packet-dissector-pfcp",
+  "packet-dissector-pim",
   "packet-dissector-ppp",
   "packet-dissector-pppoe",
   "packet-dissector-quic",
@@ -259,6 +261,10 @@ name = "packet-dissector-ike"
 version_group = "workspace"
 
 [[package]]
+name = "packet-dissector-ipfix"
+version_group = "workspace"
+
+[[package]]
 name = "packet-dissector-ipv4"
 version_group = "workspace"
 
@@ -348,6 +354,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-pfcp"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-pim"
 version_group = "workspace"
 
 [[package]]

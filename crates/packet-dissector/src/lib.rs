@@ -211,11 +211,17 @@ pub mod dissectors {
     #[cfg(feature = "ospf")]
     pub use packet_dissector_ospf as ospf;
 
+    #[cfg(feature = "pim")]
+    pub use packet_dissector_pim as pim;
+
     #[cfg(feature = "vrrp")]
     pub use packet_dissector_vrrp as vrrp;
 
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
+
+    #[cfg(feature = "ipfix")]
+    pub use packet_dissector_ipfix as ipfix;
 
     #[cfg(feature = "snmp")]
     pub use packet_dissector_snmp as snmp;
