@@ -1982,21 +1982,17 @@ impl Dissector for OspfDispatcher {
 // HTTP/1.1.
 // ---------------------------------------------------------------------------
 
-/// Maximum number of TCP stream directions remembered as HTTP/2 (two per
-/// connection). The oldest ones are forgotten first.
-#[cfg(feature = "http2")]
-const MAX_HTTP2_DIRECTIONS: usize = 65_536;
-
 #[cfg(any(feature = "http", feature = "http2"))]
 struct HttpDispatcher {
-    /// TCP stream directions known to carry HTTP/2.
+    /// HTTP/2 dissector that tracks the connections whose client connection
+    /// preface it has seen (HPACK dynamic tables, split header blocks).
     ///
     /// RFC 9113, Section 3.4 — the client connection preface is sent once,
     /// as "the first application data octets of a connection"
     /// (<https://www.rfc-editor.org/rfc/rfc9113#section-3.4>), so later
-    /// segments of either direction are recognised by this memory.
+    /// segments of either direction are recognised by that tracking.
     #[cfg(feature = "http2")]
-    http2_streams: std::sync::Mutex<crate::stream_set::StreamSet>,
+    http2: packet_dissector_http2::Http2ConnectionDissector,
 }
 
 #[cfg(any(feature = "http", feature = "http2"))]
@@ -2004,16 +2000,14 @@ impl HttpDispatcher {
     fn new() -> Self {
         Self {
             #[cfg(feature = "http2")]
-            http2_streams: std::sync::Mutex::new(crate::stream_set::StreamSet::new(
-                MAX_HTTP2_DIRECTIONS,
-            )),
+            http2: packet_dissector_http2::Http2ConnectionDissector::new(),
         }
     }
 
     /// Whether `data` of the direction `stream` is HTTP/2.
     ///
-    /// Only the client connection preface marks the connection (both
-    /// directions) as HTTP/2 for the following segments. A frame header
+    /// Only the client connection preface makes the connection (both
+    /// directions) HTTP/2 for the following segments. A frame header
     /// recognised by [`is_http2_start`] alone is dissected as HTTP/2 but not
     /// remembered: an HTTP/1.1 body can start with octets that form a valid
     /// frame header, and remembering it would send the connection's later
@@ -2024,22 +2018,7 @@ impl HttpDispatcher {
         data: &[u8],
         stream: &packet_dissector_core::dissector::TcpStreamContext,
     ) -> bool {
-        // A poisoned lock only means a panic elsewhere; the set itself is
-        // always consistent, so keep using it.
-        let mut streams = self
-            .http2_streams
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if streams.contains(&stream.stream_key) {
-            return true;
-        }
-        if data.starts_with(packet_dissector_http2::CONNECTION_PREFACE) {
-            streams.insert(stream.stream_key);
-            streams.insert(stream.reverse_key());
-            return true;
-        }
-        drop(streams);
-        is_http2_start(data)
+        self.http2.is_tracking(&stream.stream_key) || is_http2_start(data)
     }
 }
 
@@ -2133,7 +2112,7 @@ impl Dissector for HttpDispatcher {
     ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
         #[cfg(feature = "http2")]
         if self.is_http2_stream(data, stream) {
-            return packet_dissector_http2::Http2Dissector.dissect(data, buf, offset);
+            return self.http2.dissect_tcp_stream(data, buf, offset, stream);
         }
         #[cfg(not(feature = "http2"))]
         let _ = stream;
@@ -2142,10 +2121,7 @@ impl Dissector for HttpDispatcher {
 
     fn release_tcp_stream(&self, stream_key: &packet_dissector_core::dissector::TcpStreamKey) {
         #[cfg(feature = "http2")]
-        self.http2_streams
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(stream_key);
+        self.http2.release_tcp_stream(stream_key);
         #[cfg(not(feature = "http2"))]
         let _ = stream_key;
     }
@@ -3075,7 +3051,7 @@ impl Default for DissectorRegistry {
         reg.register_dissector_factory("http", || Box::new(packet_dissector_http::HttpDissector));
         #[cfg(feature = "http2")]
         reg.register_dissector_factory("http2", || {
-            Box::new(packet_dissector_http2::Http2Dissector)
+            Box::new(packet_dissector_http2::Http2ConnectionDissector::new())
         });
 
         // GENEVE runs over UDP on port 6081 (RFC 8926)

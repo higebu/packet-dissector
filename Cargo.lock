@@ -1138,6 +1138,7 @@ dependencies = [
  "packet-dissector-erspan",
  "packet-dissector-f1ap",
  "packet-dissector-gtpv1c",
+ "packet-dissector-http2",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
  "packet-dissector-ieee80211",
