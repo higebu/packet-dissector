@@ -170,6 +170,8 @@
 //! | Ethernet → IPv4 → UDP (853) → DTLS ClientHello + CCS         | integration_ethernet_ipv4_udp_dtls_client_hello_two_records |
 //! | Ethernet → IPv4 → UDP (853) → QUIC (RFC 9443 §3 demux)      | integration_ethernet_ipv4_udp_853_quic_not_dtls      |
 //! | Ethernet → IPv4 → UDP (3478) → DTLS 1.3 (RFC 9443 §3 demux) | integration_ethernet_ipv4_udp_stun_port_dtls         |
+//! | Ethernet → IPv4 → UDP (853) → DTLS reject → QUIC fallback    | integration_ethernet_ipv4_udp_853_dtls_reject_falls_back_to_quic |
+//! | Ethernet → IPv4 → UDP (3478) → DTLS reject → STUN fallback   | integration_ethernet_ipv4_udp_stun_port_dtls_reject_falls_back_to_stun |
 
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
@@ -9341,6 +9343,55 @@ fn integration_ethernet_ipv4_udp_853_quic_not_dtls() {
     assert_layers_contiguous(&buf);
     assert_eq!(buf.layers().len(), 4);
     assert_eq!(buf.layers()[3].name, "QUIC");
+}
+
+/// A first octet in 20..=63 that DTLS rejects (27..=31 are unassigned in
+/// RFC 9147, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9147#section-4.1>)
+/// falls back to QUIC on port 853, e.g. a packet with the QUIC bit greased
+/// (RFC 9287, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9287#section-3.1>).
+#[test]
+fn integration_ethernet_ipv4_udp_853_dtls_reject_falls_back_to_quic() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 853, 54321);
+    // QUIC short header with fixed_bit=0 (greased): first octet 0x1B.
+    pkt.push(0x1B);
+    pkt.extend_from_slice(&[0xBB; 20]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "QUIC");
+}
+
+/// A first octet in 20..=63 that DTLS rejects falls back to STUN on the
+/// STUN/TURN port (RFC 9443, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc9443#section-3>).
+#[test]
+fn integration_ethernet_ipv4_udp_stun_port_dtls_reject_falls_back_to_stun() {
+    let reg = DissectorRegistry::default();
+    let mut pkt: Vec<u8> = Vec::new();
+    push_ethernet(&mut pkt, [0; 6], [0; 6], 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 50000, 3478);
+    // STUN header: message type 0x1B01, length 0, magic cookie, transaction ID.
+    pkt.extend_from_slice(&[0x1B, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42]);
+    pkt.extend_from_slice(&[0x11; 12]);
+
+    fixup_ipv4_length(&mut pkt, ip_start);
+    fixup_udp_length(&mut pkt, udp_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "STUN");
 }
 
 /// A DTLS 1.3 record on the STUN/TURN port is DTLS by its first octet

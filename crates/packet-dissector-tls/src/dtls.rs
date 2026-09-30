@@ -15,7 +15,8 @@
 //!   Heartbeat and ACK payloads are decoded; the handshake message bodies
 //!   are decoded by the TLS handshake decoders, with the DTLS `cookie` of
 //!   ClientHello and HelloVerifyRequest.
-//! - 25 (`tls12_cid`, RFC 9146): the header is decoded up to the sequence
+//! - 25 (`tls12_cid`, RFC 9146, Section 4 —
+//!   <https://www.rfc-editor.org/rfc/rfc9146#section-4>): the header is decoded up to the sequence
 //!   number. The Connection ID length is negotiated and not carried on the
 //!   wire, so the CID, length and encrypted content are reported as one
 //!   opaque `cid_and_record` field that runs to the end of the datagram.
@@ -25,6 +26,10 @@
 //!   so everything after the first octet is reported as `cid_and_record`.
 //! - Anything else is rejected.
 //!
+//! The first record must be well-formed or the datagram is rejected. A
+//! malformed later record ends the walk: the records before it are kept
+//! and `bytes_consumed` ends at the last well-formed record.
+//!
 //! A handshake message body is decoded only when the record carries the
 //! whole message (`fragment_offset` 0 and `fragment_length` equal to
 //! `length`). Handshake records in an epoch other than 0, and records whose
@@ -33,7 +38,9 @@
 //! encrypted (RFC 6347, Section 4.1 —
 //! <https://www.rfc-editor.org/rfc/rfc6347#section-4.1>: "The epoch number
 //! is initially zero and is incremented each time a ChangeCipherSpec
-//! message is sent."). Messages are not reassembled across records or
+//! message is sent."). For the same reason, Alert and Heartbeat records in
+//! an epoch other than 0 are reported as `encrypted_alert` and
+//! `encrypted_heartbeat`. Messages are not reassembled across records or
 //! datagrams, and nothing is decrypted.
 //!
 //! ## References
@@ -50,7 +57,7 @@ use packet_dissector_core::dissector::{
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u16, read_be_u64};
+use packet_dissector_core::util::{read_be_u16, read_be_u24, read_be_u64};
 
 use crate::handshake::{
     FD_HANDSHAKE, HANDSHAKE_BODY_FIELD_COUNT, HANDSHAKE_BODY_FIELDS, HANDSHAKE_LENGTH_FIELD,
@@ -418,7 +425,8 @@ static REFERENCES: &[SpecReference] = &[
 ///   header decoded, plus Handshake, Alert, Heartbeat and ACK payloads. A
 ///   handshake body is decoded only for an unfragmented message in epoch 0;
 ///   the ClientHello and HelloVerifyRequest `cookie` is reported.
-/// - `tls12_cid` records (RFC 9146) and DTLS 1.3 unified headers with the C
+/// - `tls12_cid` records (RFC 9146, Section 4 —
+///   <https://www.rfc-editor.org/rfc/rfc9146#section-4>) and DTLS 1.3 unified headers with the C
 ///   bit set are decoded up to the Connection ID, whose length is not carried
 ///   on the wire; the rest of the datagram is reported as `cid_and_record`.
 /// - DTLS 1.3 unified headers (first octet `001CSLEE`) have their flags,
@@ -465,9 +473,15 @@ impl Dissector for DtlsDissector {
                 actual: 0,
             });
         }
-        let mut pos = 0;
+        // The first record must be well-formed. A malformed later record
+        // ends the walk: the records before it are kept and only they are
+        // consumed. `dissect_record` pushes nothing when it fails.
+        let mut pos = dissect_record(data, 0, offset, buf)?;
         while pos < data.len() {
-            pos += dissect_record(data, pos, offset, buf)?;
+            match dissect_record(data, pos, offset, buf) {
+                Ok(len) => pos += len,
+                Err(_) => break,
+            }
         }
         Ok(DissectResult::new(pos, DispatchHint::End))
     }
@@ -516,11 +530,16 @@ fn dissect_record<'pkt>(
 
 /// Push the type, version, epoch and sequence number shared by
 /// `DTLSPlaintext` and the `tls12_cid` record, whose first 11 bytes are
-/// `rec[..11]`, located at packet offset `at`.
-fn push_record_prefix<'pkt>(rec: &'pkt [u8], at: usize, buf: &mut DissectBuffer<'pkt>) {
+/// `rec[..11]`, located at packet offset `at`. `version` and `epoch` are the
+/// values the caller already read from `rec[1..5]`.
+fn push_record_prefix<'pkt>(
+    rec: &'pkt [u8],
+    at: usize,
+    version: u16,
+    epoch: u16,
+    buf: &mut DissectBuffer<'pkt>,
+) {
     // Bounds are checked by the caller.
-    let version = u16::from_be_bytes([rec[1], rec[2]]);
-    let epoch = u16::from_be_bytes([rec[3], rec[4]]);
     let seq = rec[5..TLS12_CID_PREFIX_SIZE]
         .iter()
         .fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
@@ -532,6 +551,22 @@ fn push_record_prefix<'pkt>(rec: &'pkt [u8], at: usize, buf: &mut DissectBuffer<
         FieldValue::U64(seq),
         at + 5..at + TLS12_CID_PREFIX_SIZE,
     );
+}
+
+/// Push a protected record payload as one opaque field, unless it is empty.
+fn push_encrypted<'pkt>(
+    descriptor: &'static FieldDescriptor,
+    payload: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) {
+    if !payload.is_empty() {
+        buf.push_field(
+            descriptor,
+            FieldValue::Bytes(payload),
+            offset..offset + payload.len(),
+        );
+    }
 }
 
 /// Dissect a `DTLSPlaintext` record, or a DTLS 1.2 `tls12_cid` record.
@@ -547,7 +582,8 @@ fn dissect_plaintext_record<'pkt>(
     let rec = &data[pos..];
     let ct = rec[0];
     // A tls12_cid record needs at least one CID byte: "The CID field is
-    // present and contains one or more bytes." (RFC 9146, Section 4).
+    // present and contains one or more bytes." (RFC 9146, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc9146#section-4).
     let header_size = if ct == CONTENT_TYPE_TLS12_CID {
         TLS12_CID_PREFIX_SIZE + 1
     } else {
@@ -562,11 +598,12 @@ fn dissect_plaintext_record<'pkt>(
             value: u32::from(version),
         });
     }
+    let epoch = read_be_u16(rec, 3)?;
     let at = base + pos;
 
     if ct == CONTENT_TYPE_TLS12_CID {
         buf.begin_layer("DTLS", None, FIELD_DESCRIPTORS, at..at + rec.len());
-        push_record_prefix(rec, at, buf);
+        push_record_prefix(rec, at, version, epoch, buf);
         buf.push_field(
             fd(FD_CID_AND_RECORD),
             FieldValue::Bytes(&rec[TLS12_CID_PREFIX_SIZE..]),
@@ -583,8 +620,8 @@ fn dissect_plaintext_record<'pkt>(
     }
 
     let length = read_be_u16(rec, 11)?;
-    // RFC 6347, Section 4.1: length is "Identical to the length field in a
-    // TLS 1.2 record."
+    // RFC 6347, Section 4.1 — https://www.rfc-editor.org/rfc/rfc6347#section-4.1
+    // length is "Identical to the length field in a TLS 1.2 record."
     if usize::from(length) > MAX_RECORD_LENGTH {
         return Err(PacketError::InvalidFieldValue {
             field: "length",
@@ -593,10 +630,9 @@ fn dissect_plaintext_record<'pkt>(
     }
     let record_len = PLAINTEXT_HEADER_SIZE + usize::from(length);
     require(data, pos, record_len)?;
-    let epoch = u16::from_be_bytes([rec[3], rec[4]]);
 
     buf.begin_layer("DTLS", None, FIELD_DESCRIPTORS, at..at + record_len);
-    push_record_prefix(rec, at, buf);
+    push_record_prefix(rec, at, version, epoch, buf);
     buf.push_field(
         fd(FD_LENGTH),
         FieldValue::U16(length),
@@ -608,6 +644,27 @@ fn dissect_plaintext_record<'pkt>(
     let label = match ct {
         CONTENT_TYPE_HANDSHAKE => {
             dissect_handshake_record(payload, payload_offset, epoch, version, buf)
+        }
+        // A record in a non-zero epoch is protected (RFC 6347, Section 4.1 —
+        // https://www.rfc-editor.org/rfc/rfc6347#section-4.1), so its
+        // payload is not decoded whatever its shape.
+        CONTENT_TYPE_ALERT if epoch != 0 => {
+            push_encrypted(
+                &TLS_FIELD_DESCRIPTORS[FD_ENCRYPTED_ALERT],
+                payload,
+                payload_offset,
+                buf,
+            );
+            record_version_label(version)
+        }
+        CONTENT_TYPE_HEARTBEAT if epoch != 0 => {
+            push_encrypted(
+                &TLS_FIELD_DESCRIPTORS[FD_ENCRYPTED_HEARTBEAT],
+                payload,
+                payload_offset,
+                buf,
+            );
+            record_version_label(version)
         }
         CONTENT_TYPE_ALERT => {
             dissect_alert_record(payload, payload_offset, buf);
@@ -774,13 +831,12 @@ struct HandshakeHeader {
 /// RFC 9147, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9147#section-5.2>
 fn read_handshake_header(payload: &[u8], pos: usize) -> Option<HandshakeHeader> {
     let h = payload.get(pos..pos.checked_add(HANDSHAKE_HEADER_SIZE)?)?;
-    let u24 = |i: usize| u32::from_be_bytes([0, h[i], h[i + 1], h[i + 2]]);
     Some(HandshakeHeader {
         msg_type: h[0],
-        length: u24(1),
-        message_seq: u16::from_be_bytes([h[4], h[5]]),
-        fragment_offset: u24(6),
-        fragment_length: u24(9),
+        length: read_be_u24(h, 1).ok()?,
+        message_seq: read_be_u16(h, 4).ok()?,
+        fragment_offset: read_be_u24(h, 6).ok()?,
+        fragment_length: read_be_u24(h, 9).ok()?,
     })
 }
 
@@ -831,7 +887,8 @@ fn dissect_handshake_record<'pkt>(
     // A handshake record in a non-zero epoch is protected (RFC 6347,
     // Section 4.1 — https://www.rfc-editor.org/rfc/rfc6347#section-4.1);
     // DTLS 1.3 never sends DTLSPlaintext records with a non-zero epoch
-    // (RFC 9147, Section 4 — "uint16 epoch = 0").
+    // (RFC 9147, Section 4 — https://www.rfc-editor.org/rfc/rfc9147#section-4
+    // — "uint16 epoch = 0").
     if epoch != 0 || !is_plaintext_handshake(payload) {
         buf.push_field(
             fd(FD_OPAQUE_HANDSHAKE),
@@ -977,7 +1034,9 @@ mod tests {
     //! | 9147 §4        | Two records in one datagram                | parse_two_records_in_one_datagram           |
     //! | 9147 §4        | Truncated 13-octet header                  | parse_truncated_plaintext_header            |
     //! | 9147 §4        | Truncated fragment                         | parse_truncated_plaintext_fragment          |
-    //! | 9147 §4        | Truncated second record                    | parse_truncated_second_record               |
+    //! | 9147 §4        | Truncated second record: walk stops        | parse_truncated_second_record               |
+    //! | 9147 §4        | Invalid later record: walk stops           | parse_invalid_later_record_stops_walk       |
+    //! | 6347 §4.1      | Alert/Heartbeat in epoch > 0 encrypted     | parse_alert_and_heartbeat_epoch_nonzero_are_encrypted |
     //! | 9147 §4        | Empty input                                | parse_empty_input                           |
     //! | 9147 §4.1      | Unknown first octet rejected               | parse_rejects_unknown_first_octet           |
     //! | 6347 §4.1      | Version major must be 254                  | parse_rejects_non_dtls_version              |
@@ -1433,26 +1492,74 @@ mod tests {
 
     #[test]
     fn parse_truncated_second_record() {
+        // A later malformed record ends the walk: the earlier records are
+        // kept and only they are consumed.
         let mut data = record(21, 0xFEFD, 0, 0, &[1, 0]);
+        let first = data.len();
         data.extend_from_slice(&record(21, 0xFEFD, 0, 1, &[1, 0]));
-        let cut = &data[..data.len() - 1];
-        let (r, _) = dissect(cut);
-        assert_eq!(
-            r.unwrap_err(),
-            PacketError::Truncated {
-                expected: data.len(),
-                actual: cut.len()
-            }
-        );
+        // Second record's fragment cut short.
+        let (r, buf) = dissect(&data[..data.len() - 1]);
+        assert_eq!(r.unwrap().bytes_consumed, first);
+        let layers = dtls_layers(&buf);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].range, 0..first);
         // Second header cut short.
-        let cut = &data[..15 + 5];
-        let (r, _) = dissect(cut);
+        let (r, buf) = dissect(&data[..first + 5]);
+        assert_eq!(r.unwrap().bytes_consumed, first);
+        assert_eq!(dtls_layers(&buf).len(), 1);
+    }
+
+    #[test]
+    fn parse_invalid_later_record_stops_walk() {
+        let mut data = record(21, 0xFEFD, 0, 0, &[1, 0]);
+        let first = data.len();
+        // Unknown first octet, a non-DTLS version, an oversized unified
+        // header length: each ends the walk after the first record.
+        for tail in [
+            vec![0u8, 1, 2, 3],
+            record(22, 0x0303, 0, 0, &[]),
+            vec![0b0010_0100, 0x00, 0xFF, 0xFF],
+        ] {
+            let mut d = data.clone();
+            d.extend_from_slice(&tail);
+            let (r, buf) = dissect(&d);
+            assert_eq!(r.unwrap().bytes_consumed, first);
+            let layers = dtls_layers(&buf);
+            assert_eq!(layers.len(), 1);
+            assert_eq!(buf.field_u8(layers[0], "alert_level"), Some(1));
+        }
+        // Three records, the third truncated: two are kept.
+        data.extend_from_slice(&record(21, 0xFEFD, 0, 1, &[1, 0]));
+        let two = data.len();
+        data.extend_from_slice(&[21, 0xFE]);
+        let (r, buf) = dissect(&data);
+        assert_eq!(r.unwrap().bytes_consumed, two);
+        assert_eq!(dtls_layers(&buf).len(), 2);
+    }
+
+    #[test]
+    fn parse_alert_and_heartbeat_epoch_nonzero_are_encrypted() {
+        // Epoch 1 heartbeat whose bytes look like a plaintext request.
+        let mut payload = vec![1, 0, 2, 0xDE, 0xAD];
+        payload.extend_from_slice(&[0; 16]);
+        let data = record(24, 0xFEFD, 1, 0, &payload);
+        let (r, buf) = dissect(&data);
+        r.unwrap();
+        let layer = only_layer(&buf);
+        assert_eq!(buf.field_u8(layer, "heartbeat_type"), None);
         assert_eq!(
-            r.unwrap_err(),
-            PacketError::Truncated {
-                expected: 15 + 13,
-                actual: 20
-            }
+            buf.field_bytes(layer, "encrypted_heartbeat"),
+            Some(&payload[..])
+        );
+        // Epoch 1 two-byte alert: protected, not a plaintext alert.
+        let data = record(21, 0xFEFD, 1, 0, &[2, 40]);
+        let (r, buf) = dissect(&data);
+        r.unwrap();
+        let layer = only_layer(&buf);
+        assert_eq!(buf.field_u8(layer, "alert_level"), None);
+        assert_eq!(
+            buf.field_bytes(layer, "encrypted_alert"),
+            Some(&[2, 40][..])
         );
     }
 
@@ -1617,7 +1724,8 @@ mod tests {
 
     #[test]
     fn parse_tls12_cid_record() {
-        // RFC 9146, Section 4: type, version, epoch, seq, cid, length, enc_content
+        // RFC 9146, Section 4 — https://www.rfc-editor.org/rfc/rfc9146#section-4
+        // type, version, epoch, seq, cid, length, enc_content
         let mut data = vec![25, 0xFE, 0xFD, 0, 1, 0, 0, 0, 0, 0, 4];
         let rest = [0xC1, 0xC2, 0xC3, 0xC4, 0x00, 0x03, 0xEE, 0xEE, 0xEE];
         data.extend_from_slice(&rest);

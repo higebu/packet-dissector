@@ -1983,10 +1983,26 @@ impl Dissector for DtlsDemux {
         // https://www.rfc-editor.org/rfc/rfc9443#section-3
         const DTLS_FIRST_OCTET: core::ops::RangeInclusive<u8> = 20..=63;
         if data.first().is_some_and(|b| DTLS_FIRST_OCTET.contains(b)) {
-            packet_dissector_tls::DtlsDissector.dissect(data, buf, offset)
-        } else {
-            self.other.dissect(data, buf, offset)
+            // DTLS rejects some octets in that range (27..=31 are not
+            // assigned, RFC 9147, Section 4.1 —
+            // https://www.rfc-editor.org/rfc/rfc9147#section-4.1), and a
+            // QUIC packet with the QUIC bit greased can start with any of
+            // them (RFC 9287, Section 3.1 —
+            // https://www.rfc-editor.org/rfc/rfc9287#section-3.1). Undo
+            // whatever DTLS pushed and let the other protocol try.
+            let layers = buf.layers().len();
+            let fields = buf.field_count() as usize;
+            match packet_dissector_tls::DtlsDissector.dissect(data, buf, offset) {
+                Ok(result) => return Ok(result),
+                Err(_) => {
+                    while buf.layers().len() > layers {
+                        buf.pop_layer();
+                    }
+                    buf.truncate_fields(fields);
+                }
+            }
         }
+        self.other.dissect(data, buf, offset)
     }
 }
 
