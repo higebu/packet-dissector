@@ -288,3 +288,104 @@ fn fin_forgets_sender_direction() {
         ["HTTP2"]
     );
 }
+
+/// Decoded headers of the last HTTP2 layer, as `name: value` or `#index`.
+fn last_headers(buf: &DissectBuffer<'_>) -> Vec<String> {
+    use packet_dissector::field::FieldValue;
+    let layer = buf
+        .layers()
+        .iter()
+        .rev()
+        .find(|l| l.name == "HTTP2")
+        .unwrap();
+    let Some(field) = buf.field_by_name(layer, "headers") else {
+        return Vec::new();
+    };
+    let FieldValue::Array(ref array) = field.value else {
+        panic!("expected Array");
+    };
+    let text = |v: &FieldValue<'_>| match v {
+        FieldValue::Str(s) => s.to_string(),
+        FieldValue::Scratch(r) => {
+            String::from_utf8(buf.scratch()[r.start as usize..r.end as usize].to_vec()).unwrap()
+        }
+        other => panic!("unexpected {other:?}"),
+    };
+    buf.nested_fields(array)
+        .iter()
+        .filter_map(|f| match f.value {
+            FieldValue::Object(ref r) => Some(buf.nested_fields(r)),
+            _ => None,
+        })
+        .map(|c| {
+            let get = |n: &str| c.iter().find(|f| f.name() == n).map(|f| &f.value);
+            match (get("name"), get("value"), get("index")) {
+                (Some(n), Some(v), _) => format!("{}: {}", text(n), text(v)),
+                (_, _, Some(FieldValue::U32(i))) => format!("#{i}"),
+                other => panic!("unexpected {other:?}"),
+            }
+        })
+        .collect()
+}
+
+/// HEADERS frame (END_HEADERS, plus `flags`) on `stream` carrying `block`.
+fn headers_frame(flags: u8, stream: u32, block: &[u8]) -> Vec<u8> {
+    let mut f = (block.len() as u32).to_be_bytes()[1..].to_vec();
+    f.extend_from_slice(&[0x01, flags]);
+    f.extend_from_slice(&stream.to_be_bytes());
+    f.extend_from_slice(block);
+    f
+}
+
+/// RFC 7541, Appendix C.3.1 and C.3.2 request header blocks.
+const C3_1: &[u8] = &[
+    0x82, 0x86, 0x84, 0x41, 0x0f, 0x77, 0x77, 0x77, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65,
+    0x2e, 0x63, 0x6f, 0x6d,
+];
+const C3_2: &[u8] = &[
+    0x82, 0x86, 0x84, 0xbe, 0x58, 0x08, 0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63, 0x68, 0x65,
+];
+
+#[test]
+fn hpack_dynamic_table_across_packets() {
+    let reg = DissectorRegistry::default();
+    let first = [PREFACE, SETTINGS_EMPTY, &headers_frame(0x05, 1, C3_1)].concat();
+    let pkt = c2s(1000, PSH_ACK, &first);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(last_headers(&buf)[3], ":authority: www.example.com");
+
+    // The second request refers to :authority by dynamic index 62.
+    let seq = 1000 + first.len() as u32;
+    let pkt = c2s(seq, PSH_ACK, &headers_frame(0x05, 3, C3_2));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        last_headers(&buf),
+        [
+            ":method: GET",
+            ":scheme: http",
+            ":path: /",
+            ":authority: www.example.com",
+            "cache-control: no-cache",
+        ]
+    );
+}
+
+#[test]
+fn header_block_split_across_packets() {
+    let reg = DissectorRegistry::default();
+    // HEADERS without END_HEADERS, ending inside the :authority literal.
+    let (head, tail) = C3_1.split_at(8);
+    let mut headers = headers_frame(0x01, 1, head);
+    headers[4] = 0x01; // END_STREAM only
+    let first = [PREFACE, SETTINGS_EMPTY, &headers].concat();
+    dissect_ok(&reg, &c2s(1000, PSH_ACK, &first));
+
+    let mut continuation = headers_frame(0x04, 1, tail);
+    continuation[3] = 0x09; // CONTINUATION
+    let pkt = c2s(1000 + first.len() as u32, PSH_ACK, &continuation);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(last_headers(&buf)[3], ":authority: www.example.com");
+}
