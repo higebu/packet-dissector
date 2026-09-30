@@ -34,7 +34,7 @@ protocols include:
 | L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, PIM, RSVP / RSVP-TE, IS-IS, AH, ESP, SRv6, GRE, ERSPAN, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE, NSH |
 | Application / control | DNS, mDNS, LLMNR, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, BMP, LDP, TLS, PPP, RADIUS, RTP, RTCP, QUIC, STUN, DTLS, IPFIX, NetFlow v5/v9, SNMP |
-| 3GPP | GTPv1-U, GTPv1-C, GTPv2-C, PFCP, NAS5G, NAS-EPS, NGAP, XnAP, F1AP, E1AP, SGsAP |
+| 3GPP | GTPv1-U, GTPv1-C, GTPv2-C, PFCP, NAS5G, NAS-EPS, NGAP, S1AP, XnAP, F1AP, E1AP, SGsAP |
 | SIGTRAN / SS7 | M3UA, SCCP, TCAP, MAP |
 
 See `crates/packet-dissector/Cargo.toml` and `crates/packet-dissector/src/lib.rs`
@@ -62,7 +62,7 @@ Representative feature flags:
 - Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `pim`, `rsvp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `erspan`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`, `nsh`
 - Application / control: `dns`, `mdns`, `llmnr`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `bmp`, `ldp`, `tls`, `ppp`, `radius`, `rtp`, `rtcp`, `quic`, `stun`, `dtls`, `ipfix`, `snmp`
-- 3GPP: `gtpv1u`, `gtpv1c`, `gtpv2c`, `pfcp`, `nas5g`, `nas-eps`, `ngap`, `xnap`, `f1ap`, `e1ap`, `sgsap`
+- 3GPP: `gtpv1u`, `gtpv1c`, `gtpv2c`, `pfcp`, `nas5g`, `nas-eps`, `ngap`, `s1ap`, `xnap`, `f1ap`, `e1ap`, `sgsap`
 - SIGTRAN / SS7: `m3ua`, `sccp`, `tcap`, `map`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
@@ -77,7 +77,7 @@ Convenience groups:
 - `tunneling = ["gre", "erspan", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]`
 - `routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "pim", "rsvp", "ldp"]`
 - `ipsec = ["ah", "esp", "ike"]`
-- `3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "xnap", "f1ap", "e1ap", "sgsap"]`
+- `3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "s1ap", "xnap", "f1ap", "e1ap", "sgsap"]`
 - `sigtran = ["m3ua", "sccp", "tcap", "map"]`
 
 For the authoritative, exhaustive list, see

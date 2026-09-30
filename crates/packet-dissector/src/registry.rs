@@ -3628,6 +3628,29 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // S1AP runs over SCTP port 36412 with PPID 18 (3GPP TS 36.412,
+        // Section 7, which refers to IANA; IANA "SCTP Payload Protocol
+        // Identifiers": 18 = S1AP; service name "s1-control" = 36412) —
+        // https://www.iana.org/assignments/sctp-parameters/
+        #[cfg(feature = "s1ap")]
+        {
+            #[cfg(feature = "sctp")]
+            {
+                assert_builtin(
+                    reg.register_by_sctp_port(
+                        36412,
+                        Box::new(packet_dissector_s1ap::S1apDissector),
+                    ),
+                );
+                assert_builtin(
+                    reg.register_by_sctp_ppid(18, Box::new(packet_dissector_s1ap::S1apDissector)),
+                );
+            }
+            reg.register_dissector_factory("s1ap", || {
+                Box::new(packet_dissector_s1ap::S1apDissector)
+            });
+        }
+
         // M3UA runs over SCTP: PPID 3 and port 2905 (RFC 4666, Sections 7.1
         // and 7.2 — https://www.rfc-editor.org/rfc/rfc4666#section-7.1).
         #[cfg(feature = "m3ua")]
@@ -5978,6 +6001,11 @@ mod tests {
         assert_eq!(reg.get_by_sctp_ppid(46).unwrap().short_name(), "Diameter");
         #[cfg(all(feature = "ngap", feature = "sctp"))]
         assert_eq!(reg.get_by_sctp_ppid(60).unwrap().short_name(), "NGAP");
+        #[cfg(all(feature = "s1ap", feature = "sctp"))]
+        {
+            assert_eq!(reg.get_by_sctp_ppid(18).unwrap().short_name(), "S1AP");
+            assert_eq!(reg.get_by_sctp_port(36412).unwrap().short_name(), "S1AP");
+        }
 
         // IANA: XnAP port 38422 / PPID 61, F1AP 38472 / 62, E1AP 38462 / 64.
         #[cfg(all(feature = "xnap", feature = "sctp"))]
@@ -6172,6 +6200,9 @@ mod tests {
 
         #[cfg(feature = "nas-eps")]
         assert!(reg.create_dissector_by_name("nas-eps").is_some());
+
+        #[cfg(feature = "s1ap")]
+        assert!(reg.create_dissector_by_name("s1ap").is_some());
 
         #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
         assert!(reg.create_dissector_by_name("l2tp").is_some());

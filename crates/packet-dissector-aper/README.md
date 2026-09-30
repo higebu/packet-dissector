@@ -2,10 +2,10 @@
 
 ASN.1 ALIGNED PER (APER, ITU-T X.691) decoding shared by the 3GPP
 application protocol dissectors of packet-dissector (NGAP, XnAP, F1AP,
-E1AP)
+E1AP, S1AP)
 
 This crate is part of the [`packet-dissector`](https://crates.io/crates/packet-dissector)
-ecosystem. It is used automatically by the `ngap`, `xnap`, `f1ap` and
-`e1ap` feature flags of the main crate.
+ecosystem. It is used automatically by the `ngap`, `xnap`, `f1ap`,
+`e1ap` and `s1ap` feature flags of the main crate.
 
 You generally do not need to depend on this crate directly.

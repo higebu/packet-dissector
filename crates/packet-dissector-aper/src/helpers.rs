@@ -140,6 +140,22 @@ pub fn read_sequence_preamble(r: &mut AperReader<'_>) -> Result<(bool, bool), Pa
     Ok((extended, has_ie_extensions))
 }
 
+/// Reads the preamble of an extensible SEQUENCE with `optional` OPTIONAL
+/// or DEFAULT components. Returns `(extended, bitmap)`, where the first
+/// OPTIONAL component in the ASN.1 definition is the most significant of
+/// the `optional` low-order bits.
+///
+/// ITU-T Rec. X.691, Section 19.1 (extension bit) and 19.2 (bitmap of
+/// OPTIONAL components).
+pub fn read_sequence_preamble_bitmap(
+    r: &mut AperReader<'_>,
+    optional: u32,
+) -> Result<(bool, u64), PacketError> {
+    let extended = r.read_bit()?;
+    let bitmap = r.read_bits(optional)?;
+    Ok((extended, bitmap))
+}
+
 /// Skips what follows the root components of an extensible SEQUENCE:
 /// the `iE-Extensions` container and the extension additions.
 pub fn skip_sequence_tail(
@@ -170,6 +186,7 @@ mod tests {
     //! | 16.10         | Long BIT STRING, aligned                 | bit_string_field_aligned               |
     //! | 19.8          | Extension additions skipped              | skip_extension_additions               |
     //! | 19.1–19.2     | Preamble and tail with iE-Extensions     | preamble_and_tail_with_extensions      |
+    //! | 19.1–19.2     | Preamble with several OPTIONAL bits      | preamble_bitmap_multiple_optionals     |
     //! | —             | ProtocolIE-SingleContainer skipped       | skip_single_container                  |
     //! | —             | Range shift                              | shift_moves_range                      |
 
@@ -225,6 +242,25 @@ mod tests {
         let (v, range) = read_bit_string_field(&mut r, 36).unwrap();
         assert_eq!(v, 0x1_2345_6789);
         assert_eq!(range, 1..6);
+    }
+
+    #[test]
+    fn preamble_bitmap_multiple_optionals() {
+        // Extension bit 1, then a 2-bit bitmap 10, then 0 more bits used.
+        let mut r = AperReader::new(&[0b1100_0000]);
+        assert_eq!(
+            read_sequence_preamble_bitmap(&mut r, 2).unwrap(),
+            (true, 0b10)
+        );
+        assert_eq!(r.bit_position(), 3);
+        // No OPTIONAL components: only the extension bit is read.
+        let mut r = AperReader::new(&[0b0000_0000]);
+        assert_eq!(
+            read_sequence_preamble_bitmap(&mut r, 0).unwrap(),
+            (false, 0)
+        );
+        assert_eq!(r.bit_position(), 1);
+        assert!(read_sequence_preamble_bitmap(&mut AperReader::new(&[]), 1).is_err());
     }
 
     #[test]
