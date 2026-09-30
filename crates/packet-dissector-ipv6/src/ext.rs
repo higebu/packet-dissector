@@ -978,6 +978,7 @@ impl Dissector for FragmentDissector {
             // RFC 8200, Section 4.5 — "An original packet is reassembled only
             // from fragment packets that have the same Source Address,
             // Destination Address, and Fragment Identification."
+            // <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>
             let ctx = IpFragmentContext::new(
                 (
                     src,

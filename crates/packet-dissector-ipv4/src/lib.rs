@@ -20,7 +20,7 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::lookup::ip_protocol_name;
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::read_be_u16;
+use packet_dissector_core::util::{ipv4_mapped, read_be_u16};
 
 /// Minimum IPv4 header size (no options).
 const MIN_HEADER_SIZE: usize = 20;
@@ -364,10 +364,11 @@ impl Dissector for Ipv4Dissector {
         // RFC 791, Section 3.2 — "The internet identification field (ID) is
         // used together with the source and destination address, and the
         // protocol fields, to identify datagram fragments for reassembly."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
         let ctx = IpFragmentContext::new(
             (
-                IpFragmentContext::ipv4_mapped(src),
-                IpFragmentContext::ipv4_mapped(dst),
+                ipv4_mapped(src),
+                ipv4_mapped(dst),
                 protocol,
                 u32::from(identification),
             ),

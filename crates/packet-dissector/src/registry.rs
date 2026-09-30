@@ -16,7 +16,7 @@ use crate::summary::{DissectSummary, FieldProjection};
 /// A free fn (single concrete type) rather than a closure, so the recursive
 /// `dispatch_loop` instantiation for decrypted payloads does not create an
 /// unbounded chain of monomorphizations.
-fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
+pub(crate) fn no_stop(_: &DissectBuffer<'_>, _: &DispatchHint) -> bool {
     false
 }
 
@@ -35,6 +35,15 @@ pub(crate) fn bound_payload_end(
         Some(len) => end.min(payload_start.saturating_add(len)),
         None => end,
     }
+}
+
+/// Number of layers, fields and scratch bytes at the start of a temporary
+/// buffer that were copied from the main buffer and must not be merged back.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TmpPrefix {
+    pub(crate) layers: usize,
+    pub(crate) fields: u32,
+    pub(crate) scratch: u32,
 }
 
 struct TmpRemapContext {
@@ -656,7 +665,7 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'pkt>,
     ) -> Result<(), PacketError> {
         let entry = self.entry_dissector()?;
-        self.dissect_from_entry(entry, data, buf, &mut no_stop)
+        self.dissect_from_entry(entry, data, buf, &mut no_stop, true)
     }
 
     /// Dissect a raw packet using a link-layer type to select the entry dissector.
@@ -693,7 +702,7 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'pkt>,
     ) -> Result<(), PacketError> {
         let entry = self.entry_dissector_for_link_type(link_type)?;
-        self.dissect_from_entry(entry, data, buf, &mut no_stop)
+        self.dissect_from_entry(entry, data, buf, &mut no_stop, true)
     }
 
     /// Shallow dissection for row summaries: stop once the transport layer
@@ -715,6 +724,11 @@ impl DissectorRegistry {
     /// Stopping before the upper-layer dissector also skips TCP reassembly
     /// and tunnel/inner-packet dissection, so for tunneled packets (e.g.,
     /// VXLAN) the summary describes the outermost transport.
+    ///
+    /// IP fragments are not fed to the stateful fragment reassembly (feature
+    /// `ip-reassembly`): a first fragment is summarized by its own transport
+    /// header and any other fragment ends after its IP layer, so summarizing
+    /// a capture does not disturb a later full dissection of it.
     ///
     /// # Example
     ///
@@ -748,9 +762,13 @@ impl DissectorRegistry {
     ) -> Result<DissectSummary, PacketError> {
         let entry = self.entry_dissector()?;
         let mut summary = DissectSummary::new();
-        self.dissect_from_entry(entry, data, buf, &mut |buf, hint| {
-            self.summary_stop(buf, hint, &mut summary)
-        })?;
+        self.dissect_from_entry(
+            entry,
+            data,
+            buf,
+            &mut |buf, hint| self.summary_stop(buf, hint, &mut summary),
+            false,
+        )?;
         Ok(summary)
     }
 
@@ -765,9 +783,13 @@ impl DissectorRegistry {
     ) -> Result<DissectSummary, PacketError> {
         let entry = self.entry_dissector_for_link_type(link_type)?;
         let mut summary = DissectSummary::new();
-        self.dissect_from_entry(entry, data, buf, &mut |buf, hint| {
-            self.summary_stop(buf, hint, &mut summary)
-        })?;
+        self.dissect_from_entry(
+            entry,
+            data,
+            buf,
+            &mut |buf, hint| self.summary_stop(buf, hint, &mut summary),
+            false,
+        )?;
         Ok(summary)
     }
 
@@ -810,8 +832,15 @@ impl DissectorRegistry {
     /// `(layer, field)` targets, and the dispatch loop stops before
     /// dissecting any deeper layer once all targets are found. If the packet
     /// never produces all targets, the chain runs to completion, identical
-    /// to [`dissect`](Self::dissect), and
-    /// [`FieldProjection::is_satisfied`] returns `false`.
+    /// to [`dissect`](Self::dissect) except that IP fragments are not
+    /// reassembled (see below), and [`FieldProjection::is_satisfied`]
+    /// returns `false`.
+    ///
+    /// Like [`dissect_summary`](Self::dissect_summary), projected
+    /// dissection does not feed IP fragments to the stateful fragment
+    /// reassembly (feature `ip-reassembly`): a first fragment is dissected
+    /// from its own upper-layer header and any other fragment ends after
+    /// its IP layer.
     ///
     /// `projection` is reset automatically, so it can be reused across
     /// packets without per-packet allocation. Read the extracted values from
@@ -853,7 +882,7 @@ impl DissectorRegistry {
     ) -> Result<(), PacketError> {
         let entry = self.entry_dissector()?;
         projection.reset();
-        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf))
+        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf), false)
     }
 
     /// [`dissect_projected`](Self::dissect_projected) variant that selects
@@ -870,12 +899,12 @@ impl DissectorRegistry {
         // packet's state when the link type is unsupported.
         projection.reset();
         let entry = self.entry_dissector_for_link_type(link_type)?;
-        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf))
+        self.dissect_from_entry(entry, data, buf, &mut |buf, _| projection.scan(buf), false)
     }
 
     /// Dissect with the given entry dissector, then run the dispatch loop.
     ///
-    /// `stop` is the early-termination predicate described on
+    /// `stop` and `full` are described on
     /// [`dispatch_loop`](Self::dispatch_loop).
     fn dissect_from_entry<'pkt, F>(
         &self,
@@ -883,6 +912,7 @@ impl DissectorRegistry {
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
         stop: &mut F,
+        full: bool,
     ) -> Result<(), PacketError>
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
@@ -900,10 +930,25 @@ impl DissectorRegistry {
                 buf.truncate_embedded_payloads(payloads_base);
                 return Ok(());
             }
-            return self.dispatch_embedded_payloads(data, buf, payloads_base, data.len(), stop);
+            return self.dispatch_embedded_payloads(
+                data,
+                buf,
+                payloads_base,
+                data.len(),
+                stop,
+                full,
+            );
         }
         let end = bound_payload_end(data.len(), result.bytes_consumed, result.payload_len);
-        self.dispatch_loop(data, buf, result.bytes_consumed, end, result.next, stop)
+        self.dispatch_loop(
+            data,
+            buf,
+            result.bytes_consumed,
+            end,
+            result.next,
+            stop,
+            full,
+        )
     }
 
     /// Dispatch the payloads a dissector recorded with
@@ -926,6 +971,7 @@ impl DissectorRegistry {
         base: usize,
         end: usize,
         stop: &mut F,
+        full: bool,
     ) -> Result<(), PacketError>
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
@@ -939,7 +985,9 @@ impl DissectorRegistry {
             if start >= payload_end {
                 continue;
             }
-            if let Err(e) = self.dispatch_loop(data, buf, start, payload_end, payload.next, stop) {
+            if let Err(e) =
+                self.dispatch_loop(data, buf, start, payload_end, payload.next, stop, full)
+            {
                 first_err.get_or_insert(e);
             }
         }
@@ -1013,6 +1061,14 @@ impl DissectorRegistry {
     /// The predicate is a generic parameter (not `&mut dyn FnMut`) so the
     /// full-dissection instantiation inlines the always-`false` predicate
     /// and keeps the existing fast path free of indirect calls.
+    ///
+    /// `full` is `true` for full dissection ([`dissect`](Self::dissect) and
+    /// [`dissect_with_link_type`](Self::dissect_with_link_type)). Only full
+    /// dissection feeds IP fragments to the (stateful) fragment reassembly;
+    /// shallow dissection dispatches the first fragment's upper layers as
+    /// if reassembly were disabled and leaves the reassembly state alone.
+    #[cfg_attr(not(feature = "ip-reassembly"), allow(unused_variables))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_loop<'pkt, F>(
         &self,
         data: &'pkt [u8],
@@ -1021,6 +1077,7 @@ impl DissectorRegistry {
         mut end: usize,
         mut next: DispatchHint,
         stop: &mut F,
+        full: bool,
     ) -> Result<(), PacketError>
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
@@ -1089,7 +1146,14 @@ impl DissectorRegistry {
             // several upper-layer messages (e.g. bundled SCTP DATA chunks)
             // records each one in the buffer, and each gets its own chain.
             if buf.embedded_payloads().len() > payloads_base {
-                return self.dispatch_embedded_payloads(data, buf, payloads_base, layer_end, stop);
+                return self.dispatch_embedded_payloads(
+                    data,
+                    buf,
+                    payloads_base,
+                    layer_end,
+                    stop,
+                    full,
+                );
             }
 
             // Embedded payload middleware: when a dissector signals that the
@@ -1146,6 +1210,7 @@ impl DissectorRegistry {
                     padded.len(),
                     decrypted.next,
                     &mut full,
+                    true,
                 )?;
 
                 // Merge tmp_buf into the main buf. Layers are cheap to copy.
@@ -1161,18 +1226,20 @@ impl DissectorRegistry {
             // with the upper layers of the reassembled datagram. Packets
             // carrying an incomplete datagram end here, including the first
             // fragment. A fragment whose data was not captured in full
-            // (snaplen truncation) cannot be reassembled.
+            // (snaplen truncation) cannot be reassembled; it, and every
+            // fragment in shallow dissection, follows the dissector's own
+            // hint (the first fragment's upper layers, or the end of the
+            // chain).
             // RFC 791, Section 3.2 —
             // https://www.rfc-editor.org/rfc/rfc791#section-3.2
             // RFC 8200, Section 4.5 —
             // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
             #[cfg(feature = "ip-reassembly")]
             if let Some(ref ctx) = result.ip_fragment_context {
-                if end.saturating_sub(offset) < ctx.payload_len {
-                    break;
+                if full && end.saturating_sub(offset) >= ctx.payload_len {
+                    let payload = &data[offset..offset + ctx.payload_len];
+                    return self.handle_ip_fragment(ctx, payload, buf, offset);
                 }
-                let payload = &data[offset..offset + ctx.payload_len];
-                return self.handle_ip_fragment(ctx, payload, buf, offset, stop);
             }
 
             // TCP reassembly middleware: if the dissector provided TCP stream
@@ -1220,13 +1287,37 @@ impl DissectorRegistry {
         virtual_start: usize,
         aux_handle: AuxDataHandle,
     ) {
+        Self::merge_tmp_tail(
+            buf,
+            tmp_buf,
+            TmpPrefix::default(),
+            padded,
+            virtual_start,
+            aux_handle,
+        );
+    }
+
+    /// Like [`merge_tmp_buf`](Self::merge_tmp_buf), but skip the first
+    /// `prefix` layers, fields and scratch bytes of `tmp_buf`: a copy of
+    /// `buf`'s own content that seeded the temporary buffer so upper-layer
+    /// dissectors could see the enclosing layers.
+    pub(crate) fn merge_tmp_tail<'pkt>(
+        buf: &mut DissectBuffer<'pkt>,
+        tmp_buf: DissectBuffer<'_>,
+        prefix: TmpPrefix,
+        padded: &[u8],
+        virtual_start: usize,
+        aux_handle: AuxDataHandle,
+    ) {
         use packet_dissector_core::field::Field;
 
-        let field_offset = buf.field_count();
-        let scratch_offset = buf.scratch_len();
+        // Indices recorded in `tmp_buf` count the prefix; in `buf` they
+        // start at its current length instead.
+        let field_offset = buf.field_count() - prefix.fields;
+        let scratch_offset = buf.scratch_len() - prefix.scratch;
         let (tmp_layers, tmp_fields, tmp_scratch) = tmp_buf.into_parts();
-        buf.extend_scratch(&tmp_scratch);
-        for mut layer in tmp_layers {
+        buf.extend_scratch(&tmp_scratch[prefix.scratch as usize..]);
+        for mut layer in tmp_layers.into_iter().skip(prefix.layers) {
             layer.field_range.start += field_offset;
             layer.field_range.end += field_offset;
             buf.push_layer(layer);
@@ -1241,7 +1332,7 @@ impl DissectorRegistry {
             scratch_offset,
         };
 
-        for field in tmp_fields {
+        for field in tmp_fields.into_iter().skip(prefix.fields as usize) {
             // Remap borrowed field values from `padded` to `buf.aux_data`.
             let new_value: FieldValue<'pkt> = Self::remap_field_value(field.value, buf, &remap_ctx);
             buf.push_raw_field(Field {
@@ -1252,7 +1343,7 @@ impl DissectorRegistry {
         }
     }
 
-    pub(crate) fn aux_bytes<'pkt>(
+    fn aux_bytes<'pkt>(
         buf: &DissectBuffer<'pkt>,
         aux_handle: AuxDataHandle,
         range: core::ops::Range<usize>,
@@ -1265,9 +1356,8 @@ impl DissectorRegistry {
         // the `DissectBuffer`. We extend the borrow lifetime from `'_` to `'pkt`
         // because the `DissectBuffer<'pkt>` owns the `Box<[u8]>` and will not
         // drop or modify it until `clear()` is called (which resets the lifetime).
-        // The callers (`merge_tmp_buf` and the IP reassembly middleware) only
-        // use this during a single `dissect` call, before `clear()` is invoked
-        // for the next packet.
+        // The caller (`merge_tmp_buf`) only uses this during a single `dissect`
+        // call, before `clear()` is invoked for the next packet.
         unsafe {
             core::slice::from_raw_parts(slice.as_ptr(), slice.len())
         }
@@ -2982,7 +3072,7 @@ mod tests {
         reg.register_by_llc_sap_or_replace(0x42, Box::new(MsgDissector));
         let data = [0x00, 0x00, 0x01, 0xAA];
         let mut buf = DissectBuffer::new();
-        reg.dissect_from_entry(&BundleDissector, &data, &mut buf, &mut |_, _| true)
+        reg.dissect_from_entry(&BundleDissector, &data, &mut buf, &mut |_, _| true, false)
             .unwrap();
         assert_eq!(buf.layers().len(), 1);
         assert!(buf.embedded_payloads().is_empty());

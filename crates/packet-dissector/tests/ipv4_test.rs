@@ -60,7 +60,7 @@
 //! | —              | Offset handling                 | parse_ipv4_with_offset              |
 //! | —              | Dissector metadata              | ipv4_dissector_metadata             |
 
-use packet_dissector::dissector::{DispatchHint, Dissector, IpFragmentContext};
+use packet_dissector::dissector::{DispatchHint, Dissector};
 use packet_dissector::field::{Field, FieldValue};
 use packet_dissector::packet::DissectBuffer;
 
@@ -291,8 +291,9 @@ fn parse_ipv4_non_initial_fragment_ends_chain() {
     assert_eq!(
         ctx.frag_key,
         (
-            IpFragmentContext::ipv4_mapped([10, 0, 0, 1]),
-            IpFragmentContext::ipv4_mapped([10, 0, 0, 2]),
+            // IPv4-mapped IPv6 addresses (RFC 4291, Section 2.5.5.2).
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 2],
             17,
             0x2a
         )

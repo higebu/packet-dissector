@@ -208,9 +208,31 @@ pub fn intern_content_type(raw: &str) -> Option<&'static str> {
     }
 }
 
+/// Encode an IPv4 address as an IPv4-mapped IPv6 address
+/// (`::ffff:a.b.c.d`), so IPv4 and IPv6 addresses share one 16-byte key
+/// space without colliding.
+///
+/// RFC 4291, Section 2.5.5.2 —
+/// <https://www.rfc-editor.org/rfc/rfc4291#section-2.5.5.2>
+pub fn ipv4_mapped(addr: [u8; 4]) -> [u8; 16] {
+    let mut mapped = [0u8; 16];
+    mapped[10] = 0xff;
+    mapped[11] = 0xff;
+    mapped[12..16].copy_from_slice(&addr);
+    mapped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv4_mapped_address_encoding() {
+        assert_eq!(
+            ipv4_mapped([192, 0, 2, 1]),
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1]
+        );
+    }
 
     #[test]
     fn trim_ows_strips_spaces_and_tabs() {

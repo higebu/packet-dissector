@@ -260,7 +260,7 @@ impl TcpStreamContext {
 pub struct IpFragmentContext {
     /// Reassembly key: (source address, destination address, protocol,
     /// identification). Addresses are encoded as 16 bytes (IPv4-mapped for
-    /// IPv4, see [`IpFragmentContext::ipv4_mapped`]).
+    /// IPv4, see [`ipv4_mapped`](crate::util::ipv4_mapped)).
     ///
     /// IPv4 fragments are grouped by source, destination, protocol and
     /// identification (RFC 791, Section 3.2 — "The internet identification
@@ -338,19 +338,6 @@ impl IpFragmentContext {
     /// Whether this is the first fragment (Fragment Offset zero).
     pub fn is_first(&self) -> bool {
         self.offset_bytes == 0
-    }
-
-    /// Encode an IPv4 address as an IPv4-mapped IPv6 address
-    /// (`::ffff:a.b.c.d`) for use in [`IpFragmentContext::frag_key`].
-    ///
-    /// RFC 4291, Section 2.5.5.2 —
-    /// <https://www.rfc-editor.org/rfc/rfc4291#section-2.5.5.2>
-    pub fn ipv4_mapped(addr: [u8; 4]) -> [u8; 16] {
-        let mut mapped = [0u8; 16];
-        mapped[10] = 0xff;
-        mapped[11] = 0xff;
-        mapped[12..16].copy_from_slice(&addr);
-        mapped
     }
 }
 
@@ -782,14 +769,6 @@ mod tests {
         assert_eq!(ctx.unfragmentable_len, 0);
         assert!(!ctx.is_first());
         assert!(IpFragmentContext::new(([0; 16], [0; 16], 17, 1), 17, 0, true, 8).is_first());
-    }
-
-    #[test]
-    fn ipv4_mapped_address_encoding() {
-        assert_eq!(
-            IpFragmentContext::ipv4_mapped([192, 0, 2, 1]),
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1]
-        );
     }
 
     #[test]

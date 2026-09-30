@@ -11,9 +11,10 @@
 //! | RFC 791 3.2          | Non-last fragment not on an 8-octet boundary is dropped  | ipv4_fragment_not_multiple_of_8_is_discarded            |
 //! | RFC 791 3.1          | Reassembled Total Length above 65,535 is dropped         | ipv4_oversized_fragment_is_discarded                    |
 //! | —                    | Conflicting last fragments abandon the datagram          | ipv4_conflicting_last_fragment_abandons_datagram        |
-//! | —                    | Snaplen-truncated fragment is not buffered               | ipv4_truncated_fragment_is_not_buffered                 |
+//! | —                    | Snaplen-truncated fragment is dissected, not buffered    | ipv4_truncated_fragment_is_not_buffered                 |
 //! | RFC 9293 3.1         | TCP segment in a fragmented datagram keeps its length    | ipv4_fragmented_tcp_segment_reassembles                 |
-//! | —                    | Summary dissection stops at the reassembled transport    | ipv4_summary_reports_reassembled_transport              |
+//! | —                    | Summary dissection leaves the reassembly state alone     | ipv4_summary_does_not_reassemble                        |
+//! | —                    | Projected dissection leaves the reassembly state alone   | ipv4_projected_does_not_reassemble                      |
 //! | RFC 8200 4.5         | In-order IPv6 fragments reassemble into UDP/DNS          | ipv6_fragments_in_order_reassemble                      |
 //! | RFC 8200 4.5         | Reverse-order IPv6 fragments reassemble                  | ipv6_fragments_in_reverse_order_reassemble              |
 //! | RFC 8200 4.5         | Next Header of the offset-zero fragment is used          | ipv6_next_header_from_first_fragment                    |
@@ -395,7 +396,11 @@ fn ipv4_truncated_fragment_is_not_buffered() {
     let reg = DissectorRegistry::default();
     let mut first = ipv4(6, 17, true, 0, &datagram[..32]);
     first.truncate(first.len() - 8); // snaplen cut
-    feed(&reg, &[first]);
+    // Not reassembled: the first fragment's own upper layers are dissected
+    // as far as they were captured.
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&first, &mut buf);
+    assert_eq!(&names(&buf)[..3], ["Ethernet", "IPv4", "UDP"]);
     let layers = feed(&reg, &[ipv4(6, 17, false, 4, &datagram[32..])]);
     assert_eq!(layers, vec![vec!["Ethernet", "IPv4"]]);
 }
@@ -424,20 +429,45 @@ fn ipv4_fragmented_tcp_segment_reassembles() {
 }
 
 #[test]
-fn ipv4_summary_reports_reassembled_transport() {
+fn ipv4_summary_does_not_reassemble() {
+    // Shallow dissection leaves the (stateful) reassembly alone: the first
+    // fragment is summarized by its own transport header and a non-initial
+    // fragment ends after IPv4.
     let datagram = udp(&dns_response(10));
     let frags = ipv4_fragments(12, &datagram, &[64]);
     let reg = DissectorRegistry::default();
 
     let mut buf = DissectBuffer::new();
     let summary = reg.dissect_summary(&frags[0], &mut buf).unwrap();
-    assert_eq!(names(&buf), ["Ethernet", "IPv4"]);
-    assert_eq!(summary.next_protocol, None);
+    assert_eq!(names(&buf), ["Ethernet", "IPv4", "UDP"]);
+    assert_eq!(summary.next_protocol, Some("DNS"));
 
     let mut buf = DissectBuffer::new();
     let summary = reg.dissect_summary(&frags[1], &mut buf).unwrap();
-    assert_eq!(names(&buf), ["Ethernet", "IPv4", "UDP"]);
-    assert_eq!(summary.next_protocol, Some("DNS"));
+    assert_eq!(names(&buf), ["Ethernet", "IPv4"]);
+    assert_eq!(summary.next_protocol, None);
+
+    // Full dissection of the same packets still reassembles the datagram.
+    feed(&reg, &frags[..1]);
+    assert_matches_unfragmented(&reg, &frags[1], &ipv4(12, 17, false, 0, &datagram));
+}
+
+#[test]
+fn ipv4_projected_does_not_reassemble() {
+    use packet_dissector::summary::FieldProjection;
+
+    let datagram = udp(&dns_response(10));
+    let frags = ipv4_fragments(13, &datagram, &[64]);
+    let reg = DissectorRegistry::default();
+    let mut projection = FieldProjection::new([("DNS", "id")]);
+    for frag in &frags {
+        let mut buf = DissectBuffer::new();
+        let _ = reg.dissect_projected(frag, &mut buf, &mut projection);
+    }
+    // The last fragment ended after IPv4 and the state was not touched.
+    assert!(!projection.is_satisfied());
+    feed(&reg, &frags[..1]);
+    assert_matches_unfragmented(&reg, &frags[1], &ipv4(13, 17, false, 0, &datagram));
 }
 
 #[test]
