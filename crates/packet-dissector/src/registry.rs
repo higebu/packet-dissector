@@ -3284,6 +3284,28 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // LLMNR runs over UDP port 5355 (multicast queries) and TCP port 5355
+        // (unicast queries) — RFC 4795, Sections 2 and 2.4 —
+        // https://www.rfc-editor.org/rfc/rfc4795#section-2
+        #[cfg(feature = "llmnr")]
+        {
+            #[cfg(feature = "udp")]
+            assert_builtin(
+                reg.register_by_udp_port(5355, Box::new(packet_dissector_llmnr::LlmnrDissector)),
+            );
+            #[cfg(feature = "tcp")]
+            assert_builtin(
+                reg.register_by_tcp_port(5355, Box::new(packet_dissector_llmnr::LlmnrTcpDissector)),
+            );
+
+            reg.register_dissector_factory("llmnr", || {
+                Box::new(packet_dissector_llmnr::LlmnrDissector)
+            });
+            reg.register_dissector_factory("llmnr.tcp", || {
+                Box::new(packet_dissector_llmnr::LlmnrTcpDissector)
+            });
+        }
+
         // DHCPv6 runs over UDP on ports 546 (client) and 547 (server/relay) (RFC 8415)
         #[cfg(feature = "dhcpv6")]
         {
@@ -4418,6 +4440,12 @@ mod tests {
         }
         #[cfg(feature = "mdns")]
         assert!(reg.create_dissector_by_name("mdns").is_some());
+
+        #[cfg(feature = "llmnr")]
+        {
+            assert!(reg.create_dissector_by_name("llmnr").is_some());
+            assert!(reg.create_dissector_by_name("llmnr.tcp").is_some());
+        }
         #[cfg(feature = "tls")]
         assert!(reg.create_dissector_by_name("tls").is_some());
         #[cfg(feature = "bgp")]
@@ -5872,6 +5900,17 @@ mod tests {
 
         #[cfg(all(feature = "mdns", feature = "udp"))]
         assert!(reg.get_by_udp_port(5353).is_some());
+
+        #[cfg(all(feature = "llmnr", feature = "udp"))]
+        assert_eq!(
+            reg.get_by_udp_port(5355).map(|d| d.short_name()),
+            Some("LLMNR")
+        );
+        #[cfg(all(feature = "llmnr", feature = "tcp"))]
+        assert_eq!(
+            reg.get_by_tcp_port(5355).map(|d| d.name()),
+            Some("LLMNR over TCP")
+        );
 
         #[cfg(all(feature = "vxlan", feature = "udp"))]
         assert!(reg.get_by_udp_port(4789).is_some());

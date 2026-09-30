@@ -2226,12 +2226,20 @@ fn parse_dso_tlvs<'pkt>(
     Ok(pos)
 }
 
-/// Generates the common DNS header + section field descriptors shared by both
-/// the UDP and TCP variants.  The `$tcp_length_optional` parameter controls
-/// whether the leading `tcp_length` field is marked optional (UDP schema, where
-/// it is included only for `bask fields` completeness) or required (TCP schema).
-macro_rules! dns_field_descriptors {
-    (tcp_length_optional: $opt:expr) => {
+/// Field descriptors shared by DNS-format messages (DNS, mDNS, LLMNR): the
+/// TCP length prefix, the RFC 1035 header with the protocol's own flag bits
+/// (`flags`), the four sections, then `trailing` descriptors.
+/// `$tcp_length_optional` controls whether the leading `tcp_length` field is
+/// marked optional (UDP schema, where it is included only for `bask fields`
+/// completeness) or required (TCP schema).
+///
+/// RFC 1035, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc1035#section-4.1>
+macro_rules! dns_format_field_descriptors {
+    (
+        tcp_length_optional: $opt:expr,
+        flags: [$($flag:expr),* $(,)?],
+        trailing: [$($trailing:expr),* $(,)?]
+    ) => {
         &[
             FieldDescriptor {
                 name: "tcp_length",
@@ -2268,13 +2276,7 @@ macro_rules! dns_field_descriptors {
                 }),
                 format_fn: None,
             },
-            FieldDescriptor::new("aa", "Authoritative Answer", FieldType::U8),
-            FieldDescriptor::new("tc", "Truncation", FieldType::U8),
-            FieldDescriptor::new("rd", "Recursion Desired", FieldType::U8),
-            FieldDescriptor::new("ra", "Recursion Available", FieldType::U8),
-            FieldDescriptor::new("z", "Reserved", FieldType::U8),
-            FieldDescriptor::new("ad", "Authentic Data", FieldType::U8),
-            FieldDescriptor::new("cd", "Checking Disabled", FieldType::U8),
+            $($flag,)*
             FieldDescriptor {
                 name: "rcode",
                 display_name: "Response Code",
@@ -2303,11 +2305,57 @@ macro_rules! dns_field_descriptors {
             FieldDescriptor::new("additionals", "Additional Records", FieldType::Array)
                 .optional()
                 .with_children(RR_CHILD_FIELDS),
-            // RFC 8490, Section 5.4.2 — <https://www.rfc-editor.org/rfc/rfc8490#section-5.4.2>
-            FieldDescriptor::new("dso_tlvs", "DSO TLVs", FieldType::Array)
-                .optional()
-                .with_children(DSO_TLV_CHILD_FIELDS),
+            $($trailing,)*
         ]
+    };
+}
+
+/// Field descriptors of a DNS message: the RFC 1035 header flags
+/// (<https://www.rfc-editor.org/rfc/rfc1035#section-4.1.1>), the AD / CD bits
+/// of RFC 4035 (<https://www.rfc-editor.org/rfc/rfc4035#section-3.1.6>) and
+/// the DSO TLVs of RFC 8490 (<https://www.rfc-editor.org/rfc/rfc8490#section-5.4.2>).
+macro_rules! dns_field_descriptors {
+    (tcp_length_optional: $opt:expr) => {
+        dns_format_field_descriptors!(
+            tcp_length_optional: $opt,
+            flags: [
+                FieldDescriptor::new("aa", "Authoritative Answer", FieldType::U8),
+                FieldDescriptor::new("tc", "Truncation", FieldType::U8),
+                FieldDescriptor::new("rd", "Recursion Desired", FieldType::U8),
+                FieldDescriptor::new("ra", "Recursion Available", FieldType::U8),
+                FieldDescriptor::new("z", "Reserved", FieldType::U8),
+                FieldDescriptor::new("ad", "Authentic Data", FieldType::U8),
+                FieldDescriptor::new("cd", "Checking Disabled", FieldType::U8),
+            ],
+            trailing: [
+                // RFC 8490, Section 5.4.2 — <https://www.rfc-editor.org/rfc/rfc8490#section-5.4.2>
+                FieldDescriptor::new("dso_tlvs", "DSO TLVs", FieldType::Array)
+                    .optional()
+                    .with_children(DSO_TLV_CHILD_FIELDS),
+            ]
+        )
+    };
+}
+
+/// Field descriptors of an LLMNR message.
+///
+/// RFC 4795, Section 2.1.1 — "LLMNR queries and responses utilize the DNS
+/// header format defined in \[RFC1035\] with exceptions noted below": C
+/// (Conflict) and T (Tentative) take the positions of the DNS AA and RD bits,
+/// TC is unchanged, and a 4-bit reserved Z field covers the DNS RA, Z, AD and
+/// CD bits. <https://www.rfc-editor.org/rfc/rfc4795#section-2.1.1>
+macro_rules! llmnr_field_descriptors {
+    (tcp_length_optional: $opt:expr) => {
+        dns_format_field_descriptors!(
+            tcp_length_optional: $opt,
+            flags: [
+                FieldDescriptor::new("c", "Conflict", FieldType::U8),
+                FieldDescriptor::new("tc", "Truncation", FieldType::U8),
+                FieldDescriptor::new("t", "Tentative", FieldType::U8),
+                FieldDescriptor::new("z", "Reserved", FieldType::U8),
+            ],
+            trailing: []
+        )
     };
 }
 
@@ -2326,6 +2374,21 @@ static DNS_FIELD_DESCRIPTORS: &[FieldDescriptor] =
 /// and the `stream_id` field correlates segments belonging to the same stream.
 static DNS_TCP_FIELD_DESCRIPTORS: &[FieldDescriptor] =
     dns_field_descriptors!(tcp_length_optional: false);
+
+/// Field descriptors for LLMNR over UDP (`tcp_length` optional, like
+/// [`DNS_FIELD_DESCRIPTORS`]).
+static LLMNR_FIELD_DESCRIPTORS: &[FieldDescriptor] =
+    llmnr_field_descriptors!(tcp_length_optional: true);
+
+/// Field descriptors for LLMNR over TCP (2-octet length prefix).
+static LLMNR_TCP_FIELD_DESCRIPTORS: &[FieldDescriptor] =
+    llmnr_field_descriptors!(tcp_length_optional: false);
+
+// -- Field descriptor index constants for the LLMNR header flags --
+const LLMNR_FD_C: usize = 4;
+const LLMNR_FD_TC: usize = 5;
+const LLMNR_FD_T: usize = 6;
+const LLMNR_FD_Z: usize = 7;
 
 /// Specification references for the DNS dissectors.
 static REFERENCES: &[SpecReference] = &[
@@ -2569,7 +2632,7 @@ impl Dissector for DnsDissector {
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
         // DNS (RFC 1035) — standard parsing without mDNS bit reinterpretation.
-        dissect_dns_core(data, buf, offset, self.short_name(), false, false)
+        dissect_dns_core(data, buf, offset, Flavor::Dns, false)
     }
 }
 
@@ -2596,13 +2659,102 @@ pub fn dissect_as_mdns<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
 ) -> Result<DissectResult, PacketError> {
-    dissect_dns_core(data, buf, offset, "mDNS", true, false)
+    dissect_dns_core(data, buf, offset, Flavor::Mdns, false)
 }
 
-/// Shared DNS / mDNS message parser.
+/// Parse a Link-Local Multicast Name Resolution (RFC 4795) message carried
+/// over UDP.
 ///
-/// `layer_name` is the short name pushed onto the layer (e.g., `"DNS"` or
-/// `"mDNS"`). When `mdns_mode` is true, the top bit of each question's
+/// LLMNR messages use the DNS message format (RFC 4795, Section 2.1 —
+/// <https://www.rfc-editor.org/rfc/rfc4795#section-2.1>), but the header
+/// bits DNS uses for AA and RD are C (Conflict) and T (Tentative), and the
+/// DNS RA, Z, AD and CD bits form a 4-bit reserved Z field (RFC 4795,
+/// Section 2.1.1 —
+/// <https://www.rfc-editor.org/rfc/rfc4795#section-2.1.1>). The layer is
+/// labelled `"LLMNR"` and carries `c`, `tc`, `t` and `z` instead of the DNS
+/// flag fields; questions and resource records are parsed exactly as DNS.
+/// See [`llmnr_field_descriptors`].
+pub fn dissect_as_llmnr<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+) -> Result<DissectResult, PacketError> {
+    dissect_dns_core(data, buf, offset, Flavor::Llmnr, false)
+}
+
+/// Parse an LLMNR message carried over TCP, i.e. preceded by the 2-octet
+/// length field of RFC 1035, Section 4.2.2 —
+/// <https://www.rfc-editor.org/rfc/rfc1035#section-4.2.2>.
+///
+/// RFC 4795, Section 2.1 — "LLMNR is based on the DNS packet format defined
+/// in \[RFC1035\] Section 4 for both queries and responses."
+/// <https://www.rfc-editor.org/rfc/rfc4795#section-2.1>. The header is
+/// decoded as in [`dissect_as_llmnr`]; see [`llmnr_tcp_field_descriptors`].
+pub fn dissect_as_llmnr_tcp<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+) -> Result<DissectResult, PacketError> {
+    dissect_tcp_framed(data, buf, offset, Flavor::Llmnr)
+}
+
+/// Field descriptors of an LLMNR layer produced by [`dissect_as_llmnr`]
+/// (the `tcp_length` field is listed as optional).
+pub fn llmnr_field_descriptors() -> &'static [FieldDescriptor] {
+    LLMNR_FIELD_DESCRIPTORS
+}
+
+/// Field descriptors of an LLMNR layer produced by [`dissect_as_llmnr_tcp`]
+/// (starting with the mandatory `tcp_length` field).
+pub fn llmnr_tcp_field_descriptors() -> &'static [FieldDescriptor] {
+    LLMNR_TCP_FIELD_DESCRIPTORS
+}
+
+/// The DNS-format protocol being parsed by [`dissect_dns_core`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flavor {
+    /// DNS (RFC 1035 — <https://www.rfc-editor.org/rfc/rfc1035>).
+    Dns,
+    /// Multicast DNS (RFC 6762 — <https://www.rfc-editor.org/rfc/rfc6762>):
+    /// QU and cache-flush bits split from the
+    /// class fields.
+    Mdns,
+    /// LLMNR (RFC 4795 — <https://www.rfc-editor.org/rfc/rfc4795>): C / TC /
+    /// T / Z header flags.
+    Llmnr,
+}
+
+impl Flavor {
+    /// Short name of the layer.
+    fn layer_name(self) -> &'static str {
+        match self {
+            Self::Dns => "DNS",
+            Self::Mdns => "mDNS",
+            Self::Llmnr => "LLMNR",
+        }
+    }
+
+    /// Layer field descriptors (UDP form, `tcp_length` optional).
+    fn field_descriptors(self) -> &'static [FieldDescriptor] {
+        match self {
+            Self::Dns | Self::Mdns => DNS_FIELD_DESCRIPTORS,
+            Self::Llmnr => LLMNR_FIELD_DESCRIPTORS,
+        }
+    }
+
+    /// Layer field descriptors of the TCP form (`tcp_length` mandatory).
+    fn tcp_field_descriptors(self) -> &'static [FieldDescriptor] {
+        match self {
+            Self::Dns | Self::Mdns => DNS_TCP_FIELD_DESCRIPTORS,
+            Self::Llmnr => LLMNR_TCP_FIELD_DESCRIPTORS,
+        }
+    }
+}
+
+/// Shared DNS / mDNS / LLMNR message parser.
+///
+/// `flavor` selects the layer name, the header flag layout (LLMNR) and the
+/// class-field reinterpretation (mDNS). In mDNS, the top bit of each question's
 /// qclass is emitted as a separate `qu` field, and the top bit of each
 /// non-OPT record's rrclass is emitted as a separate `cache_flush` field,
 /// per RFC 6762, Sections 18.12, 18.13 and 10.2.
@@ -2616,10 +2768,10 @@ fn dissect_dns_core<'pkt>(
     data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
-    layer_name: &'static str,
-    mdns_mode: bool,
+    flavor: Flavor,
     stream_transport: bool,
 ) -> Result<DissectResult, PacketError> {
+    let mdns_mode = flavor == Flavor::Mdns;
     if data.len() < HEADER_SIZE {
         return Err(PacketError::Truncated {
             expected: HEADER_SIZE,
@@ -2650,9 +2802,9 @@ fn dissect_dns_core<'pkt>(
     let arcount = read_be_u16(data, 10)?;
 
     buf.begin_layer(
-        layer_name,
+        flavor.layer_name(),
         None,
-        DNS_FIELD_DESCRIPTORS,
+        flavor.field_descriptors(),
         offset..offset + data.len(),
     );
 
@@ -2671,41 +2823,61 @@ fn dissect_dns_core<'pkt>(
         FieldValue::U8(opcode),
         offset + 2..offset + 4,
     );
-    buf.push_field(
-        &DNS_FIELD_DESCRIPTORS[FD_AA],
-        FieldValue::U8(aa),
-        offset + 2..offset + 4,
-    );
-    buf.push_field(
-        &DNS_FIELD_DESCRIPTORS[FD_TC],
-        FieldValue::U8(tc),
-        offset + 2..offset + 4,
-    );
-    buf.push_field(
-        &DNS_FIELD_DESCRIPTORS[FD_RD],
-        FieldValue::U8(rd),
-        offset + 2..offset + 4,
-    );
-    buf.push_field(
-        &DNS_FIELD_DESCRIPTORS[FD_RA],
-        FieldValue::U8(ra),
-        offset + 2..offset + 4,
-    );
-    buf.push_field(
-        &DNS_FIELD_DESCRIPTORS[FD_Z],
-        FieldValue::U8(z),
-        offset + 2..offset + 4,
-    );
-    buf.push_field(
-        &DNS_FIELD_DESCRIPTORS[FD_AD],
-        FieldValue::U8(ad),
-        offset + 2..offset + 4,
-    );
-    buf.push_field(
-        &DNS_FIELD_DESCRIPTORS[FD_CD],
-        FieldValue::U8(cd),
-        offset + 2..offset + 4,
-    );
+    if flavor == Flavor::Llmnr {
+        // RFC 4795, Section 2.1.1 — header "|QR|   Opcode  | C|TC| T| Z| Z| Z|
+        // Z|   RCODE   |": C (Conflict), TC (TrunCation), T (Tentative) and
+        // four reserved Z bits in place of DNS AA, TC, RD, RA, Z, AD, CD.
+        // https://www.rfc-editor.org/rfc/rfc4795#section-2.1.1
+        let flag_fields = [
+            (LLMNR_FD_C, aa),
+            (LLMNR_FD_TC, tc),
+            (LLMNR_FD_T, rd),
+            (LLMNR_FD_Z, ((flags >> 4) & 0x0F) as u8),
+        ];
+        for (fd, value) in flag_fields {
+            buf.push_field(
+                &LLMNR_FIELD_DESCRIPTORS[fd],
+                FieldValue::U8(value),
+                offset + 2..offset + 4,
+            );
+        }
+    } else {
+        buf.push_field(
+            &DNS_FIELD_DESCRIPTORS[FD_AA],
+            FieldValue::U8(aa),
+            offset + 2..offset + 4,
+        );
+        buf.push_field(
+            &DNS_FIELD_DESCRIPTORS[FD_TC],
+            FieldValue::U8(tc),
+            offset + 2..offset + 4,
+        );
+        buf.push_field(
+            &DNS_FIELD_DESCRIPTORS[FD_RD],
+            FieldValue::U8(rd),
+            offset + 2..offset + 4,
+        );
+        buf.push_field(
+            &DNS_FIELD_DESCRIPTORS[FD_RA],
+            FieldValue::U8(ra),
+            offset + 2..offset + 4,
+        );
+        buf.push_field(
+            &DNS_FIELD_DESCRIPTORS[FD_Z],
+            FieldValue::U8(z),
+            offset + 2..offset + 4,
+        );
+        buf.push_field(
+            &DNS_FIELD_DESCRIPTORS[FD_AD],
+            FieldValue::U8(ad),
+            offset + 2..offset + 4,
+        );
+        buf.push_field(
+            &DNS_FIELD_DESCRIPTORS[FD_CD],
+            FieldValue::U8(cd),
+            offset + 2..offset + 4,
+        );
+    }
     buf.push_field(
         &DNS_FIELD_DESCRIPTORS[FD_RCODE],
         FieldValue::U8(rcode),
@@ -3002,7 +3174,9 @@ fn dissect_dns_tcp_message<'pkt>(
     msg_data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
     offset: usize,
+    flavor: Flavor,
 ) -> Result<DissectResult, PacketError> {
+    let tcp_descriptors = flavor.tcp_field_descriptors();
     let msg_len = read_be_u16(msg_data, 0)? as usize;
 
     // Push tcp_length field BEFORE calling the inner DNS dissector,
@@ -3010,7 +3184,7 @@ fn dissect_dns_tcp_message<'pkt>(
     // We record the field index so we can include it in the layer's field_range.
     let tcp_len_field_idx = buf.field_count();
     buf.push_field(
-        &DNS_TCP_FIELD_DESCRIPTORS[0], // tcp_length is the first descriptor
+        &tcp_descriptors[0], // tcp_length is the first descriptor
         FieldValue::U16(msg_len as u16),
         offset..offset + 2,
     );
@@ -3018,18 +3192,21 @@ fn dissect_dns_tcp_message<'pkt>(
     // RFC 1035, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc1035#section-4.2.2>:
     // the length prefix delimits the message, so a message that needs more
     // octets than it declares is malformed, not a truncated capture.
+    // DNS Stateful Operations are only defined for DNS (RFC 8490 —
+    // https://www.rfc-editor.org/rfc/rfc8490), so only a DNS message gets the
+    // stream-transport DSO parsing.
     let result = dissect_dns_core(
         &msg_data[2..2 + msg_len],
         buf,
         offset + 2,
-        "DNS",
-        false,
-        true,
+        flavor,
+        flavor == Flavor::Dns,
     )
     .map_err(|e| match e {
-        PacketError::Truncated { .. } => {
-            PacketError::InvalidHeader("DNS message overruns TCP length prefix")
-        }
+        PacketError::Truncated { .. } => PacketError::InvalidHeader(match flavor {
+            Flavor::Llmnr => "LLMNR message overruns TCP length prefix",
+            Flavor::Dns | Flavor::Mdns => "DNS message overruns TCP length prefix",
+        }),
         other => other,
     })?;
 
@@ -3038,13 +3215,43 @@ fn dissect_dns_tcp_message<'pkt>(
     if let Some(layer) = buf.last_layer_mut() {
         layer.range = offset..layer.range.end;
         layer.field_range.start = tcp_len_field_idx;
-        layer.field_descriptors = DNS_TCP_FIELD_DESCRIPTORS;
+        layer.field_descriptors = tcp_descriptors;
     }
 
     Ok(DissectResult::new(
         2 + result.bytes_consumed,
         DispatchHint::End,
     ))
+}
+
+/// Parse a length-prefixed DNS-format message received over TCP.
+fn dissect_tcp_framed<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    flavor: Flavor,
+) -> Result<DissectResult, PacketError> {
+    // RFC 1035, Section 4.2.2 (updated by RFC 7766) — TCP messages are
+    // prefixed with a 2-byte length.
+    // <https://www.rfc-editor.org/rfc/rfc7766#section-8>
+    if data.len() < 2 {
+        return Err(PacketError::Truncated {
+            expected: 2,
+            actual: data.len(),
+        });
+    }
+
+    let msg_len = read_be_u16(data, 0)? as usize;
+    let total_len = 2 + msg_len;
+
+    if data.len() < total_len {
+        return Err(PacketError::Truncated {
+            expected: total_len,
+            actual: data.len(),
+        });
+    }
+
+    dissect_dns_tcp_message(&data[..total_len], buf, offset, flavor)
 }
 
 /// Stateless DNS over TCP dissector.
@@ -3083,27 +3290,7 @@ impl Dissector for DnsTcpDissector {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError> {
-        // RFC 1035, Section 4.2.2 (updated by RFC 7766) — TCP messages are
-        // prefixed with a 2-byte length.
-        // <https://www.rfc-editor.org/rfc/rfc7766#section-8>
-        if data.len() < 2 {
-            return Err(PacketError::Truncated {
-                expected: 2,
-                actual: data.len(),
-            });
-        }
-
-        let msg_len = read_be_u16(data, 0)? as usize;
-        let total_len = 2 + msg_len;
-
-        if data.len() < total_len {
-            return Err(PacketError::Truncated {
-                expected: total_len,
-                actual: data.len(),
-            });
-        }
-
-        dissect_dns_tcp_message(&data[..total_len], buf, offset)
+        dissect_tcp_framed(data, buf, offset, Flavor::Dns)
     }
 }
 
@@ -3180,6 +3367,12 @@ mod tests {
     // | RFC 4025 §2.1-§2.5     | IPSECKEY gateway types              | parse_ipseckey_record_gateway_types |
     // | RFC 4398 §2 / RFC 4701 §3.1 / RFC 7929 §2.1 / RFC 7043 §3.1, §4.1 | CERT, DHCID, OPENPGPKEY, EUI48/64 | parse_cert_dhcid_openpgpkey_eui_records |
     // | RFC 8490 §4.2/§5.4.2/§5.4.4 | DSO message TLVs (TCP only)    | dso_message_tlvs                  |
+    // | RFC 4795 §2.1.1        | LLMNR header: C / TC / T / Z(4) bits | llmnr_header_flags               |
+    // | RFC 4795 §2.1          | LLMNR questions / RRs as DNS         | llmnr_header_flags               |
+    // | RFC 4795 §2.1 / 1035 §4.2.2 | LLMNR over TCP length prefix    | llmnr_tcp_length_prefix          |
+    // | RFC 4795 §2.1 / 1035 §4.2.2 | LLMNR TCP prefix overrun / short | llmnr_tcp_errors                |
+    // | RFC 4795 §2.1 / 8490 §4.2 | LLMNR opcode 6 is not DSO          | llmnr_tcp_opcode6_has_no_dso_tlvs |
+    // | RFC 4795 §2.1.1        | LLMNR flag descriptor indices        | llmnr_flag_indices_match_descriptors |
     // | —                      | Opcode / RCODE / TYPE / CLASS names | type_class_opcode_rcode_names     |
     // | —                      | Dispatch hint is End                | dispatch_hint_is_end              |
     // | —                      | `write_dns_name` formats output     | write_dns_name_formats_output     |
@@ -3303,6 +3496,148 @@ mod tests {
                 actual: 11,
             }
         ));
+    }
+
+    // ---- RFC 4795 §2.1.1 — LLMNR header ----------------------------------
+
+    #[test]
+    fn llmnr_header_flags() {
+        // QR=1 Opcode=0 C=1 TC=1 T=1 Z=0b1010 RCODE=0, one question.
+        let flags: u16 = (1 << 15) | (1 << 10) | (1 << 9) | (1 << 8) | (0b1010 << 4);
+        let mut data = header(1, 0, 0, 0);
+        data[0..2].copy_from_slice(&0x1234u16.to_be_bytes());
+        data[2..4].copy_from_slice(&flags.to_be_bytes());
+        data.extend_from_slice(&wire_name("host1"));
+        data.extend_from_slice(&1u16.to_be_bytes()); // QTYPE=A
+        data.extend_from_slice(&1u16.to_be_bytes()); // QCLASS=IN
+
+        let mut b = buf();
+        let result = dissect_as_llmnr(&data, &mut b, 0).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        assert_eq!(result.next, DispatchHint::End);
+
+        let layer = &b.layers()[0];
+        assert_eq!(layer.name, "LLMNR");
+        assert!(core::ptr::eq(
+            layer.field_descriptors,
+            llmnr_field_descriptors()
+        ));
+        let get = |name: &str| b.field_by_name(layer, name).unwrap().value.clone();
+        assert_eq!(get("id"), FieldValue::U16(0x1234));
+        assert_eq!(get("qr"), FieldValue::U8(1));
+        assert_eq!(get("opcode"), FieldValue::U8(0));
+        assert_eq!(get("c"), FieldValue::U8(1));
+        assert_eq!(get("tc"), FieldValue::U8(1));
+        assert_eq!(get("t"), FieldValue::U8(1));
+        assert_eq!(get("z"), FieldValue::U8(0b1010));
+        assert_eq!(get("rcode"), FieldValue::U8(0));
+        // RFC 4795, Section 2.1.1 — the DNS AA/RD/RA/AD/CD bits do not exist.
+        // https://www.rfc-editor.org/rfc/rfc4795#section-2.1.1
+        for dns_only in ["aa", "rd", "ra", "ad", "cd"] {
+            assert!(b.field_by_name(layer, dns_only).is_none(), "{dns_only}");
+        }
+        let questions = b.field_by_name(layer, "questions").unwrap();
+        let q = first_array_entry(&b, questions);
+        assert_eq!(find_child(&b, q, "type").unwrap().value, FieldValue::U16(1));
+        // No mDNS reinterpretation of the class field.
+        assert!(find_child(&b, q, "qu").is_none());
+
+        // The descriptor list names the LLMNR flags, not the DNS ones.
+        let names: Vec<_> = llmnr_field_descriptors().iter().map(|d| d.name).collect();
+        assert!(names.contains(&"c") && names.contains(&"t"));
+        assert!(!names.contains(&"aa") && !names.contains(&"dso_tlvs"));
+    }
+
+    #[test]
+    fn llmnr_tcp_length_prefix() {
+        let mut msg = header(1, 0, 0, 0);
+        msg.extend_from_slice(&wire_name("host1"));
+        msg.extend_from_slice(&[0x00, 0x1C, 0x00, 0x01]); // AAAA IN
+        let mut data = (msg.len() as u16).to_be_bytes().to_vec();
+        data.extend_from_slice(&msg);
+
+        let mut b = buf();
+        let result = dissect_as_llmnr_tcp(&data, &mut b, 10).unwrap();
+        assert_eq!(result.bytes_consumed, data.len());
+        let layer = &b.layers()[0];
+        assert_eq!(layer.name, "LLMNR");
+        assert_eq!(layer.range, 10..10 + data.len());
+        assert!(core::ptr::eq(
+            layer.field_descriptors,
+            llmnr_tcp_field_descriptors()
+        ));
+        let fields = b.layer_fields(layer);
+        assert_eq!(fields[0].name(), "tcp_length");
+        assert_eq!(fields[0].value, FieldValue::U16(msg.len() as u16));
+        assert_eq!(
+            b.field_by_name(layer, "c").unwrap().value,
+            FieldValue::U8(0)
+        );
+        assert!(!llmnr_tcp_field_descriptors()[0].optional);
+        assert!(llmnr_field_descriptors()[0].optional);
+    }
+
+    #[test]
+    fn llmnr_tcp_errors() {
+        let mut b = buf();
+        assert_eq!(
+            dissect_as_llmnr_tcp(&[0x00], &mut b, 0),
+            Err(PacketError::Truncated {
+                expected: 2,
+                actual: 1
+            })
+        );
+        let mut b = buf();
+        assert_eq!(
+            dissect_as_llmnr_tcp(&[0x00, 0x0C, 0, 0], &mut b, 0),
+            Err(PacketError::Truncated {
+                expected: 14,
+                actual: 4
+            })
+        );
+        // The prefix says 12 octets but the header claims a question.
+        let mut data = vec![0x00, 0x0C];
+        data.extend_from_slice(&header(1, 0, 0, 0));
+        data.extend_from_slice(&wire_name("x"));
+        let mut b = buf();
+        assert_eq!(
+            dissect_as_llmnr_tcp(&data, &mut b, 0),
+            Err(PacketError::InvalidHeader(
+                "LLMNR message overruns TCP length prefix"
+            ))
+        );
+    }
+
+    #[test]
+    fn llmnr_tcp_opcode6_has_no_dso_tlvs() {
+        // DSO (RFC 8490, Section 4.2 —
+        // https://www.rfc-editor.org/rfc/rfc8490#section-4.2) is a DNS-only
+        // opcode: an LLMNR message with opcode 6 keeps trailing octets
+        // undecoded instead of reading them as DSO TLVs.
+        let mut msg = header(0, 0, 0, 0);
+        msg[2..4].copy_from_slice(&(6u16 << 11).to_be_bytes());
+        msg.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // a DSO-like TLV
+        let mut data = (msg.len() as u16).to_be_bytes().to_vec();
+        data.extend_from_slice(&msg);
+        let mut b = buf();
+        dissect_as_llmnr_tcp(&data, &mut b, 0).unwrap();
+        let layer = &b.layers()[0];
+        assert!(b.field_by_name(layer, "dso_tlvs").is_none());
+
+        // The same message as DNS over TCP does decode the TLV.
+        let mut b = buf();
+        DnsTcpDissector.dissect(&data, &mut b, 0).unwrap();
+        assert!(b.field_by_name(&b.layers()[0], "dso_tlvs").is_some());
+    }
+
+    #[test]
+    fn llmnr_flag_indices_match_descriptors() {
+        for fds in [llmnr_field_descriptors(), llmnr_tcp_field_descriptors()] {
+            assert_eq!(fds[LLMNR_FD_C].name, "c");
+            assert_eq!(fds[LLMNR_FD_TC].name, "tc");
+            assert_eq!(fds[LLMNR_FD_T].name, "t");
+            assert_eq!(fds[LLMNR_FD_Z].name, "z");
+        }
     }
 
     // ---- RFC 1035 §4.1.2 — question & §3.4.1 A RDATA ---------------------
