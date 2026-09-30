@@ -165,6 +165,8 @@ pub mod dissectors {
     pub use packet_dissector_nas5g as nas5g;
     #[cfg(feature = "ngap")]
     pub use packet_dissector_ngap as ngap;
+    #[cfg(feature = "sgsap")]
+    pub use packet_dissector_sgsap as sgsap;
     #[cfg(feature = "xnap")]
     pub use packet_dissector_xnap as xnap;
 
@@ -180,6 +182,8 @@ pub mod dissectors {
     #[cfg(feature = "vxlan")]
     pub use packet_dissector_vxlan as vxlan;
 
+    #[cfg(feature = "eap")]
+    pub use packet_dissector_eap as eap;
     #[cfg(feature = "lldp")]
     pub use packet_dissector_lldp as lldp;
 

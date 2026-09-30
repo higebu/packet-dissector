@@ -47,10 +47,12 @@ default = [
   "xnap",
   "f1ap",
   "e1ap",
+  "sgsap",
   "geneve",
   "gre",
   "vxlan",
   "lldp",
+  "eap",
   "stp",
   "mpls",
   "ntp",
@@ -116,10 +118,13 @@ ngap = ["dep:packet-dissector-ngap", "nas5g"]
 xnap = ["dep:packet-dissector-xnap"]
 f1ap = ["dep:packet-dissector-f1ap"]
 e1ap = ["dep:packet-dissector-e1ap"]
+sgsap = ["dep:packet-dissector-sgsap"]
 geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
 vxlan = ["dep:packet-dissector-vxlan"]
 lldp = ["dep:packet-dissector-lldp"]
+# EAP is also decoded inside PPP (Protocol 0xC227) when both are enabled.
+eap = ["dep:packet-dissector-eap", "packet-dissector-ppp?/eap"]
 stp = ["dep:packet-dissector-stp"]
 mpls = ["dep:packet-dissector-mpls"]
 ntp = ["dep:packet-dissector-ntp"]
@@ -157,6 +162,7 @@ layer2 = [
   "arp",
   "lacp",
   "lldp",
+  "eap",
   "stp",
   "ppp",
   "pppoe",
@@ -194,6 +200,7 @@ ipsec = ["ah", "esp", "ike"]
   "xnap",
   "f1ap",
   "e1ap",
+  "sgsap",
 ]
 
 [dependencies]
@@ -234,10 +241,12 @@ packet-dissector-ngap = { workspace = true, optional = true }
 packet-dissector-xnap = { workspace = true, optional = true }
 packet-dissector-f1ap = { workspace = true, optional = true }
 packet-dissector-e1ap = { workspace = true, optional = true }
+packet-dissector-sgsap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }
 packet-dissector-gre = { workspace = true, optional = true }
 packet-dissector-vxlan = { workspace = true, optional = true }
 packet-dissector-lldp = { workspace = true, optional = true }
+packet-dissector-eap = { workspace = true, optional = true }
 packet-dissector-stp = { workspace = true, optional = true }
 packet-dissector-mpls = { workspace = true, optional = true }
 packet-dissector-ntp = { workspace = true, optional = true }
