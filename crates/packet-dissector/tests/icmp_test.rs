@@ -41,9 +41,15 @@
 //! | —           | —        | Truncated packet                   | parse_icmp_truncated                          |
 //! | —           | —        | Offset handling                    | parse_icmp_with_offset                        |
 //! | —           | —        | Dissector metadata                 | icmp_dissector_metadata                       |
+//! | RFC 792     | p.14     | Checksum verified (good)           | icmp_checksum_status_good                     |
+//! | RFC 792     | p.14     | Checksum verified (bad)            | icmp_checksum_status_bad                      |
+//! | RFC 791     | 3.1      | Fragment / no IP layer unverified  | icmp_checksum_status_unverified               |
+//! | —           | —        | No status unless verification on   | icmp_checksum_status_absent_by_default        |
 
+use packet_dissector::checksum::{ChecksumStatus, internet_checksum};
 use packet_dissector::dissector::{DispatchHint, Dissector};
 use packet_dissector::dissectors::icmp::IcmpDissector;
+use packet_dissector::dissectors::ipv4::Ipv4Dissector;
 use packet_dissector::error::PacketError;
 use packet_dissector::field::FieldValue;
 use packet_dissector::packet::DissectBuffer;
@@ -1476,4 +1482,107 @@ fn icmp_dissector_metadata() {
     let d = IcmpDissector;
     assert_eq!(d.name(), "Internet Control Message Protocol");
     assert_eq!(d.short_name(), "ICMP");
+}
+
+/// The `checksum_status` of `layer`, if the dissector added one.
+fn checksum_status(buf: &DissectBuffer<'_>, layer_name: &str) -> Option<ChecksumStatus> {
+    let layer = buf.layer_by_name(layer_name).unwrap();
+    buf.field_by_name(layer, "checksum_status")
+        .map(|f| ChecksumStatus::from_u8(f.value.as_u8().unwrap()).unwrap())
+}
+
+/// IPv4 header (20 bytes, no fragmentation) for `payload_len` bytes of `protocol`.
+fn ipv4_header(protocol: u8, payload_len: usize) -> Vec<u8> {
+    let mut h = vec![0x45, 0x00];
+    h.extend_from_slice(&((20 + payload_len) as u16).to_be_bytes());
+    h.extend_from_slice(&[0x00, 0x01, 0x40, 0x00, 64, protocol, 0x00, 0x00]);
+    h.extend_from_slice(&V4_SRC);
+    h.extend_from_slice(&V4_DST);
+    h
+}
+
+const V4_SRC: [u8; 4] = [192, 0, 2, 1];
+const V4_DST: [u8; 4] = [198, 51, 100, 2];
+
+/// Store the Internet checksum over `pseudo` + `message` at `at`.
+fn fill_checksum(pseudo: &[u8], message: &mut [u8], at: usize) {
+    message[at..at + 2].copy_from_slice(&[0, 0]);
+    let c = internet_checksum(&[pseudo, message]);
+    message[at..at + 2].copy_from_slice(&c.to_be_bytes());
+}
+
+/// Dissect `ip_header` + `message` with verification on: IPv4 first, then
+/// `dissector` at the message offset.
+fn dissect_over_ipv4<'a>(dissector: &dyn Dissector, packet: &'a [u8], buf: &mut DissectBuffer<'a>) {
+    buf.set_verify_checksums(true);
+    Ipv4Dissector.dissect(packet, buf, 0).unwrap();
+    dissector.dissect(&packet[20..], buf, 20).unwrap();
+}
+
+/// IPv4 + ICMP Echo Request with a correct checksum.
+fn ipv4_icmp_echo(data: &[u8]) -> Vec<u8> {
+    let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0x00, 0x01];
+    icmp.extend_from_slice(data);
+    fill_checksum(&[], &mut icmp, 2);
+    let mut pkt = ipv4_header(1, icmp.len());
+    pkt.extend_from_slice(&icmp);
+    pkt
+}
+
+#[test]
+fn icmp_checksum_status_absent_by_default() {
+    let pkt = ipv4_icmp_echo(b"abc");
+    let mut buf = DissectBuffer::new();
+    Ipv4Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+    IcmpDissector.dissect(&pkt[20..], &mut buf, 20).unwrap();
+    assert_eq!(checksum_status(&buf, "ICMP"), None);
+}
+
+#[test]
+fn icmp_checksum_status_good() {
+    // RFC 792 — "The checksum is the 16-bit ones's complement of the one's
+    // complement sum of the ICMP message starting with the ICMP Type."
+    // https://www.rfc-editor.org/rfc/rfc792
+    let pkt = ipv4_icmp_echo(b"abc");
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv4(&IcmpDissector, &pkt, &mut buf);
+    assert_eq!(checksum_status(&buf, "ICMP"), Some(ChecksumStatus::Good));
+    let layer = buf.layer_by_name("ICMP").unwrap();
+    assert_eq!(
+        buf.field_by_name(layer, "checksum_status").unwrap().range,
+        22..24
+    );
+}
+
+#[test]
+fn icmp_checksum_status_bad() {
+    let mut pkt = ipv4_icmp_echo(b"abc");
+    let last = pkt.len() - 1;
+    pkt[last] = b'x';
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv4(&IcmpDissector, &pkt, &mut buf);
+    assert_eq!(checksum_status(&buf, "ICMP"), Some(ChecksumStatus::Bad));
+}
+
+#[test]
+fn icmp_checksum_status_unverified() {
+    // First fragment (MF set): the checksum covers the whole message.
+    let mut pkt = ipv4_icmp_echo(b"abc");
+    pkt[6] = 0x20;
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv4(&IcmpDissector, &pkt, &mut buf);
+    assert_eq!(
+        checksum_status(&buf, "ICMP"),
+        Some(ChecksumStatus::Unverified)
+    );
+
+    // No enclosing IP layer.
+    let pkt = ipv4_icmp_echo(b"abc");
+    let mut buf = DissectBuffer::new();
+    buf.set_verify_checksums(true);
+    IcmpDissector.dissect(&pkt[20..], &mut buf, 0).unwrap();
+    assert_eq!(
+        checksum_status(&buf, "ICMP"),
+        Some(ChecksumStatus::Unverified)
+    );
 }

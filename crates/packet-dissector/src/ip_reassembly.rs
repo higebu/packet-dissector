@@ -418,6 +418,7 @@ impl DissectorRegistry {
         padded.splice(0..0, core::iter::repeat_n(0u8, offset));
 
         let mut tmp_buf = DissectBuffer::new();
+        tmp_buf.set_verify_checksums(buf.verify_checksums());
         for layer in buf.layers() {
             tmp_buf.push_layer(layer.clone());
         }
