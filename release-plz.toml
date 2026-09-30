@@ -59,6 +59,7 @@ git_tag_enable = true
 git_release_enable = true
 changelog_include = [
   "packet-dissector-ah",
+  "packet-dissector-aper",
   "packet-dissector-arp",
   "packet-dissector-bfd",
   "packet-dissector-bgp",
@@ -120,6 +121,10 @@ changelog_include = [
 
 [[package]]
 name = "packet-dissector-ah"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-aper"
 version_group = "workspace"
 
 [[package]]
