@@ -17,7 +17,7 @@ packet-dissector = "0.3"
 
 ## Features
 
-- **Zero-copy on the normal path** — dissectors borrow directly from `&[u8]` slices when parsing a single packet; TCP reassembly and decrypted-payload paths copy into auxiliary storage
+- **Zero-copy on the normal path** — dissectors borrow directly from `&[u8]` slices when parsing a single packet; TCP reassembly, IP fragment reassembly and decrypted-payload paths copy into auxiliary storage
 - **Extensible** — add new protocols by implementing the `Dissector` trait
 - **Layered dissection** — automatic chaining from Ethernet through IP, TCP/UDP, to application protocols
 - **Safe Rust** — minimal `unsafe` in the registry only, documented with `// SAFETY:` comments
@@ -30,11 +30,11 @@ protocols include:
 
 | Category | Protocols |
 |----------|-----------|
-| L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (up to 2 VLAN tags), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP |
+| L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (up to 2 VLAN tags), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP, PPPoE |
 | L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, IS-IS, AH, ESP, SRv6, GRE, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE |
 | Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, TLS, PPP, RADIUS, RTP, QUIC, STUN |
-| 3GPP | GTPv1-U, GTPv2-C, PFCP, NAS5G, NGAP |
+| 3GPP | GTPv1-U, GTPv1-C, GTPv2-C, PFCP, NAS5G, NGAP |
 
 See `crates/packet-dissector/Cargo.toml` and `crates/packet-dissector/src/lib.rs`
 for the current feature-gated protocol list.
@@ -57,24 +57,25 @@ packet-dissector = { version = "0.3", default-features = false, features = ["lay
 
 Representative feature flags:
 
-- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `arp`, `lacp`, `lldp`, `stp`
+- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `arp`, `lacp`, `lldp`, `stp`, `pppoe`
 - Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`
 - Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
-- 3GPP: `gtpv1u`, `gtpv2c`, `pfcp`, `nas5g`, `ngap`
+- 3GPP: `gtpv1u`, `gtpv1c`, `gtpv2c`, `pfcp`, `nas5g`, `ngap`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
+- `ip-reassembly` enables IPv4 / IPv6 fragment reassembly in the registry (without it, non-initial fragments still end the chain after the IP layer)
 
 Convenience groups:
 
-- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "arp", "lacp", "lldp", "stp", "ppp"]`
+- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "arp", "lacp", "lldp", "stp", "ppp", "pppoe"]`
 - `layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]`
 - `layer4 = ["tcp", "udp", "sctp"]`
 - `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun"]`
 - `tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]`
 - `routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]`
 - `ipsec = ["ah", "esp", "ike"]`
-- `3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]`
+- `3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "ngap"]`
 
 For the authoritative, exhaustive list, see
 `crates/packet-dissector/Cargo.toml`.
@@ -152,7 +153,7 @@ dissectors then add an optional `checksum_status` field next to the checksum
 (`good`, `bad`, `unverified` or `not_present`; see
 `packet_dissector::checksum::ChecksumStatus`). A bad checksum is never a
 dissection error. `unverified` means the checksum could not be computed, e.g.
-the capture is cut by the snaplen or the datagram is a fragment.
+the capture is cut by the snaplen or a fragment could not be reassembled.
 
 Captures taken on the sending host often carry wrong TCP/UDP/IPv4 checksums
 because the NIC computes them after the capture point (checksum offload), so
