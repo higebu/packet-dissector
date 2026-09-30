@@ -3032,6 +3032,13 @@ impl Default for DissectorRegistry {
             reg.register_by_ip_protocol(112, Box::new(packet_dissector_vrrp::VrrpDissector)),
         );
 
+        // RSVP is IP protocol number 46 (RFC 2205, Section 3.1 —
+        // https://www.rfc-editor.org/rfc/rfc2205#section-3.1)
+        #[cfg(feature = "rsvp")]
+        assert_builtin(
+            reg.register_by_ip_protocol(46, Box::new(packet_dissector_rsvp::RsvpDissector)),
+        );
+
         // "All PIM control messages have IP protocol number 103." (RFC 7761,
         // Section 4.9 — https://www.rfc-editor.org/rfc/rfc7761#section-4.9)
         #[cfg(feature = "pim")]
@@ -5500,6 +5507,9 @@ mod tests {
 
         #[cfg(feature = "vrrp")]
         assert!(reg.get_by_ip_protocol(112).is_some());
+
+        #[cfg(feature = "rsvp")]
+        assert!(reg.get_by_ip_protocol(46).is_some());
 
         #[cfg(feature = "pim")]
         assert!(reg.get_by_ip_protocol(103).is_some());

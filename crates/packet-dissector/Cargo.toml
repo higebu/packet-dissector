@@ -64,6 +64,7 @@ default = [
   "ospf",
   "pim",
   "vrrp",
+  "rsvp",
   "bfd",
   "ipfix",
   "snmp",
@@ -160,6 +161,7 @@ ntp = ["dep:packet-dissector-ntp"]
 ospf = ["dep:packet-dissector-ospf"]
 pim = ["dep:packet-dissector-pim"]
 vrrp = ["dep:packet-dissector-vrrp"]
+rsvp = ["dep:packet-dissector-rsvp"]
 bfd = ["dep:packet-dissector-bfd"]
 ipfix = ["dep:packet-dissector-ipfix"]
 snmp = ["dep:packet-dissector-snmp"]
@@ -240,7 +242,7 @@ tunneling = [
   "mpls",
   "nsh",
 ]
-routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "pim"]
+routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "pim", "rsvp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = [
   "gtpv1u",
@@ -312,6 +314,7 @@ packet-dissector-ntp = { workspace = true, optional = true }
 packet-dissector-ospf = { workspace = true, optional = true }
 packet-dissector-pim = { workspace = true, optional = true }
 packet-dissector-vrrp = { workspace = true, optional = true }
+packet-dissector-rsvp = { workspace = true, optional = true }
 packet-dissector-bfd = { workspace = true, optional = true }
 packet-dissector-ipfix = { workspace = true, optional = true }
 packet-dissector-snmp = { workspace = true, optional = true }

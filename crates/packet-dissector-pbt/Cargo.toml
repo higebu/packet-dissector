@@ -44,6 +44,7 @@ packet-dissector-pim = { workspace = true }
 packet-dissector-pppoe = { workspace = true }
 packet-dissector-sccp = { workspace = true }
 packet-dissector-radiotap = { workspace = true }
+packet-dissector-rsvp = { workspace = true }
 packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcap = { workspace = true }
