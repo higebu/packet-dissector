@@ -654,6 +654,7 @@ dependencies = [
  "packet-dissector-rtp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
+ "packet-dissector-sgsap",
  "packet-dissector-sip",
  "packet-dissector-srv6",
  "packet-dissector-stp",
@@ -1047,6 +1048,7 @@ dependencies = [
  "packet-dissector-pppoe",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
+ "packet-dissector-sgsap",
  "packet-dissector-tcp",
  "proptest",
 ]
@@ -1142,6 +1144,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-sdp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-sgsap"
 version = "0.5.0"
 dependencies = [
  "criterion",

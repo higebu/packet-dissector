@@ -3100,6 +3100,20 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // SGsAP runs over SCTP on the registered port 29118 (3GPP TS 29.118,
+        // Section 6.3). Its payload protocol identifier is 0 ("unspecified"),
+        // which cannot identify it, so only the port is registered.
+        #[cfg(feature = "sgsap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_port(29118, Box::new(packet_dissector_sgsap::SgsapDissector)),
+            );
+            reg.register_dissector_factory("sgsap", || {
+                Box::new(packet_dissector_sgsap::SgsapDissector)
+            });
+        }
+
         // NAS-5G is invoked from NGAP IE parsers; register factory for
         // standalone use (e.g., `bask read --dissector nas5g`).
         #[cfg(feature = "nas5g")]
@@ -4897,6 +4911,11 @@ mod tests {
         #[cfg(all(feature = "ngap", feature = "sctp"))]
         assert!(reg.get_by_sctp_port(38412).is_some());
 
+        #[cfg(all(feature = "sgsap", feature = "sctp"))]
+        assert_eq!(reg.get_by_sctp_port(29118).unwrap().short_name(), "SGsAP");
+        #[cfg(all(feature = "sgsap", feature = "sctp"))]
+        assert!(reg.get_by_sctp_ppid(0).is_none());
+
         // IANA "SCTP Payload Protocol Identifiers": 46 Diameter, 60 NGAP.
         #[cfg(all(feature = "diameter", feature = "sctp"))]
         assert_eq!(reg.get_by_sctp_ppid(46).unwrap().short_name(), "Diameter");
@@ -5058,6 +5077,9 @@ mod tests {
 
         #[cfg(feature = "ngap")]
         assert!(reg.create_dissector_by_name("ngap").is_some());
+
+        #[cfg(feature = "sgsap")]
+        assert!(reg.create_dissector_by_name("sgsap").is_some());
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());
