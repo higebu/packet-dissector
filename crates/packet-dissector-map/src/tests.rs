@@ -20,6 +20,7 @@
 //! | 17.7        | Raw parameter always kept; malformed arguments           | malformed_arguments_raw               |
 //! | —           | TCAP errors propagate; TCAP layer always emitted         | tcap_errors_and_layers                |
 //! | —           | Name tables and display functions                        | name_tables                           |
+//! | 17.7.8      | Digits formatting and component display                  | format_and_component_display          |
 
 use super::*;
 use packet_dissector_core::field::Field;
@@ -495,6 +496,20 @@ fn malformed_arguments_raw() {
         (46, tlv(0x04, &[1])),
         // Cancel Location with a NULL argument.
         (3, tlv(0x05, &[])),
+        // Purge MS, Insert Subscriber Data, Provide Roaming Number and
+        // Send Routing Info for SM that are not a SEQUENCE.
+        (67, tlv(0x05, &[])),
+        (7, tlv(0x05, &[])),
+        (4, tlv(0x05, &[])),
+        (45, tlv(0x05, &[])),
+        // Purge MS (version 2) with a third, unexpected OCTET STRING.
+        (
+            67,
+            tlv(
+                0x30,
+                &cat(&[tlv(0x04, IMSI), tlv(0x04, MSISDN), tlv(0x04, &[1])]),
+            ),
+        ),
     ] {
         let data = begin(&ac(1, 3), opcode, Some(arg.clone()));
         let (buf, _) = dissect(&data);
@@ -589,6 +604,56 @@ fn exercise_display_fns(fds: &'static [FieldDescriptor], depth: usize) {
             exercise_display_fns(children, depth + 1);
         }
     }
+}
+
+/// Calls `format_digits` and returns what it writes.
+fn format(value: &FieldValue<'_>, scratch: &[u8]) -> String {
+    let ctx = FormatContext {
+        packet_data: &[],
+        scratch,
+        layer_range: 0..0,
+        field_range: 0..0,
+    };
+    let mut out = Vec::new();
+    format_digits(value, &ctx, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn format_and_component_display() {
+    assert_eq!(format(&FieldValue::Scratch(1..3), b"x12y"), "\"12\"");
+    // Out-of-range scratch and other value types write an empty string.
+    assert_eq!(format(&FieldValue::Scratch(2..9), b"x12y"), "\"\"");
+    assert_eq!(format(&FieldValue::Bytes(&[0x21]), &[]), "\"\"");
+    // Descriptor constructors used at run time.
+    assert_eq!(digits_fd("d", "D").field_type, FieldType::Bytes);
+    assert_eq!(address_fd("a", "A").children, Some(ADDRESS_FIELDS));
+    // The component display names the operation, else the error.
+    let display = FD_COMPONENT.display_fn.unwrap();
+    let field = |name: usize, value: FieldValue<'static>| Field {
+        descriptor: &COMPONENT_FIELDS[name],
+        value,
+        range: 0..0,
+    };
+    let find = |name: &str| {
+        COMPONENT_FIELDS
+            .iter()
+            .position(|f| f.name == name)
+            .unwrap()
+    };
+    let (op, err) = (find("operation"), find("error"));
+    assert_eq!(
+        display(&FieldValue::Object(0..0), &[field(op, FieldValue::I32(56))]),
+        operation_name(56)
+    );
+    assert_eq!(
+        display(&FieldValue::Object(0..0), &[field(err, FieldValue::I32(1))]),
+        error_name(1)
+    );
+    assert_eq!(
+        display(&FieldValue::Object(0..0), &[field(op, FieldValue::U8(1))]),
+        None
+    );
 }
 
 #[test]
