@@ -58,6 +58,9 @@
 //! | Ethernet → IPv4 → TCP → HTTP 200 OK           | integration_ethernet_ipv4_tcp_http_response         |
 //! | Ethernet → IPv4 → UDP → SIP INVITE            | integration_ethernet_ipv4_udp_sip_invite            |
 //! | Ethernet → IPv4 → TCP → SIP 200 OK            | integration_ethernet_ipv4_tcp_sip_response          |
+//! | Ethernet → IPv4 → RSVP Hello                  | ethernet_ipv4_rsvp_hello                            |
+//! | Ethernet → IPv6 → RSVP Hello                  | ethernet_ipv6_rsvp_hello                            |
+//! | Ethernet → IPv4 → RSVP Bundle → RSVP ×2       | ethernet_ipv4_rsvp_bundle                           |
 //! | Ethernet → IPv4 → UDP → SIP INVITE → SDP      | integration_ethernet_ipv4_udp_sip_invite_with_sdp   |
 //! | Ethernet → IPv4 → TCP → HTTP 200 → SDP        | integration_ethernet_ipv4_tcp_http_response_sdp_body |
 //! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
@@ -9230,4 +9233,84 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+// ---------------------------------------------------------------------------
+// RSVP
+// ---------------------------------------------------------------------------
+
+/// Push an RSVP Hello message with a HELLO REQUEST object (RFC 3209,
+/// Section 5.1).
+fn push_rsvp_hello(pkt: &mut Vec<u8>) {
+    pkt.extend_from_slice(&[0x10, 20, 0, 0, 1, 0, 0, 20]); // Hello, length 20
+    pkt.extend_from_slice(&[0, 12, 22, 1, 0, 0, 0, 1, 0, 0, 0, 0]); // HELLO REQUEST
+}
+
+#[test]
+fn ethernet_ipv4_rsvp_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 46, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_rsvp_hello(&mut pkt);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "RSVP"]);
+    assert_layers_contiguous(&buf);
+    let rsvp = buf.layer_by_name("RSVP").unwrap();
+    assert_eq!(display_name_for(&buf, rsvp, "message_type"), Some("Hello"));
+}
+
+#[test]
+fn ethernet_ipv6_rsvp_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x86DD);
+    let ip_start = push_ipv6(&mut pkt, 46, [0x20; 16], [0x30; 16]);
+    push_rsvp_hello(&mut pkt);
+    fixup_ipv6_payload_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "RSVP"]);
+    assert_layers_contiguous(&buf);
+}
+
+#[test]
+fn ethernet_ipv4_rsvp_bundle() {
+    // A Bundle message carries complete RSVP messages (RFC 2961,
+    // Section 3.2); each is dissected as its own RSVP layer.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 46, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(&[0x11, 12, 0, 0, 1, 0, 0, 48]); // Bundle, length 48
+    push_rsvp_hello(&mut pkt);
+    push_rsvp_hello(&mut pkt);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "RSVP", "RSVP", "RSVP"]);
+    let layers = buf.layers();
+    assert_eq!(
+        display_name_for(&buf, &layers[2], "message_type"),
+        Some("Bundle")
+    );
+    assert_eq!(
+        display_name_for(&buf, &layers[3], "message_type"),
+        Some("Hello")
+    );
+    assert_eq!(layers[3].range, 42..62);
+    assert_eq!(layers[4].range, 62..82);
 }

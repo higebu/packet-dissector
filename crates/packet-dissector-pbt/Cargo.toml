@@ -24,6 +24,7 @@ packet-dissector-isis = { workspace = true }
 packet-dissector-mdns = { workspace = true }
 packet-dissector-ntp = { workspace = true }
 packet-dissector-ospf = { workspace = true }
+packet-dissector-rsvp = { workspace = true }
 packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcp = { workspace = true }

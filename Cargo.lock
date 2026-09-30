@@ -648,6 +648,7 @@ dependencies = [
  "packet-dissector-radius",
  "packet-dissector-raw-ip",
  "packet-dissector-reassembly",
+ "packet-dissector-rsvp",
  "packet-dissector-rtp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
@@ -1019,6 +1020,7 @@ dependencies = [
  "packet-dissector-mdns",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
+ "packet-dissector-rsvp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
@@ -1085,6 +1087,15 @@ name = "packet-dissector-reassembly"
 version = "0.5.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "packet-dissector-rsvp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
 ]
 
 [[package]]
