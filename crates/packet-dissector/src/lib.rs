@@ -84,6 +84,12 @@ pub mod dissectors {
     #[cfg(feature = "raw_ip")]
     pub use packet_dissector_raw_ip as raw_ip;
 
+    #[cfg(feature = "ieee80211")]
+    pub use packet_dissector_ieee80211 as ieee80211;
+
+    #[cfg(feature = "radiotap")]
+    pub use packet_dissector_radiotap as radiotap;
+
     #[cfg(feature = "arp")]
     pub use packet_dissector_arp as arp;
 

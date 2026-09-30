@@ -17,6 +17,8 @@ default = [
   "linux_sll2",
   "null",
   "raw_ip",
+  "ieee80211",
+  "radiotap",
   "arp",
   "lacp",
   "ipv4",
@@ -92,6 +94,10 @@ null = ["dep:packet-dissector-null"]
 # The raw IP dispatchers add no layer of their own; without IPv4/IPv6 a
 # raw IP packet would dissect to nothing.
 raw_ip = ["dep:packet-dissector-raw-ip", "ipv4", "ipv6"]
+# 802.11 data frames reach SNAP (in the Ethernet crate) through the LLC header.
+ieee80211 = ["dep:packet-dissector-ieee80211", "dep:packet-dissector-ethernet"]
+# The radiotap header is followed by an 802.11 frame.
+radiotap = ["dep:packet-dissector-radiotap", "ieee80211"]
 arp = ["dep:packet-dissector-arp"]
 lacp = ["dep:packet-dissector-lacp"]
 ipv4 = ["dep:packet-dissector-ipv4"]
@@ -177,6 +183,8 @@ layer2 = [
   "linux_sll2",
   "null",
   "raw_ip",
+  "ieee80211",
+  "radiotap",
   "arp",
   "lacp",
   "lldp",
@@ -230,6 +238,8 @@ packet-dissector-linux-sll = { workspace = true, optional = true }
 packet-dissector-linux-sll2 = { workspace = true, optional = true }
 packet-dissector-null = { workspace = true, optional = true }
 packet-dissector-raw-ip = { workspace = true, optional = true }
+packet-dissector-ieee80211 = { workspace = true, optional = true }
+packet-dissector-radiotap = { workspace = true, optional = true }
 packet-dissector-arp = { workspace = true, optional = true }
 packet-dissector-lacp = { workspace = true, optional = true }
 packet-dissector-ipv4 = { workspace = true, optional = true }
