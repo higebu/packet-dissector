@@ -42,6 +42,7 @@ default = [
   "sdp",
   "diameter",
   "nas5g",
+  "nas-eps",
   "ngap",
   "xnap",
   "f1ap",
@@ -110,6 +111,7 @@ sip = ["dep:packet-dissector-sip"]
 sdp = ["dep:packet-dissector-sdp"]
 diameter = ["dep:packet-dissector-diameter"]
 nas5g = ["dep:packet-dissector-nas5g"]
+nas-eps = ["dep:packet-dissector-nas-eps"]
 ngap = ["dep:packet-dissector-ngap", "nas5g"]
 xnap = ["dep:packet-dissector-xnap"]
 f1ap = ["dep:packet-dissector-f1ap"]
@@ -187,6 +189,7 @@ ipsec = ["ah", "esp", "ike"]
   "gtpv2c",
   "pfcp",
   "nas5g",
+  "nas-eps",
   "ngap",
   "xnap",
   "f1ap",
@@ -226,6 +229,7 @@ packet-dissector-sip = { workspace = true, optional = true }
 packet-dissector-sdp = { workspace = true, optional = true }
 packet-dissector-diameter = { workspace = true, optional = true }
 packet-dissector-nas5g = { workspace = true, optional = true }
+packet-dissector-nas-eps = { workspace = true, optional = true }
 packet-dissector-ngap = { workspace = true, optional = true }
 packet-dissector-xnap = { workspace = true, optional = true }
 packet-dissector-f1ap = { workspace = true, optional = true }
