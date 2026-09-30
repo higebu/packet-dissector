@@ -14,7 +14,7 @@
 mod options;
 
 use packet_dissector_core::dissector::{
-    DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
+    DispatchHint, DissectResult, Dissector, IpFragmentContext, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
@@ -24,6 +24,12 @@ use packet_dissector_core::util::read_be_u16;
 
 /// Minimum IPv4 header size (no options).
 const MIN_HEADER_SIZE: usize = 20;
+
+/// More Fragments flag within the 3-bit Flags field.
+///
+/// RFC 791, Section 3.1 — "Bit 2: (MF) 0 = Last Fragment, 1 = More
+/// Fragments." — <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
+const FLAG_MF: u8 = 0x01;
 
 /// Field descriptor indices for [`FIELD_DESCRIPTORS`].
 const FD_VERSION: usize = 0;
@@ -324,10 +330,51 @@ impl Dissector for Ipv4Dissector {
         // past it (e.g. link-layer padding) are not part of the datagram, so
         // the payload handed upward ends at Total Length.
         // https://www.rfc-editor.org/rfc/rfc791#section-3.1
-        Ok(
-            DissectResult::new(header_len, DispatchHint::ByIpProtocol(protocol))
-                .with_payload_len(total_length as usize - header_len),
+        let payload_len = total_length as usize - header_len;
+
+        // RFC 791, Section 3.2 — "The fragmentation strategy is designed so
+        // than an unfragmented datagram has all zero fragmentation
+        // information (MF = 0, fragment offset = 0)."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+        let more_fragments = flags & FLAG_MF != 0;
+        if !more_fragments && fragment_offset == 0 {
+            return Ok(
+                DissectResult::new(header_len, DispatchHint::ByIpProtocol(protocol))
+                    .with_payload_len(payload_len),
+            );
+        }
+
+        // A fragment. Only the first one (offset 0) starts with the
+        // upper-layer header; the data of any other fragment begins in the
+        // middle of the original datagram and must not be dispatched.
+        // RFC 791, Section 3.2 — "The Fragment Offset field identifies the
+        // fragment location, relative to the beginning of the original
+        // unfragmented datagram. Fragments are counted in units of 8 octets."
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+        let next = if fragment_offset == 0 {
+            DispatchHint::ByIpProtocol(protocol)
+        } else {
+            DispatchHint::End
+        };
+        // RFC 791, Section 3.2 — "The internet identification field (ID) is
+        // used together with the source and destination address, and the
+        // protocol fields, to identify datagram fragments for reassembly."
+        let ctx = IpFragmentContext::new(
+            (
+                IpFragmentContext::ipv4_mapped(src),
+                IpFragmentContext::ipv4_mapped(dst),
+                protocol,
+                u32::from(identification),
+            ),
+            protocol,
+            usize::from(fragment_offset) * 8,
+            more_fragments,
+            payload_len,
         )
+        .with_unfragmentable_len(header_len);
+        Ok(DissectResult::new(header_len, next)
+            .with_payload_len(payload_len)
+            .with_ip_fragment_context(ctx))
     }
 }
 
