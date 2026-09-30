@@ -18,6 +18,7 @@ proptest = "1"
 # Registry-level properties (IP fragment reassembly).
 packet-dissector = { path = "../packet-dissector" }
 packet-dissector-dns = { workspace = true }
+packet-dissector-eap = { workspace = true }
 packet-dissector-gtpv1c = { workspace = true }
 packet-dissector-icmp = { workspace = true }
 packet-dissector-icmpv6 = { workspace = true }
@@ -32,4 +33,5 @@ packet-dissector-ospf = { workspace = true }
 packet-dissector-pppoe = { workspace = true }
 packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
+packet-dissector-sgsap = { workspace = true }
 packet-dissector-tcp = { workspace = true }
