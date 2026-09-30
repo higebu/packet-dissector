@@ -25,6 +25,8 @@
 //! | —                    | Zero-length success from the upper dissector is an error | zero_length_upper_result_is_error                       |
 //! | —                    | Body dispatcher that never consumes does not loop         | stalled_body_dispatch_terminates                        |
 //! | —                    | Body parse error still consumes the body                 | body_parse_error_does_not_desync_stream                 |
+//! | RFC 5036 3.1         | LDP PDU split across segments                            | ldp_pdu_reassembled                                     |
+//! | RFC 7854 4.6         | BMP Route Monitoring split across segments (decode-as)   | bmp_route_monitoring_reassembled                        |
 
 use packet_dissector::dissector::{DispatchHint, DissectResult, Dissector};
 use packet_dissector::error::PacketError;
@@ -161,6 +163,89 @@ fn sip_body_bounded_by_content_length_reassembled() {
         ["Ethernet", "IPv4", "TCP", "SIP", "SDP", "SIP"]
     );
     assert_eq!(str_fields(&buf, "SIP", "method"), ["INVITE", "OPTIONS"]);
+    assert!(!reassembly_in_progress(&buf));
+}
+
+#[cfg(feature = "ldp")]
+#[test]
+fn ldp_pdu_reassembled() {
+    let reg = DissectorRegistry::default();
+    // LDP PDU (RFC 5036, Section 3.1) with an Address message.
+    let mut pdu = vec![0, 1, 0, 28, 10, 0, 0, 1, 0, 0];
+    pdu.extend_from_slice(&[0x03, 0x00, 0, 18, 0, 0, 0, 1]); // Address
+    pdu.extend_from_slice(&[0x01, 0x01, 0, 10, 0, 1, 10, 0, 0, 1, 10, 0, 0, 2]);
+    let split = 12;
+
+    let pkt = c2s(646, 1000, PSH_ACK, &pdu[..split]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert!(reassembly_in_progress(&buf));
+
+    let pkt = c2s(646, 1000 + split as u32, PSH_ACK, &pdu[split..]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "TCP", "LDP"]);
+    assert!(!reassembly_in_progress(&buf));
+    let ldp = buf.layer_by_name("LDP").unwrap();
+    let addresses: Vec<_> = buf
+        .layer_fields(ldp)
+        .iter()
+        .filter(|f| f.name() == "address")
+        .map(|f| f.value.clone())
+        .collect();
+    assert_eq!(
+        addresses,
+        [
+            FieldValue::Ipv4Addr([10, 0, 0, 1]),
+            FieldValue::Ipv4Addr([10, 0, 0, 2])
+        ]
+    );
+    assert!(buf.layer_fields(ldp).iter().all(|f| f.name() != "data"));
+}
+
+/// BMP Route Monitoring (IPv4 Global Instance Peer) carrying a BGP UPDATE
+/// (RFC 7854, Section 4.6).
+#[cfg(feature = "bmp")]
+fn bmp_route_monitoring() -> Vec<u8> {
+    let mut update = vec![0xFF; 16];
+    update.extend_from_slice(&[0, 0, 2, 0, 0, 0, 4, 0x40, 1, 1, 0]); // ORIGIN IGP
+    update.extend_from_slice(&[24, 198, 51, 100]); // 198.51.100.0/24
+    let len = update.len() as u16;
+    update[16..18].copy_from_slice(&len.to_be_bytes());
+
+    let mut msg = vec![3, 0, 0, 0, 0, 0];
+    msg.extend_from_slice(&[0, 0]);
+    msg.extend_from_slice(&[0; 20]);
+    msg.extend_from_slice(&[192, 0, 2, 1]);
+    msg.extend_from_slice(&65001u32.to_be_bytes());
+    msg.extend_from_slice(&[192, 0, 2, 1]);
+    msg.extend_from_slice(&[0; 8]);
+    msg.extend_from_slice(&update);
+    let len = msg.len() as u32;
+    msg[1..5].copy_from_slice(&len.to_be_bytes());
+    msg
+}
+
+#[cfg(feature = "bmp")]
+#[test]
+fn bmp_route_monitoring_reassembled() {
+    let mut reg = DissectorRegistry::default();
+    let bmp = reg.create_dissector_by_name("bmp").unwrap();
+    reg.register_by_tcp_port_or_replace(11019, bmp);
+    let msg = bmp_route_monitoring();
+    let split = 30;
+
+    let pkt = c2s(11019, 1000, PSH_ACK, &msg[..split]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert!(reassembly_in_progress(&buf));
+    // Only the thin reassembly-in-progress BMP layer; no BGP yet.
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "TCP", "BMP"]);
+
+    let pkt = c2s(11019, 1000 + split as u32, PSH_ACK, &msg[split..]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "TCP", "BMP", "BGP"]);
     assert!(!reassembly_in_progress(&buf));
 }
 

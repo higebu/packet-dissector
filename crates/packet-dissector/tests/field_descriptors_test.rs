@@ -115,15 +115,19 @@ fn udp_field_descriptors() {
     let d = UdpDissector;
     let descs = d.field_descriptors();
 
-    assert_eq!(descs.len(), 4);
+    assert_eq!(descs.len(), 5);
     assert_eq!(descs[0].name, "src_port");
     assert_eq!(descs[0].field_type, FieldType::U16);
     assert_eq!(descs[1].name, "dst_port");
     assert_eq!(descs[2].name, "length");
     assert_eq!(descs[3].name, "checksum");
 
-    // All required
-    assert!(descs.iter().all(|d| !d.optional));
+    // All required except the checksum status, which is only emitted when
+    // checksum verification is enabled.
+    assert!(descs[..4].iter().all(|d| !d.optional));
+    assert_eq!(descs[4].name, "checksum_status");
+    assert_eq!(descs[4].field_type, FieldType::U8);
+    assert!(descs[4].optional);
     assert_names_unique(&d);
 }
 
