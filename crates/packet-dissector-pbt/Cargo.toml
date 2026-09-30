@@ -17,6 +17,7 @@ proptest = "1"
 [dev-dependencies]
 # Registry-level properties (IP fragment reassembly).
 packet-dissector = { path = "../packet-dissector" }
+packet-dissector-cdp = { workspace = true }
 packet-dissector-dns = { workspace = true }
 packet-dissector-eap = { workspace = true }
 packet-dissector-gtpv1c = { workspace = true }

@@ -51,6 +51,7 @@ default = [
   "lldp",
   "eap",
   "stp",
+  "cdp",
   "mpls",
   "ntp",
   "ospf",
@@ -120,6 +121,9 @@ lldp = ["dep:packet-dissector-lldp"]
 # EAP is also decoded inside PPP (Protocol 0xC227) when both are enabled.
 eap = ["dep:packet-dissector-eap", "packet-dissector-ppp?/eap"]
 stp = ["dep:packet-dissector-stp"]
+# CDP is reached through SNAP (OUI 00-00-0C, PID 0x2000), which the
+# Ethernet crate decodes.
+cdp = ["dep:packet-dissector-cdp", "ethernet"]
 mpls = ["dep:packet-dissector-mpls"]
 ntp = ["dep:packet-dissector-ntp"]
 ospf = ["dep:packet-dissector-ospf"]
@@ -158,6 +162,7 @@ layer2 = [
   "lldp",
   "eap",
   "stp",
+  "cdp",
   "ppp",
   "pppoe",
 ]
@@ -236,6 +241,7 @@ packet-dissector-vxlan = { workspace = true, optional = true }
 packet-dissector-lldp = { workspace = true, optional = true }
 packet-dissector-eap = { workspace = true, optional = true }
 packet-dissector-stp = { workspace = true, optional = true }
+packet-dissector-cdp = { workspace = true, optional = true }
 packet-dissector-mpls = { workspace = true, optional = true }
 packet-dissector-ntp = { workspace = true, optional = true }
 packet-dissector-ospf = { workspace = true, optional = true }

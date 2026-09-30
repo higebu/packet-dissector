@@ -182,6 +182,8 @@ pub mod dissectors {
     #[cfg(feature = "lldp")]
     pub use packet_dissector_lldp as lldp;
 
+    #[cfg(feature = "cdp")]
+    pub use packet_dissector_cdp as cdp;
     #[cfg(feature = "stp")]
     pub use packet_dissector_stp as stp;
 
