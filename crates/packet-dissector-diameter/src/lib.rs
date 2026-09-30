@@ -7,7 +7,8 @@
 //! - Diameter Base Protocol (RFC 6733, Application-ID 0)
 //! - NASREQ (RFC 7155, Application-ID 1)
 //! - Diameter Credit-Control (RFC 8506, which obsoletes RFC 4006, Application-ID 4)
-//! - Diameter EAP (RFC 4072, Application-ID 5)
+//! - Diameter EAP (RFC 4072, Application-ID 5); with the `eap` feature the
+//!   EAP-Payload and EAP-Reissued-Payload values are decoded as EAP
 //! - 3GPP STa (TS 29.273, Application-ID 16777250)
 //! - 3GPP Cx (TS 29.229, Application-ID 16777216) — IMS HSS
 //! - 3GPP Sh (TS 29.329, Application-ID 16777217) — User Profile
@@ -119,6 +120,8 @@ const FD_AVP_VALUE: usize = 5;
 const FD_AVP_FLAG_VENDOR: usize = 6;
 const FD_AVP_FLAG_MANDATORY: usize = 7;
 const FD_AVP_FLAG_PROTECTED: usize = 8;
+#[cfg(feature = "eap")]
+const FD_AVP_EAP: usize = 9;
 
 /// Return the `U32` value of the AVP header field called `name`.
 ///
@@ -270,7 +273,19 @@ static AVP_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("flag_vendor", "Vendor-Specific Flag", FieldType::U8),
     FieldDescriptor::new("flag_mandatory", "Mandatory Flag", FieldType::U8),
     FieldDescriptor::new("flag_protected", "Protected Flag", FieldType::U8),
+    // RFC 4072, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc4072#section-4.1.1>
+    #[cfg(feature = "eap")]
+    packet_dissector_eap::EAP_OBJECT_DESCRIPTOR,
 ];
+
+/// EAP-Payload AVP code.
+/// RFC 4072, Section 4.1.1 — <https://www.rfc-editor.org/rfc/rfc4072#section-4.1.1>
+#[cfg(feature = "eap")]
+const AVP_CODE_EAP_PAYLOAD: u32 = 462;
+/// EAP-Reissued-Payload AVP code.
+/// RFC 4072, Section 4.1.2 — <https://www.rfc-editor.org/rfc/rfc4072#section-4.1.2>
+#[cfg(feature = "eap")]
+const AVP_CODE_EAP_REISSUED_PAYLOAD: u32 = 463;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
@@ -512,6 +527,22 @@ fn parse_avps<'pkt>(
                 &AVP_CHILD_FIELDS[FD_AVP_VALUE]
             };
             buf.push_field(descriptor, typed_value, data_range);
+            // RFC 4072, Sections 4.1.1 and 4.1.2 — the value is an EAP packet.
+            // <https://www.rfc-editor.org/rfc/rfc4072#section-4.1.1>
+            #[cfg(feature = "eap")]
+            if effective_vendor == 0
+                && matches!(
+                    avp_code,
+                    AVP_CODE_EAP_PAYLOAD | AVP_CODE_EAP_REISSUED_PAYLOAD
+                )
+            {
+                packet_dissector_eap::push_eap_object(
+                    &AVP_CHILD_FIELDS[FD_AVP_EAP],
+                    data_slice,
+                    buf_offset + data_start,
+                    buf,
+                );
+            }
         }
 
         buf.end_container(obj_idx);
@@ -787,6 +818,7 @@ mod tests {
     //! | RFC 8506 §8          | Credit-Control AVP names             | parse_new_base_avp_names                 |
     //! | RFC 7155 §4.4.10.5.1 | Framed-IP-Address                    | parse_nasreq_framed_ip_address           |
     //! | RFC 4072 §3, §4.1    | Diameter-EAP command, EAP AVPs       | parse_diameter_eap_command_and_applications, parse_new_base_avp_names |
+    //! | RFC 4072 §4.1.1-4.1.2| EAP-Payload decoded as EAP (eap)     | parse_eap_payload_decoded, parse_eap_payload_with_vendor_id_zero, parse_eap_payload_malformed_and_vendor_avp_stay_raw |
     //! | TS 29.061 §16a.5     | Gi/SGi 3GPP AVPs                     | parse_3gpp_gi_avps                       |
     //! | TS 29.272 §7.4       | Experimental-Result-Code names       | parse_experimental_result_code_annotation |
     //! | —                    | Truncated / malformed AVPs           | parse_truncated_avp, parse_avp_length_too_small |
@@ -1805,6 +1837,68 @@ mod tests {
                 "AVP {code}"
             );
         }
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn parse_eap_payload_decoded() {
+        // RFC 4072, Section 4.1.1 — EAP-Payload carries an EAP packet; 4.1.2
+        // EAP-Reissued-Payload too.
+        // https://www.rfc-editor.org/rfc/rfc4072#section-4.1.1
+        for code in [462u32, 463] {
+            let avp = make_avp(code, 0x40, &[0x01, 0x03, 0x00, 0x05, 0x01]);
+            let data = make_message_with_avp(&avp);
+            let (_, buf) = dissect(&data).unwrap();
+            let avps = get_avps_range(&buf).unwrap();
+            assert!(avp_field_at(&buf, avps, 0, "value").is_some());
+            let eap = avp_field_at(&buf, avps, 0, "eap").unwrap();
+            assert!(matches!(eap, FieldValue::Object(_)), "AVP {code}");
+            let eap = eap.as_container_range().unwrap();
+            assert_eq!(
+                buf.resolve_nested_display_name(eap, "code_name"),
+                Some("Request")
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(eap, "type_name"),
+                Some("Identity")
+            );
+        }
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn parse_eap_payload_with_vendor_id_zero() {
+        // V bit set with Vendor-Id 0 is the IETF AVP (named EAP-Payload), so
+        // it is decoded too.
+        let avp = make_vendor_avp(462, 0x40, 0, &[0x03, 0x04, 0x00, 0x04]);
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert_eq!(
+            avp_field_at(&buf, avps, 0, "name"),
+            Some(&FieldValue::Str("EAP-Payload"))
+        );
+        assert!(matches!(
+            avp_field_at(&buf, avps, 0, "eap"),
+            Some(FieldValue::Object(_))
+        ));
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn parse_eap_payload_malformed_and_vendor_avp_stay_raw() {
+        // Malformed EAP (Length 9 > 5 octets): raw value only.
+        let avp = make_avp(462, 0x40, &[0x01, 0x03, 0x00, 0x09, 0x01]);
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert!(avp_field_at(&buf, avps, 0, "eap").is_none());
+        // A 3GPP vendor AVP with code 462 is not EAP-Payload.
+        let avp = make_vendor_avp(462, 0x80, 10415, &[0x01, 0x03, 0x00, 0x05, 0x01]);
+        let data = make_message_with_avp(&avp);
+        let (_, buf) = dissect(&data).unwrap();
+        let avps = get_avps_range(&buf).unwrap();
+        assert!(avp_field_at(&buf, avps, 0, "eap").is_none());
     }
 
     #[test]

@@ -181,7 +181,9 @@ enum IpAddrs {
 
 /// The IP header that carries an upper-layer message.
 struct EnclosingIp {
-    addrs: IpAddrs,
+    /// Pseudo-header addresses; `None` when they differ from the IP header's
+    /// (IPv6 Routing header with Segments Left > 0, Home Address option).
+    addrs: Option<IpAddrs>,
     /// Length of the upper-layer message as declared by the IP header.
     upper_len: usize,
 }
@@ -209,10 +211,7 @@ fn reassembled_length(buf: &DissectBuffer<'_>, layer: &Layer) -> Option<usize> {
 ///
 /// Returns `None` when there is no such layer or when the message cannot be
 /// checked against it: a fragment of a larger datagram that was not
-/// reassembled, an IPv6 jumbogram,
-/// or an IPv6 packet whose pseudo-header addresses differ from the IPv6
-/// header's (a Routing header with Segments Left > 0, or a Home Address
-/// option).
+/// reassembled, or an IPv6 jumbogram.
 fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
     let layers = buf.layers();
     let idx = layers
@@ -247,7 +246,7 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
             total_length.checked_sub(offset - ip.range.start)?
         };
         return Some(EnclosingIp {
-            addrs: IpAddrs::V4(src, dst),
+            addrs: Some(IpAddrs::V4(src, dst)),
             upper_len,
         });
     }
@@ -261,6 +260,7 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
     if payload_length == 0 {
         return None;
     }
+    let mut final_addrs = true;
     // Reassembled length and the end of the Fragment header it follows.
     let mut reassembled = None;
     for ext in layers[idx + 1..].iter().filter(|l| l.range.start < offset) {
@@ -285,12 +285,16 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
                 // Routing header, the Destination Address used in the
                 // pseudo-header is that of the final destination."
                 // https://www.rfc-editor.org/rfc/rfc8200#section-8.1
-                ("segments_left", FieldValue::U8(left)) if *left != 0 => return None,
+                ("segments_left", FieldValue::U8(left)) if *left != 0 => {
+                    final_addrs = false;
+                }
                 // RFC 6275, Section 9.3.1 — the receiver processes the option
                 // "in a manner consistent with exchanging the Home Address
                 // field from the Home Address option into the IPv6 header".
                 // https://www.rfc-editor.org/rfc/rfc6275#section-9.3.1
-                ("home_address", _) if ext.name == "IPv6 Destination Options" => return None,
+                ("home_address", _) if ext.name == "IPv6 Destination Options" => {
+                    final_addrs = false;
+                }
                 _ => {}
             }
         }
@@ -311,9 +315,62 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
         None => payload_length.checked_sub(offset.checked_sub(ip.range.end)?)?,
     };
     Some(EnclosingIp {
-        addrs: IpAddrs::V6(src, dst),
+        addrs: final_addrs.then_some(IpAddrs::V6(src, dst)),
         upper_len,
     })
+}
+
+/// The upper-layer message that starts at absolute packet offset `offset`,
+/// bounded by the enclosing IP header's length fields.
+///
+/// `data` is the captured data from `offset` on. Returns `None` when there is
+/// no enclosing IPv4 / IPv6 layer, the datagram is a fragment or an IPv6
+/// jumbogram, or the capture is shorter than the message.
+///
+/// RFC 791, Section 3.1 (Total Length) —
+/// <https://www.rfc-editor.org/rfc/rfc791#section-3.1>; RFC 8200, Section
+/// 8.1 (upper-layer length) — <https://www.rfc-editor.org/rfc/rfc8200#section-8.1>.
+pub fn ip_payload<'a>(buf: &DissectBuffer<'_>, offset: usize, data: &'a [u8]) -> Option<&'a [u8]> {
+    data.get(..enclosing_ip(buf, offset)?.upper_len)
+}
+
+/// CRC-32C (Castagnoli) lookup table, reflected polynomial 0x82F63B78.
+const CRC32C_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x82F6_3B78
+            } else {
+                crc >> 1
+            };
+            bit += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// CRC-32C (Castagnoli) over the concatenation of `parts`, as used by the
+/// SCTP checksum.
+///
+/// RFC 9260, Section 6.8 and Appendix A —
+/// <https://www.rfc-editor.org/rfc/rfc9260#appendix-A>. The CRC is
+/// transmitted least significant byte first, i.e. as `crc.to_le_bytes()`
+/// (the examples in RFC 3720, Appendix B.4 —
+/// <https://www.rfc-editor.org/rfc/rfc3720#appendix-B.4>).
+pub fn crc32c(parts: &[&[u8]]) -> u32 {
+    let mut crc = !0u32;
+    for part in parts {
+        for &byte in *part {
+            crc = CRC32C_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
+        }
+    }
+    !crc
 }
 
 /// Verify an Internet checksum that covers the whole IP payload and no
@@ -328,13 +385,10 @@ pub fn verify_ip_payload_checksum(
     offset: usize,
     data: &[u8],
 ) -> ChecksumStatus {
-    let Some(ip) = enclosing_ip(buf, offset) else {
-        return ChecksumStatus::Unverified;
-    };
-    let Some(message) = data.get(..ip.upper_len) else {
-        return ChecksumStatus::Unverified;
-    };
-    ChecksumStatus::from_valid(internet_checksum(&[message]) == 0)
+    match ip_payload(buf, offset, data) {
+        Some(message) => ChecksumStatus::from_valid(internet_checksum(&[message]) == 0),
+        None => ChecksumStatus::Unverified,
+    }
 }
 
 /// Verify an Internet checksum that covers an IP pseudo-header followed by
@@ -367,8 +421,11 @@ pub fn verify_pseudo_header_checksum(
     let Some(message) = data.get(..len) else {
         return ChecksumStatus::Unverified;
     };
+    let Some(addrs) = ip.addrs else {
+        return ChecksumStatus::Unverified;
+    };
     let mut sum = InternetChecksum::new();
-    match ip.addrs {
+    match addrs {
         // RFC 9293, Section 3.1 — IPv4 pseudo-header: Source Address,
         // Destination Address, zero, PTCL, TCP Length (16 bits).
         // https://www.rfc-editor.org/rfc/rfc9293#section-3.1
@@ -421,6 +478,10 @@ mod tests {
     //! | ---             | Truncated message                           | truncated_message_is_unverified             |
     //! | ---             | No enclosing IP layer                       | no_ip_layer_is_unverified                   |
     //! | ---             | Status names and display function           | status_names_and_display                    |
+    //! | RFC 3720 B.4    | CRC32c examples (SCTP checksum algorithm)   | crc32c_rfc3720_vectors                      |
+    //! | RFC 8200 §8.1   | IP payload bounded by the IP header         | ip_payload_is_the_rest_of_the_datagram      |
+    //! | RFC 8200 §8.1   | Routing header only affects pseudo-header   | ip_payload_checksum_ignores_routing_header  |
+    //! | RFC 8200 §8.1   | Segments Left in any extension layer        | segments_left_in_any_extension_layer_counts |
 
     use super::*;
 
@@ -788,6 +849,87 @@ mod tests {
         assert_eq!(
             verify_pseudo_header_checksum(&buf, 60, 17, &msg, Some(8)),
             ChecksumStatus::Good
+        );
+    }
+
+    #[test]
+    fn crc32c_rfc3720_vectors() {
+        // RFC 3720, Appendix B.4 — CRC bytes as transmitted (least
+        // significant byte first).
+        // https://www.rfc-editor.org/rfc/rfc3720#appendix-B.4
+        let inc: Vec<u8> = (0u8..32).collect();
+        let dec: Vec<u8> = (0u8..32).rev().collect();
+        let read10 = [
+            0x01, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x14,
+            0x00, 0x00, 0x00, 0x18, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        for (data, crc) in [
+            (&[0u8; 32][..], [0xaa, 0x36, 0x91, 0x8a]),
+            (&[0xffu8; 32][..], [0x43, 0xab, 0xa8, 0x62]),
+            (&inc[..], [0x4e, 0x79, 0xdd, 0x46]),
+            (&dec[..], [0x5c, 0xdb, 0x3f, 0x11]),
+            (&read10[..], [0x56, 0x3a, 0x96, 0xd9]),
+        ] {
+            assert_eq!(crc32c(&[data]).to_le_bytes(), crc);
+        }
+        // Split input gives the same CRC.
+        assert_eq!(
+            crc32c(&[&inc[..5], &[], &inc[5..]]).to_le_bytes(),
+            [0x4e, 0x79, 0xdd, 0x46]
+        );
+    }
+
+    #[test]
+    fn ip_payload_is_the_rest_of_the_datagram() {
+        let msg = [1u8, 2, 3, 4, 5, 6];
+        let mut buf = DissectBuffer::new();
+        push_ipv4(&mut buf, 26, 0, 0);
+        assert_eq!(ip_payload(&buf, 20, &msg), Some(&msg[..]));
+        // Later in the same datagram.
+        assert_eq!(ip_payload(&buf, 22, &msg[2..]), Some(&msg[2..]));
+        // Captured less than the datagram holds.
+        assert_eq!(ip_payload(&buf, 20, &msg[..5]), None);
+        // No IP layer.
+        assert_eq!(ip_payload(&DissectBuffer::new(), 20, &msg), None);
+    }
+
+    #[test]
+    fn ip_payload_checksum_ignores_routing_header() {
+        // Without a pseudo-header the final destination does not matter.
+        let mut msg = vec![0x3a, 0, 0, 0, 0, 0, 0, 0];
+        fill_checksum(&[], &mut msg, 2);
+        let mut buf = DissectBuffer::new();
+        push_ipv6(&mut buf, 24 + msg.len() as u16);
+        buf.begin_layer("IPv6 Routing", None, EXT_FIELDS, 40..64);
+        buf.push_field(&EXT_FIELDS[0], FieldValue::U8(2), 43..44);
+        buf.end_layer();
+        assert_eq!(
+            verify_ip_payload_checksum(&buf, 64, &msg),
+            ChecksumStatus::Good
+        );
+        assert_eq!(
+            verify_pseudo_header_checksum(&buf, 64, 58, &msg, None),
+            ChecksumStatus::Unverified
+        );
+    }
+
+    #[test]
+    fn segments_left_in_any_extension_layer_counts() {
+        // Any Routing header type (SRv6, RPL Source Routing, ...) is
+        // dissected under its own layer name; a pending segment in any of
+        // them leaves the final destination unknown.
+        let mut msg = vec![128, 0, 0, 0, 0x12, 0x34, 0x00, 0x01];
+        fill_checksum(&v6_pseudo(58, msg.len() as u32), &mut msg, 2);
+        let mut buf = DissectBuffer::new();
+        push_ipv6(&mut buf, 24 + msg.len() as u16);
+        buf.begin_layer("Other Routing", None, EXT_FIELDS, 40..64);
+        buf.push_field(&EXT_FIELDS[0], FieldValue::U8(2), 43..44);
+        buf.end_layer();
+        assert_eq!(
+            verify_pseudo_header_checksum(&buf, 64, 58, &msg, None),
+            ChecksumStatus::Unverified
         );
     }
 

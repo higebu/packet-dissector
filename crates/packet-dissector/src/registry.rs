@@ -83,6 +83,12 @@ pub struct DissectorRegistry {
     /// MPLS G-ACh Channel Type table — dispatches the message after an
     /// Associated Channel Header (RFC 5586, Section 2.1).
     by_ach_channel_type: HashMap<u16, Box<dyn Dissector>>,
+    /// SS7 MTP3 Service Indicator table — mirrors Wireshark's
+    /// `mtp3.service_indicator` dissector table.
+    by_mtp3_service_indicator: HashMap<u8, Box<dyn Dissector>>,
+    /// SCCP subsystem number table — mirrors Wireshark's `sccp.ssn`
+    /// dissector table.
+    by_sccp_ssn: HashMap<u8, Box<dyn Dissector>>,
     /// SNAP (Organization Code, Protocol Identifier) table — dispatches SNAP
     /// payloads whose PID is not an EtherType (IEEE Std 802-2014, Clause 10).
     by_snap: HashMap<(u32, u16), Box<dyn Dissector>>,
@@ -124,6 +130,8 @@ impl DissectorRegistry {
             by_llc_sap: HashMap::new(),
             by_link_type: HashMap::new(),
             by_ach_channel_type: HashMap::new(),
+            by_mtp3_service_indicator: HashMap::new(),
+            by_sccp_ssn: HashMap::new(),
             by_snap: HashMap::new(),
             dissector_factories: HashMap::new(),
             #[cfg(feature = "ip-reassembly")]
@@ -596,6 +604,87 @@ impl DissectorRegistry {
             .map(|d| d.as_ref())
     }
 
+    /// Register a dissector for a given SS7 MTP3 Service Indicator.
+    ///
+    /// Returns an error if a dissector is already registered for this
+    /// Service Indicator. Use
+    /// [`register_by_mtp3_service_indicator_or_replace`](Self::register_by_mtp3_service_indicator_or_replace)
+    /// to intentionally override an existing registration.
+    pub fn register_by_mtp3_service_indicator(
+        &mut self,
+        si: u8,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        if let Some(existing) = self.by_mtp3_service_indicator.get(&si) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "mtp3_service_indicator",
+                key: si as u64,
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        self.by_mtp3_service_indicator.insert(si, dissector);
+        Ok(())
+    }
+
+    /// Register a dissector for a given SS7 MTP3 Service Indicator,
+    /// replacing any existing one.
+    ///
+    /// Returns the previously registered dissector, if any.
+    pub fn register_by_mtp3_service_indicator_or_replace(
+        &mut self,
+        si: u8,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        self.by_mtp3_service_indicator.insert(si, dissector)
+    }
+
+    /// Look up a dissector by SS7 MTP3 Service Indicator.
+    pub fn get_by_mtp3_service_indicator(&self, si: u8) -> Option<&dyn Dissector> {
+        self.by_mtp3_service_indicator.get(&si).map(|d| d.as_ref())
+    }
+
+    /// Register a dissector for a given SCCP subsystem number.
+    ///
+    /// Used for [`DispatchHint::BySccpSsn`]. SSN 0 ("SSN not known/not
+    /// used", ITU-T Q.713, clause 3.4.2.2) is accepted but never looked up.
+    /// Returns an error if a dissector is already registered for this SSN.
+    /// Use [`register_by_sccp_ssn_or_replace`](Self::register_by_sccp_ssn_or_replace)
+    /// to intentionally override an existing registration.
+    pub fn register_by_sccp_ssn(
+        &mut self,
+        ssn: u8,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        if let Some(existing) = self.by_sccp_ssn.get(&ssn) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "sccp_ssn",
+                key: ssn as u64,
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        self.by_sccp_ssn.insert(ssn, dissector);
+        Ok(())
+    }
+
+    /// Register a dissector for a given SCCP subsystem number, replacing any
+    /// existing one.
+    ///
+    /// Returns the previously registered dissector, if any.
+    pub fn register_by_sccp_ssn_or_replace(
+        &mut self,
+        ssn: u8,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        self.by_sccp_ssn.insert(ssn, dissector)
+    }
+
+    /// Look up a dissector by SCCP subsystem number.
+    pub fn get_by_sccp_ssn(&self, ssn: u8) -> Option<&dyn Dissector> {
+        self.by_sccp_ssn.get(&ssn).map(|d| d.as_ref())
+    }
+
     /// Register a dissector for the payload after the bottom-of-stack MPLS
     /// label `label` (a decode-as rule, e.g. `pw-eth` or `pw-eth-cw`).
     ///
@@ -838,8 +927,10 @@ impl DissectorRegistry {
     /// - `9` — `LINKTYPE_PPP` (`ppp`)
     /// - `50` — `LINKTYPE_PPP_HDLC` (`ppp`)
     /// - `101` — `LINKTYPE_RAW` (`raw_ip`)
+    /// - `105` — `LINKTYPE_IEEE802_11` (`ieee80211`)
     /// - `108` — `LINKTYPE_LOOP` (`null`)
     /// - `113` — `LINKTYPE_LINUX_SLL` (`linux_sll`)
+    /// - `127` — `LINKTYPE_IEEE802_11_RADIOTAP` (`radiotap`)
     /// - `228` — `LINKTYPE_IPV4` (`raw_ip`)
     /// - `229` — `LINKTYPE_IPV6` (`raw_ip`)
     /// - `276` — `LINKTYPE_LINUX_SLL2` (`linux_sll2`)
@@ -1196,6 +1287,17 @@ impl DissectorRegistry {
             DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
             DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
             DispatchHint::ByAchChannelType(ct) => self.get_by_ach_channel_type(*ct),
+            DispatchHint::ByMtp3ServiceIndicator(si) => self.get_by_mtp3_service_indicator(*si),
+            DispatchHint::BySccpSsn { called, calling } => {
+                // ITU-T Q.713, clause 3.4.2.2 — SSN "00000000" is "SSN not
+                // known/not used" — https://www.itu.int/rec/T-REC-Q.713
+                let by_ssn = |ssn: u8| match ssn {
+                    0 => None,
+                    ssn => self.get_by_sccp_ssn(ssn),
+                };
+                by_ssn(*called).or_else(|| by_ssn(*calling))
+            }
+            DispatchHint::ByLinkType(lt) => self.get_by_link_type(*lt),
             DispatchHint::BySnap { oui, pid } => self.get_by_snap(*oui, *pid),
         }
     }
@@ -1318,30 +1420,20 @@ impl DissectorRegistry {
             // next dissector's input is at a specific range within the original
             // packet (e.g., SCTP DATA chunk user data), dispatch directly to
             // that range instead of using the normal offset-based slicing.
+            // The next dissector then runs through this loop like any other,
+            // so its own embedded payload (e.g. SCCP user data inside M3UA
+            // Protocol Data) and middleware are honoured, and its input ends
+            // at the embedded range.
             if let Some(ref payload_range) = result.embedded_payload {
-                if let Some(upper) = self.lookup_dissector(&result.next) {
-                    let start = payload_range.start;
-                    let range_end = payload_range.end.min(end);
-                    if start < range_end {
-                        let upper_result = upper.dissect(&data[start..range_end], buf, start)?;
-                        offset = start + upper_result.bytes_consumed;
-                        end = bound_payload_end(end, offset, upper_result.payload_len);
-                        #[cfg(feature = "ip-reassembly")]
-                        if let Some(result) = self.reassemble_reported_fragment(
-                            &upper_result,
-                            data,
-                            buf,
-                            offset,
-                            end,
-                            full,
-                        ) {
-                            return result;
-                        }
-                        next = upper_result.next;
-                        continue;
-                    }
+                let start = payload_range.start;
+                let range_end = payload_range.end.min(end);
+                if start >= range_end {
+                    break;
                 }
-                break;
+                offset = start;
+                end = range_end;
+                next = result.next;
+                continue;
             }
 
             // Decrypted payload middleware: when a dissector decrypts its payload
@@ -1708,6 +1800,12 @@ impl DissectorRegistry {
         for d in self.by_ach_channel_type.values() {
             push(d.as_ref());
         }
+        for d in self.by_mtp3_service_indicator.values() {
+            push(d.as_ref());
+        }
+        for d in self.by_sccp_ssn.values() {
+            push(d.as_ref());
+        }
         for d in self.by_snap.values() {
             push(d.as_ref());
         }
@@ -1731,6 +1829,9 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+        // BMP is registered by decode-as name only.
+        #[cfg(feature = "bmp")]
+        push(&packet_dissector_bmp::BmpDissector);
         // The MPLS dissector emits ACH and PW control word layers itself
         // (RFC 5586, Section 2.1 — https://www.rfc-editor.org/rfc/rfc5586#section-2.1;
         // RFC 4385, Section 3 — https://www.rfc-editor.org/rfc/rfc4385#section-3).
@@ -1760,6 +1861,24 @@ impl DissectorRegistry {
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
+        // DTLS may be reachable only through `DtlsDemux`, which reports the
+        // schema of the protocol it shares a port with.
+        #[cfg(feature = "dtls")]
+        push(&packet_dissector_tls::DtlsDissector);
+        // RTCP has no dispatch key (decode-as only), yet its layers are also
+        // produced by the RTP dissector when RTP and RTCP share a port
+        // (RFC 5761, Section 4 — https://www.rfc-editor.org/rfc/rfc5761#section-4).
+        #[cfg(feature = "rtcp")]
+        push(&packet_dissector_rtcp::RtcpDissector);
+        // The "netflow" decode-as dissector emits NetFlow v5, v9 and IPFIX
+        // layers; IPFIX is also registered on port 4739 when a transport
+        // feature is enabled.
+        #[cfg(feature = "ipfix")]
+        {
+            push(&packet_dissector_ipfix::IpfixDissector::new());
+            push(&packet_dissector_ipfix::NetflowV9Dissector::new());
+            push(&packet_dissector_ipfix::NetflowV5Dissector);
+        }
     }
 
     /// Returns field metadata for all registered dissectors.
@@ -1836,6 +1955,10 @@ impl DissectorRegistry {
             }
             DissectorTable::LinkType(lt) => self.register_by_link_type(lt, dissector),
             DissectorTable::AchChannelType(ct) => self.register_by_ach_channel_type(ct, dissector),
+            DissectorTable::Mtp3ServiceIndicator(si) => {
+                self.register_by_mtp3_service_indicator(si, dissector)
+            }
+            DissectorTable::SccpSsn(ssn) => self.register_by_sccp_ssn(ssn, dissector),
             DissectorTable::Snap { oui, pid } => self.register_by_snap(oui, pid, dissector),
         }
     }
@@ -1879,6 +2002,10 @@ impl DissectorRegistry {
             DissectorTable::AchChannelType(ct) => {
                 self.register_by_ach_channel_type_or_replace(ct, dissector)
             }
+            DissectorTable::Mtp3ServiceIndicator(si) => {
+                self.register_by_mtp3_service_indicator_or_replace(si, dissector)
+            }
+            DissectorTable::SccpSsn(ssn) => self.register_by_sccp_ssn_or_replace(ssn, dissector),
             DissectorTable::Snap { oui, pid } => {
                 self.register_by_snap_or_replace(oui, pid, dissector)
             }
@@ -1976,21 +2103,17 @@ impl Dissector for OspfDispatcher {
 // HTTP/1.1.
 // ---------------------------------------------------------------------------
 
-/// Maximum number of TCP stream directions remembered as HTTP/2 (two per
-/// connection). The oldest ones are forgotten first.
-#[cfg(feature = "http2")]
-const MAX_HTTP2_DIRECTIONS: usize = 65_536;
-
 #[cfg(any(feature = "http", feature = "http2"))]
 struct HttpDispatcher {
-    /// TCP stream directions known to carry HTTP/2.
+    /// HTTP/2 dissector that tracks the connections whose client connection
+    /// preface it has seen (HPACK dynamic tables, split header blocks).
     ///
     /// RFC 9113, Section 3.4 — the client connection preface is sent once,
     /// as "the first application data octets of a connection"
     /// (<https://www.rfc-editor.org/rfc/rfc9113#section-3.4>), so later
-    /// segments of either direction are recognised by this memory.
+    /// segments of either direction are recognised by that tracking.
     #[cfg(feature = "http2")]
-    http2_streams: std::sync::Mutex<crate::stream_set::StreamSet>,
+    http2: packet_dissector_http2::Http2ConnectionDissector,
 }
 
 #[cfg(any(feature = "http", feature = "http2"))]
@@ -1998,16 +2121,14 @@ impl HttpDispatcher {
     fn new() -> Self {
         Self {
             #[cfg(feature = "http2")]
-            http2_streams: std::sync::Mutex::new(crate::stream_set::StreamSet::new(
-                MAX_HTTP2_DIRECTIONS,
-            )),
+            http2: packet_dissector_http2::Http2ConnectionDissector::new(),
         }
     }
 
     /// Whether `data` of the direction `stream` is HTTP/2.
     ///
-    /// Only the client connection preface marks the connection (both
-    /// directions) as HTTP/2 for the following segments. A frame header
+    /// Only the client connection preface makes the connection (both
+    /// directions) HTTP/2 for the following segments. A frame header
     /// recognised by [`is_http2_start`] alone is dissected as HTTP/2 but not
     /// remembered: an HTTP/1.1 body can start with octets that form a valid
     /// frame header, and remembering it would send the connection's later
@@ -2018,22 +2139,7 @@ impl HttpDispatcher {
         data: &[u8],
         stream: &packet_dissector_core::dissector::TcpStreamContext,
     ) -> bool {
-        // A poisoned lock only means a panic elsewhere; the set itself is
-        // always consistent, so keep using it.
-        let mut streams = self
-            .http2_streams
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if streams.contains(&stream.stream_key) {
-            return true;
-        }
-        if data.starts_with(packet_dissector_http2::CONNECTION_PREFACE) {
-            streams.insert(stream.stream_key);
-            streams.insert(stream.reverse_key());
-            return true;
-        }
-        drop(streams);
-        is_http2_start(data)
+        self.http2.is_tracking(&stream.stream_key) || is_http2_start(data)
     }
 }
 
@@ -2127,7 +2233,7 @@ impl Dissector for HttpDispatcher {
     ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
         #[cfg(feature = "http2")]
         if self.is_http2_stream(data, stream) {
-            return packet_dissector_http2::Http2Dissector.dissect(data, buf, offset);
+            return self.http2.dissect_tcp_stream(data, buf, offset, stream);
         }
         #[cfg(not(feature = "http2"))]
         let _ = stream;
@@ -2136,10 +2242,7 @@ impl Dissector for HttpDispatcher {
 
     fn release_tcp_stream(&self, stream_key: &packet_dissector_core::dissector::TcpStreamKey) {
         #[cfg(feature = "http2")]
-        self.http2_streams
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(stream_key);
+        self.http2.release_tcp_stream(stream_key);
         #[cfg(not(feature = "http2"))]
         let _ = stream_key;
     }
@@ -2506,6 +2609,90 @@ impl Dissector for GtpcDispatcher {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DTLS first-octet demultiplexer — UDP ports shared by DTLS and another
+// protocol (STUN/TURN on 3478, DNS over QUIC on 853).
+// ---------------------------------------------------------------------------
+
+/// Routes a UDP payload to DTLS when its first octet is in 20..=63 and to
+/// `other` otherwise.
+///
+/// RFC 9443, Section 3 — <https://www.rfc-editor.org/rfc/rfc9443#section-3>:
+/// "If the value is between 20 and 63 (inclusive), then the packet is DTLS."
+/// The same range is listed for the TURN port in RFC 8656, Section 12 —
+/// <https://www.rfc-editor.org/rfc/rfc8656#section-12>.
+///
+/// It reports `other`'s names and schema, so it can replace `other`'s
+/// registration without changing the registry's schema output; the DTLS
+/// schema is exposed by `for_each_unique_dissector`.
+#[cfg(all(
+    feature = "udp",
+    feature = "dtls",
+    any(feature = "stun", feature = "quic")
+))]
+struct DtlsDemux {
+    other: &'static (dyn Dissector + Sync),
+}
+
+#[cfg(all(
+    feature = "udp",
+    feature = "dtls",
+    any(feature = "stun", feature = "quic")
+))]
+impl Dissector for DtlsDemux {
+    fn name(&self) -> &'static str {
+        self.other.name()
+    }
+
+    fn short_name(&self) -> &'static str {
+        self.other.short_name()
+    }
+
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        self.other.field_descriptors()
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        self.other.references()
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        self.other.layer()
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        // RFC 9443, Section 3 — "[20..63] -+--> forward to DTLS"
+        // https://www.rfc-editor.org/rfc/rfc9443#section-3
+        const DTLS_FIRST_OCTET: core::ops::RangeInclusive<u8> = 20..=63;
+        if data.first().is_some_and(|b| DTLS_FIRST_OCTET.contains(b)) {
+            // DTLS rejects some octets in that range (27..=31 are not
+            // assigned, RFC 9147, Section 4.1 —
+            // https://www.rfc-editor.org/rfc/rfc9147#section-4.1), and a
+            // QUIC packet with the QUIC bit greased can start with any of
+            // them (RFC 9287, Section 3.1 —
+            // https://www.rfc-editor.org/rfc/rfc9287#section-3.1). Undo
+            // whatever DTLS pushed and let the other protocol try.
+            let layers = buf.layers().len();
+            let fields = buf.field_count() as usize;
+            match packet_dissector_tls::DtlsDissector.dissect(data, buf, offset) {
+                Ok(result) => return Ok(result),
+                Err(_) => {
+                    while buf.layers().len() > layers {
+                        buf.pop_layer();
+                    }
+                    buf.truncate_fields(fields);
+                }
+            }
+        }
+        self.other.dissect(data, buf, offset)
+    }
+}
+
 /// Assert that a built-in dissector registration succeeds.
 ///
 /// Used only during [`DissectorRegistry::default()`] initialization where
@@ -2563,6 +2750,22 @@ impl Default for DissectorRegistry {
                 reg.register_by_link_type(229, Box::new(packet_dissector_raw_ip::RawIpv6Dissector)),
             );
         }
+
+        // LINKTYPE_IEEE802_11 (105) — IEEE 802.11 wireless LAN
+        // https://www.tcpdump.org/linktypes.html
+        #[cfg(feature = "ieee80211")]
+        assert_builtin(reg.register_by_link_type(
+            105,
+            Box::new(packet_dissector_ieee80211::Ieee80211Dissector),
+        ));
+
+        // LINKTYPE_IEEE802_11_RADIOTAP (127) — radiotap header followed by
+        // an 802.11 frame (dispatched through link type 105)
+        // https://www.tcpdump.org/linktypes.html
+        #[cfg(feature = "radiotap")]
+        assert_builtin(
+            reg.register_by_link_type(127, Box::new(packet_dissector_radiotap::RadiotapDissector)),
+        );
 
         // Transparent Ethernet Bridging (0x6558) — used by tunneling
         // protocols (VXLAN, GRE) to encapsulate inner Ethernet frames.
@@ -2714,7 +2917,12 @@ impl Default for DissectorRegistry {
         // SNAP follows an IEEE 802.2 LLC header with SAP 0xAA
         // (RFC 1042 — https://www.rfc-editor.org/rfc/rfc1042). Ethernet and
         // Linux cooked captures (protocol type 0x0004) both carry LLC.
-        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        #[cfg(any(
+            feature = "ethernet",
+            feature = "linux_sll",
+            feature = "linux_sll2",
+            feature = "ieee80211"
+        ))]
         assert_builtin(reg.register_by_llc_sap(
             packet_dissector_ethernet::llc::SAP_SNAP,
             Box::new(packet_dissector_ethernet::SnapDissector),
@@ -2876,6 +3084,23 @@ impl Default for DissectorRegistry {
             reg.register_by_ip_protocol(47, Box::new(packet_dissector_gre::GreDissector)),
         );
 
+        // ERSPAN is carried in GRE with Protocol Type 0x88BE (Type I and II)
+        // or 0x22EB (Type III) (draft-foschiano-erspan-03, Section 4 —
+        // https://datatracker.ietf.org/doc/html/draft-foschiano-erspan-03#section-4).
+        #[cfg(feature = "erspan")]
+        {
+            assert_builtin(
+                reg.register_by_ethertype(
+                    0x88BE,
+                    Box::new(packet_dissector_erspan::ErspanDissector),
+                ),
+            );
+            assert_builtin(reg.register_by_ethertype(
+                0x22EB,
+                Box::new(packet_dissector_erspan::ErspanType3Dissector),
+            ));
+        }
+
         // L2TPv3 is IP protocol number 115 (RFC 3931)
         #[cfg(feature = "l2tpv3")]
         assert_builtin(
@@ -2900,6 +3125,20 @@ impl Default for DissectorRegistry {
             reg.register_by_ip_protocol(112, Box::new(packet_dissector_vrrp::VrrpDissector)),
         );
 
+        // RSVP is IP protocol number 46 (RFC 2205, Section 3.1 —
+        // https://www.rfc-editor.org/rfc/rfc2205#section-3.1)
+        #[cfg(feature = "rsvp")]
+        assert_builtin(
+            reg.register_by_ip_protocol(46, Box::new(packet_dissector_rsvp::RsvpDissector)),
+        );
+
+        // "All PIM control messages have IP protocol number 103." (RFC 7761,
+        // Section 4.9 — https://www.rfc-editor.org/rfc/rfc7761#section-4.9)
+        #[cfg(feature = "pim")]
+        assert_builtin(
+            reg.register_by_ip_protocol(103, Box::new(packet_dissector_pim::PimDissector)),
+        );
+
         // NTP runs over UDP on port 123 (RFC 5905)
         #[cfg(feature = "ntp")]
         {
@@ -2908,6 +3147,22 @@ impl Default for DissectorRegistry {
                 reg.register_by_udp_port(123, Box::new(packet_dissector_ntp::NtpDissector)),
             );
             reg.register_dissector_factory("ntp", || Box::new(packet_dissector_ntp::NtpDissector));
+        }
+
+        // LDP uses UDP port 646 for discovery and TCP port 646 for sessions
+        // (RFC 5036, Section 3.10.1 —
+        // https://www.rfc-editor.org/rfc/rfc5036#section-3.10.1).
+        #[cfg(feature = "ldp")]
+        {
+            #[cfg(feature = "udp")]
+            assert_builtin(
+                reg.register_by_udp_port(646, Box::new(packet_dissector_ldp::LdpDissector)),
+            );
+            #[cfg(feature = "tcp")]
+            assert_builtin(
+                reg.register_by_tcp_port(646, Box::new(packet_dissector_ldp::LdpDissector)),
+            );
+            reg.register_dissector_factory("ldp", || Box::new(packet_dissector_ldp::LdpDissector));
         }
 
         // BFD Control runs over UDP on ports 3784 (single-hop, RFC 5881),
@@ -2948,6 +3203,55 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // IPFIX runs over UDP, TCP and SCTP on port 4739. RFC 7011,
+        // Section 10.1 — "By default, the Collecting Process listens for
+        // connections on SCTP, TCP, and/or UDP port 4739."
+        //   <https://www.rfc-editor.org/rfc/rfc7011#section-10.1>
+        // NetFlow v5/v9 have no IANA-assigned port; "netflow" selects the
+        // version-specific dissector by the version field for decode-as.
+        #[cfg(feature = "ipfix")]
+        {
+            #[cfg(feature = "udp")]
+            assert_builtin(reg.register_by_udp_port(
+                packet_dissector_ipfix::IPFIX_PORT,
+                Box::new(packet_dissector_ipfix::IpfixDissector::new()),
+            ));
+            #[cfg(feature = "tcp")]
+            assert_builtin(reg.register_by_tcp_port(
+                packet_dissector_ipfix::IPFIX_PORT,
+                Box::new(packet_dissector_ipfix::IpfixDissector::new()),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_ipfix::IPFIX_PORT,
+                Box::new(packet_dissector_ipfix::IpfixDissector::new()),
+            ));
+            reg.register_dissector_factory("ipfix", || {
+                Box::new(packet_dissector_ipfix::IpfixDissector::new())
+            });
+            reg.register_dissector_factory("netflow", || {
+                Box::new(packet_dissector_ipfix::NetflowDissector::new())
+            });
+        }
+
+        // SNMP runs over UDP on ports 161 (agent) and 162 (notifications).
+        // RFC 3417, Section 3.2 — https://www.rfc-editor.org/rfc/rfc3417#section-3.2
+        #[cfg(feature = "snmp")]
+        {
+            #[cfg(feature = "udp")]
+            for port in [
+                packet_dissector_snmp::SNMP_PORT,
+                packet_dissector_snmp::SNMP_TRAP_PORT,
+            ] {
+                assert_builtin(
+                    reg.register_by_udp_port(port, Box::new(packet_dissector_snmp::SnmpDissector)),
+                );
+            }
+            reg.register_dissector_factory("snmp", || {
+                Box::new(packet_dissector_snmp::SnmpDissector)
+            });
+        }
+
         // DNS runs over both TCP and UDP (RFC 1035)
         #[cfg(feature = "dns")]
         {
@@ -2977,6 +3281,28 @@ impl Default for DissectorRegistry {
 
             reg.register_dissector_factory("mdns", || {
                 Box::new(packet_dissector_mdns::MdnsDissector)
+            });
+        }
+
+        // LLMNR runs over UDP port 5355 (multicast queries) and TCP port 5355
+        // (unicast queries) — RFC 4795, Sections 2 and 2.4 —
+        // https://www.rfc-editor.org/rfc/rfc4795#section-2
+        #[cfg(feature = "llmnr")]
+        {
+            #[cfg(feature = "udp")]
+            assert_builtin(
+                reg.register_by_udp_port(5355, Box::new(packet_dissector_llmnr::LlmnrDissector)),
+            );
+            #[cfg(feature = "tcp")]
+            assert_builtin(
+                reg.register_by_tcp_port(5355, Box::new(packet_dissector_llmnr::LlmnrTcpDissector)),
+            );
+
+            reg.register_dissector_factory("llmnr", || {
+                Box::new(packet_dissector_llmnr::LlmnrDissector)
+            });
+            reg.register_dissector_factory("llmnr.tcp", || {
+                Box::new(packet_dissector_llmnr::LlmnrTcpDissector)
             });
         }
 
@@ -3031,7 +3357,7 @@ impl Default for DissectorRegistry {
         reg.register_dissector_factory("http", || Box::new(packet_dissector_http::HttpDissector));
         #[cfg(feature = "http2")]
         reg.register_dissector_factory("http2", || {
-            Box::new(packet_dissector_http2::Http2Dissector)
+            Box::new(packet_dissector_http2::Http2ConnectionDissector::new())
         });
 
         // GENEVE runs over UDP on port 6081 (RFC 8926)
@@ -3325,12 +3651,71 @@ impl Default for DissectorRegistry {
             });
         }
 
+        // M3UA runs over SCTP: PPID 3 and port 2905 (RFC 4666, Sections 7.1
+        // and 7.2 — https://www.rfc-editor.org/rfc/rfc4666#section-7.1).
+        #[cfg(feature = "m3ua")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_port(2905, Box::new(packet_dissector_m3ua::M3uaDissector)),
+            );
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_ppid(3, Box::new(packet_dissector_m3ua::M3uaDissector)),
+            );
+            reg.register_dissector_factory("m3ua", || {
+                Box::new(packet_dissector_m3ua::M3uaDissector)
+            });
+        }
+
+        // SCCP is the MTP3-User with Service Indicator 3 (ITU-T Q.704,
+        // clause 14.2.1 — https://www.itu.int/rec/T-REC-Q.704).
+        #[cfg(feature = "sccp")]
+        {
+            assert_builtin(reg.register_by_mtp3_service_indicator(
+                3,
+                Box::new(packet_dissector_sccp::SccpDissector),
+            ));
+            reg.register_dissector_factory("sccp", || {
+                Box::new(packet_dissector_sccp::SccpDissector)
+            });
+        }
         // EPS NAS is carried inside S1AP; register as a factory for
         // standalone use (e.g., `bask read --dissector nas-eps`).
         #[cfg(feature = "nas-eps")]
         reg.register_dissector_factory("nas-eps", || {
             Box::new(packet_dissector_nas_eps::NasEpsDissector)
         });
+
+        // TCAP is the SCCP user for the MAP subsystems — ITU-T Q.713, clause
+        // 3.4.2.2 (5 = MAP) and 3GPP TS 23.003, clauses 8.1 (6 HLR, 7 VLR,
+        // 8 MSC, 9 EIR) and 8.2 (145 GMLC, 147 gsmSCF, 148 SIWF, 149 SGSN,
+        // 150 GGSN, 248 CSS). The MAP dissector decodes TCAP itself, so it
+        // takes these SSNs when enabled. CAP (146) is TCAP-based as well.
+        // https://www.itu.int/rec/T-REC-Q.713
+        // https://www.3gpp.org/ftp/Specs/archive/23_series/23.003/
+        #[cfg(feature = "tcap")]
+        {
+            const MAP_SSNS: [u8; 11] = [5, 6, 7, 8, 9, 145, 147, 148, 149, 150, 248];
+            for ssn in MAP_SSNS {
+                #[cfg(feature = "map")]
+                assert_builtin(
+                    reg.register_by_sccp_ssn(ssn, Box::new(packet_dissector_map::MapDissector)),
+                );
+                #[cfg(not(feature = "map"))]
+                assert_builtin(
+                    reg.register_by_sccp_ssn(ssn, Box::new(packet_dissector_tcap::TcapDissector)),
+                );
+            }
+            assert_builtin(
+                reg.register_by_sccp_ssn(146, Box::new(packet_dissector_tcap::TcapDissector)),
+            );
+            reg.register_dissector_factory("tcap", || {
+                Box::new(packet_dissector_tcap::TcapDissector)
+            });
+            #[cfg(feature = "map")]
+            reg.register_dissector_factory("map", || Box::new(packet_dissector_map::MapDissector));
+        }
 
         // BGP runs over TCP on port 179 (RFC 4271)
         #[cfg(feature = "bgp")]
@@ -3341,6 +3726,13 @@ impl Default for DissectorRegistry {
             );
             reg.register_dissector_factory("bgp", || Box::new(packet_dissector_bgp::BgpDissector));
         }
+
+        // BMP has no assigned port: "The passive party is configured to
+        // listen on a particular TCP port" (RFC 7854, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc7854#section-3.2), so it is only
+        // available by decode-as name.
+        #[cfg(feature = "bmp")]
+        reg.register_dissector_factory("bmp", || Box::new(packet_dissector_bmp::BmpDissector));
 
         // Register TLS for the common HTTPS port 443 (RFC 5246, RFC 8446)
         // and for the ports whose assigned service runs over implicit TLS
@@ -3436,6 +3828,14 @@ impl Default for DissectorRegistry {
         #[cfg(feature = "rtp")]
         reg.register_dissector_factory("rtp", || Box::new(packet_dissector_rtp::RtpDissector));
 
+        // RTCP has no well-known port either ("RTP port + 1" is only a
+        // convention, RFC 3550, Section 11 —
+        // https://www.rfc-editor.org/rfc/rfc3550#section-11). It is reached
+        // through decode-as, or from RTP when RTP and RTCP share a port
+        // (RFC 5761, Section 4 — https://www.rfc-editor.org/rfc/rfc5761#section-4).
+        #[cfg(feature = "rtcp")]
+        reg.register_dissector_factory("rtcp", || Box::new(packet_dissector_rtcp::RtcpDissector));
+
         // QUIC runs over UDP, typically on port 443 (RFC 9000).
         #[cfg(feature = "quic")]
         {
@@ -3467,6 +3867,42 @@ impl Default for DissectorRegistry {
             // Section 12.5 — https://www.rfc-editor.org/rfc/rfc8656#section-12.5).
             reg.register_dissector_factory("stun.tcp", || {
                 Box::new(packet_dissector_stun::StunTcpDissector)
+            });
+        }
+
+        // DTLS (RFC 9147, RFC 6347) over UDP.
+        #[cfg(feature = "dtls")]
+        {
+            // DNS over DTLS runs on UDP port 853 (RFC 8094, Section 3.1 —
+            // https://www.rfc-editor.org/rfc/rfc8094#section-3.1), which DNS
+            // over QUIC shares (RFC 9250, Section 8.2 —
+            // https://www.rfc-editor.org/rfc/rfc9250#section-8.2); the two
+            // are told apart by the first octet (RFC 9443, Section 3 —
+            // https://www.rfc-editor.org/rfc/rfc9443#section-3).
+            #[cfg(all(feature = "udp", feature = "quic"))]
+            assert_builtin(reg.register_by_udp_port(
+                853,
+                Box::new(DtlsDemux {
+                    other: &packet_dissector_quic::QuicDissector,
+                }),
+            ));
+            #[cfg(all(feature = "udp", not(feature = "quic")))]
+            assert_builtin(
+                reg.register_by_udp_port(853, Box::new(packet_dissector_tls::DtlsDissector)),
+            );
+            // The STUN/TURN port multiplexes DTLS by its first octet
+            // (RFC 8656, Section 12 —
+            // https://www.rfc-editor.org/rfc/rfc8656#section-12), so the
+            // STUN registration above is wrapped in the demultiplexer.
+            #[cfg(all(feature = "udp", feature = "stun"))]
+            reg.register_by_udp_port_or_replace(
+                3478,
+                Box::new(DtlsDemux {
+                    other: &packet_dissector_stun::StunDissector,
+                }),
+            );
+            reg.register_dissector_factory("dtls", || {
+                Box::new(packet_dissector_tls::DtlsDissector)
             });
         }
 
@@ -3568,6 +4004,100 @@ mod tests {
             buf.end_layer();
             Ok(DissectResult::new(data.len(), DispatchHint::End))
         }
+    }
+
+    /// One-octet entry layer that hands the rest to LLC SAP 0x20.
+    struct PrefixDissector;
+
+    impl Dissector for PrefixDissector {
+        fn name(&self) -> &'static str {
+            "Prefix"
+        }
+        fn short_name(&self) -> &'static str {
+            "Prefix"
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            _data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.begin_layer("Prefix", None, &[], offset..offset + 1);
+            buf.end_layer();
+            Ok(DissectResult::new(1, DispatchHint::ByLlcSap(0x20)))
+        }
+    }
+
+    /// Dissector whose first octet is the length of an embedded payload that
+    /// follows it; trailing octets after the payload belong to this layer
+    /// (like M3UA's Protocol Data followed by a Correlation Id).
+    struct WrapDissector(&'static str, u8);
+
+    impl Dissector for WrapDissector {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn short_name(&self) -> &'static str {
+            self.0
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            &[]
+        }
+        fn dissect<'pkt>(
+            &self,
+            data: &'pkt [u8],
+            buf: &mut DissectBuffer<'pkt>,
+            offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            buf.begin_layer(self.0, None, &[], offset..offset + data.len());
+            buf.end_layer();
+            let len = usize::from(data[0]);
+            Ok(DissectResult::with_embedded_payload(
+                data.len(),
+                DispatchHint::ByLlcSap(self.1),
+                offset + 1..offset + 1 + len,
+            ))
+        }
+    }
+
+    /// An embedded payload inside an embedded payload is dispatched to its
+    /// own range, not to the octets after the enclosing layer.
+    #[test]
+    fn nested_embedded_payload_ranges() {
+        let mut reg = DissectorRegistry::new();
+        reg.set_entry_dissector(Box::new(PrefixDissector));
+        reg.register_by_llc_sap(0x20, Box::new(WrapDissector("Outer", 0x10)))
+            .unwrap();
+        reg.register_by_llc_sap(0x10, Box::new(WrapDissector("Inner", 0x42)))
+            .unwrap();
+        reg.register_by_llc_sap(0x42, Box::new(MsgDissector))
+            .unwrap();
+        // Prefix, then Outer: payload [2, AA, BB] and trailer EE; Inner:
+        // payload [AA, BB].
+        let data = [0x00, 0x03, 0x02, 0xAA, 0xBB, 0xEE];
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&data, &mut buf).unwrap();
+        let layers: Vec<_> = buf
+            .layers()
+            .iter()
+            .map(|l| (l.name, l.range.clone()))
+            .collect();
+        assert_eq!(
+            layers,
+            [
+                ("Prefix", 0..1),
+                ("Outer", 1..6),
+                ("Inner", 2..5),
+                ("Msg", 3..5)
+            ]
+        );
+        assert_eq!(PrefixDissector.name(), "Prefix");
+        assert!(PrefixDissector.field_descriptors().is_empty());
+        assert!(WrapDissector("W", 0).field_descriptors().is_empty());
+        assert_eq!(WrapDissector("W", 0).name(), "W");
     }
 
     fn bundle_registry() -> DissectorRegistry {
@@ -3933,10 +4463,20 @@ mod tests {
         }
         #[cfg(feature = "mdns")]
         assert!(reg.create_dissector_by_name("mdns").is_some());
+
+        #[cfg(feature = "llmnr")]
+        {
+            assert!(reg.create_dissector_by_name("llmnr").is_some());
+            assert!(reg.create_dissector_by_name("llmnr.tcp").is_some());
+        }
         #[cfg(feature = "tls")]
         assert!(reg.create_dissector_by_name("tls").is_some());
         #[cfg(feature = "bgp")]
         assert!(reg.create_dissector_by_name("bgp").is_some());
+        #[cfg(feature = "ldp")]
+        assert!(reg.create_dissector_by_name("ldp").is_some());
+        #[cfg(feature = "bmp")]
+        assert!(reg.create_dissector_by_name("bmp").is_some());
         #[cfg(feature = "sip")]
         assert!(reg.create_dissector_by_name("sip").is_some());
         #[cfg(feature = "sip")]
@@ -4071,6 +4611,22 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "ipfix")]
+    #[test]
+    fn all_field_schemas_include_netflow_versions() {
+        let reg = DissectorRegistry::default();
+        let schemas = reg.all_field_schemas();
+        for name in ["IPFIX", "NetFlow-v9", "NetFlow-v5"] {
+            assert!(
+                schemas.iter().any(|s| s.short_name == name),
+                "{name} missing from all_field_schemas"
+            );
+        }
+        let names = reg.available_decode_as_protocols();
+        assert!(names.contains(&"ipfix"));
+        assert!(names.contains(&"netflow"));
+    }
+
     #[test]
     fn lookup_dissector_by_ach_channel_type_hint() {
         let mut reg = DissectorRegistry::new();
@@ -4083,6 +4639,129 @@ mod tests {
         );
         assert!(
             reg.lookup_dissector(&DispatchHint::ByAchChannelType(0x0008))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mtp3_service_indicator_table() {
+        let mut reg = DissectorRegistry::new();
+        assert!(reg.get_by_mtp3_service_indicator(3).is_none());
+        reg.register_by_mtp3_service_indicator(3, Box::new(StubDissector("sccp")))
+            .unwrap();
+        let dup = reg.register_by_mtp3_service_indicator(3, Box::new(StubDissector("dup")));
+        assert!(matches!(
+            dup,
+            Err(RegistrationError::DuplicateDispatchKey {
+                table: "mtp3_service_indicator",
+                key: 3,
+                ..
+            })
+        ));
+        assert_eq!(
+            reg.lookup_dissector(&DispatchHint::ByMtp3ServiceIndicator(3))
+                .map(|d| d.short_name()),
+            Some("sccp")
+        );
+        assert!(
+            reg.lookup_dissector(&DispatchHint::ByMtp3ServiceIndicator(5))
+                .is_none()
+        );
+        let prev =
+            reg.register_by_mtp3_service_indicator_or_replace(3, Box::new(StubDissector("b")));
+        assert_eq!(prev.map(|d| d.short_name()), Some("sccp"));
+        assert!(
+            reg.register_dissector(
+                DissectorTable::Mtp3ServiceIndicator(5),
+                Box::new(StubDissector("isup")),
+            )
+            .is_ok()
+        );
+        assert!(
+            reg.register_dissector_or_replace(
+                DissectorTable::Mtp3ServiceIndicator(5),
+                Box::new(StubDissector("isup2")),
+            )
+            .is_some()
+        );
+        let names: Vec<_> = reg
+            .all_field_schemas()
+            .iter()
+            .map(|s| s.short_name)
+            .collect();
+        assert!(names.contains(&"b") && names.contains(&"isup2"));
+    }
+
+    #[test]
+    fn sccp_ssn_table() {
+        let mut reg = DissectorRegistry::new();
+        assert!(reg.get_by_sccp_ssn(6).is_none());
+        reg.register_by_sccp_ssn(6, Box::new(StubDissector("hlr")))
+            .unwrap();
+        reg.register_by_sccp_ssn(7, Box::new(StubDissector("vlr")))
+            .unwrap();
+        let dup = reg.register_by_sccp_ssn(6, Box::new(StubDissector("dup")));
+        assert!(matches!(
+            dup,
+            Err(RegistrationError::DuplicateDispatchKey {
+                table: "sccp_ssn",
+                key: 6,
+                ..
+            })
+        ));
+        let lookup = |called, calling| {
+            reg.lookup_dissector(&DispatchHint::BySccpSsn { called, calling })
+                .map(|d| d.short_name())
+        };
+        // The called SSN is tried first, then the calling SSN.
+        assert_eq!(lookup(7, 6), Some("vlr"));
+        assert_eq!(lookup(200, 6), Some("hlr"));
+        // SSN 0 means "SSN not known/not used" and is never looked up.
+        assert_eq!(lookup(0, 0), None);
+        assert_eq!(lookup(0, 200), None);
+
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_sccp_ssn(0, Box::new(StubDissector("zero")))
+            .unwrap();
+        assert!(
+            reg.lookup_dissector(&DispatchHint::BySccpSsn {
+                called: 0,
+                calling: 0
+            })
+            .is_none()
+        );
+        let prev = reg.register_by_sccp_ssn_or_replace(0, Box::new(StubDissector("z2")));
+        assert_eq!(prev.map(|d| d.short_name()), Some("zero"));
+        assert!(
+            reg.register_dissector(DissectorTable::SccpSsn(8), Box::new(StubDissector("msc")))
+                .is_ok()
+        );
+        assert!(
+            reg.register_dissector_or_replace(
+                DissectorTable::SccpSsn(8),
+                Box::new(StubDissector("msc2")),
+            )
+            .is_some()
+        );
+        assert!(
+            reg.all_field_schemas()
+                .iter()
+                .any(|s| s.short_name == "msc2")
+        );
+    }
+
+    #[test]
+    fn lookup_dissector_by_link_type_hint() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_link_type(105, Box::new(StubDissector("802.11")))
+            .unwrap();
+        assert_eq!(
+            reg.lookup_dissector(&DispatchHint::ByLinkType(105))
+                .map(|d| d.short_name()),
+            Some("802.11")
+        );
+        assert!(
+            reg.lookup_dissector(&DispatchHint::ByLinkType(127))
                 .is_none()
         );
     }
@@ -5023,11 +5702,23 @@ mod tests {
         #[cfg(feature = "gre")]
         assert!(reg.get_by_ip_protocol(47).is_some());
 
+        #[cfg(feature = "erspan")]
+        {
+            assert!(reg.get_by_ethertype(0x88BE).is_some());
+            assert!(reg.get_by_ethertype(0x22EB).is_some());
+        }
+
         #[cfg(feature = "ospf")]
         assert!(reg.get_by_ip_protocol(89).is_some());
 
         #[cfg(feature = "vrrp")]
         assert!(reg.get_by_ip_protocol(112).is_some());
+
+        #[cfg(feature = "rsvp")]
+        assert!(reg.get_by_ip_protocol(46).is_some());
+
+        #[cfg(feature = "pim")]
+        assert!(reg.get_by_ip_protocol(103).is_some());
 
         #[cfg(feature = "ah")]
         assert!(reg.get_by_ip_protocol(51).is_some());
@@ -5058,6 +5749,12 @@ mod tests {
 
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_link_type(1).is_some());
+
+        #[cfg(feature = "ieee80211")]
+        assert!(reg.get_by_link_type(105).is_some());
+
+        #[cfg(feature = "radiotap")]
+        assert!(reg.get_by_link_type(127).is_some());
 
         #[cfg(feature = "null")]
         {
@@ -5102,6 +5799,56 @@ mod tests {
         assert!(reg.get_by_snap(0x00_000C, 0x2000).is_some());
     }
 
+    /// RFC 4666, Sections 7.1 and 7.2 — M3UA on SCTP PPID 3 and port 2905;
+    /// SCCP is the MTP3-User with Service Indicator 3 (ITU-T Q.704, clause
+    /// 14.2.1).
+    #[test]
+    fn default_registry_sigtran_dissectors() {
+        let reg = DissectorRegistry::default();
+
+        #[cfg(all(feature = "m3ua", feature = "sctp"))]
+        {
+            assert_eq!(
+                reg.get_by_sctp_ppid(3).map(|d| d.short_name()),
+                Some("M3UA")
+            );
+            assert_eq!(
+                reg.get_by_sctp_port(2905).map(|d| d.short_name()),
+                Some("M3UA")
+            );
+        }
+        #[cfg(feature = "m3ua")]
+        assert!(reg.create_dissector_by_name("m3ua").is_some());
+
+        #[cfg(feature = "sccp")]
+        {
+            assert_eq!(
+                reg.get_by_mtp3_service_indicator(3).map(|d| d.short_name()),
+                Some("SCCP")
+            );
+            assert!(reg.create_dissector_by_name("sccp").is_some());
+        }
+
+        #[cfg(feature = "tcap")]
+        {
+            let map_ssn = if cfg!(feature = "map") { "MAP" } else { "TCAP" };
+            for ssn in [5, 6, 7, 8, 9, 145, 147, 148, 149, 150, 248] {
+                assert_eq!(
+                    reg.get_by_sccp_ssn(ssn).map(|d| d.short_name()),
+                    Some(map_ssn),
+                    "SSN {ssn}"
+                );
+            }
+            assert_eq!(
+                reg.get_by_sccp_ssn(146).map(|d| d.short_name()),
+                Some("TCAP")
+            );
+            assert!(reg.create_dissector_by_name("tcap").is_some());
+        }
+        #[cfg(feature = "map")]
+        assert!(reg.create_dissector_by_name("map").is_some());
+    }
+
     #[test]
     fn default_registry_port_based_dissectors() {
         let reg = DissectorRegistry::default();
@@ -5142,6 +5889,12 @@ mod tests {
         #[cfg(all(feature = "ntp", feature = "udp"))]
         assert!(reg.get_by_udp_port(123).is_some());
 
+        #[cfg(all(feature = "ldp", feature = "udp"))]
+        assert!(reg.get_by_udp_port(646).is_some());
+
+        #[cfg(all(feature = "ldp", feature = "tcp"))]
+        assert!(reg.get_by_tcp_port(646).is_some());
+
         #[cfg(all(feature = "bfd", feature = "udp"))]
         {
             assert!(reg.get_by_udp_port(3784).is_some());
@@ -5151,8 +5904,36 @@ mod tests {
             assert!(reg.get_by_udp_port(7784).is_some());
         }
 
+        // IPFIX: RFC 7011, Section 10.1 —
+        // https://www.rfc-editor.org/rfc/rfc7011#section-10.1
+        #[cfg(all(feature = "ipfix", feature = "udp"))]
+        assert!(reg.get_by_udp_port(4739).is_some());
+        #[cfg(all(feature = "ipfix", feature = "tcp"))]
+        assert!(reg.get_by_tcp_port(4739).is_some());
+        #[cfg(all(feature = "ipfix", feature = "sctp"))]
+        assert!(reg.get_by_sctp_port(4739).is_some());
+
+        // SNMP: RFC 3417, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc3417#section-3.2
+        #[cfg(all(feature = "snmp", feature = "udp"))]
+        {
+            assert!(reg.get_by_udp_port(161).is_some());
+            assert!(reg.get_by_udp_port(162).is_some());
+        }
+
         #[cfg(all(feature = "mdns", feature = "udp"))]
         assert!(reg.get_by_udp_port(5353).is_some());
+
+        #[cfg(all(feature = "llmnr", feature = "udp"))]
+        assert_eq!(
+            reg.get_by_udp_port(5355).map(|d| d.short_name()),
+            Some("LLMNR")
+        );
+        #[cfg(all(feature = "llmnr", feature = "tcp"))]
+        assert_eq!(
+            reg.get_by_tcp_port(5355).map(|d| d.name()),
+            Some("LLMNR over TCP")
+        );
 
         #[cfg(all(feature = "vxlan", feature = "udp"))]
         assert!(reg.get_by_udp_port(4789).is_some());
@@ -5361,6 +6142,9 @@ mod tests {
             assert!(reg.create_dissector_by_name("bfd.echo").is_some());
         }
 
+        #[cfg(feature = "snmp")]
+        assert!(reg.create_dissector_by_name("snmp").is_some());
+
         #[cfg(feature = "dhcp")]
         assert!(reg.create_dissector_by_name("dhcp").is_some());
 
@@ -5426,8 +6210,24 @@ mod tests {
         #[cfg(feature = "rtp")]
         assert!(reg.create_dissector_by_name("rtp").is_some());
 
+        #[cfg(feature = "rtcp")]
+        assert!(reg.create_dissector_by_name("rtcp").is_some());
+
         #[cfg(feature = "quic")]
         assert!(reg.create_dissector_by_name("quic").is_some());
+
+        #[cfg(feature = "dtls")]
+        {
+            let dtls = reg.create_dissector_by_name("dtls").unwrap();
+            assert_eq!(dtls.short_name(), "DTLS");
+            assert!(
+                reg.all_field_schemas()
+                    .iter()
+                    .any(|s| s.short_name == "DTLS")
+            );
+            #[cfg(feature = "udp")]
+            assert!(reg.get_by_udp_port(853).is_some());
+        }
 
         #[cfg(feature = "stun")]
         {

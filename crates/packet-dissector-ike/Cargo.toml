@@ -10,8 +10,14 @@ keywords = ["packet", "network", "dissector", "parser", "ipsec"]
 categories = ["network-programming", "parser-implementations"]
 description = "Internet Key Exchange (IKEv1/IKEv2, RFC 2408/RFC 7296) dissector for packet-dissector"
 
+[features]
+# Decode the IKEv2 EAP payload as EAP (RFC 7296, Section 3.16 —
+# https://www.rfc-editor.org/rfc/rfc7296#section-3.16).
+eap = ["dep:packet-dissector-eap"]
+
 [dependencies]
 packet-dissector-core = { workspace = true }
+packet-dissector-eap = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

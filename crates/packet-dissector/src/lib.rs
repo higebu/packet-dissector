@@ -84,6 +84,12 @@ pub mod dissectors {
     #[cfg(feature = "raw_ip")]
     pub use packet_dissector_raw_ip as raw_ip;
 
+    #[cfg(feature = "ieee80211")]
+    pub use packet_dissector_ieee80211 as ieee80211;
+
+    #[cfg(feature = "radiotap")]
+    pub use packet_dissector_radiotap as radiotap;
+
     #[cfg(feature = "arp")]
     pub use packet_dissector_arp as arp;
 
@@ -119,6 +125,9 @@ pub mod dissectors {
 
     #[cfg(feature = "mdns")]
     pub use packet_dissector_mdns as mdns;
+
+    #[cfg(feature = "llmnr")]
+    pub use packet_dissector_llmnr as llmnr;
 
     #[cfg(feature = "dhcp")]
     pub use packet_dissector_dhcp as dhcp;
@@ -179,6 +188,9 @@ pub mod dissectors {
     #[cfg(feature = "gre")]
     pub use packet_dissector_gre as gre;
 
+    #[cfg(feature = "erspan")]
+    pub use packet_dissector_erspan as erspan;
+
     #[cfg(feature = "mpls")]
     pub use packet_dissector_mpls as mpls;
 
@@ -204,11 +216,35 @@ pub mod dissectors {
     #[cfg(feature = "ospf")]
     pub use packet_dissector_ospf as ospf;
 
+    #[cfg(feature = "pim")]
+    pub use packet_dissector_pim as pim;
+
     #[cfg(feature = "vrrp")]
     pub use packet_dissector_vrrp as vrrp;
 
+    #[cfg(feature = "rsvp")]
+    pub use packet_dissector_rsvp as rsvp;
+
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
+
+    #[cfg(feature = "ipfix")]
+    pub use packet_dissector_ipfix as ipfix;
+
+    #[cfg(feature = "snmp")]
+    pub use packet_dissector_snmp as snmp;
+
+    #[cfg(feature = "m3ua")]
+    pub use packet_dissector_m3ua as m3ua;
+
+    #[cfg(feature = "sccp")]
+    pub use packet_dissector_sccp as sccp;
+
+    #[cfg(feature = "tcap")]
+    pub use packet_dissector_tcap as tcap;
+
+    #[cfg(feature = "map")]
+    pub use packet_dissector_map as map;
 
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
@@ -216,11 +252,17 @@ pub mod dissectors {
     #[cfg(feature = "bgp")]
     pub use packet_dissector_bgp as bgp;
 
+    #[cfg(feature = "bmp")]
+    pub use packet_dissector_bmp as bmp;
+
     #[cfg(feature = "l2tp")]
     pub use packet_dissector_l2tp as l2tp;
 
     #[cfg(feature = "l2tpv3")]
     pub use packet_dissector_l2tpv3 as l2tpv3;
+
+    #[cfg(feature = "ldp")]
+    pub use packet_dissector_ldp as ldp;
 
     #[cfg(feature = "tls")]
     pub use packet_dissector_tls as tls;
@@ -245,17 +287,23 @@ pub mod dissectors {
     #[cfg(feature = "rtp")]
     pub use packet_dissector_rtp as rtp;
 
+    #[cfg(feature = "rtcp")]
+    pub use packet_dissector_rtcp as rtcp;
+
     #[cfg(feature = "quic")]
     pub use packet_dissector_quic as quic;
 
     #[cfg(feature = "stun")]
     pub use packet_dissector_stun as stun;
+
+    /// DTLS is implemented in the TLS crate
+    /// ([`DtlsDissector`](packet_dissector_tls::DtlsDissector)).
+    #[cfg(feature = "dtls")]
+    pub use packet_dissector_tls as dtls;
 }
 
 #[cfg(feature = "ip-reassembly")]
 mod ip_reassembly;
-#[cfg(feature = "http2")]
-mod stream_set;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 

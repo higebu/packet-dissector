@@ -10,6 +10,7 @@
 
 #![deny(missing_docs)]
 
+use packet_dissector_core::checksum::{checksum_status_descriptor, verify_ip_payload_checksum};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -211,6 +212,8 @@ const FD_RESERVED: usize = 20;
 /// Field descriptor index for the derived `query_version` (RFC 9776 §7.1).
 ///   <https://www.rfc-editor.org/rfc/rfc9776#section-7.1>
 const FD_QUERY_VERSION: usize = 21;
+/// Field descriptor index for `checksum_status`.
+const FD_CHECKSUM_STATUS: usize = 22;
 
 // ---------------------------------------------------------------------------
 // Child field descriptor indices — source address
@@ -375,6 +378,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // Derived from the message length and Max Resp Code (RFC 9776 §7.1).
     //   <https://www.rfc-editor.org/rfc/rfc9776#section-7.1>
     FieldDescriptor::new("query_version", "Query Version", FieldType::U8).optional(),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// Per-type header layout shared by the fixed fields of every IGMP message.
@@ -651,6 +655,18 @@ impl Dissector for IgmpDissector {
             FieldValue::U16(checksum),
             offset + 2..offset + 4,
         );
+        if buf.verify_checksums() {
+            // RFC 3376, Section 4.1.2 / RFC 2236, Section 2.3 — the checksum
+            // covers the whole IGMP message (the entire IP payload).
+            // https://www.rfc-editor.org/rfc/rfc3376#section-4.1.2
+            // https://www.rfc-editor.org/rfc/rfc2236#section-2.3
+            let status = verify_ip_payload_checksum(buf, offset, data);
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 2..offset + 4,
+            );
+        }
 
         if layout.has_group_address {
             let group_addr = read_ipv4_addr(data, 4)?;

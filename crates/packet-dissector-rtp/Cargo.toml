@@ -12,6 +12,12 @@ description = "RTP (RFC 3550) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }
+packet-dissector-rtcp = { workspace = true, optional = true }
+
+[features]
+# Hand packets whose second octet is an RTCP packet type (192-223) to the
+# RTCP dissector (RFC 5761, Section 4).
+rtcp-mux = ["dep:packet-dissector-rtcp"]
 
 [dev-dependencies]
 criterion = { workspace = true }

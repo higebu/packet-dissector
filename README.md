@@ -30,11 +30,12 @@ protocols include:
 
 | Category | Protocols |
 |----------|-----------|
-| L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (stacked tags; also standalone tags after SLL, SLL2 or GRE), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP, CDP, PPPoE, EAPOL / EAP (802.1X) |
-| L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, IS-IS, AH, ESP, SRv6, GRE, MPLS |
+| L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), IEEE 802.11 (MAC header, management elements, LLC/SNAP, A-MSDU), radiotap, 802.1Q VLAN, 802.1ad QinQ (stacked tags; also standalone tags after SLL, SLL2 or GRE), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP, CDP, PPPoE, EAPOL / EAP (802.1X) |
+| L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, PIM, RSVP / RSVP-TE, IS-IS, AH, ESP, SRv6, GRE, ERSPAN, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE, NSH |
-| Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, TLS, PPP, RADIUS, RTP, QUIC, STUN |
+| Application / control | DNS, mDNS, LLMNR, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, BMP, LDP, TLS, PPP, RADIUS, RTP, RTCP, QUIC, STUN, DTLS, IPFIX, NetFlow v5/v9, SNMP |
 | 3GPP | GTPv1-U, GTPv1-C, GTPv2-C, PFCP, NAS5G, NAS-EPS, NGAP, S1AP, XnAP, F1AP, E1AP, SGsAP |
+| SIGTRAN / SS7 | M3UA, SCCP, TCAP, MAP |
 
 See `crates/packet-dissector/Cargo.toml` and `crates/packet-dissector/src/lib.rs`
 for the current feature-gated protocol list.
@@ -57,25 +58,27 @@ packet-dissector = { version = "0.3", default-features = false, features = ["lay
 
 Representative feature flags:
 
-- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `arp`, `lacp`, `lldp`, `eap`, `stp`, `cdp`, `pppoe`
-- Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `mpls`
+- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `ieee80211`, `radiotap`, `arp`, `lacp`, `lldp`, `eap`, `stp`, `cdp`, `pppoe`
+- Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `pim`, `rsvp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `erspan`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`, `nsh`
-- Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
+- Application / control: `dns`, `mdns`, `llmnr`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `bmp`, `ldp`, `tls`, `ppp`, `radius`, `rtp`, `rtcp`, `quic`, `stun`, `dtls`, `ipfix`, `snmp`
 - 3GPP: `gtpv1u`, `gtpv1c`, `gtpv2c`, `pfcp`, `nas5g`, `nas-eps`, `ngap`, `s1ap`, `xnap`, `f1ap`, `e1ap`, `sgsap`
+- SIGTRAN / SS7: `m3ua`, `sccp`, `tcap`, `map`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
 - `ip-reassembly` enables IPv4 / IPv6 fragment reassembly in the registry (without it, non-initial fragments still end the chain after the IP layer)
 
 Convenience groups:
 
-- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "arp", "lacp", "lldp", "eap", "stp", "cdp", "ppp", "pppoe"]`
+- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "ieee80211", "radiotap", "arp", "lacp", "lldp", "eap", "stp", "cdp", "ppp", "pppoe"]`
 - `layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]`
 - `layer4 = ["tcp", "udp", "sctp"]`
-- `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun"]`
-- `tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]`
-- `routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]`
+- `application = ["dns", "mdns", "llmnr", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "rtcp", "tls", "quic", "stun", "dtls", "ipfix", "snmp"]`
+- `tunneling = ["gre", "erspan", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]`
+- `routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "pim", "rsvp", "ldp"]`
 - `ipsec = ["ah", "esp", "ike"]`
 - `3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "s1ap", "xnap", "f1ap", "e1ap", "sgsap"]`
+- `sigtran = ["m3ua", "sccp", "tcap", "map"]`
 
 For the authoritative, exhaustive list, see
 `crates/packet-dissector/Cargo.toml`.
@@ -135,8 +138,10 @@ default registry handles these
 | 9 | `LINKTYPE_PPP` | `ppp` |
 | 50 | `LINKTYPE_PPP_HDLC` | `ppp` |
 | 101 | `LINKTYPE_RAW` | `raw_ip` |
+| 105 | `LINKTYPE_IEEE802_11` | `ieee80211` |
 | 108 | `LINKTYPE_LOOP` | `null` |
 | 113 | `LINKTYPE_LINUX_SLL` | `linux_sll` |
+| 127 | `LINKTYPE_IEEE802_11_RADIOTAP` | `radiotap` |
 | 228 | `LINKTYPE_IPV4` | `raw_ip` |
 | 229 | `LINKTYPE_IPV6` | `raw_ip` |
 | 276 | `LINKTYPE_LINUX_SLL2` | `linux_sll2` |
@@ -147,7 +152,8 @@ dissector with `register_by_link_type()` to handle it.
 ## Checksum Verification
 
 Checksums are not verified by default. Enable verification with
-`registry.set_verify_checksums(true)`: the IPv4, ICMP, ICMPv6, TCP and UDP
+`registry.set_verify_checksums(true)`: the IPv4, ICMP (including RFC 4884
+extensions), ICMPv6, TCP, UDP, SCTP (CRC32c), IGMP, GRE, VRRP and OSPF
 dissectors then add an optional `checksum_status` field next to the checksum
 (`good`, `bad`, `unverified` or `not_present`; see
 `packet_dissector::checksum::ChecksumStatus`). A bad checksum is never a
