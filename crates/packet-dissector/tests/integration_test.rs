@@ -13,6 +13,9 @@
 //! | Ethernet → ARP                           | integration_ethernet_arp                      |
 //! | Ethernet → LLDP                          | integration_ethernet_lldp                     |
 //! | Ethernet → LLDP (IEEE 802.1 Port VLAN ID TLV)   | integration_ethernet_lldp_org_port_vlan_id    |
+//! | Ethernet → EAPOL → EAP (Identity, padded frame) | integration_ethernet_eapol_eap_identity      |
+//! | Ethernet → EAPOL-Start / EAPOL-Key             | integration_ethernet_eapol_start_and_key      |
+//! | PPP (HDLC) → EAP (inline, 0xC227)               | integration_ppp_eap_inline                    |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -4964,6 +4967,109 @@ fn integration_ethernet_lldp() {
             }
         },
         FieldValue::Bytes(b"switch")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// EAPOL (IEEE 802.1X-2020, 11.3) and EAP (RFC 3748)
+// https://www.rfc-editor.org/rfc/rfc3748
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_ethernet_eapol_eap_identity() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    // PAE group address 01-80-C2-00-00-03 (IEEE 802.1X-2020, 11.1.1).
+    push_ethernet(
+        &mut pkt,
+        [0x01, 0x80, 0xC2, 0, 0, 0x03],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    // EAPOL v2, EAPOL-EAP, body 10: EAP Response/Identity "alice".
+    pkt.extend_from_slice(&[0x02, 0x00, 0x00, 0x0A]);
+    pkt.extend_from_slice(&[0x02, 0x01, 0x00, 0x0A, 0x01]);
+    pkt.extend_from_slice(b"alice");
+    pkt.resize(60, 0); // Ethernet padding
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "EAPOL", "EAP"]);
+    assert_layers_contiguous(&buf);
+    let eap = buf.layer_by_name("EAP").unwrap();
+    assert_eq!(eap.range, 18..28);
+    assert_eq!(buf.resolve_display_name(eap, "code_name"), Some("Response"));
+    assert_eq!(buf.resolve_display_name(eap, "type_name"), Some("Identity"));
+    assert_eq!(
+        buf.field_by_name(eap, "identity").unwrap().value,
+        FieldValue::Bytes(b"alice")
+    );
+}
+
+#[test]
+fn integration_ethernet_eapol_start_and_key() {
+    let registry = DissectorRegistry::default();
+
+    let mut start = Vec::new();
+    push_ethernet(
+        &mut start,
+        [0x01, 0x80, 0xC2, 0, 0, 0x03],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    start.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+    start.resize(60, 0);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&start, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "EAPOL"]);
+    let eapol = buf.layer_by_name("EAPOL").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(eapol, "packet_type_name"),
+        Some("EAPOL-Start")
+    );
+
+    let mut key = Vec::new();
+    push_ethernet(
+        &mut key,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    key.extend_from_slice(&[0x02, 0x03, 0x00, 0x05, 0x02, 0x00, 0x8A, 0x00, 0x10]);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&key, &mut buf).unwrap();
+    let eapol = buf.layer_by_name("EAPOL").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(eapol, "key_descriptor_type_name"),
+        Some("IEEE 802.11")
+    );
+    assert_eq!(
+        buf.field_by_name(eapol, "body").unwrap().value,
+        FieldValue::Bytes(&[0x00, 0x8A, 0x00, 0x10])
+    );
+}
+
+#[test]
+fn integration_ppp_eap_inline() {
+    let registry = DissectorRegistry::default();
+    // PPP (HDLC framing) Protocol 0xC227 (RFC 3748, Section 3.2.1 —
+    // https://www.rfc-editor.org/rfc/rfc3748#section-3.2.1): EAP Success.
+    let pkt = [0xFF, 0x03, 0xC2, 0x27, 0x03, 0x05, 0x00, 0x04];
+    let mut buf = DissectBuffer::new();
+    registry.dissect_with_link_type(&pkt, 9, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 1);
+    let ppp = buf.layer_by_name("PPP").unwrap();
+    let FieldValue::Object(r) = &buf.field_by_name(ppp, "payload").unwrap().value else {
+        panic!("payload must be an Object");
+    };
+    let eap = buf.nested_fields(r);
+    assert_eq!(eap[0].name(), "code");
+    assert_eq!(eap[0].value, FieldValue::U8(3));
+    assert_eq!(
+        buf.resolve_nested_display_name(r, "code_name"),
+        Some("Success")
     );
 }
 

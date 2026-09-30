@@ -1666,6 +1666,10 @@ impl DissectorRegistry {
             push(&packet_dissector_lacp::OsspDissector);
             push(&packet_dissector_lacp::EsmcDissector);
         }
+        // The EAPOL dissector emits EAP layers itself (RFC 3748 —
+        // https://www.rfc-editor.org/rfc/rfc3748).
+        #[cfg(feature = "eap")]
+        push(&packet_dissector_eap::EapDissector);
         // GtpcDispatcher delegates by version; expose both GTP-C schemas.
         #[cfg(feature = "gtpv1c")]
         push(&packet_dissector_gtpv1c::Gtpv1cDissector);
@@ -2660,6 +2664,13 @@ impl Default for DissectorRegistry {
         #[cfg(feature = "lldp")]
         assert_builtin(
             reg.register_by_ethertype(0x88CC, Box::new(packet_dissector_lldp::LldpDissector)),
+        );
+
+        // EAPOL uses EtherType 0x888E (IEEE 802.1X-2020, 11.3); the EAPOL
+        // dissector hands an EAPOL-EAP body to EAP (RFC 3748) itself.
+        #[cfg(feature = "eap")]
+        assert_builtin(
+            reg.register_by_ethertype(0x888E, Box::new(packet_dissector_eap::EapolDissector)),
         );
 
         // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332).
@@ -4753,6 +4764,9 @@ mod tests {
 
         #[cfg(feature = "lldp")]
         assert!(reg.get_by_ethertype(0x88CC).is_some());
+
+        #[cfg(feature = "eap")]
+        assert!(reg.get_by_ethertype(0x888E).is_some());
 
         #[cfg(feature = "mpls")]
         {
