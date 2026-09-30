@@ -27,11 +27,13 @@ packet-dissector-dhcp = { version = "0.5.0", path = "crates/packet-dissector-dhc
 packet-dissector-dhcpv6 = { version = "0.5.0", path = "crates/packet-dissector-dhcpv6" }
 packet-dissector-srv6 = { version = "0.5.0", path = "crates/packet-dissector-srv6" }
 packet-dissector-gtpv1u = { version = "0.5.0", path = "crates/packet-dissector-gtpv1u" }
+packet-dissector-gtpv1c = { version = "0.5.0", path = "crates/packet-dissector-gtpv1c" }
 packet-dissector-gtpv2c = { version = "0.5.0", path = "crates/packet-dissector-gtpv2c" }
 packet-dissector-pfcp = { version = "0.5.0", path = "crates/packet-dissector-pfcp" }
 packet-dissector-linux-sll = { version = "0.5.0", path = "crates/packet-dissector-linux-sll" }
 packet-dissector-linux-sll2 = { version = "0.5.0", path = "crates/packet-dissector-linux-sll2" }
 packet-dissector-ppp = { version = "0.5.0", path = "crates/packet-dissector-ppp" }
+packet-dissector-pppoe = { version = "0.5.0", path = "crates/packet-dissector-pppoe" }
 packet-dissector-stp = { version = "0.5.0", path = "crates/packet-dissector-stp" }
 packet-dissector-http = { version = "0.5.0", path = "crates/packet-dissector-http" }
 packet-dissector-http2 = { version = "0.5.0", path = "crates/packet-dissector-http2" }
