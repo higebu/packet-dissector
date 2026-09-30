@@ -614,6 +614,7 @@ dependencies = [
  "packet-dissector-dhcpv6",
  "packet-dissector-diameter",
  "packet-dissector-dns",
+ "packet-dissector-eap",
  "packet-dissector-esp",
  "packet-dissector-ethernet",
  "packet-dissector-geneve",
@@ -655,6 +656,7 @@ dependencies = [
  "packet-dissector-s1ap",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
+ "packet-dissector-sgsap",
  "packet-dissector-sip",
  "packet-dissector-srv6",
  "packet-dissector-stp",
@@ -739,6 +741,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-dns"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-eap"
 version = "0.5.0"
 dependencies = [
  "criterion",
@@ -1036,6 +1047,7 @@ dependencies = [
  "packet-dissector",
  "packet-dissector-core",
  "packet-dissector-dns",
+ "packet-dissector-eap",
  "packet-dissector-gtpv1c",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
@@ -1050,6 +1062,7 @@ dependencies = [
  "packet-dissector-s1ap",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
+ "packet-dissector-sgsap",
  "packet-dissector-tcp",
  "proptest",
 ]
@@ -1083,6 +1096,7 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-eap",
  "packet-dissector-test-alloc",
 ]
 
@@ -1163,6 +1177,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-sdp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-sgsap"
 version = "0.5.0"
 dependencies = [
  "criterion",
