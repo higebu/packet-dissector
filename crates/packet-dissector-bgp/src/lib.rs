@@ -35,6 +35,9 @@
 //! - RFC 8955 (Dissemination of Flow Specification Rules): <https://www.rfc-editor.org/rfc/rfc8955>
 //! - RFC 8956 (Dissemination of Flow Specification Rules for IPv6): <https://www.rfc-editor.org/rfc/rfc8956>
 //! - IANA Flow Spec Component Types: <https://www.iana.org/assignments/flow-spec/flow-spec.xhtml>
+//! - RFC 9514 (BGP-LS Extensions for SRv6): <https://www.rfc-editor.org/rfc/rfc9514>
+//! - RFC 9857 (Advertisement of SR Policies Using BGP-LS): <https://www.rfc-editor.org/rfc/rfc9857>
+//! - RFC 9086 (BGP-LS Extensions for Segment Routing BGP Egress Peer Engineering): <https://www.rfc-editor.org/rfc/rfc9086>
 //! - RFC 9015 (BGP Control Plane for the Network Service Header / SFP attribute): <https://www.rfc-editor.org/rfc/rfc9015>
 //! - RFC 9026 (Multicast VPN Fast Upstream Failover / BFD Discriminator): <https://www.rfc-editor.org/rfc/rfc9026>
 //! - RFC 9552 (BGP-LS): <https://www.rfc-editor.org/rfc/rfc9552>
@@ -273,6 +276,16 @@
 //! | RFC 7911 §3 | ADD-PATH Flow Specification block | `parse_bgp_update_mp_reach_flowspec_add_path` |
 //! | IANA Flow Spec Component Types | Component and comparison names | `flowspec_name_tables` |
 //!
+//! # BGP-LS NLRI Coverage (RFC 9552)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | §5.2, §5.2.1-5.2.3 | Node, Link and IPv4 Prefix NLRI: Protocol-ID, Identifier, descriptor TLVs, Node Descriptor sub-TLVs | `parse_bgp_update_mp_reach_bgp_ls_node_link_prefix` |
+//! | §5.2 | SAFI 72 RD; unknown NLRI type, overrunning descriptors and truncated body kept as `value` | `parse_bgp_update_mp_reach_bgp_ls_vpn_unknown_and_malformed` |
+//! | §5.2; RFC 7911 §3 | Withdrawn NLRI, ADD-PATH block, truncated tail kept raw | `parse_bgp_update_bgp_ls_withdrawn_add_path_and_tail` |
+//! | §5.5 | IPv4 next hop (SAFI 71) and RD + IPv6 next hop (SAFI 72) | `parse_bgp_update_mp_reach_bgp_ls_next_hop` |
+//! | IANA BGP-LS | NLRI Type and Protocol-ID names | `bgp_ls_nlri_name_tables` |
+//!
 //! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
 //!
 //! | RFC Section | Description | Test |
@@ -453,6 +466,11 @@ const SAFI_MPLS_VPN: u8 = 128;
 /// Its NLRI (RD + prefix, without a label; RFC 6514, Section 10 —
 /// <https://www.rfc-editor.org/rfc/rfc6514#section-10>) is not decoded.
 const SAFI_MULTICAST_VPN: u8 = 129;
+/// AFI and SAFIs of BGP-LS (RFC 9552, Section 5.2 —
+/// <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>).
+const AFI_BGP_LS: u16 = 16388;
+const SAFI_BGP_LS: u8 = 71;
+const SAFI_BGP_LS_VPN: u8 = 72;
 /// Size of a Route Distinguisher (RFC 4364, Section 4.2 —
 /// <https://www.rfc-editor.org/rfc/rfc4364#section-4.2>).
 const RD_SIZE: usize = 8;
@@ -535,6 +553,7 @@ fn afi_name(v: u16) -> Option<&'static str> {
         1 => Some("IPv4"),
         2 => Some("IPv6"),
         25 => Some("L2VPN"),
+        16388 => Some("BGP-LS"),
         _ => None,
     }
 }
@@ -550,6 +569,7 @@ fn safi_name(v: u8) -> Option<&'static str> {
         65 => Some("VPLS"),
         70 => Some("EVPN"),
         71 => Some("BGP-LS"),
+        72 => Some("BGP-LS-VPN"),
         73 => Some("SR Policy"),
         85 => Some("BGP-MUP"),
         128 => Some("MPLS-labeled VPN"),
@@ -5385,6 +5405,9 @@ enum MpNlriEncoding {
     /// and 8 — <https://www.rfc-editor.org/rfc/rfc8955#section-4>; RFC 8956 —
     /// <https://www.rfc-editor.org/rfc/rfc8956>).
     FlowSpec { ipv6: bool, vpn: bool },
+    /// Link-State NLRI, with an RD when `vpn` (RFC 9552, Section 5.2 —
+    /// <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>).
+    BgpLs { vpn: bool },
 }
 
 /// Shape of a labeled NLRI block.
@@ -6537,6 +6560,284 @@ fn push_flowspec_operators<'pkt>(
     buf.end_container(array_idx);
 }
 
+/// Returns a human-readable name for a BGP-LS NLRI Type.
+///
+/// IANA BGP-LS NLRI Types —
+/// <https://www.iana.org/assignments/bgp-ls-parameters/bgp-ls-parameters.xhtml#nlri-types>
+fn bgp_ls_nlri_type_name(v: u16) -> Option<&'static str> {
+    match v {
+        // RFC 9552, Section 5.2 — https://www.rfc-editor.org/rfc/rfc9552#section-5.2
+        1 => Some("Node NLRI"),
+        2 => Some("Link NLRI"),
+        3 => Some("IPv4 Topology Prefix NLRI"),
+        4 => Some("IPv6 Topology Prefix NLRI"),
+        // RFC 9857 — https://www.rfc-editor.org/rfc/rfc9857
+        5 => Some("SR Policy Candidate Path NLRI"),
+        // RFC 9514 — https://www.rfc-editor.org/rfc/rfc9514
+        6 => Some("SRv6 SID NLRI"),
+        _ => None,
+    }
+}
+
+/// Returns a human-readable name for a BGP-LS Protocol-ID.
+///
+/// IANA BGP-LS Protocol-IDs —
+/// <https://www.iana.org/assignments/bgp-ls-parameters/bgp-ls-parameters.xhtml#protocol-ids>
+fn bgp_ls_protocol_id_name(v: u8) -> Option<&'static str> {
+    match v {
+        // RFC 9552, Section 5.2 — https://www.rfc-editor.org/rfc/rfc9552#section-5.2
+        1 => Some("IS-IS Level 1"),
+        2 => Some("IS-IS Level 2"),
+        3 => Some("OSPFv2"),
+        4 => Some("Direct"),
+        5 => Some("Static configuration"),
+        6 => Some("OSPFv3"),
+        // RFC 9086 — https://www.rfc-editor.org/rfc/rfc9086
+        7 => Some("BGP"),
+        // RFC 9857 — https://www.rfc-editor.org/rfc/rfc9857
+        9 => Some("Segment Routing"),
+        _ => None,
+    }
+}
+
+/// NLRI Type (2) + Total NLRI Length (2) (RFC 9552, Section 5.2).
+const BGP_LS_NLRI_HEADER_SIZE: usize = 4;
+/// Protocol-ID (1) + Identifier (8) (RFC 9552, Section 5.2).
+const BGP_LS_NLRI_FIXED_SIZE: usize = 9;
+/// Highest NLRI Type whose body is Protocol-ID, Identifier and TLVs: Node,
+/// Link, IPv4 / IPv6 Topology Prefix (RFC 9552, Section 5.2), SR Policy
+/// Candidate Path (RFC 9857 — <https://www.rfc-editor.org/rfc/rfc9857>) and
+/// SRv6 SID (RFC 9514 — <https://www.rfc-editor.org/rfc/rfc9514>).
+const BGP_LS_NLRI_TYPE_MAX_DECODED: u16 = 6;
+/// Local / Remote Node Descriptors TLVs, whose values are sub-TLVs (RFC 9552,
+/// Sections 5.2.1.2-5.2.1.3 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2.1.2>).
+const BGP_LS_LOCAL_NODE_DESCRIPTORS: u16 = 256;
+const BGP_LS_REMOTE_NODE_DESCRIPTORS: u16 = 257;
+
+/// Returns how many leading octets of `data` frame as Link-State NLRI (NLRI
+/// Type, Total NLRI Length, body), each preceded by `path_id_len` octets of
+/// Path Identifier. The framing stops at the Reserved NLRI Type 0, and at an
+/// NLRI of Types 1-6 whose body does not parse (see [`bgp_ls_body_valid`]).
+fn bgp_ls_block_framed_len(data: &[u8], path_id_len: usize, vpn: bool) -> usize {
+    let mut pos = 0;
+    while pos < data.len() {
+        let nlri = pos + path_id_len;
+        let (Ok(nlri_type), Ok(len)) = (read_be_u16(data, nlri), read_be_u16(data, nlri + 2))
+        else {
+            break;
+        };
+        let end = nlri + BGP_LS_NLRI_HEADER_SIZE + usize::from(len);
+        if nlri_type == 0 || end > data.len() {
+            break;
+        }
+        if (1..=BGP_LS_NLRI_TYPE_MAX_DECODED).contains(&nlri_type)
+            && !bgp_ls_body_valid(&data[nlri + BGP_LS_NLRI_HEADER_SIZE..end], vpn)
+        {
+            break;
+        }
+        pos = end;
+    }
+    pos
+}
+
+/// Returns `true` when a BGP-LS block carries RFC 7911 ADD-PATH Path
+/// Identifiers: it does not frame as Link-State NLRI without them — a Path
+/// Identifier usually starts with zero octets, which would read as the
+/// Reserved NLRI Type 0, or as a Node NLRI without a Protocol-ID — and
+/// frames further with them.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_bgp_ls(data: &[u8], vpn: bool) -> bool {
+    let plain = bgp_ls_block_framed_len(data, 0, vpn);
+    plain != data.len() && bgp_ls_block_framed_len(data, PATH_ID_SIZE, vpn) > plain
+}
+
+/// Parses a BGP-LS NLRI block (AFI 16388, SAFI 71, or 72 with an RD) into
+/// one object per Link-State NLRI and returns the number of octets consumed.
+///
+/// RFC 9552, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>
+///
+/// Each NLRI is NLRI Type, Total NLRI Length ("the cumulative length, in
+/// octets, of the rest of the NLRI, not including the NLRI Type field or
+/// itself. For VPN applications, it also includes the length of the Route
+/// Distinguisher"), the RD for SAFI 72, then for NLRI Types 1-6 a
+/// Protocol-ID, an Identifier and descriptor TLVs. "An implementation MUST
+/// handle unknown Link-State NLRI types as opaque objects": their body, and
+/// a body that does not parse, stay as `value`.
+fn parse_bgp_ls_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+    vpn: bool,
+) -> usize {
+    let f = &BGP_LS_NLRI_FIELDS;
+    let id_len = if detect_add_path_bgp_ls(data, vpn) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
+    let mut pos = 0;
+    while pos + id_len + BGP_LS_NLRI_HEADER_SIZE <= data.len() {
+        let nlri = pos + id_len;
+        let nlri_type = read_be_u16(data, nlri).unwrap_or_default();
+        let len = read_be_u16(data, nlri + 2).unwrap_or_default();
+        let end = nlri + BGP_LS_NLRI_HEADER_SIZE + usize::from(len);
+        if end > data.len() {
+            break;
+        }
+        let abs = base_offset + pos;
+        let nlri_abs = base_offset + nlri;
+        let obj_idx = buf.begin_container(
+            &BGP_LS_NLRI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + end,
+        );
+        if id_len != 0 {
+            buf.push_field(
+                &f[FD_LS_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+        buf.push_field(
+            &f[FD_LS_NLRI_TYPE],
+            FieldValue::U16(nlri_type),
+            nlri_abs..nlri_abs + 2,
+        );
+        buf.push_field(
+            &f[FD_LS_TOTAL_NLRI_LENGTH],
+            FieldValue::U16(len),
+            nlri_abs + 2..nlri_abs + BGP_LS_NLRI_HEADER_SIZE,
+        );
+        let body = &data[nlri + BGP_LS_NLRI_HEADER_SIZE..end];
+        let body_abs = nlri_abs + BGP_LS_NLRI_HEADER_SIZE;
+        let decoded =
+            (1..=BGP_LS_NLRI_TYPE_MAX_DECODED).contains(&nlri_type) && bgp_ls_body_valid(body, vpn);
+        if decoded {
+            push_bgp_ls_body(buf, body, body_abs, vpn);
+        } else if !body.is_empty() {
+            buf.push_field(
+                &f[FD_LS_VALUE],
+                FieldValue::Bytes(body),
+                body_abs..body_abs + body.len(),
+            );
+        }
+        buf.end_container(obj_idx);
+        pos = end;
+    }
+    pos
+}
+
+/// Returns `true` when a Link-State NLRI body is the RD (SAFI 72), a
+/// Protocol-ID, an Identifier and exactly a sequence of TLVs whose Node
+/// Descriptors TLVs are exactly sequences of sub-TLVs.
+fn bgp_ls_body_valid(body: &[u8], vpn: bool) -> bool {
+    let start = if vpn { RD_SIZE } else { 0 } + BGP_LS_NLRI_FIXED_SIZE;
+    let Some(tlvs) = body.get(start..) else {
+        return false;
+    };
+    let header_len = BGP_LS_TLV_SHAPE.header_len();
+    let mut pos = 0;
+    while pos < tlvs.len() {
+        let Some((tlv_type, value_len)) = tlv_at(tlvs, pos, BGP_LS_TLV_SHAPE) else {
+            return false;
+        };
+        let value = &tlvs[pos + header_len..pos + header_len + value_len];
+        if is_bgp_ls_node_descriptors(tlv_type) && !tlvs_fit(value, BGP_LS_TLV_SHAPE) {
+            return false;
+        }
+        pos += header_len + value_len;
+    }
+    true
+}
+
+/// Returns `true` when `data` is exactly a sequence of TLVs of the given
+/// shape; an empty sequence fits.
+fn tlvs_fit(data: &[u8], shape: TlvShape) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        match tlv_at(data, pos, shape) {
+            Some((_, value_len)) => pos += shape.header_len() + value_len,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Whether a descriptor TLV is a Local / Remote Node Descriptors TLV.
+fn is_bgp_ls_node_descriptors(tlv_type: u16) -> bool {
+    tlv_type == BGP_LS_LOCAL_NODE_DESCRIPTORS || tlv_type == BGP_LS_REMOTE_NODE_DESCRIPTORS
+}
+
+/// Pushes a Link-State NLRI body validated by [`bgp_ls_body_valid`].
+///
+/// RFC 9552, Sections 5.2.1-5.2.3 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2.1>:
+/// the Local / Remote Node Descriptors TLVs carry sub-TLVs; the other
+/// descriptor TLVs keep their value as bytes.
+fn push_bgp_ls_body<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    body: &'pkt [u8],
+    offset: usize,
+    vpn: bool,
+) {
+    let f = &BGP_LS_NLRI_FIELDS;
+    let mut pos = 0;
+    if vpn {
+        buf.push_field(
+            &f[FD_LS_RD],
+            FieldValue::Bytes(&body[..RD_SIZE]),
+            offset..offset + RD_SIZE,
+        );
+        pos = RD_SIZE;
+    }
+    buf.push_field(
+        &f[FD_LS_PROTOCOL_ID],
+        FieldValue::U8(body[pos]),
+        offset + pos..offset + pos + 1,
+    );
+    buf.push_field(
+        &f[FD_LS_IDENTIFIER],
+        FieldValue::U64(read_be_u64(body, pos + 1).unwrap_or_default()),
+        offset + pos + 1..offset + pos + BGP_LS_NLRI_FIXED_SIZE,
+    );
+    pos += BGP_LS_NLRI_FIXED_SIZE;
+    let tlvs = &body[pos..];
+    let tlvs_offset = offset + pos;
+    let array_idx = buf.begin_container(
+        &f[FD_LS_DESCRIPTORS],
+        FieldValue::Array(0..0),
+        tlvs_offset..tlvs_offset + tlvs.len(),
+    );
+    let d = &BGP_LS_DESCRIPTOR_FIELDS;
+    let mut p = 0;
+    while let Some(tlv) = begin_tlv_object(
+        buf,
+        &BGP_LS_DESCRIPTOR_OBJECT_DESCRIPTOR,
+        d,
+        tlvs,
+        p,
+        tlvs_offset,
+        BGP_LS_TLV_SHAPE,
+    ) {
+        if is_bgp_ls_node_descriptors(tlv.tlv_type) {
+            push_generic_tlvs(
+                buf,
+                &d[FD_LSD_SUB_TLVS],
+                &BGP_LS_TLV_OBJECT_DESCRIPTOR,
+                BGP_LS_TLV_CHILDREN,
+                tlv.value,
+                tlv.value_offset,
+                BGP_LS_TLV_SHAPE,
+            );
+        } else {
+            push_bytes_nonempty(buf, &d[FD_LSD_VALUE], tlv.value, tlv.value_offset);
+        }
+        buf.end_container(tlv.idx);
+        p = tlv.next;
+    }
+    buf.end_container(array_idx);
+}
+
 /// Selects the NLRI encoding for an (AFI, SAFI) pair.
 ///
 /// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
@@ -6559,6 +6860,8 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
         (AFI_IPV4 | AFI_IPV6, SAFI_MPLS_VPN) => Some(MpNlriEncoding::Labeled { ipv6, vpn: true }),
         (_, SAFI_MUP) => Some(MpNlriEncoding::Mup { ipv6 }),
         (AFI_L2VPN, SAFI_EVPN) => Some(MpNlriEncoding::Evpn),
+        (AFI_BGP_LS, SAFI_BGP_LS) => Some(MpNlriEncoding::BgpLs { vpn: false }),
+        (AFI_BGP_LS, SAFI_BGP_LS_VPN) => Some(MpNlriEncoding::BgpLs { vpn: true }),
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC) => Some(MpNlriEncoding::FlowSpec { ipv6, vpn: false }),
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC_VPN) => {
             Some(MpNlriEncoding::FlowSpec { ipv6, vpn: true })
@@ -6609,6 +6912,7 @@ fn parse_mp_nlri_block<'pkt>(
             MpNlriEncoding::FlowSpec { ipv6, vpn } => {
                 parse_flowspec_nlri(buf, data, offset, ipv6, vpn)
             }
+            MpNlriEncoding::BgpLs { vpn } => parse_bgp_ls_nlri(buf, data, offset, vpn),
         };
         if buf.field_count() == before {
             buf.pop_field(); // remove empty array placeholder
@@ -6642,6 +6946,8 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 /// - AFI 1 or 25 (L2VPN), non-VPN SAFI, length 4: IPv4 address.
 /// - AFI 25 (L2VPN), non-VPN SAFI, length 16 or 32: IPv6 address(es), as
 ///   for AFI 2 (RFC 7432, Section 9.2.1).
+/// - AFI 16388 (BGP-LS): as AFI 1 / 2, with SAFI 72 as the VPN SAFI
+///   (RFC 9552, Section 5.5).
 /// - AFI 1 or 2, non-VPN SAFI, length 16 or 32: IPv6 global address,
 ///   optionally followed by a link-local address (RFC 2545, Section 3; for
 ///   AFI 1 RFC 8950, Section 3).
@@ -6660,6 +6966,7 @@ fn is_vpn_next_hop_safi(safi: u8) -> bool {
 /// RFC 4659, Section 3.2.1.1 — <https://www.rfc-editor.org/rfc/rfc4659#section-3.2.1.1>
 /// RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>
 /// RFC 7432, Section 9.2.1 — <https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1>
+/// RFC 9552, Section 5.5 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.5>
 fn parse_mp_next_hop<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     afi: u16,
@@ -6672,13 +6979,22 @@ fn parse_mp_next_hop<'pkt>(
     // field of the MP_REACH_NLRI attribute of the route MUST be set to the
     // IPv4 or IPv6 address of the advertising PE" (RFC 7432, Section 9.2.1 —
     // https://www.rfc-editor.org/rfc/rfc7432#section-9.2.1).
-    let l2vpn = afi == AFI_L2VPN && !is_vpn_next_hop_safi(safi);
+    // BGP-LS: "If the next-hop length is 4, then the next hop is an IPv4
+    // address; if the next-hop length is 16, then it is a global IPv6
+    // address; and if the next-hop length is 32, then there is one global
+    // IPv6 address followed by an IPv6 link-local address. ... For VPN
+    // Subsequent Address Family Identifier (SAFI), as per custom, an 8-byte
+    // Route Distinguisher set to all zero is prepended to the next hop"
+    // (RFC 9552, Section 5.5 — https://www.rfc-editor.org/rfc/rfc9552#section-5.5).
+    let bgp_ls = afi == AFI_BGP_LS;
+    let vpn = is_vpn_next_hop_safi(safi) || (bgp_ls && safi == SAFI_BGP_LS_VPN);
+    let other_afi = (afi == AFI_L2VPN || bgp_ls) && !vpn;
     // Length of the Route Distinguisher preceding each address, if any.
-    let rd_len = match (is_vpn_next_hop_safi(safi), nh.len()) {
-        (false, 4) if afi == AFI_IPV4 || l2vpn => 0,
-        (false, 16 | 32) if ip_afi || l2vpn => 0,
-        (true, 12) if afi == AFI_IPV4 => RD_SIZE,
-        (true, 24 | 48) if ip_afi => RD_SIZE,
+    let rd_len = match (vpn, nh.len()) {
+        (false, 4) if afi == AFI_IPV4 || other_afi => 0,
+        (false, 16 | 32) if ip_afi || other_afi => 0,
+        (true, 12) if afi == AFI_IPV4 || bgp_ls => RD_SIZE,
+        (true, 24 | 48) if ip_afi || bgp_ls => RD_SIZE,
         _ => {
             buf.push_field(
                 &MP_CHILDREN[FD_MP_NEXT_HOP],
@@ -7072,7 +7388,8 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// schema on either array.
 ///
 /// The element shape depends on the SAFI: SAFI 70 (EVPN) yields EVPN entries,
-/// SAFI 85 (BGP-MUP) yields MUP entries,
+/// SAFI 85 (BGP-MUP) yields MUP entries, SAFI 133 / 134 yield Flow
+/// Specification entries, SAFI 71 / 72 yield Link-State NLRI entries,
 /// SAFI 4 / 128 yield labeled entries (`label_stack` or `compatibility`, `rd`
 /// for SAFI 128, `prefix`), and SAFI 1 / 2 yield plain prefix entries. All
 /// fields are therefore optional.
@@ -7080,9 +7397,11 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// RFC 4760 — <https://www.rfc-editor.org/rfc/rfc4760>
 /// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
 /// RFC 7432, Section 7 — <https://www.rfc-editor.org/rfc/rfc7432#section-7>
+/// RFC 8955, Section 4 — <https://www.rfc-editor.org/rfc/rfc8955#section-4>
+/// RFC 9552, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 30] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 35] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
@@ -7140,6 +7459,14 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 30] = [
     // are listed above.
     FLOWSPEC_NLRI_FIELDS[FD_FS_NLRI_LENGTH],
     FLOWSPEC_NLRI_FIELDS[FD_FS_COMPONENTS],
+    // Link-State NLRI fields (RFC 9552, Section 5.2 —
+    // https://www.rfc-editor.org/rfc/rfc9552#section-5.2); `path_id`, `rd`
+    // and `value` are listed above.
+    BGP_LS_NLRI_FIELDS[FD_LS_NLRI_TYPE],
+    BGP_LS_NLRI_FIELDS[FD_LS_TOTAL_NLRI_LENGTH],
+    BGP_LS_NLRI_FIELDS[FD_LS_PROTOCOL_ID],
+    BGP_LS_NLRI_FIELDS[FD_LS_IDENTIFIER],
+    BGP_LS_NLRI_FIELDS[FD_LS_DESCRIPTORS],
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
@@ -7310,6 +7637,69 @@ const FLOWSPEC_OPERATOR_FIELDS: [FieldDescriptor; 7] = [
 static FLOWSPEC_OPERATOR_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("operator", "Operator", FieldType::Object)
         .with_children(&FLOWSPEC_OPERATOR_FIELDS);
+
+/// Field descriptor indices for [`BGP_LS_NLRI_FIELDS`].
+const FD_LS_PATH_ID: usize = 0;
+const FD_LS_NLRI_TYPE: usize = 1;
+const FD_LS_TOTAL_NLRI_LENGTH: usize = 2;
+const FD_LS_RD: usize = 3;
+const FD_LS_PROTOCOL_ID: usize = 4;
+const FD_LS_IDENTIFIER: usize = 5;
+const FD_LS_DESCRIPTORS: usize = 6;
+const FD_LS_VALUE: usize = 7;
+
+/// Child field descriptors of a Link-State NLRI entry.
+///
+/// RFC 9552, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>
+const BGP_LS_NLRI_FIELDS: [FieldDescriptor; 8] = [
+    PATH_ID_FIELD,
+    FieldDescriptor::new("nlri_type", "NLRI Type", FieldType::U16)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U16(t) => bgp_ls_nlri_type_name(*t),
+            _ => None,
+        }),
+    FieldDescriptor::new("total_nlri_length", "Total NLRI Length", FieldType::U16).optional(),
+    MUP_NLRI_FIELDS[FD_MUP_RD],
+    FieldDescriptor::new("protocol_id", "Protocol-ID", FieldType::U8)
+        .optional()
+        .with_display_fn(|v, _| match v {
+            FieldValue::U8(p) => bgp_ls_protocol_id_name(*p),
+            _ => None,
+        }),
+    FieldDescriptor::new("identifier", "Identifier", FieldType::U64).optional(),
+    FieldDescriptor::new("descriptors", "Descriptor TLVs", FieldType::Array)
+        .optional()
+        .with_children(&BGP_LS_DESCRIPTOR_FIELDS),
+    MUP_NLRI_FIELDS[FD_MUP_VALUE],
+];
+
+/// Object descriptor for Link-State NLRI entries.
+static BGP_LS_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("link_state_nlri", "Link-State NLRI", FieldType::Object)
+        .with_children(&BGP_LS_NLRI_FIELDS);
+
+/// Field descriptor indices for [`BGP_LS_DESCRIPTOR_FIELDS`].
+const FD_LSD_SUB_TLVS: usize = 2;
+const FD_LSD_VALUE: usize = 3;
+
+/// Child field descriptors of a Link-State NLRI descriptor TLV: Node
+/// Descriptors TLVs carry `sub_tlvs`, the others a `value`.
+///
+/// RFC 9552, Sections 5.2.1-5.2.3 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2.1>
+const BGP_LS_DESCRIPTOR_FIELDS: [FieldDescriptor; 4] = [
+    BGP_LS_TLV_FIELDS[0],
+    BGP_LS_TLV_FIELDS[1],
+    FieldDescriptor::new("sub_tlvs", "Sub-TLVs", FieldType::Array)
+        .optional()
+        .with_children(&BGP_LS_TLV_FIELDS),
+    BGP_LS_TLV_FIELDS[2],
+];
+
+/// Object descriptor for Link-State NLRI descriptor TLVs.
+static BGP_LS_DESCRIPTOR_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("descriptor", "Descriptor TLV", FieldType::Object)
+        .with_children(&BGP_LS_DESCRIPTOR_FIELDS);
 
 /// Object descriptor for AS_PATH segment entries.
 static AS_PATH_SEG_OBJECT_DESCRIPTOR: FieldDescriptor =
@@ -9121,6 +9511,21 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc8956",
     ),
     SpecReference::new(
+        "RFC 9514",
+        "Border Gateway Protocol - Link State (BGP-LS) Extensions for Segment Routing over IPv6 (SRv6)",
+        "https://www.rfc-editor.org/rfc/rfc9514",
+    ),
+    SpecReference::new(
+        "RFC 9857",
+        "Advertisement of Segment Routing Policies Using BGP - Link State",
+        "https://www.rfc-editor.org/rfc/rfc9857",
+    ),
+    SpecReference::new(
+        "RFC 9086",
+        "Border Gateway Protocol - Link State (BGP-LS) Extensions for Segment Routing BGP Egress Peer Engineering",
+        "https://www.rfc-editor.org/rfc/rfc9086",
+    ),
+    SpecReference::new(
         "RFC 9135",
         "Integrated Routing and Bridging in Ethernet VPN (EVPN)",
         "https://www.rfc-editor.org/rfc/rfc9135",
@@ -10304,6 +10709,7 @@ mod tests {
         assert_eq!(afi_name(1), Some("IPv4"));
         assert_eq!(afi_name(2), Some("IPv6"));
         assert_eq!(afi_name(25), Some("L2VPN"));
+        assert_eq!(afi_name(16388), Some("BGP-LS"));
         assert_eq!(afi_name(0), None);
 
         // IANA SAFI Namespace.
@@ -10314,6 +10720,7 @@ mod tests {
             (65, "VPLS"),
             (70, "EVPN"),
             (71, "BGP-LS"),
+            (72, "BGP-LS-VPN"),
             (73, "SR Policy"),
             (SAFI_MUP, "BGP-MUP"),
             (128, "MPLS-labeled VPN"),
@@ -16472,5 +16879,264 @@ mod tests {
         ));
         assert!(!detect_add_path_flowspec(&[0, 0, 0], false, false));
         assert!(!flowspec_block_parses(&[0xf0], 0, false, false));
+    }
+
+    // ---------------------------------------------------------------------
+    // BGP-LS NLRI (AFI 16388 / SAFI 71, 72; RFC 9552, Section 5.2)
+    // ---------------------------------------------------------------------
+
+    /// Helper: a BGP-LS TLV with a 2-octet Type and Length.
+    fn ls_tlv(tlv_type: u16, value: &[u8]) -> Vec<u8> {
+        let mut raw = tlv_type.to_be_bytes().to_vec();
+        raw.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        raw.extend_from_slice(value);
+        raw
+    }
+
+    /// Helper: a Link-State NLRI of `nlri_type` with `body` after the Total
+    /// NLRI Length.
+    fn ls_nlri(nlri_type: u16, body: &[u8]) -> Vec<u8> {
+        let mut raw = nlri_type.to_be_bytes().to_vec();
+        raw.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        raw.extend_from_slice(body);
+        raw
+    }
+
+    /// Helper: Protocol-ID, Identifier and a Local Node Descriptors TLV with
+    /// an Autonomous System (65000) and an IS-IS IGP Router-ID sub-TLV.
+    fn ls_node_body(protocol_id: u8) -> Vec<u8> {
+        let mut subs = ls_tlv(512, &65000u32.to_be_bytes());
+        subs.extend(ls_tlv(515, &[0x19, 0x21, 0x68, 0x00, 0x00, 0x01]));
+        let mut body = vec![protocol_id];
+        body.extend_from_slice(&7u64.to_be_bytes());
+        body.extend(ls_tlv(256, &subs));
+        body
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_bgp_ls_node_link_prefix() {
+        // RFC 9552, Section 5.2: Node (1), Link (2) and IPv4 Topology Prefix
+        // (3) NLRI with Local / Remote Node Descriptors (Section 5.2.1), Link
+        // Descriptors (Section 5.2.2) and Prefix Descriptors (Section 5.2.3).
+        let node = ls_nlri(1, &ls_node_body(2));
+        let mut link = ls_node_body(3);
+        link.extend(ls_tlv(257, &ls_tlv(515, &[192, 0, 2, 2])));
+        link.extend(ls_tlv(259, &[10, 0, 0, 1]));
+        link.extend(ls_tlv(260, &[10, 0, 0, 2]));
+        let link = ls_nlri(2, &link);
+        let mut prefix = ls_node_body(1);
+        prefix.extend(ls_tlv(265, &[24, 10, 1, 2]));
+        let prefix = ls_nlri(3, &prefix);
+        let mut nlri = node.clone();
+        nlri.extend(&link);
+        nlri.extend(&prefix);
+        with_mp_reach_nlri(16388, 71, &nlri, |buf, mp, entries| {
+            assert!(nested_field_by_name_opt(buf, mp, "nlri_raw").is_none());
+            assert_eq!(entries.len(), 3);
+            let e = &entries[0];
+            assert_eq!(*nested_field_value(buf, e, "nlri_type"), FieldValue::U16(1));
+            assert_eq!(
+                buf.resolve_nested_display_name(e, "nlri_type_name"),
+                Some("Node NLRI")
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "total_nlri_length"),
+                FieldValue::U16((node.len() - 4) as u16)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "protocol_id"),
+                FieldValue::U8(2)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(e, "protocol_id_name"),
+                Some("IS-IS Level 2")
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "identifier"),
+                FieldValue::U64(7)
+            );
+            let descs = array_objs(buf, e, "descriptors");
+            assert_eq!(descs.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &descs[0], "type"),
+                FieldValue::U16(256)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(&descs[0], "type_name"),
+                Some("Local Node Descriptors")
+            );
+            let subs = array_objs(buf, &descs[0], "sub_tlvs");
+            assert_eq!(subs.len(), 2);
+            assert_eq!(
+                buf.resolve_nested_display_name(&subs[0], "type_name"),
+                Some("Autonomous System")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &subs[0], "value"),
+                FieldValue::Bytes(&65000u32.to_be_bytes())
+            );
+            assert!(
+                !direct_children(buf, &descs[0])
+                    .iter()
+                    .any(|f| f.name() == "value")
+            );
+
+            let descs = array_objs(buf, &entries[1], "descriptors");
+            assert_eq!(descs.len(), 4);
+            assert_eq!(
+                buf.resolve_nested_display_name(&descs[1], "type_name"),
+                Some("Remote Node Descriptors")
+            );
+            assert_eq!(array_objs(buf, &descs[1], "sub_tlvs").len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &descs[2], "value"),
+                FieldValue::Bytes(&[10, 0, 0, 1])
+            );
+            assert!(nested_field_by_name_opt(buf, &descs[2], "sub_tlvs").is_none());
+
+            let descs = array_objs(buf, &entries[2], "descriptors");
+            assert_eq!(
+                buf.resolve_nested_display_name(&descs[1], "type_name"),
+                Some("IP Reachability Information")
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_bgp_ls_vpn_unknown_and_malformed() {
+        // SAFI 72 carries an RD after the Total NLRI Length (RFC 9552,
+        // Section 5.2, Figure 6). "An implementation MUST handle unknown
+        // Link-State NLRI types as opaque objects": NLRI type 7 keeps
+        // `value`, as does a Node NLRI whose descriptors overrun it.
+        let mut vpn = vec![0, 0, 0xfd, 0xe8, 0, 0, 0, 0x64];
+        vpn.extend(ls_node_body(3));
+        let vpn = ls_nlri(1, &vpn);
+        with_mp_reach_nlri(16388, 72, &vpn, |buf, _, entries| {
+            let rd = nested_field_by_name(buf, &entries[0], "rd");
+            assert_eq!(
+                call_format_fn(rd.descriptor.format_fn.unwrap(), &rd.value),
+                "\"0:65000:100\""
+            );
+            assert_eq!(array_objs(buf, &entries[0], "descriptors").len(), 1);
+        });
+        let mut bad = ls_node_body(3);
+        bad.extend_from_slice(&[1, 0x08, 0, 9, 0]);
+        let mut nlri = ls_nlri(7, &[1, 2, 3]);
+        nlri.extend(ls_nlri(1, &bad));
+        nlri.extend(ls_nlri(1, &[3, 0, 0]));
+        with_mp_reach_nlri(16388, 71, &nlri, |buf, _, entries| {
+            assert_eq!(entries.len(), 3);
+            assert_eq!(
+                buf.resolve_nested_display_name(&entries[0], "nlri_type_name"),
+                None
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "value"),
+                FieldValue::Bytes(&[1, 2, 3])
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[0], "protocol_id").is_none());
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "value"),
+                FieldValue::Bytes(&bad)
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[1], "descriptors").is_none());
+            assert_eq!(
+                *nested_field_value(buf, &entries[2], "value"),
+                FieldValue::Bytes(&[3, 0, 0])
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_bgp_ls_withdrawn_add_path_and_tail() {
+        // Withdrawn Link-State NLRI (RFC 9552, Section 5.2), an ADD-PATH block
+        // (RFC 7911, Section 3 — https://www.rfc-editor.org/rfc/rfc7911#section-3)
+        // and a truncated tail kept raw.
+        let node = ls_nlri(1, &ls_node_body(2));
+        let data = build_single_attr_update(15, &build_mp_unreach(16388, 71, &node));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(array_objs(&buf, &mp, "withdrawn_routes").len(), 1);
+
+        let mut add_path = 9u32.to_be_bytes().to_vec();
+        add_path.extend(&node);
+        with_mp_reach_nlri(16388, 71, &add_path, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(9)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "protocol_id"),
+                FieldValue::U8(2)
+            );
+        });
+        assert!(!detect_add_path_bgp_ls(&node, false));
+        assert!(!detect_add_path_bgp_ls(&[0, 0, 0], false));
+        // A Path Identifier whose low octets are zero reads as a Node NLRI
+        // without a body, which does not parse: ADD-PATH.
+        let mut low_zero = 0x0001_0000u32.to_be_bytes().to_vec();
+        low_zero.extend(&node);
+        assert!(detect_add_path_bgp_ls(&low_zero, false));
+        // An ADD-PATH block with a malformed tail still frames further with
+        // Path Identifiers.
+        let mut add_path_tail = add_path.clone();
+        add_path_tail.extend_from_slice(&[0, 0, 0, 1, 0, 1, 0, 9]);
+        assert!(detect_add_path_bgp_ls(&add_path_tail, false));
+        with_mp_reach_nlri(16388, 71, &add_path_tail, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(9)
+            );
+        });
+
+        let mut tail = node.clone();
+        tail.extend_from_slice(&[0, 1, 0, 9]);
+        with_mp_reach_nlri(16388, 71, &tail, |buf, mp, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&[0, 1, 0, 9])
+            );
+        });
+    }
+
+    #[test]
+    fn bgp_ls_nlri_name_tables() {
+        assert_eq!((0..=u16::MAX).filter_map(bgp_ls_nlri_type_name).count(), 6);
+        assert_eq!(bgp_ls_nlri_type_name(6), Some("SRv6 SID NLRI"));
+        assert_eq!((0..=u8::MAX).filter_map(bgp_ls_protocol_id_name).count(), 8);
+        assert_eq!(bgp_ls_protocol_id_name(9), Some("Segment Routing"));
+        assert_eq!(bgp_ls_protocol_id_name(8), None);
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_bgp_ls_next_hop() {
+        // RFC 9552, Section 5.5 (https://www.rfc-editor.org/rfc/rfc9552#section-5.5):
+        // an IPv4 next hop for SAFI 71 and an RD + IPv6 next hop for SAFI 72.
+        let data = build_single_attr_update(14, &build_mp_reach(16388, 71, &[192, 0, 2, 1], &[]));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        let mut nh = vec![0u8; 8];
+        nh.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let data = build_single_attr_update(14, &build_mp_reach(16388, 72, &nh, &[]));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop_rd"),
+            FieldValue::Bytes(&[0; 8])
+        );
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        );
     }
 }
