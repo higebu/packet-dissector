@@ -45,6 +45,9 @@ default = [
   "nas-eps",
   "ngap",
   "s1ap",
+  "xnap",
+  "f1ap",
+  "e1ap",
   "sgsap",
   "geneve",
   "gre",
@@ -52,7 +55,9 @@ default = [
   "lldp",
   "eap",
   "stp",
+  "cdp",
   "mpls",
+  "nsh",
   "ntp",
   "ospf",
   "vrrp",
@@ -114,6 +119,9 @@ nas5g = ["dep:packet-dissector-nas5g"]
 nas-eps = ["dep:packet-dissector-nas-eps"]
 ngap = ["dep:packet-dissector-ngap", "nas5g"]
 s1ap = ["dep:packet-dissector-s1ap", "nas-eps"]
+xnap = ["dep:packet-dissector-xnap"]
+f1ap = ["dep:packet-dissector-f1ap"]
+e1ap = ["dep:packet-dissector-e1ap"]
 sgsap = ["dep:packet-dissector-sgsap"]
 geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
@@ -122,7 +130,11 @@ lldp = ["dep:packet-dissector-lldp"]
 # EAP is also decoded inside PPP (Protocol 0xC227) when both are enabled.
 eap = ["dep:packet-dissector-eap", "packet-dissector-ppp?/eap"]
 stp = ["dep:packet-dissector-stp"]
+# CDP is reached through SNAP (OUI 00-00-0C, PID 0x2000), which the
+# Ethernet crate decodes.
+cdp = ["dep:packet-dissector-cdp", "ethernet"]
 mpls = ["dep:packet-dissector-mpls"]
+nsh = ["dep:packet-dissector-nsh"]
 ntp = ["dep:packet-dissector-ntp"]
 ospf = ["dep:packet-dissector-ospf"]
 vrrp = ["dep:packet-dissector-vrrp"]
@@ -160,6 +172,7 @@ layer2 = [
   "lldp",
   "eap",
   "stp",
+  "cdp",
   "ppp",
   "pppoe",
 ]
@@ -182,7 +195,7 @@ application = [
   "quic",
   "stun",
 ]
-tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
+tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = [
@@ -194,6 +207,9 @@ ipsec = ["ah", "esp", "ike"]
   "nas-eps",
   "ngap",
   "s1ap",
+  "xnap",
+  "f1ap",
+  "e1ap",
   "sgsap",
 ]
 
@@ -233,6 +249,9 @@ packet-dissector-nas5g = { workspace = true, optional = true }
 packet-dissector-nas-eps = { workspace = true, optional = true }
 packet-dissector-ngap = { workspace = true, optional = true }
 packet-dissector-s1ap = { workspace = true, optional = true }
+packet-dissector-xnap = { workspace = true, optional = true }
+packet-dissector-f1ap = { workspace = true, optional = true }
+packet-dissector-e1ap = { workspace = true, optional = true }
 packet-dissector-sgsap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }
 packet-dissector-gre = { workspace = true, optional = true }
@@ -240,7 +259,9 @@ packet-dissector-vxlan = { workspace = true, optional = true }
 packet-dissector-lldp = { workspace = true, optional = true }
 packet-dissector-eap = { workspace = true, optional = true }
 packet-dissector-stp = { workspace = true, optional = true }
+packet-dissector-cdp = { workspace = true, optional = true }
 packet-dissector-mpls = { workspace = true, optional = true }
+packet-dissector-nsh = { workspace = true, optional = true }
 packet-dissector-ntp = { workspace = true, optional = true }
 packet-dissector-ospf = { workspace = true, optional = true }
 packet-dissector-vrrp = { workspace = true, optional = true }

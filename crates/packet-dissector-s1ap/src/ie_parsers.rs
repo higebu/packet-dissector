@@ -15,16 +15,16 @@
 use core::ops::Range;
 use std::io::{self, Write};
 
+use packet_dissector_aper::AperReader;
+use packet_dissector_aper::helpers::{
+    ensure_consumed, read_aligned_octets, read_bit_string_field, read_sequence_preamble_bitmap,
+    skip_sequence_tail,
+};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{
     FieldDescriptor, FieldType, FieldValue, FormatContext, format_utf8_lossy,
 };
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_per::AperReader;
-use packet_dissector_per::ap::{
-    ensure_consumed, read_aligned_octets, read_bit_string_field, read_sequence_preamble,
-    skip_sequence_tail,
-};
 
 use crate::container::{self, IeContext};
 
@@ -565,7 +565,7 @@ fn push_plmn<'pkt>(out: &mut Out<'_, 'pkt>, r: &mut AperReader<'pkt>) -> Result<
 /// two-octet fixed OCTET STRING is not octet-aligned (ITU-T Rec. X.691,
 /// Section 17.6), but follows the aligned PLMN identity here.
 fn push_tai<'pkt>(out: &mut Out<'_, 'pkt>, r: &mut AperReader<'pkt>) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 1)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 1)?;
     push_plmn(out, r)?;
     let start = r.bit_position();
     let tac = r.read_bits(16)? as u16;
@@ -579,7 +579,7 @@ fn push_eutran_cgi<'pkt>(
     out: &mut Out<'_, 'pkt>,
     r: &mut AperReader<'pkt>,
 ) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 1)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 1)?;
     push_plmn(out, r)?;
     let (cell, range) = read_bit_string_field(r, 28)?;
     out.push(FD_CELL_IDENTITY, FieldValue::U32(cell as u32), range);
@@ -595,7 +595,7 @@ fn push_global_enb_id<'pkt>(
     out: &mut Out<'_, 'pkt>,
     r: &mut AperReader<'pkt>,
 ) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 1)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 1)?;
     push_plmn(out, r)?;
     let start = r.bit_position();
     let choice = r.read_choice_index(2, true)?;
@@ -625,7 +625,7 @@ fn push_global_enb_id<'pkt>(
 /// OPTIONAL, ... }` with `MME-Code ::= OCTET STRING (SIZE (1))` and
 /// `M-TMSI ::= OCTET STRING (SIZE (4))` (3GPP TS 36.413, Section 9.3.4).
 fn push_s_tmsi<'pkt>(out: &mut Out<'_, 'pkt>, r: &mut AperReader<'pkt>) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 1)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 1)?;
     let start = r.bit_position();
     let mmec = r.read_bits(8)? as u8;
     out.push(FD_MME_CODE, FieldValue::U8(mmec), r.byte_range_since(start));
@@ -654,7 +654,7 @@ fn push_ue_security_capabilities(
     out: &mut Out<'_, '_>,
     r: &mut AperReader<'_>,
 ) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 1)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 1)?;
     let start = r.bit_position();
     let eea = read_algorithms(r)?;
     out.push(
@@ -688,7 +688,7 @@ fn push_bit_rate(
 /// uEaggregateMaximumBitRateUL, iE-Extensions OPTIONAL, ... }` (3GPP TS
 /// 36.413, Section 9.3.4).
 fn push_ue_ambr(out: &mut Out<'_, '_>, r: &mut AperReader<'_>) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 1)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 1)?;
     push_bit_rate(out, r, FD_UE_AMBR_DL)?;
     push_bit_rate(out, r, FD_UE_AMBR_UL)?;
     skip_sequence_tail(r, extended, opt == 1)
@@ -770,7 +770,7 @@ fn push_e_rab_list<'pkt>(
 /// allocationRetentionPriority, gbrQosInformation OPTIONAL, iE-Extensions
 /// OPTIONAL, ... }` (3GPP TS 36.413, Section 9.3.4).
 fn push_e_rab_qos(out: &mut Out<'_, '_>, r: &mut AperReader<'_>) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 2)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 2)?;
     // QCI ::= INTEGER (0..255): one octet-aligned octet.
     let start = r.bit_position();
     let qci = r.read_constrained_whole_number(0, 255)? as u8;
@@ -778,7 +778,7 @@ fn push_e_rab_qos(out: &mut Out<'_, '_>, r: &mut AperReader<'_>) -> Result<(), P
     // AllocationAndRetentionPriority ::= SEQUENCE { priorityLevel INTEGER
     // (0..15), pre-emptionCapability, pre-emptionVulnerability,
     // iE-Extensions OPTIONAL, ... }
-    let (arp_ext, arp_opt) = read_sequence_preamble(r, 1)?;
+    let (arp_ext, arp_opt) = read_sequence_preamble_bitmap(r, 1)?;
     let start = r.bit_position();
     let level = r.read_constrained_whole_number(0, 15)? as u8;
     let cap = r.read_enumerated(2, false)? as u8;
@@ -795,7 +795,7 @@ fn push_e_rab_qos(out: &mut Out<'_, '_>, r: &mut AperReader<'_>) -> Result<(), P
     if opt & 0b10 != 0 {
         // GBR-QosInformation ::= SEQUENCE { four BitRates, iE-Extensions
         // OPTIONAL, ... }
-        let (gbr_ext, gbr_opt) = read_sequence_preamble(r, 1)?;
+        let (gbr_ext, gbr_opt) = read_sequence_preamble_bitmap(r, 1)?;
         for fd in [FD_MBR_DL, FD_MBR_UL, FD_GBR_DL, FD_GBR_UL] {
             push_bit_rate(out, r, fd)?;
         }
@@ -864,10 +864,10 @@ fn push_e_rab_to_be_setup_item<'pkt>(
     nas_optional: bool,
 ) -> Result<(), PacketError> {
     let (extended, opt, has_nas) = if nas_optional {
-        let (e, o) = read_sequence_preamble(r, 2)?;
+        let (e, o) = read_sequence_preamble_bitmap(r, 2)?;
         (e, o & 0b01, o & 0b10 != 0)
     } else {
-        let (e, o) = read_sequence_preamble(r, 1)?;
+        let (e, o) = read_sequence_preamble_bitmap(r, 1)?;
         (e, o, true)
     };
     push_e_rab_id(out, r)?;
@@ -886,7 +886,7 @@ fn push_e_rab_setup_item<'pkt>(
     out: &mut Out<'_, 'pkt>,
     r: &mut AperReader<'pkt>,
 ) -> Result<(), PacketError> {
-    let (extended, opt) = read_sequence_preamble(r, 1)?;
+    let (extended, opt) = read_sequence_preamble_bitmap(r, 1)?;
     push_e_rab_id(out, r)?;
     push_tla_teid(out, r)?;
     skip_sequence_tail(r, extended, opt == 1)

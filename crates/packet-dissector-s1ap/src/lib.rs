@@ -18,13 +18,13 @@ pub mod ie_id;
 mod ie_parsers;
 pub mod procedure_code;
 
+use packet_dissector_aper::{Extent, read_extent};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_per::{Extent, read_extent};
 
 /// S1AP-PDU header: CHOICE index (1), procedure code (1) and criticality
 /// (1), before the value length determinant.

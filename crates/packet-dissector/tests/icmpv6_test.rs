@@ -13,6 +13,10 @@
 //! | —                 | Offset handling                      | parse_icmpv6_with_offset                           |
 //! | —                 | Dissector metadata                   | icmpv6_dissector_metadata                          |
 //! | —                 | Unknown type (no type-specific parse) | parse_icmpv6_unknown_type                         |
+//! | 2.3               | Checksum over pseudo-header (good)   | icmpv6_checksum_status_good                        |
+//! | 2.3               | Checksum over pseudo-header (bad)    | icmpv6_checksum_status_bad                         |
+//! | 2.3               | No IP layer / truncated unverified   | icmpv6_checksum_status_unverified                  |
+//! | —                 | No status unless verification on     | icmpv6_checksum_status_absent_by_default           |
 //!
 //! # RFC 4884 (Extended ICMP Multi-Part Messages — updates RFC 4443) Coverage
 //!
@@ -174,7 +178,9 @@
 //! | §6.5              | HA Discovery Reply (Type 145)        | parse_icmpv6_home_agent_reply                      |
 //! | §6.5              | HA Reply multiple addresses          | parse_icmpv6_home_agent_reply_multiple_addresses   |
 
+use packet_dissector::checksum::{ChecksumStatus, internet_checksum};
 use packet_dissector::dissector::{DispatchHint, Dissector};
+use packet_dissector::dissectors::ipv6::Ipv6Dissector;
 use packet_dissector::field::{Field, FieldValue};
 use packet_dissector::packet::DissectBuffer;
 
@@ -3339,4 +3345,95 @@ fn parse_icmpv6_rpl_option_missing_length() {
     let opt = nested(&buf, &opts[last]);
     assert_eq!(child(opt, "type"), Some(&FieldValue::U8(4)));
     assert_eq!(child(opt, "malformed"), Some(&FieldValue::Bytes(&[])));
+}
+
+/// The `checksum_status` of `layer`, if the dissector added one.
+fn checksum_status(buf: &DissectBuffer<'_>, layer_name: &str) -> Option<ChecksumStatus> {
+    let layer = buf.layer_by_name(layer_name).unwrap();
+    buf.field_by_name(layer, "checksum_status")
+        .map(|f| ChecksumStatus::from_u8(f.value.as_u8().unwrap()).unwrap())
+}
+
+const V6_SRC: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+const V6_DST: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+
+/// IPv6 + ICMPv6 Echo Request with a checksum over the RFC 8200, Section
+/// 8.1 pseudo-header — <https://www.rfc-editor.org/rfc/rfc8200#section-8.1>.
+fn ipv6_icmpv6_echo(data: &[u8]) -> Vec<u8> {
+    let mut icmp = vec![128, 0, 0, 0, 0x12, 0x34, 0x00, 0x01];
+    icmp.extend_from_slice(data);
+    let mut pseudo = Vec::new();
+    pseudo.extend_from_slice(&V6_SRC);
+    pseudo.extend_from_slice(&V6_DST);
+    pseudo.extend_from_slice(&(icmp.len() as u32).to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0, 58]);
+    let c = internet_checksum(&[&pseudo, &icmp]);
+    icmp[2..4].copy_from_slice(&c.to_be_bytes());
+    let mut pkt = vec![0x60, 0, 0, 0];
+    pkt.extend_from_slice(&(icmp.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&[58, 64]);
+    pkt.extend_from_slice(&V6_SRC);
+    pkt.extend_from_slice(&V6_DST);
+    pkt.extend_from_slice(&icmp);
+    pkt
+}
+
+fn dissect_over_ipv6<'a>(packet: &'a [u8], buf: &mut DissectBuffer<'a>) {
+    buf.set_verify_checksums(true);
+    Ipv6Dissector.dissect(packet, buf, 0).unwrap();
+    Icmpv6Dissector.dissect(&packet[40..], buf, 40).unwrap();
+}
+
+#[test]
+fn icmpv6_checksum_status_absent_by_default() {
+    let pkt = ipv6_icmpv6_echo(b"abc");
+    let mut buf = DissectBuffer::new();
+    Ipv6Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+    Icmpv6Dissector.dissect(&pkt[40..], &mut buf, 40).unwrap();
+    assert_eq!(checksum_status(&buf, "ICMPv6"), None);
+}
+
+#[test]
+fn icmpv6_checksum_status_good() {
+    let pkt = ipv6_icmpv6_echo(b"abc");
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv6(&pkt, &mut buf);
+    assert_eq!(checksum_status(&buf, "ICMPv6"), Some(ChecksumStatus::Good));
+    let layer = buf.layer_by_name("ICMPv6").unwrap();
+    assert_eq!(
+        buf.field_by_name(layer, "checksum_status").unwrap().range,
+        42..44
+    );
+}
+
+#[test]
+fn icmpv6_checksum_status_bad() {
+    // RFC 4443, Section 2.3 — the pseudo-header is covered: a different
+    // destination address makes the checksum wrong.
+    // https://www.rfc-editor.org/rfc/rfc4443#section-2.3
+    let mut pkt = ipv6_icmpv6_echo(b"abc");
+    pkt[39] = 3;
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv6(&pkt, &mut buf);
+    assert_eq!(checksum_status(&buf, "ICMPv6"), Some(ChecksumStatus::Bad));
+}
+
+#[test]
+fn icmpv6_checksum_status_unverified() {
+    let pkt = ipv6_icmpv6_echo(b"abc");
+    let truncated = &pkt[..pkt.len() - 1];
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv6(truncated, &mut buf);
+    assert_eq!(
+        checksum_status(&buf, "ICMPv6"),
+        Some(ChecksumStatus::Unverified)
+    );
+
+    let mut buf = DissectBuffer::new();
+    buf.set_verify_checksums(true);
+    Icmpv6Dissector.dissect(&pkt[40..], &mut buf, 0).unwrap();
+    assert_eq!(
+        checksum_status(&buf, "ICMPv6"),
+        Some(ChecksumStatus::Unverified)
+    );
 }

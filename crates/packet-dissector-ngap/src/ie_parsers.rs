@@ -14,13 +14,9 @@ use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, format_utf8_lossy};
 use packet_dissector_core::packet::DissectBuffer;
 
+use crate::aper::AperReader;
 use crate::container::IeContext;
 use crate::pdu_session;
-use packet_dissector_per::AperReader;
-use packet_dissector_per::ap::{
-    self, ensure_consumed, read_aligned_octets, read_bit_string_field,
-    skip_protocol_ie_single_container, skip_sequence_tail,
-};
 
 // ── Field descriptors ──────────────────────────────────────────────────
 
@@ -494,20 +490,10 @@ fn cause_root_count(group: u64) -> Option<u64> {
 
 // ── Shared APER decoding helpers ───────────────────────────────────────
 
-/// Shifts a byte range relative to the IE value by `offset`.
-pub(crate) fn shift(range: Range<usize>, offset: usize) -> Range<usize> {
-    range.start + offset..range.end + offset
-}
-
-/// Reads the preamble of an extensible SEQUENCE with a single OPTIONAL
-/// `iE-Extensions` component. Returns `(extended, has_ie_extensions)`.
-///
-/// ITU-T Rec. X.691, Section 19.1 (extension bit) and 19.2 (bitmap of
-/// OPTIONAL components).
-pub(crate) fn read_sequence_preamble(r: &mut AperReader<'_>) -> Result<(bool, bool), PacketError> {
-    let (extended, bitmap) = ap::read_sequence_preamble(r, 1)?;
-    Ok((extended, bitmap == 1))
-}
+pub(crate) use packet_dissector_aper::helpers::{
+    ensure_consumed, read_aligned_octets, read_bit_string_field, read_sequence_preamble, shift,
+    skip_protocol_ie_single_container, skip_sequence_extension_additions, skip_sequence_tail,
+};
 
 /// A decoded NR-CGI or E-UTRA CGI.
 struct Cgi<'a> {

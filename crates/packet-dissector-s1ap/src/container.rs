@@ -7,11 +7,11 @@
 //!   (constrained whole numbers), 11.9 (length determinants):
 //!   <https://www.itu.int/rec/T-REC-X.691>
 
+use packet_dissector_aper::helpers::{ensure_consumed, skip_sequence_extension_additions};
+use packet_dissector_aper::{AperReader, Extent, read_extent};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_per::ap::{ensure_consumed, skip_sequence_extension_additions};
-use packet_dissector_per::{AperReader, Extent, read_extent};
 
 use crate::{criticality_name, ie_id, ie_parsers};
 

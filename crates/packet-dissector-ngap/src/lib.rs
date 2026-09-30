@@ -10,20 +10,20 @@
 
 #![deny(missing_docs)]
 
-// The APER reader is shared with the other 3GPP application protocols.
+mod aper;
 mod container;
 pub mod ie_id;
 pub mod ie_parsers;
 mod pdu_session;
 pub mod procedure_code;
 
+use aper::{Extent, read_extent};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_per::{Extent, read_extent};
 
 /// Minimum NGAP-PDU header size: PDU type (1) + procedure code (1) +
 /// criticality (1) = 3 bytes, before the value length determinant.

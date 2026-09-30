@@ -1,7 +1,6 @@
 //! Bit-level reader for ASN.1 ALIGNED PER (APER) encodings.
 //!
-//! Shared by the 3GPP application protocols (NGAP, S1AP, ...), whose
-//! messages are encoded with the ALIGNED variant of PER. Small
+//! 3GPP application protocol IE values are encoded with the ALIGNED variant of PER. Small
 //! constrained values (CHOICE indices, ENUMERATED indices, extension and
 //! optional bits, short fixed-size strings, lengths with a small upper
 //! bound) are bit-fields packed back to back; padding is only inserted
@@ -11,10 +10,6 @@
 //!
 //! ## References
 //! - ITU-T Rec. X.691 (02/2021): <https://www.itu.int/rec/T-REC-X.691>
-
-#![deny(missing_docs)]
-
-pub mod ap;
 
 use core::ops::Range;
 
@@ -166,19 +161,6 @@ impl<'a> AperReader<'a> {
         Ok(octets
             .iter()
             .fold(0u64, |acc, &b| (acc << 8) | u64::from(b)))
-    }
-
-    /// Reads a normally small length (ITU-T Rec. X.691, Section 11.9.3.4):
-    /// `n` up to 64 is a zero bit and `n - 1` in six bits; a larger `n` is
-    /// a one bit followed by a length determinant of `n` (Section 11.9.4.2).
-    ///
-    /// Used for the size of the extension addition bitmap of a SEQUENCE
-    /// (Section 19.8).
-    pub fn read_normally_small_length(&mut self) -> Result<u64, PacketError> {
-        if !self.read_bit()? {
-            return Ok(self.read_bits(6)? + 1);
-        }
-        self.read_length(0, None)
     }
 
     /// Decodes a length determinant with lower bound `lb` and optional
@@ -370,7 +352,6 @@ mod tests {
     //! | 11.6          | Normally small, 6-bit form               | normally_small_short                  |
     //! | 11.6          | Normally small, long form                | normally_small_long                   |
     //! | 11.6          | Normally small, bad length               | normally_small_bad_length             |
-    //! | 11.9.3.4      | Normally small length (bitmap size)      | normally_small_length                 |
     //! | 11.9.4.1      | Constrained length                       | length_constrained                    |
     //! | 11.9.3.6      | Unconstrained length, one octet          | length_unconstrained_short            |
     //! | 11.9.3.7      | Unconstrained length, two octets         | length_unconstrained_long             |
@@ -548,24 +529,6 @@ mod tests {
         // 1 | pad | length 1 | 0x40
         let mut r = AperReader::new(&[0x80, 0x01, 0x40]);
         assert_eq!(r.read_normally_small().unwrap(), 64);
-    }
-
-    #[test]
-    fn normally_small_length() {
-        // 0 | 000000 → 1; 0 | 111111 → 64.
-        let mut r = AperReader::new(&[0b0000_0000]);
-        assert_eq!(r.read_normally_small_length().unwrap(), 1);
-        let mut r = AperReader::new(&[0b0111_1110]);
-        assert_eq!(r.read_normally_small_length().unwrap(), 64);
-        // 1 | pad | length determinant 65.
-        let mut r = AperReader::new(&[0x80, 0x41]);
-        assert_eq!(r.read_normally_small_length().unwrap(), 65);
-        assert_eq!(r.bit_position(), 16);
-        assert!(
-            AperReader::new(&[0x80])
-                .read_normally_small_length()
-                .is_err()
-        );
     }
 
     #[test]

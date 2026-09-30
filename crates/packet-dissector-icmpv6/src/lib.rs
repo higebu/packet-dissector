@@ -31,6 +31,7 @@
 
 mod rpl;
 
+use packet_dissector_core::checksum::{checksum_status_descriptor, verify_pseudo_header_checksum};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -351,6 +352,10 @@ pub(crate) const FD_RPL_FLAGS: usize = 54;
 pub(crate) const FD_DODAG_ID: usize = 55;
 pub(crate) const FD_DAO_SEQUENCE: usize = 56;
 pub(crate) const FD_RPL_OPTIONS: usize = 57;
+const FD_CHECKSUM_STATUS: usize = 58;
+
+/// IP protocol number of ICMPv6, used in the checksum pseudo-header.
+const IP_PROTO_ICMPV6: u8 = 58;
 pub(crate) const FD_RPL_STATUS: usize = FD_STATUS;
 
 /// Minimum IPv6 header size (RFC 8200, Section 3).
@@ -732,6 +737,7 @@ pub(crate) static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("rpl_options", "RPL Options", FieldType::Array)
         .optional()
         .with_children(rpl::RPL_OPTION_CHILDREN),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// ICMPv6 dissector.
@@ -1776,6 +1782,20 @@ impl Dissector for Icmpv6Dissector {
             FieldValue::U16(checksum),
             offset + 2..offset + 4,
         );
+        if buf.verify_checksums() {
+            // RFC 4443, Section 2.3 — "The checksum is the 16-bit one's
+            // complement of the one's complement sum of the entire ICMPv6
+            // message, starting with the ICMPv6 message type field, and
+            // prepended with a "pseudo-header" of IPv6 header fields, as
+            // specified in [IPv6, Section 8.1]."
+            // https://www.rfc-editor.org/rfc/rfc4443#section-2.3
+            let status = verify_pseudo_header_checksum(buf, offset, IP_PROTO_ICMPV6, data, None);
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 2..offset + 4,
+            );
+        }
 
         match icmpv6_type {
             // RFC 4443, Section 3.1 — Destination Unreachable (Type 1)
