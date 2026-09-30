@@ -173,6 +173,13 @@ pub trait DissectorPlugin {
     fn dissectors(&self) -> Vec<(DissectorTable, Box<dyn Dissector>)>;
 }
 
+/// Directional TCP stream key: (source address, destination address, source
+/// port, destination port). IP addresses are encoded as 16 bytes
+/// (IPv4-mapped for IPv4).
+///
+/// See [`TcpStreamContext::stream_key`].
+pub type TcpStreamKey = ([u8; 16], [u8; 16], u16, u16);
+
 /// Context for TCP stream reassembly, provided by the TCP dissector
 /// when dispatching to upper-layer protocol dissectors.
 ///
@@ -186,7 +193,7 @@ pub struct TcpStreamContext {
     /// Each direction of a connection has its own key, so the reverse direction
     /// (dst→src) maintains a separate reassembly buffer and sequence space.
     /// IP addresses are encoded as 16 bytes (IPv4-mapped for IPv4).
-    pub stream_key: ([u8; 16], [u8; 16], u16, u16),
+    pub stream_key: TcpStreamKey,
     /// TCP sequence number of this segment's first payload octet.
     ///
     /// For a SYN segment this is ISN+1, not the header's Sequence Number:
@@ -221,12 +228,7 @@ impl TcpStreamContext {
 
     /// Create a stream context. `seq` is the sequence number of the first
     /// payload octet (see [`TcpStreamContext::seq`]).
-    pub fn new(
-        stream_key: ([u8; 16], [u8; 16], u16, u16),
-        seq: u32,
-        payload_len: usize,
-        flags: u8,
-    ) -> Self {
+    pub fn new(stream_key: TcpStreamKey, seq: u32, payload_len: usize, flags: u8) -> Self {
         Self {
             stream_key,
             seq,
@@ -258,7 +260,7 @@ impl TcpStreamContext {
     }
 
     /// Stream key of the opposite direction of the same connection.
-    pub fn reverse_key(&self) -> ([u8; 16], [u8; 16], u16, u16) {
+    pub fn reverse_key(&self) -> TcpStreamKey {
         let (src, dst, sport, dport) = self.stream_key;
         (dst, src, dport, sport)
     }
@@ -649,6 +651,50 @@ pub trait Dissector: Send {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError>;
+
+    /// Dissect one message of a TCP byte stream.
+    ///
+    /// The registry's TCP reassembly middleware calls this method, instead
+    /// of [`dissect`](Self::dissect), for every upper-layer message it
+    /// dissects from a TCP stream. `stream` identifies the direction of the
+    /// connection the message belongs to ([`TcpStreamContext::stream_key`])
+    /// and carries the control bits of the segment that completed the
+    /// message; its sequence number and payload length describe that
+    /// segment, not the message.
+    ///
+    /// Dissectors that keep per-connection state (for example which
+    /// protocol a connection switched to) override this method and key the
+    /// state by `stream.stream_key`. The default implementation ignores
+    /// `stream` and calls [`dissect`](Self::dissect).
+    fn dissect_tcp_stream<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+        stream: &TcpStreamContext,
+    ) -> Result<DissectResult, PacketError> {
+        let _ = stream;
+        self.dissect(data, buf, offset)
+    }
+
+    /// Release any state kept for one direction of a TCP connection.
+    ///
+    /// The registry calls this on the upper-layer dissector of a TCP
+    /// connection when it drops its own reassembly state for the direction
+    /// `stream_key`: before the data of a SYN segment (the 4-tuple starts a
+    /// new connection, RFC 9293, Section 3.5 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>), after the data
+    /// of a FIN segment that leaves no data missing before it (no more data
+    /// from the sender, RFC 9293, Section 3.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>),
+    /// and for both directions after an RST segment (RFC 9293,
+    /// Section 3.10.7.4 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.10.7.4>).
+    ///
+    /// The default implementation does nothing.
+    fn release_tcp_stream(&self, stream_key: &TcpStreamKey) {
+        let _ = stream_key;
+    }
 }
 
 #[cfg(test)]
@@ -740,6 +786,18 @@ mod tests {
         assert_eq!(result.bytes_consumed, 20);
         assert_eq!(result.next, DispatchHint::ByIpProtocol(6));
         assert_eq!(result.payload_len, Some(16));
+    }
+
+    #[test]
+    fn dissector_defaults_dissect_tcp_stream_as_dissect() {
+        let dissector = DefaultsDissector;
+        let ctx = TcpStreamContext::new(([0; 16], [1; 16], 1, 2), 0, 1, 0);
+        let mut buf = DissectBuffer::new();
+
+        let result = dissector.dissect_tcp_stream(&[0], &mut buf, 0, &ctx);
+        assert_eq!(result, Ok(DissectResult::new(0, DispatchHint::End)));
+        // The default release hook has nothing to release.
+        dissector.release_tcp_stream(&ctx.stream_key);
     }
 
     #[test]

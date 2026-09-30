@@ -639,6 +639,7 @@ dependencies = [
  "packet-dissector-m3ua",
  "packet-dissector-mdns",
  "packet-dissector-mpls",
+ "packet-dissector-nas-eps",
  "packet-dissector-nas5g",
  "packet-dissector-ngap",
  "packet-dissector-ntp",
@@ -984,6 +985,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-nas-eps"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-nas5g"
 version = "0.5.0"
 dependencies = [
@@ -1043,6 +1053,7 @@ dependencies = [
  "packet-dissector-isis",
  "packet-dissector-m3ua",
  "packet-dissector-mdns",
+ "packet-dissector-nas-eps",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
  "packet-dissector-pppoe",
