@@ -64,6 +64,7 @@ default = [
   "ospf",
   "vrrp",
   "bfd",
+  "ipfix",
   "isis",
   "bgp",
   "bmp",
@@ -157,6 +158,7 @@ ntp = ["dep:packet-dissector-ntp"]
 ospf = ["dep:packet-dissector-ospf"]
 vrrp = ["dep:packet-dissector-vrrp"]
 bfd = ["dep:packet-dissector-bfd"]
+ipfix = ["dep:packet-dissector-ipfix"]
 isis = ["dep:packet-dissector-isis"]
 bgp = ["dep:packet-dissector-bgp"]
 # BMP carries BGP messages, which are dissected as BGP layers.
@@ -221,6 +223,7 @@ application = [
   "tls",
   "quic",
   "stun",
+  "ipfix",
 ]
 tunneling = [
   "gre",
@@ -304,6 +307,7 @@ packet-dissector-ntp = { workspace = true, optional = true }
 packet-dissector-ospf = { workspace = true, optional = true }
 packet-dissector-vrrp = { workspace = true, optional = true }
 packet-dissector-bfd = { workspace = true, optional = true }
+packet-dissector-ipfix = { workspace = true, optional = true }
 packet-dissector-isis = { workspace = true, optional = true }
 packet-dissector-bgp = { workspace = true, optional = true }
 packet-dissector-bmp = { workspace = true, optional = true }

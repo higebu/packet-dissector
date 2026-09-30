@@ -1861,6 +1861,15 @@ impl DissectorRegistry {
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
+        // The "netflow" decode-as dissector emits NetFlow v5, v9 and IPFIX
+        // layers; IPFIX is also registered on port 4739 when a transport
+        // feature is enabled.
+        #[cfg(feature = "ipfix")]
+        {
+            push(&packet_dissector_ipfix::IpfixDissector::new());
+            push(&packet_dissector_ipfix::NetflowV9Dissector::new());
+            push(&packet_dissector_ipfix::NetflowV5Dissector);
+        }
     }
 
     /// Returns field metadata for all registered dissectors.
@@ -3068,6 +3077,37 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("bfd", || Box::new(packet_dissector_bfd::BfdDissector));
             reg.register_dissector_factory("bfd.echo", || {
                 Box::new(packet_dissector_bfd::BfdEchoDissector)
+            });
+        }
+
+        // IPFIX runs over UDP, TCP and SCTP on port 4739. RFC 7011,
+        // Section 10.1 — "By default, the Collecting Process listens for
+        // connections on SCTP, TCP, and/or UDP port 4739."
+        //   <https://www.rfc-editor.org/rfc/rfc7011#section-10.1>
+        // NetFlow v5/v9 have no IANA-assigned port; "netflow" selects the
+        // version-specific dissector by the version field for decode-as.
+        #[cfg(feature = "ipfix")]
+        {
+            #[cfg(feature = "udp")]
+            assert_builtin(reg.register_by_udp_port(
+                packet_dissector_ipfix::IPFIX_PORT,
+                Box::new(packet_dissector_ipfix::IpfixDissector::new()),
+            ));
+            #[cfg(feature = "tcp")]
+            assert_builtin(reg.register_by_tcp_port(
+                packet_dissector_ipfix::IPFIX_PORT,
+                Box::new(packet_dissector_ipfix::IpfixDissector::new()),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_ipfix::IPFIX_PORT,
+                Box::new(packet_dissector_ipfix::IpfixDissector::new()),
+            ));
+            reg.register_dissector_factory("ipfix", || {
+                Box::new(packet_dissector_ipfix::IpfixDissector::new())
+            });
+            reg.register_dissector_factory("netflow", || {
+                Box::new(packet_dissector_ipfix::NetflowDissector::new())
             });
         }
 
@@ -4331,6 +4371,22 @@ mod tests {
                 "{name} missing from all_field_schemas"
             );
         }
+    }
+
+    #[cfg(feature = "ipfix")]
+    #[test]
+    fn all_field_schemas_include_netflow_versions() {
+        let reg = DissectorRegistry::default();
+        let schemas = reg.all_field_schemas();
+        for name in ["IPFIX", "NetFlow-v9", "NetFlow-v5"] {
+            assert!(
+                schemas.iter().any(|s| s.short_name == name),
+                "{name} missing from all_field_schemas"
+            );
+        }
+        let names = reg.available_decode_as_protocols();
+        assert!(names.contains(&"ipfix"));
+        assert!(names.contains(&"netflow"));
     }
 
     #[test]
@@ -5597,6 +5653,15 @@ mod tests {
             assert!(reg.get_by_udp_port(6784).is_some());
             assert!(reg.get_by_udp_port(7784).is_some());
         }
+
+        // IPFIX: RFC 7011, Section 10.1 —
+        // https://www.rfc-editor.org/rfc/rfc7011#section-10.1
+        #[cfg(all(feature = "ipfix", feature = "udp"))]
+        assert!(reg.get_by_udp_port(4739).is_some());
+        #[cfg(all(feature = "ipfix", feature = "tcp"))]
+        assert!(reg.get_by_tcp_port(4739).is_some());
+        #[cfg(all(feature = "ipfix", feature = "sctp"))]
+        assert!(reg.get_by_sctp_port(4739).is_some());
 
         #[cfg(all(feature = "mdns", feature = "udp"))]
         assert!(reg.get_by_udp_port(5353).is_some());

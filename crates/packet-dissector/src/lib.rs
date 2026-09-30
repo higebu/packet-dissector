@@ -217,6 +217,9 @@ pub mod dissectors {
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
 
+    #[cfg(feature = "ipfix")]
+    pub use packet_dissector_ipfix as ipfix;
+
     #[cfg(feature = "m3ua")]
     pub use packet_dissector_m3ua as m3ua;
 
