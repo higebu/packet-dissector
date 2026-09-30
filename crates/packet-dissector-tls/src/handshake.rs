@@ -59,6 +59,9 @@ pub(crate) const HELLO_RETRY_REQUEST_RANDOM: [u8; RANDOM_SIZE] = [
 // RFC 9846, Section 4 — https://www.rfc-editor.org/rfc/rfc9846#section-4
 pub(crate) const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
 pub(crate) const HANDSHAKE_TYPE_SERVER_HELLO: u8 = 2;
+/// `hello_verify_request(3)`, DTLS only.
+/// RFC 6347, Section 4.2.1 — <https://www.rfc-editor.org/rfc/rfc6347#section-4.2.1>
+pub(crate) const HANDSHAKE_TYPE_HELLO_VERIFY_REQUEST: u8 = 3;
 const HANDSHAKE_TYPE_NEW_SESSION_TICKET: u8 = 4;
 const HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS: u8 = 8;
 const HANDSHAKE_TYPE_CERTIFICATE: u8 = 11;
@@ -76,7 +79,7 @@ const EC_CURVE_TYPE_NAMED_CURVE: u8 = 3;
 /// The label resolves to the handshake type name, or "Hello Retry Request"
 /// for a ServerHello carrying the HelloRetryRequest random
 /// (RFC 9846, Section 4.2.3 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.3>).
-static FD_HANDSHAKE: FieldDescriptor = FieldDescriptor {
+pub(crate) static FD_HANDSHAKE: FieldDescriptor = FieldDescriptor {
     name: "handshake",
     display_name: "Handshake Message",
     field_type: FieldType::Object,
@@ -153,27 +156,39 @@ const HFD_COMPRESSED_CERTIFICATE_MESSAGE: usize = 36;
 const HFD_STATUS_TYPE: usize = 37;
 const HFD_OCSP_RESPONSE: usize = 38;
 
-/// Child field descriptors for handshake message objects within the
-/// `handshake_messages` array.
+/// Handshake `msg_type` field, shared by the TLS and DTLS handshake headers.
 ///
 /// RFC 9846, Section 4 — <https://www.rfc-editor.org/rfc/rfc9846#section-4>
-pub(crate) static HANDSHAKE_CHILD_FIELDS: &[FieldDescriptor] = &[
-    FieldDescriptor {
-        name: "type",
-        display_name: "Handshake Type",
-        field_type: FieldType::U8,
-        optional: false,
-        children: None,
-        display_fn: Some(|v, _siblings| match v {
-            FieldValue::U8(ht) => Some(handshake_type_name(*ht)),
-            _ => None,
-        }),
-        format_fn: None,
-    },
-    FieldDescriptor::new("length", "Handshake Length", FieldType::U32),
-    // Present only when the message continues in a following record: the
-    // number of body bytes carried by this record.
-    FieldDescriptor::new("fragment_length", "Fragment Length", FieldType::U32).optional(),
+/// RFC 9147, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9147#section-5.2>
+pub(crate) const HANDSHAKE_TYPE_FIELD: FieldDescriptor = FieldDescriptor {
+    name: "type",
+    display_name: "Handshake Type",
+    field_type: FieldType::U8,
+    optional: false,
+    children: None,
+    display_fn: Some(|v, _siblings| match v {
+        FieldValue::U8(ht) => Some(handshake_type_name(*ht)),
+        _ => None,
+    }),
+    format_fn: None,
+};
+
+/// Handshake `length` field (bytes in the whole message), shared by the TLS
+/// and DTLS handshake headers.
+pub(crate) const HANDSHAKE_LENGTH_FIELD: FieldDescriptor =
+    FieldDescriptor::new("length", "Handshake Length", FieldType::U32);
+
+/// Number of entries in [`HANDSHAKE_BODY_FIELDS`].
+pub(crate) const HANDSHAKE_BODY_FIELD_COUNT: usize = 36;
+
+/// Number of TLS handshake header fields that precede the body fields in
+/// [`HANDSHAKE_CHILD_FIELDS`].
+const TLS_HANDSHAKE_HEADER_FIELD_COUNT: usize = 3;
+
+/// Field descriptors for decoded handshake message bodies, shared by TLS
+/// and DTLS: both use the same message bodies (RFC 9147, Section 5 —
+/// <https://www.rfc-editor.org/rfc/rfc9147#section-5>).
+pub(crate) const HANDSHAKE_BODY_FIELDS: [FieldDescriptor; HANDSHAKE_BODY_FIELD_COUNT] = [
     // --- ClientHello / ServerHello (RFC 9846, Section 4.2.2 and Section 4.2.3) ---
     // https://www.rfc-editor.org/rfc/rfc9846#section-4.2.2
     // https://www.rfc-editor.org/rfc/rfc9846#section-4.2.3
@@ -301,6 +316,46 @@ pub(crate) static HANDSHAKE_CHILD_FIELDS: &[FieldDescriptor] = &[
     FieldDescriptor::new("ocsp_response", "OCSP Response", FieldType::Bytes).optional(),
 ];
 
+/// Concatenate two descriptor arrays at compile time; `N` must equal `A + B`.
+pub(crate) const fn concat_fields<const A: usize, const B: usize, const N: usize>(
+    head: [FieldDescriptor; A],
+    tail: [FieldDescriptor; B],
+) -> [FieldDescriptor; N] {
+    assert!(A + B == N, "concat_fields: N must equal A + B");
+    assert!(B > 0, "concat_fields: tail must not be empty");
+    let mut out = [tail[0]; N];
+    let mut i = 0;
+    while i < A {
+        out[i] = head[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < B {
+        out[A + j] = tail[j];
+        j += 1;
+    }
+    out
+}
+
+/// Child field descriptors for handshake message objects within the
+/// `handshake_messages` array.
+///
+/// RFC 9846, Section 4 — <https://www.rfc-editor.org/rfc/rfc9846#section-4>
+pub(crate) static HANDSHAKE_CHILD_FIELDS: &[FieldDescriptor] = &concat_fields::<
+    TLS_HANDSHAKE_HEADER_FIELD_COUNT,
+    HANDSHAKE_BODY_FIELD_COUNT,
+    { TLS_HANDSHAKE_HEADER_FIELD_COUNT + HANDSHAKE_BODY_FIELD_COUNT },
+>(
+    [
+        HANDSHAKE_TYPE_FIELD,
+        HANDSHAKE_LENGTH_FIELD,
+        // Present only when the message continues in a following record: the
+        // number of body bytes carried by this record.
+        FieldDescriptor::new("fragment_length", "Fragment Length", FieldType::U32).optional(),
+    ],
+    HANDSHAKE_BODY_FIELDS,
+);
+
 /// Shorthand for a handshake child descriptor.
 fn hfd(idx: usize) -> &'static FieldDescriptor {
     &HANDSHAKE_CHILD_FIELDS[idx]
@@ -330,10 +385,19 @@ impl HelloVersion {
     /// A ClientHello that carries the extension offers a list, so no single
     /// version applies to it.
     fn label(self) -> Option<&'static str> {
+        self.label_with(version_short_name)
+    }
+
+    /// Like [`label`](Self::label), with the version names given by
+    /// `short_name` (TLS or DTLS).
+    pub(crate) fn label_with(
+        self,
+        short_name: fn(u16) -> Option<&'static str>,
+    ) -> Option<&'static str> {
         match self.supported_versions {
-            SupportedVersions::Absent => version_short_name(self.legacy_version),
+            SupportedVersions::Absent => short_name(self.legacy_version),
             SupportedVersions::Undetermined => None,
-            SupportedVersions::Selected(v) => version_short_name(v),
+            SupportedVersions::Selected(v) => short_name(v),
         }
     }
 }
@@ -406,17 +470,32 @@ fn parse_hello_prefix<'pkt>(
 
 /// Parse a ClientHello handshake body and append fields.
 ///
+/// With `dtls_cookie`, the body is a DTLS ClientHello, which carries a
+/// cookie after the session ID; the cookie is pushed with that descriptor.
+///
 /// RFC 5246, Section 7.4.1.2 — <https://www.rfc-editor.org/rfc/rfc5246#section-7.4.1.2>
 /// RFC 9846, Section 4.2.2 — <https://www.rfc-editor.org/rfc/rfc9846#section-4.2.2>
+/// RFC 6347, Section 4.2.1 — <https://www.rfc-editor.org/rfc/rfc6347#section-4.2.1>
+/// RFC 9147, Section 5.3 — <https://www.rfc-editor.org/rfc/rfc9147#section-5.3>
 fn parse_client_hello<'pkt>(
     body: &'pkt [u8],
     offset: usize,
+    dtls_cookie: Option<&'static FieldDescriptor>,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Option<HelloVersion> {
     let mut r = Reader::new(body, offset);
     let (mut hello, _, complete) = parse_hello_prefix(&mut r, HANDSHAKE_TYPE_CLIENT_HELLO, buf)?;
     if !complete {
         return Some(hello);
+    }
+
+    // RFC 6347, Section 4.2.1 — https://www.rfc-editor.org/rfc/rfc6347#section-4.2.1
+    // opaque cookie<0..2^8-1>;                             // New field
+    if let Some(cookie_fd) = dtls_cookie {
+        let Some((cookie, range)) = r.vector(1) else {
+            return Some(hello);
+        };
+        buf.push_field(cookie_fd, FieldValue::Bytes(cookie), range);
     }
 
     // RFC 9846, Section 4.2.2 — https://www.rfc-editor.org/rfc/rfc9846#section-4.2.2
@@ -947,16 +1026,59 @@ fn parse_compressed_certificate<'pkt>(
     push_bytes(buf, HFD_COMPRESSED_CERTIFICATE_MESSAGE, message);
 }
 
+/// Parse a HelloVerifyRequest body (DTLS only).
+///
+/// ```text
+/// RFC 6347, Section 4.2.1 — https://www.rfc-editor.org/rfc/rfc6347#section-4.2.1
+///
+/// struct {
+///   ProtocolVersion server_version;
+///   opaque cookie<0..2^8-1>;
+/// } HelloVerifyRequest;
+/// ```
+///
+/// Nothing is pushed unless the two fields exactly fill the body.
+fn parse_hello_verify_request<'pkt>(
+    body: &'pkt [u8],
+    offset: usize,
+    cookie_fd: &'static FieldDescriptor,
+    buf: &mut DissectBuffer<'pkt>,
+) {
+    let mut r = Reader::new(body, offset);
+    let (Some(version), Some((cookie, range))) = (r.u16(), r.vector(1)) else {
+        return;
+    };
+    if !r.is_empty() {
+        return;
+    }
+    buf.push_field(
+        hfd(HFD_VERSION),
+        FieldValue::U16(version),
+        offset..offset + 2,
+    );
+    buf.push_field(cookie_fd, FieldValue::Bytes(cookie), range);
+}
+
 /// Decode the body of one complete handshake message. Returns version
 /// information for ClientHello / ServerHello.
-fn parse_body<'pkt>(
+///
+/// `dtls_cookie` is `Some` for DTLS: it is the descriptor of the `cookie`
+/// field of ClientHello and HelloVerifyRequest, which only exist in DTLS
+/// (RFC 6347, Section 4.2.1 — <https://www.rfc-editor.org/rfc/rfc6347#section-4.2.1>).
+pub(crate) fn parse_body<'pkt>(
     ht: u8,
     body: &'pkt [u8],
     offset: usize,
+    dtls_cookie: Option<&'static FieldDescriptor>,
     buf: &mut DissectBuffer<'pkt>,
 ) -> Option<HelloVersion> {
     match ht {
-        HANDSHAKE_TYPE_CLIENT_HELLO => return parse_client_hello(body, offset, buf),
+        HANDSHAKE_TYPE_CLIENT_HELLO => return parse_client_hello(body, offset, dtls_cookie, buf),
+        HANDSHAKE_TYPE_HELLO_VERIFY_REQUEST => {
+            if let Some(cookie_fd) = dtls_cookie {
+                parse_hello_verify_request(body, offset, cookie_fd, buf);
+            }
+        }
         HANDSHAKE_TYPE_SERVER_HELLO => return parse_server_hello(body, offset, buf),
         HANDSHAKE_TYPE_NEW_SESSION_TICKET => parse_new_session_ticket(body, offset, buf),
         HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS => parse_encrypted_extensions(body, offset, buf),
@@ -1101,7 +1223,7 @@ pub(crate) fn dissect_handshake_record<'pkt>(
                 body_offset..offset + body_end,
             );
         } else {
-            let parsed = parse_body(ht, body, body_offset, buf);
+            let parsed = parse_body(ht, body, body_offset, None, buf);
             if hello.is_none() {
                 hello = parsed;
             }

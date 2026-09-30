@@ -67,6 +67,7 @@ default = [
   "quic",
   "quic-decrypt",
   "stun",
+  "dtls",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
 # SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
@@ -129,6 +130,8 @@ rtp = ["dep:packet-dissector-rtp"]
 quic = ["dep:packet-dissector-quic"]
 quic-decrypt = ["quic", "packet-dissector-quic/decrypt"]
 stun = ["dep:packet-dissector-stun"]
+# DTLS lives in the TLS crate, which shares its handshake decoders.
+dtls = ["dep:packet-dissector-tls"]
 
 ## Convenience feature groups
 layer2 = [
@@ -161,6 +164,7 @@ application = [
   "tls",
   "quic",
   "stun",
+  "dtls",
 ]
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]

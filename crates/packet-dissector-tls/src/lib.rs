@@ -24,6 +24,10 @@
 //! ClientHello `legacy_version` when the client does not offer
 //! `supported_versions`.
 //!
+//! The crate also provides [`DtlsDissector`] for DTLS 1.0, 1.2 and 1.3
+//! records over datagram transports. It shares the handshake body, alert and
+//! heartbeat decoders with [`TlsDissector`].
+//!
 //! ## References
 //! - RFC 9846 (TLS 1.3, obsoletes RFC 8446 and RFC 5246): <https://www.rfc-editor.org/rfc/rfc9846>
 //! - RFC 5246 (TLS 1.2): <https://www.rfc-editor.org/rfc/rfc5246>
@@ -44,6 +48,10 @@
 //! - RFC 9180 (HPKE identifiers): <https://www.rfc-editor.org/rfc/rfc9180>
 //! - RFC 9345 (Delegated Credentials): <https://www.rfc-editor.org/rfc/rfc9345>
 //! - RFC 9849 (TLS Encrypted Client Hello): <https://www.rfc-editor.org/rfc/rfc9849>
+//! - RFC 9147 (DTLS 1.3, obsoletes RFC 6347): <https://www.rfc-editor.org/rfc/rfc9147>
+//! - RFC 6347 (DTLS 1.2): <https://www.rfc-editor.org/rfc/rfc6347>
+//! - RFC 4347 (DTLS 1.0): <https://www.rfc-editor.org/rfc/rfc4347>
+//! - RFC 9146 (Connection Identifiers for DTLS 1.2): <https://www.rfc-editor.org/rfc/rfc9146>
 //! - IANA TLS Parameters: <https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml>
 
 #![deny(missing_docs)]
@@ -67,11 +75,13 @@ macro_rules! named_field {
     };
 }
 
+mod dtls;
 mod extensions;
 mod handshake;
 mod names;
 mod reader;
 
+pub use dtls::DtlsDissector;
 use handshake::{HANDSHAKE_CHILD_FIELDS, dissect_handshake_record};
 #[cfg(test)]
 use handshake::{
@@ -153,6 +163,8 @@ const CONTENT_TYPE_HEARTBEAT: u8 = 24;
 ///
 /// RFC 9846, Section 5.1 — <https://www.rfc-editor.org/rfc/rfc9846#section-5.1>
 /// RFC 6520, Section 3 — <https://www.rfc-editor.org/rfc/rfc6520#section-3> (Heartbeat)
+/// RFC 9146, Section 4 — <https://www.rfc-editor.org/rfc/rfc9146#section-4> (tls12_cid, DTLS only)
+/// RFC 9147, Section 7 — <https://www.rfc-editor.org/rfc/rfc9147#section-7> (ACK, DTLS only)
 fn content_type_name(ct: u8) -> &'static str {
     match ct {
         CONTENT_TYPE_CHANGE_CIPHER_SPEC => "Change Cipher Spec",
@@ -160,6 +172,8 @@ fn content_type_name(ct: u8) -> &'static str {
         CONTENT_TYPE_HANDSHAKE => "Handshake",
         CONTENT_TYPE_APPLICATION_DATA => "Application Data",
         CONTENT_TYPE_HEARTBEAT => "Heartbeat",
+        dtls::CONTENT_TYPE_TLS12_CID => "TLS12 CID",
+        dtls::CONTENT_TYPE_ACK => "ACK",
         _ => "Unknown",
     }
 }
@@ -167,7 +181,9 @@ fn content_type_name(ct: u8) -> &'static str {
 /// Returns a human-readable name for a record or `legacy_version` value.
 ///
 /// 0x0303 is ambiguous in these fields: TLS 1.3 sends it as
-/// `legacy_record_version` / `legacy_version`.
+/// `legacy_record_version` / `legacy_version`. Likewise, DTLS 1.3 sends the
+/// DTLS 1.2 value 0xFEFD (RFC 9147, Section 5.3 —
+/// <https://www.rfc-editor.org/rfc/rfc9147#section-5.3>).
 ///
 /// RFC 5246, Section 6.2.1 — <https://www.rfc-editor.org/rfc/rfc5246#section-6.2.1>
 /// RFC 9846, Section 5.1 — <https://www.rfc-editor.org/rfc/rfc9846#section-5.1>
@@ -178,6 +194,10 @@ fn version_name(version: u16) -> &'static str {
         0x0302 => "TLS 1.1",
         0x0303 => "TLS 1.2 / TLS 1.3 legacy_record_version",
         0x0304 => "TLS 1.3",
+        // RFC 6347, Section 4.1 — https://www.rfc-editor.org/rfc/rfc6347#section-4.1
+        // RFC 9147, Section 4 — https://www.rfc-editor.org/rfc/rfc9147#section-4
+        dtls::DTLS_1_0_VERSION => "DTLS 1.0",
+        dtls::DTLS_1_2_VERSION => "DTLS 1.2 / DTLS 1.3 legacy_record_version",
         _ => "Unknown",
     }
 }
@@ -196,6 +216,10 @@ fn supported_version_name(version: u16) -> &'static str {
         0x0302 => "TLS 1.1",
         0x0303 => "TLS 1.2",
         0x0304 => "TLS 1.3",
+        // RFC 9147, Section 5.3 — https://www.rfc-editor.org/rfc/rfc9147#section-5.3
+        dtls::DTLS_1_0_VERSION => "DTLS 1.0",
+        dtls::DTLS_1_2_VERSION => "DTLS 1.2",
+        dtls::DTLS_1_3_VERSION => "DTLS 1.3",
         _ => "Unknown",
     }
 }
@@ -239,9 +263,14 @@ fn handshake_type_name(ht: u8) -> &'static str {
         0 => "Hello Request",
         1 => "Client Hello",
         2 => "Server Hello",
+        // RFC 6347, Section 4.2.1 (https://www.rfc-editor.org/rfc/rfc6347#section-4.2.1)
+        3 => "Hello Verify Request",
         4 => "New Session Ticket",
         5 => "End Of Early Data",
         8 => "Encrypted Extensions",
+        // RFC 9147, Section 5.2 (https://www.rfc-editor.org/rfc/rfc9147#section-5.2)
+        9 => "Request Connection Id",
+        10 => "New Connection Id",
         11 => "Certificate",
         12 => "Server Key Exchange",
         13 => "Certificate Request",

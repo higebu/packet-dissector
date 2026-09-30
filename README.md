@@ -33,7 +33,7 @@ protocols include:
 | L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (up to 2 VLAN tags), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP |
 | L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, IS-IS, AH, ESP, SRv6, GRE, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE |
-| Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, TLS, PPP, RADIUS, RTP, QUIC, STUN |
+| Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, TLS, PPP, RADIUS, RTP, QUIC, STUN, DTLS |
 | 3GPP | GTPv1-U, GTPv2-C, PFCP, NAS5G, NGAP |
 
 See `crates/packet-dissector/Cargo.toml` and `crates/packet-dissector/src/lib.rs`
@@ -60,7 +60,7 @@ Representative feature flags:
 - Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `arp`, `lacp`, `lldp`, `stp`
 - Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`
-- Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
+- Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`, `dtls`
 - 3GPP: `gtpv1u`, `gtpv2c`, `pfcp`, `nas5g`, `ngap`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
@@ -70,7 +70,7 @@ Convenience groups:
 - `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "arp", "lacp", "lldp", "stp", "ppp"]`
 - `layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]`
 - `layer4 = ["tcp", "udp", "sctp"]`
-- `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun"]`
+- `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun", "dtls"]`
 - `tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]`
 - `routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]`
 - `ipsec = ["ah", "esp", "ike"]`

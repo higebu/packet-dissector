@@ -27,3 +27,4 @@ packet-dissector-ospf = { workspace = true }
 packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcp = { workspace = true }
+packet-dissector-tls = { workspace = true }
