@@ -40,6 +40,8 @@
 //! | Ethernet → IPv4 → SCTP(port 2905, PPID 0) → M3UA ASPUP | integration_ethernet_ipv4_sctp_m3ua_port_aspup |
 //! | Ethernet → IPv4 → SCTP → M3UA DATA (SI=5, no ISUP dissector) | integration_ethernet_ipv4_sctp_m3ua_unknown_si |
 //! | Ethernet → IPv4 → SCTP → M3UA → SCCP → SSN 6 user dissector | integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch |
+//! | Ethernet → IPv4 → SCTP → M3UA → SCCP → TCAP → MAP (SendAuthenticationInfo) | integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_map |
+//! | Ethernet → IPv4 → SCTP → M3UA → SCCP (SSN 146) → TCAP | integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_cap_ssn |
 //! | Ethernet → IPv4 → SCTP(port 38422, PPID 0) → XnAP | integration_ethernet_ipv4_sctp_xnap |
 //! | Ethernet → IPv4 → SCTP(40000→40001, PPID 61) → XnAP | integration_ethernet_ipv4_sctp_ppid_xnap_nondefault_port |
 //! | Ethernet → IPv4 → SCTP(port 38472, PPID 0) → F1AP | integration_ethernet_ipv4_sctp_f1ap |
@@ -73,6 +75,10 @@
 //! | Ethernet → IPv4 → TCP → HTTP 200 OK           | integration_ethernet_ipv4_tcp_http_response         |
 //! | Ethernet → IPv4 → UDP → SIP INVITE            | integration_ethernet_ipv4_udp_sip_invite            |
 //! | Ethernet → IPv4 → TCP → SIP 200 OK            | integration_ethernet_ipv4_tcp_sip_response          |
+//! | Ethernet → IPv4 → PIM Hello                   | ethernet_ipv4_pim_hello                             |
+//! | Ethernet → IPv6 → PIM Hello                   | ethernet_ipv6_pim_hello                             |
+//! | Ethernet → IPv4 → PIM Register → IPv4 → UDP   | ethernet_ipv4_pim_register_ipv4_udp                 |
+//! | Ethernet → IPv6 → PIM Null-Register → IPv6 → PIM | ethernet_ipv6_pim_null_register                  |
 //! | Ethernet → IPv4 → RSVP Hello                  | ethernet_ipv4_rsvp_hello                            |
 //! | Ethernet → IPv6 → RSVP Hello                  | ethernet_ipv6_rsvp_hello                            |
 //! | Ethernet → IPv4 → RSVP Bundle → RSVP ×2       | ethernet_ipv4_rsvp_bundle                           |
@@ -155,6 +161,9 @@
 //! | Ethernet → IPv4 → UDP → BFD Echo (opaque payload)    | integration_ethernet_ipv4_udp_bfd_echo_opaque        |
 //! | Ethernet → IPv4 → UDP → BFD Echo (Control format)    | integration_ethernet_ipv4_udp_bfd_echo_control       |
 //! | Ethernet → IPv4 → UDP → S-BFD / Micro-BFD            | integration_ethernet_ipv4_udp_sbfd_and_micro_bfd     |
+//! | Ethernet → IPv4 → UDP(4739) → IPFIX (Template, then Data) | integration_ethernet_ipv4_udp_ipfix_template_then_data |
+//! | Ethernet → IPv4 → TCP(4739) → IPFIX                  | integration_ethernet_ipv4_tcp_ipfix                  |
+//! | Ethernet → IPv4 → UDP (decode-as netflow) → v5 / v9  | integration_ethernet_ipv4_udp_netflow_decode_as      |
 //! | PPP (HDLC) → IPv4 → UDP                               | integration_ppp_ipv4_udp                              |
 //! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
 //! | Ethernet → PPPoE Discovery (PADI)                      | integration_ethernet_pppoe_discovery_padi             |
@@ -6126,6 +6135,161 @@ fn integration_ethernet_ipv4_udp_sbfd_and_micro_bfd() {
 }
 
 // ---------------------------------------------------------------------------
+// NetFlow / IPFIX
+// ---------------------------------------------------------------------------
+
+/// IPFIX Message (RFC 7011, Section 3.1) with Observation Domain 1.
+fn ipfix_message(sets: &[u8]) -> Vec<u8> {
+    let mut m = 10u16.to_be_bytes().to_vec();
+    m.extend_from_slice(&((16 + sets.len()) as u16).to_be_bytes());
+    m.extend_from_slice(&1_700_000_000u32.to_be_bytes());
+    m.extend_from_slice(&0u32.to_be_bytes());
+    m.extend_from_slice(&1u32.to_be_bytes());
+    m.extend_from_slice(sets);
+    m
+}
+
+/// IPFIX Template Set with Template 256: sourceIPv4Address (8) and
+/// protocolIdentifier (4) (RFC 7011, Section 3.4.1).
+const IPFIX_TEMPLATE_SET: [u8; 16] = [0, 2, 0, 16, 1, 0, 0, 2, 0, 8, 0, 4, 0, 4, 0, 1];
+
+/// IPFIX Data Set for Template 256 with one record and 3 octets of padding.
+const IPFIX_DATA_SET: [u8; 12] = [1, 0, 0, 12, 192, 0, 2, 7, 17, 0, 0, 0];
+
+/// Value of the first field of the first record of the first Set, or the
+/// Set's raw `data`.
+fn ipfix_first_value<'a>(buf: &'a DissectBuffer<'_>, layer: usize) -> &'a FieldValue<'a> {
+    let ipfix = &buf.layers()[layer];
+    let sets = buf.field_by_name(ipfix, "sets").unwrap();
+    let set = &buf.nested_fields(sets.value.as_container_range().unwrap())[0];
+    let set_fields = buf.nested_fields(set.value.as_container_range().unwrap());
+    if let Some(raw) = set_fields.iter().find(|f| f.name() == "data") {
+        return &raw.value;
+    }
+    set_fields
+        .iter()
+        .find(|f| f.name() == "value")
+        .map(|f| &f.value)
+        .unwrap()
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_ipfix_template_then_data() {
+    // RFC 7011, Section 10.1 — IPFIX Collecting Processes listen on UDP
+    // 4739 <https://www.rfc-editor.org/rfc/rfc7011#section-10.1>; Section 8
+    // — Templates received earlier on the session describe later Data Sets.
+    let registry = DissectorRegistry::default();
+    let template = build_eth_ipv4_udp_payload(50000, 4739, &ipfix_message(&IPFIX_TEMPLATE_SET));
+    let data = build_eth_ipv4_udp_payload(50000, 4739, &ipfix_message(&IPFIX_DATA_SET));
+
+    // Before the Template: raw Data Set.
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&data, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].name, "IPFIX");
+    assert_eq!(
+        ipfix_first_value(&buf, 3),
+        &FieldValue::Bytes(&[192, 0, 2, 7, 17, 0, 0, 0])
+    );
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&template, &mut buf).unwrap();
+    assert_eq!(buf.layers()[3].name, "IPFIX");
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&data, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(
+        ipfix_first_value(&buf, 3),
+        &FieldValue::Ipv4Addr([192, 0, 2, 7])
+    );
+
+    // Another exporter port is another Transport Session.
+    let other = build_eth_ipv4_udp_payload(50001, 4739, &ipfix_message(&IPFIX_DATA_SET));
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&other, &mut buf).unwrap();
+    assert!(matches!(ipfix_first_value(&buf, 3), FieldValue::Bytes(_)));
+}
+
+#[test]
+fn integration_ethernet_ipv4_tcp_ipfix() {
+    // RFC 7011, Section 10.4 — IPFIX over TCP; Template and Data Sets in
+    // one Message.
+    let mut sets = IPFIX_TEMPLATE_SET.to_vec();
+    sets.extend_from_slice(&IPFIX_DATA_SET);
+    let msg = ipfix_message(&sets);
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 50000, 4739, 0x18);
+    pkt.extend_from_slice(&msg);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let registry = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "IPFIX");
+    let sets = buf.field_by_name(&buf.layers()[3], "sets").unwrap();
+    let sets = buf.nested_fields(sets.value.as_container_range().unwrap());
+    assert!(
+        sets.iter()
+            .any(|f| f.value == FieldValue::Ipv4Addr([192, 0, 2, 7]))
+    );
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_netflow_decode_as() {
+    // NetFlow has no IANA-assigned port; "netflow" selects v5, v9 or IPFIX
+    // by the version field.
+    let mut registry = DissectorRegistry::default();
+    let netflow = registry.create_dissector_by_name("netflow").unwrap();
+    registry.register_by_udp_port_or_replace(2055, netflow);
+    assert!(registry.create_dissector_by_name("ipfix").is_some());
+
+    // NetFlow v5 with one record (Cisco, Tables B-3 and B-4).
+    let mut v5 = 5u16.to_be_bytes().to_vec();
+    v5.extend_from_slice(&1u16.to_be_bytes());
+    v5.extend_from_slice(&[0; 20]);
+    v5.extend_from_slice(&[10, 0, 0, 9]);
+    v5.extend_from_slice(&[0; 44]);
+    let pkt = build_eth_ipv4_udp_payload(40000, 2055, &v5);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].name, "NetFlow-v5");
+
+    // NetFlow v9 Template FlowSet then Data FlowSet (RFC 3954, Section 5).
+    let v9 = |flowset: &[u8]| {
+        let mut p = 9u16.to_be_bytes().to_vec();
+        p.extend_from_slice(&[0; 18]);
+        p.extend_from_slice(flowset);
+        p
+    };
+    let template =
+        build_eth_ipv4_udp_payload(40000, 2055, &v9(&[0, 0, 0, 12, 1, 0, 0, 1, 0, 8, 0, 4]));
+    let data = build_eth_ipv4_udp_payload(40000, 2055, &v9(&[1, 0, 0, 8, 10, 1, 2, 3]));
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&template, &mut buf).unwrap();
+    assert_eq!(buf.layers()[3].name, "NetFlow-v9");
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&data, &mut buf).unwrap();
+    let layer = &buf.layers()[3];
+    let flowsets = buf.field_by_name(layer, "flowsets").unwrap();
+    assert!(
+        buf.nested_fields(flowsets.value.as_container_range().unwrap())
+            .iter()
+            .any(|f| f.value == FieldValue::Ipv4Addr([10, 1, 2, 3]))
+    );
+}
+
+// ---------------------------------------------------------------------------
 // GENEVE helpers
 // ---------------------------------------------------------------------------
 
@@ -10458,6 +10622,113 @@ fn ethernet_ipv4_rsvp_bundle() {
 }
 
 // ---------------------------------------------------------------------------
+// PIM
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ethernet_ipv4_pim_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x01, 0x00, 0x5e, 0, 0, 13], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 103, [10, 0, 0, 1], [224, 0, 0, 13]);
+    pkt.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]); // PIMv2 Hello
+    pkt.extend_from_slice(&[0, 1, 0, 2, 0, 105]); // Holdtime 105
+    pkt.extend_from_slice(&[0, 19, 0, 4, 0, 0, 0, 1]); // DR Priority 1
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "PIM"]);
+    assert_layers_contiguous(&buf);
+    let pim = buf.layer_by_name("PIM").unwrap();
+    assert_eq!(display_name_for(&buf, pim, "type"), Some("Hello"));
+}
+
+#[test]
+fn ethernet_ipv6_pim_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x33, 0x33, 0, 0, 0, 13], [0x02; 6], 0x86DD);
+    let mut src = [0u8; 16];
+    src[..2].copy_from_slice(&[0xfe, 0x80]);
+    src[15] = 1;
+    let mut dst = [0u8; 16];
+    dst[..2].copy_from_slice(&[0xff, 0x02]);
+    dst[15] = 13;
+    let ip_start = push_ipv6(&mut pkt, 103, src, dst);
+    pkt.extend_from_slice(&[0x20, 0x00, 0x00, 0x00]); // PIMv2 Hello
+    pkt.extend_from_slice(&[0, 24, 0, 18, 2, 0]); // Address List (IPv6)
+    pkt.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    fixup_ipv6_payload_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "PIM"]);
+    assert_layers_contiguous(&buf);
+}
+
+#[test]
+fn ethernet_ipv4_pim_register_ipv4_udp() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x0800);
+    let outer = pkt.len();
+    push_ipv4(&mut pkt, 103, [10, 0, 0, 1], [10, 0, 0, 100]);
+    pkt.extend_from_slice(&[0x21, 0x00, 0x00, 0x00]); // PIMv2 Register
+    pkt.extend_from_slice(&[0, 0, 0, 0]); // B=0, N=0
+    let inner = pkt.len();
+    push_ipv4(&mut pkt, 17, [192, 0, 2, 1], [239, 1, 1, 1]);
+    let udp = push_udp(&mut pkt, 5000, 5001);
+    pkt.extend_from_slice(b"data");
+    fixup_udp_length(&mut pkt, udp);
+    fixup_ipv4_length(&mut pkt, inner);
+    fixup_ipv4_length(&mut pkt, outer);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "PIM", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let pim = buf.layer_by_name("PIM").unwrap();
+    assert_eq!(display_name_for(&buf, pim, "type"), Some("Register"));
+}
+
+#[test]
+fn ethernet_ipv6_pim_null_register() {
+    // IPv6 Null-Register: a dummy IPv6 header followed by a dummy PIM
+    // header (RFC 7761, Section 4.9.3).
+    let registry = DissectorRegistry::default();
+
+    let mut src = [0u8; 16];
+    src[..2].copy_from_slice(&[0x20, 0x01]);
+    src[15] = 1;
+    let mut group = [0u8; 16];
+    group[..2].copy_from_slice(&[0xff, 0x3e]);
+    group[15] = 1;
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x86DD);
+    let outer = push_ipv6(&mut pkt, 103, src, src);
+    pkt.extend_from_slice(&[0x21, 0x00, 0x00, 0x00]); // PIMv2 Register
+    pkt.extend_from_slice(&[0x40, 0, 0, 0]); // N=1
+    let inner = push_ipv6(&mut pkt, 103, src, group);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x12, 0x34]); // dummy PIM header
+    fixup_ipv6_payload_length(&mut pkt, inner);
+    fixup_ipv6_payload_length(&mut pkt, outer);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "PIM", "IPv6", "PIM"]);
+    assert_layers_contiguous(&buf);
+}
+
+// ---------------------------------------------------------------------------
 // SIGTRAN: M3UA (RFC 4666) and SCCP (ITU-T Q.713)
 // ---------------------------------------------------------------------------
 
@@ -10504,14 +10775,16 @@ fn sccp_udt(user_data: &[u8]) -> Vec<u8> {
 #[test]
 fn integration_ethernet_ipv4_sctp_m3ua_sccp_udt() {
     let reg = DissectorRegistry::default();
-    let user = [0x62, 0x02, 0x48, 0x00]; // opaque SCCP user data
+    // A minimal TCAP Begin (empty OTID) for SSN 6 (HLR), which carries TCAP.
+    let user = [0x62, 0x02, 0x48, 0x00];
     let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp_udt(&user)));
     let mut buf = DissectBuffer::new();
     reg.dissect(&data, &mut buf).unwrap();
-    assert_eq!(
-        layer_names(&buf),
-        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP"]
-    );
+    let mut expected = vec!["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP"];
+    if cfg!(feature = "tcap") {
+        expected.push("TCAP");
+    }
+    assert_eq!(layer_names(&buf), expected);
 
     let m3ua = &buf.layers()[3];
     assert_eq!(
@@ -10611,7 +10884,7 @@ impl packet_dissector::dissector::Dissector for SccpUserStub {
 #[test]
 fn integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch() {
     let mut reg = DissectorRegistry::default();
-    reg.register_by_sccp_ssn(6, Box::new(SccpUserStub)).unwrap();
+    reg.register_by_sccp_ssn_or_replace(6, Box::new(SccpUserStub));
     let user = [0x62, 0x02, 0x48, 0x00, 0x11];
     let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp_udt(&user)));
     let mut buf = DissectBuffer::new();
@@ -10627,6 +10900,114 @@ fn integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch() {
         sccp.range.end - user.len()..sccp.range.end
     );
     assert_eq!(&data[user_layer.range.clone()], &user);
+}
+
+/// Encode a BER element with a short definite length.
+#[cfg(feature = "tcap")]
+fn ber(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut v = vec![tag, content.len() as u8];
+    v.extend_from_slice(content);
+    v
+}
+
+/// TCAP Begin (ITU-T Q.773, clause 3.1) with an AARQ for MAP infoRetrieval
+/// version 3 and an Invoke of sendAuthenticationInfo (opcode 56,
+/// TS 29.002, clause 17.6.1) with SendAuthenticationInfoArg { imsi [0],
+/// numberOfRequestedVectors } (clause 17.7.1).
+#[cfg(feature = "tcap")]
+fn tcap_begin_sai() -> Vec<u8> {
+    let ac = [0x04, 0x00, 0x00, 0x01, 0x00, 14, 3];
+    let dialogue_as = [0x00, 0x11, 0x86, 0x05, 0x01, 0x01, 0x01];
+    let aarq = ber(0x60, &ber(0xa1, &ber(0x06, &ac)));
+    let external = ber(0x28, &[ber(0x06, &dialogue_as), ber(0xa0, &aarq)].concat());
+    let imsi = [0x00, 0x01, 0x01, 0x21, 0x43, 0x65, 0x87, 0xf9];
+    let arg = ber(0x30, &[ber(0x80, &imsi), ber(0x02, &[5])].concat());
+    let invoke = ber(0xa1, &[ber(0x02, &[1]), ber(0x02, &[56]), arg].concat());
+    ber(
+        0x62,
+        &[
+            ber(0x48, &[1, 2, 3, 4]),
+            ber(0x6b, &external),
+            ber(0x6c, &invoke),
+        ]
+        .concat(),
+    )
+}
+
+/// SCCP UDT from `calling_ssn` to `called_ssn`, routed on SSN.
+#[cfg(feature = "sccp")]
+fn sccp_udt_ssn(called_ssn: u8, calling_ssn: u8, user_data: &[u8]) -> Vec<u8> {
+    let mut m = vec![0x09, 0x00, 0x03, 0x05, 0x07];
+    m.extend_from_slice(&[0x02, 0x42, called_ssn]);
+    m.extend_from_slice(&[0x02, 0x42, calling_ssn]);
+    m.push(user_data.len() as u8);
+    m.extend_from_slice(user_data);
+    m
+}
+
+#[cfg(all(
+    feature = "sctp",
+    feature = "m3ua",
+    feature = "sccp",
+    feature = "tcap",
+    feature = "map"
+))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_map() {
+    let reg = DissectorRegistry::default();
+    let tcap = tcap_begin_sai();
+    let sccp = sccp_udt_ssn(6, 7, &tcap);
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP", "TCAP", "MAP"]
+    );
+    let tcap_layer = &buf.layers()[5];
+    assert_eq!(
+        buf.resolve_display_name(tcap_layer, "message_type_name"),
+        Some("Begin")
+    );
+    let sccp_layer = &buf.layers()[4];
+    assert_eq!(
+        tcap_layer.range,
+        sccp_layer.range.end - tcap.len()..sccp_layer.range.end
+    );
+    let map = &buf.layers()[6];
+    assert_eq!(
+        buf.resolve_display_name(map, "application_context_name"),
+        Some("infoRetrieval")
+    );
+    let FieldValue::Array(r) = &buf.field_by_name(map, "components").unwrap().value else {
+        panic!("components is not an array")
+    };
+    let component = &buf.nested_fields(r)[0];
+    assert_eq!(
+        buf.resolve_container_display_name(r.start),
+        Some("sendAuthenticationInfo")
+    );
+    let FieldValue::Object(cr) = &component.value else {
+        panic!("component is not an object")
+    };
+    assert_eq!(
+        buf.resolve_nested_display_name(cr, "operation_name"),
+        Some("sendAuthenticationInfo")
+    );
+}
+
+#[cfg(all(feature = "sctp", feature = "m3ua", feature = "sccp", feature = "tcap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_sccp_tcap_cap_ssn() {
+    let reg = DissectorRegistry::default();
+    let sccp = sccp_udt_ssn(146, 146, &tcap_begin_sai());
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP", "TCAP"]
+    );
 }
 
 // ---------------------------------------------------------------------------
