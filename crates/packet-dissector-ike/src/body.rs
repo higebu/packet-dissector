@@ -474,6 +474,10 @@ pub(crate) static PAYLOAD_CHILDREN: &[FieldDescriptor] = &[
     // <https://www.rfc-editor.org/rfc/rfc7383#section-2.5>
     opt("fragment_number", "Fragment Number", FieldType::U16),
     opt("total_fragments", "Total Fragments", FieldType::U16),
+    // RFC 7296, Section 3.16
+    // <https://www.rfc-editor.org/rfc/rfc7296#section-3.16>
+    #[cfg(feature = "eap")]
+    packet_dissector_eap::EAP_OBJECT_DESCRIPTOR,
 ];
 
 pub(crate) const PFD_PAYLOAD_TYPE: usize = 0;
@@ -509,6 +513,8 @@ const PFD_CFG_TYPE: usize = 29;
 const PFD_CFG_ATTRIBUTES: usize = 30;
 const PFD_FRAGMENT_NUMBER: usize = 31;
 const PFD_TOTAL_FRAGMENTS: usize = 32;
+#[cfg(feature = "eap")]
+const PFD_EAP: usize = 33;
 
 // IKEv1 variants of payload fields whose values use different registries.
 static V1_PROPOSALS: FieldDescriptor =
@@ -568,6 +574,13 @@ pub(crate) fn decode_body<'pkt>(
         (2, 44 | 45) => decode_v2_ts(buf, body, off),
         (2, 47) => decode_v2_cp(buf, body, off),
         (2, 53) => decode_v2_skf(buf, body, off),
+        // RFC 7296, Section 3.16 — "The payload type for an EAP payload is
+        // forty-eight (48)."; the EAP Message follows the generic payload
+        // header. <https://www.rfc-editor.org/rfc/rfc7296#section-3.16>
+        #[cfg(feature = "eap")]
+        (2, 48) => {
+            packet_dissector_eap::push_eap_object(&f[PFD_EAP], body, off, buf);
+        }
         (1, 1) => decode_v1_sa(buf, body, off),
         (1, 4) => push_rest(buf, &f[PFD_KE_DATA], body, off, 0),
         (1, 5) => decode_id(buf, true, body, off),
@@ -1491,6 +1504,7 @@ mod tests {
     //! | 2407 §4.6.2         | IKEv1 Identification                 | v1_ke_nonce_id                        |
     //! | 2408 §3.14          | IKEv1 Notification                   | v1_notification                       |
     //! | 2408 §3.15-3.16     | IKEv1 Delete / Vendor ID             | v1_delete_and_vendor_id               |
+    //! | 7296 §3.16          | EAP payload decoded as EAP (eap)     | v2_eap_payload                        |
     //! | —                   | Truncated bodies do not panic        | truncated_bodies_do_not_panic         |
 
     use crate::IkeDissector;
@@ -1623,6 +1637,32 @@ mod tests {
         p.extend_from_slice(spi);
         p.extend_from_slice(&body);
         p
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn v2_eap_payload() {
+        // RFC 7296, Section 3.16 — the EAP payload carries one EAP message.
+        // <https://www.rfc-editor.org/rfc/rfc7296#section-3.16>
+        let data = message(2, &[(48, vec![0x01, 0x05, 0x00, 0x05, 0x01])]);
+        let buf = dissect(&data);
+        let p = payload(&buf, 0);
+        let FieldValue::Object(eap) = get(&buf, &p, "eap") else {
+            panic!("eap must be an Object");
+        };
+        assert_eq!(
+            buf.resolve_nested_display_name(eap, "code_name"),
+            Some("Request")
+        );
+        assert_eq!(
+            buf.resolve_nested_display_name(eap, "type_name"),
+            Some("Identity")
+        );
+
+        // A malformed EAP message keeps only the raw payload data.
+        let data = message(2, &[(48, vec![0x01, 0x05, 0x00, 0x09, 0x01])]);
+        let buf = dissect(&data);
+        assert!(!has(&buf, &payload(&buf, 0), "eap"));
     }
 
     #[test]
