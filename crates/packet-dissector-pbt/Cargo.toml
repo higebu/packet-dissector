@@ -25,6 +25,7 @@ packet-dissector-ipv4 = { workspace = true }
 packet-dissector-ipv6 = { workspace = true }
 packet-dissector-isis = { workspace = true }
 packet-dissector-mdns = { workspace = true }
+packet-dissector-nas-eps = { workspace = true }
 packet-dissector-ntp = { workspace = true }
 packet-dissector-ospf = { workspace = true }
 packet-dissector-pim = { workspace = true }
