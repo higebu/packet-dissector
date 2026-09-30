@@ -421,7 +421,8 @@ fn parse_ipv6_fragment() {
         .unwrap();
 
     assert_eq!(result.bytes_consumed, 8);
-    assert_eq!(result.next, DispatchHint::ByIpProtocol(6));
+    // Fragment Offset 7: the data starts mid-packet, so nothing is dispatched.
+    assert_eq!(result.next, DispatchHint::End);
 
     let layer = buf.layer_by_name("IPv6 Fragment").unwrap();
     assert_eq!(layer.name, "IPv6 Fragment");
