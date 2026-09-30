@@ -1666,6 +1666,10 @@ impl DissectorRegistry {
             push(&packet_dissector_lacp::OsspDissector);
             push(&packet_dissector_lacp::EsmcDissector);
         }
+        // The EAPOL dissector emits EAP layers itself (RFC 3748 —
+        // https://www.rfc-editor.org/rfc/rfc3748).
+        #[cfg(feature = "eap")]
+        push(&packet_dissector_eap::EapDissector);
         // GtpcDispatcher delegates by version; expose both GTP-C schemas.
         #[cfg(feature = "gtpv1c")]
         push(&packet_dissector_gtpv1c::Gtpv1cDissector);
@@ -2671,6 +2675,13 @@ impl Default for DissectorRegistry {
             reg.register_by_ethertype(0x88CC, Box::new(packet_dissector_lldp::LldpDissector)),
         );
 
+        // EAPOL uses EtherType 0x888E (IEEE 802.1X-2020, 11.3); the EAPOL
+        // dissector hands an EAPOL-EAP body to EAP (RFC 3748) itself.
+        #[cfg(feature = "eap")]
+        assert_builtin(
+            reg.register_by_ethertype(0x888E, Box::new(packet_dissector_eap::EapolDissector)),
+        );
+
         // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332).
         // The 0x8847 dispatcher applies the MPLS label decode-as rules.
         // Upstream-assigned labels come from a context-specific label space
@@ -3137,6 +3148,20 @@ impl Default for DissectorRegistry {
             );
             reg.register_dissector_factory("ngap", || {
                 Box::new(packet_dissector_ngap::NgapDissector)
+            });
+        }
+
+        // SGsAP runs over SCTP on the registered port 29118 (3GPP TS 29.118,
+        // Section 6.3). Its payload protocol identifier is 0 ("unspecified"),
+        // which cannot identify it, so only the port is registered.
+        #[cfg(feature = "sgsap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_port(29118, Box::new(packet_dissector_sgsap::SgsapDissector)),
+            );
+            reg.register_dissector_factory("sgsap", || {
+                Box::new(packet_dissector_sgsap::SgsapDissector)
             });
         }
 
@@ -4796,6 +4821,9 @@ mod tests {
         #[cfg(feature = "lldp")]
         assert!(reg.get_by_ethertype(0x88CC).is_some());
 
+        #[cfg(feature = "eap")]
+        assert!(reg.get_by_ethertype(0x888E).is_some());
+
         #[cfg(feature = "mpls")]
         {
             assert!(reg.get_by_ethertype(0x8847).is_some());
@@ -4962,6 +4990,11 @@ mod tests {
         #[cfg(all(feature = "ngap", feature = "sctp"))]
         assert!(reg.get_by_sctp_port(38412).is_some());
 
+        #[cfg(all(feature = "sgsap", feature = "sctp"))]
+        assert_eq!(reg.get_by_sctp_port(29118).unwrap().short_name(), "SGsAP");
+        #[cfg(all(feature = "sgsap", feature = "sctp"))]
+        assert!(reg.get_by_sctp_ppid(0).is_none());
+
         // IANA "SCTP Payload Protocol Identifiers": 46 Diameter, 60 NGAP.
         #[cfg(all(feature = "diameter", feature = "sctp"))]
         assert_eq!(reg.get_by_sctp_ppid(46).unwrap().short_name(), "Diameter");
@@ -5123,6 +5156,9 @@ mod tests {
 
         #[cfg(feature = "ngap")]
         assert!(reg.create_dissector_by_name("ngap").is_some());
+
+        #[cfg(feature = "sgsap")]
+        assert!(reg.create_dissector_by_name("sgsap").is_some());
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());
