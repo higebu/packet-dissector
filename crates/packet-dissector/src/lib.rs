@@ -131,6 +131,9 @@ pub mod dissectors {
     #[cfg(feature = "gtpv1u")]
     pub use packet_dissector_gtpv1u as gtpv1u;
 
+    #[cfg(feature = "gtpv1c")]
+    pub use packet_dissector_gtpv1c as gtpv1c;
+
     #[cfg(feature = "gtpv2c")]
     pub use packet_dissector_gtpv2c as gtpv2c;
 
@@ -216,6 +219,8 @@ pub mod dissectors {
 
     #[cfg(feature = "ppp")]
     pub use packet_dissector_ppp as ppp;
+    #[cfg(feature = "pppoe")]
+    pub use packet_dissector_pppoe as pppoe;
 
     #[cfg(feature = "radius")]
     pub use packet_dissector_radius as radius;
@@ -239,6 +244,8 @@ pub mod dissectors {
     pub use packet_dissector_stun as stun;
 }
 
+#[cfg(feature = "ip-reassembly")]
+mod ip_reassembly;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 
