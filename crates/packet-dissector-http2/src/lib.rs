@@ -36,9 +36,9 @@ static REFERENCES: &[SpecReference] = &[
     ),
 ];
 
-/// HTTP/2 connection preface sent by the client.
+/// HTTP/2 client connection preface.
 /// RFC 9113, Section 3.4 — <https://www.rfc-editor.org/rfc/rfc9113#section-3.4>
-const CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+pub const CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// Minimum frame size: 9-byte frame header.
 /// RFC 9113, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc9113#section-4.1>
@@ -243,6 +243,74 @@ fn error_code_name(
         FieldValue::U32(0x0c) => Some("INADEQUATE_SECURITY"),
         FieldValue::U32(0x0d) => Some("HTTP_1_1_REQUIRED"),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame header heuristic
+// ---------------------------------------------------------------------------
+
+/// Initial value of SETTINGS_MAX_FRAME_SIZE (2^14 octets).
+/// RFC 9113, Section 6.5.2 — <https://www.rfc-editor.org/rfc/rfc9113#section-6.5.2>
+const DEFAULT_MAX_FRAME_SIZE: u32 = 1 << 14;
+
+/// Whether `data` starts with a plausible HTTP/2 frame header.
+///
+/// Used to recognise HTTP/2 on a connection whose connection preface was
+/// not seen (for example the server side, or a capture that starts after
+/// the preface): RFC 9113, Section 3.4 — "The client sends the client
+/// connection preface as the first application data octets of a
+/// connection", so no later segment carries it —
+/// <https://www.rfc-editor.org/rfc/rfc9113#section-3.4>.
+///
+/// The first 9 octets must form a frame header (RFC 9113, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9113#section-4.1>) that a conforming
+/// endpoint may send without knowing the peer's settings:
+///
+/// - the Type is one defined in RFC 9113, Section 6 (0x00–0x09);
+/// - the Length is at most 16,384 ("Values greater than 2^14 (16,384) MUST
+///   NOT be sent unless the receiver has set a larger value for
+///   SETTINGS_MAX_FRAME_SIZE");
+/// - the Reserved bit is unset ("MUST remain unset (0x00) when sending");
+/// - the Stream Identifier is 0 for SETTINGS, PING and GOAWAY, non-zero for
+///   DATA, HEADERS, PRIORITY, RST_STREAM, PUSH_PROMISE and CONTINUATION
+///   (Sections 6.1–6.10);
+/// - PRIORITY is 5 octets (Section 6.3), RST_STREAM and WINDOW_UPDATE are 4
+///   (Sections 6.4, 6.9), PING is 8 (Section 6.7), GOAWAY is at least 8
+///   (Section 6.8), SETTINGS is a multiple of 6 and empty with ACK
+///   (Section 6.5).
+///
+/// An HTTP/1.x message never passes: it starts with a token or `HTTP/`,
+/// whose first octet alone makes the Length exceed 16,384. Frames that fail
+/// these checks can still be valid on a connection already known to be
+/// HTTP/2 (unknown frame types, larger SETTINGS_MAX_FRAME_SIZE); the check
+/// is meant only for a connection whose protocol is not yet known.
+pub fn looks_like_frame_header(data: &[u8]) -> bool {
+    let Some(header) = data.get(..FRAME_HEADER_LEN) else {
+        return false;
+    };
+    let length = u32::from(header[0]) << 16 | u32::from(header[1]) << 8 | u32::from(header[2]);
+    let frame_type = header[3];
+    let flags = header[4];
+    let stream_word = u32::from_be_bytes([header[5], header[6], header[7], header[8]]);
+    if length > DEFAULT_MAX_FRAME_SIZE || stream_word & 0x8000_0000 != 0 {
+        return false;
+    }
+    let on_stream = stream_word != 0;
+    match frame_type {
+        FRAME_TYPE_DATA
+        | FRAME_TYPE_HEADERS
+        | FRAME_TYPE_PUSH_PROMISE
+        | FRAME_TYPE_CONTINUATION => on_stream,
+        FRAME_TYPE_PRIORITY => on_stream && length == 5,
+        FRAME_TYPE_RST_STREAM => on_stream && length == 4,
+        FRAME_TYPE_SETTINGS => {
+            !on_stream && length % 6 == 0 && (flags & FLAG_ACK == 0 || length == 0)
+        }
+        FRAME_TYPE_PING => !on_stream && length == 8,
+        FRAME_TYPE_GOAWAY => !on_stream && length >= 8,
+        FRAME_TYPE_WINDOW_UPDATE => length == 4,
+        _ => false,
     }
 }
 
@@ -898,6 +966,9 @@ mod tests {
     //! | 7541 §5.1         | Integer encoding (HPACK module)     | hpack::integer::tests                                 |
     //! | 7541 §5.2         | String literal / Huffman            | hpack::huffman::tests                                 |
     //! | 7541 §6.1–6.3     | HPACK representations               | hpack::tests                                          |
+    //! | 9113 §4.1, §6     | Frame header heuristic accepts      | looks_like_frame_header_accepts_valid_headers         |
+    //! | 9113 §4.1, §6     | Frame header heuristic rejects      | looks_like_frame_header_rejects_invalid_headers       |
+    //! | 9113 §3.4         | Heuristic rejects preface/HTTP/1.1  | looks_like_frame_header_rejects_text                  |
     //! | -                 | Unknown frame type                  | parse_unknown_frame_type                              |
     //! | -                 | Truncated frame header              | parse_truncated_frame_header                          |
     //! | -                 | Truncated frame payload             | parse_truncated_frame_payload                         |
@@ -1678,5 +1749,79 @@ mod tests {
             assert!(r.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Application));
+    }
+
+    #[test]
+    fn looks_like_frame_header_accepts_valid_headers() {
+        let accepted = [
+            build_frame(FRAME_TYPE_SETTINGS, 0, 0, &[]),
+            build_frame(FRAME_TYPE_SETTINGS, FLAG_ACK, 0, &[]),
+            build_frame(FRAME_TYPE_SETTINGS, 0, 0, &[0, 3, 0, 0, 0, 100]),
+            build_frame(FRAME_TYPE_WINDOW_UPDATE, 0, 0, &[0, 0, 0xff, 0xff]),
+            build_frame(FRAME_TYPE_WINDOW_UPDATE, 0, 3, &[0, 0, 0xff, 0xff]),
+            build_frame(FRAME_TYPE_HEADERS, FLAG_END_HEADERS, 1, &[0x82]),
+            build_frame(FRAME_TYPE_DATA, FLAG_END_STREAM, 1, &[]),
+            build_frame(FRAME_TYPE_PRIORITY, 0, 3, &[0, 0, 0, 1, 16]),
+            build_frame(FRAME_TYPE_RST_STREAM, 0, 1, &[0, 0, 0, 8]),
+            build_frame(FRAME_TYPE_PUSH_PROMISE, 0, 1, &[0, 0, 0, 2]),
+            build_frame(FRAME_TYPE_PING, 0, 0, &[0; 8]),
+            build_frame(FRAME_TYPE_GOAWAY, 0, 0, &[0; 8]),
+            build_frame(FRAME_TYPE_CONTINUATION, 0, 1, &[0x82]),
+        ];
+        for frame in &accepted {
+            assert!(looks_like_frame_header(frame), "{frame:02x?}");
+        }
+        // Only the 9-octet header is examined: the payload may follow later.
+        assert!(looks_like_frame_header(&accepted[5][..FRAME_HEADER_LEN]));
+        // Length at the default SETTINGS_MAX_FRAME_SIZE.
+        let mut max = build_frame(FRAME_TYPE_DATA, 0, 1, &[]);
+        max[..3].copy_from_slice(&[0x00, 0x40, 0x00]);
+        assert!(looks_like_frame_header(&max));
+    }
+
+    #[test]
+    fn looks_like_frame_header_rejects_invalid_headers() {
+        let mut too_long = build_frame(FRAME_TYPE_DATA, 0, 1, &[]);
+        too_long[..3].copy_from_slice(&[0x00, 0x40, 0x01]);
+        let mut reserved_bit = build_frame(FRAME_TYPE_HEADERS, 0, 1, &[0x82]);
+        reserved_bit[5] |= 0x80;
+        let rejected = [
+            // Shorter than a frame header.
+            build_frame(FRAME_TYPE_SETTINGS, 0, 0, &[])[..8].to_vec(),
+            // Frame types not defined in RFC 9113.
+            build_frame(0x0a, 0, 0, &[]),
+            build_frame(0xfa, 0, 0, &[]),
+            too_long,
+            reserved_bit,
+            // Connection-level frames on a stream.
+            build_frame(FRAME_TYPE_SETTINGS, 0, 1, &[]),
+            build_frame(FRAME_TYPE_PING, 0, 1, &[0; 8]),
+            build_frame(FRAME_TYPE_GOAWAY, 0, 1, &[0; 8]),
+            // Stream frames on stream 0.
+            build_frame(FRAME_TYPE_DATA, 0, 0, &[]),
+            build_frame(FRAME_TYPE_HEADERS, 0, 0, &[0x82]),
+            build_frame(FRAME_TYPE_PRIORITY, 0, 0, &[0, 0, 0, 1, 16]),
+            build_frame(FRAME_TYPE_RST_STREAM, 0, 0, &[0, 0, 0, 8]),
+            build_frame(FRAME_TYPE_PUSH_PROMISE, 0, 0, &[0, 0, 0, 2]),
+            build_frame(FRAME_TYPE_CONTINUATION, 0, 0, &[0x82]),
+            // Fixed or minimum payload lengths.
+            build_frame(FRAME_TYPE_PRIORITY, 0, 3, &[0, 0, 0, 1]),
+            build_frame(FRAME_TYPE_RST_STREAM, 0, 1, &[0, 0, 8]),
+            build_frame(FRAME_TYPE_SETTINGS, 0, 0, &[0, 3, 0, 0, 0]),
+            build_frame(FRAME_TYPE_SETTINGS, FLAG_ACK, 0, &[0, 3, 0, 0, 0, 100]),
+            build_frame(FRAME_TYPE_PING, 0, 0, &[0; 7]),
+            build_frame(FRAME_TYPE_GOAWAY, 0, 0, &[0; 7]),
+            build_frame(FRAME_TYPE_WINDOW_UPDATE, 0, 0, &[0, 0, 1]),
+        ];
+        for frame in &rejected {
+            assert!(!looks_like_frame_header(frame), "{frame:02x?}");
+        }
+    }
+
+    #[test]
+    fn looks_like_frame_header_rejects_text() {
+        assert!(!looks_like_frame_header(CONNECTION_PREFACE));
+        assert!(!looks_like_frame_header(b"GET / HTTP/1.1\r\n\r\n"));
+        assert!(!looks_like_frame_header(b"HTTP/1.1 200 OK\r\n\r\n"));
     }
 }

@@ -42,6 +42,7 @@ default = [
   "sdp",
   "diameter",
   "nas5g",
+  "nas-eps",
   "ngap",
   "sgsap",
   "geneve",
@@ -108,6 +109,7 @@ sip = ["dep:packet-dissector-sip"]
 sdp = ["dep:packet-dissector-sdp"]
 diameter = ["dep:packet-dissector-diameter"]
 nas5g = ["dep:packet-dissector-nas5g"]
+nas-eps = ["dep:packet-dissector-nas-eps"]
 ngap = ["dep:packet-dissector-ngap", "nas5g"]
 sgsap = ["dep:packet-dissector-sgsap"]
 geneve = ["dep:packet-dissector-geneve"]
@@ -177,7 +179,7 @@ application = [
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
-3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "ngap", "sgsap"]
+3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "sgsap"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -212,6 +214,7 @@ packet-dissector-sip = { workspace = true, optional = true }
 packet-dissector-sdp = { workspace = true, optional = true }
 packet-dissector-diameter = { workspace = true, optional = true }
 packet-dissector-nas5g = { workspace = true, optional = true }
+packet-dissector-nas-eps = { workspace = true, optional = true }
 packet-dissector-ngap = { workspace = true, optional = true }
 packet-dissector-sgsap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }

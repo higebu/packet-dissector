@@ -1,6 +1,8 @@
 //! Dissector registry for managing and dispatching protocol dissectors.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "mpls")]
+use std::sync::atomic::Ordering;
 
 use packet_dissector_core::dissector::{
     DispatchHint, Dissector, DissectorPlugin, DissectorTable, ProtocolLayer, SpecReference,
@@ -93,6 +95,10 @@ pub struct DissectorRegistry {
     /// Shared ESP Security Association database for decryption.
     #[cfg(feature = "esp-decrypt")]
     esp_sa_db: packet_dissector_esp::EspSaDb,
+    /// MPLS label table — decode-as rules for the payload after a
+    /// bottom-of-stack label, shared with the built-in MPLS dispatcher.
+    #[cfg(feature = "mpls")]
+    mpls_labels: std::sync::Arc<MplsLabelTable>,
 }
 
 impl DissectorRegistry {
@@ -119,6 +125,8 @@ impl DissectorRegistry {
             tcp_reassembly: super::tcp_reassembly::new_tcp_reassembly(),
             #[cfg(feature = "esp-decrypt")]
             esp_sa_db: std::sync::Arc::new(packet_dissector_esp::SharedEspSaDb::new()),
+            #[cfg(feature = "mpls")]
+            mpls_labels: std::sync::Arc::new(MplsLabelTable::default()),
         }
     }
 
@@ -557,6 +565,70 @@ impl DissectorRegistry {
         self.by_ach_channel_type
             .get(&channel_type)
             .map(|d| d.as_ref())
+    }
+
+    /// Register a dissector for the payload after the bottom-of-stack MPLS
+    /// label `label` (a decode-as rule, e.g. `pw-eth` or `pw-eth-cw`).
+    ///
+    /// The PW type, and hence the payload type, is signalled out of band
+    /// (RFC 4385, Section 3 — <https://www.rfc-editor.org/rfc/rfc4385#section-3>),
+    /// so the MPLS dissector otherwise guesses it from the first nibble
+    /// (RFC 4928, Section 3 — <https://www.rfc-editor.org/rfc/rfc4928#section-3>).
+    /// A rule replaces that guess for `label`. It is consulted by the
+    /// built-in MPLS dissector registered for EtherType 0x8847 only:
+    /// upstream-assigned labels (0x8848) come from a context-specific label
+    /// space (RFC 5331, Section 3 —
+    /// <https://www.rfc-editor.org/rfc/rfc5331#section-3>). It is never
+    /// consulted for bottom labels with a fixed meaning (IPv4 / IPv6
+    /// Explicit NULL and the GAL) or for a bottom entropy label, and it has
+    /// no effect once 0x8847 is re-registered with another dissector.
+    /// Labels are 20 bits wide, so a larger value never matches.
+    ///
+    /// Returns an error if a dissector is already registered for this
+    /// label. Use
+    /// [`register_by_mpls_label_or_replace`](Self::register_by_mpls_label_or_replace)
+    /// to intentionally override an existing registration.
+    #[cfg(feature = "mpls")]
+    pub fn register_by_mpls_label(
+        &mut self,
+        label: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        let mut rules = self.mpls_labels.lock();
+        if let Some(existing) = rules.get(&label) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "mpls_label",
+                key: u64::from(label),
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        rules.insert(label, dissector);
+        self.mpls_labels.has_rules.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Register a dissector for the payload after the bottom-of-stack MPLS
+    /// label `label`, replacing any existing one.
+    ///
+    /// See [`register_by_mpls_label`](Self::register_by_mpls_label). Returns
+    /// the previously registered dissector, if any.
+    #[cfg(feature = "mpls")]
+    pub fn register_by_mpls_label_or_replace(
+        &mut self,
+        label: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        let previous = self.mpls_labels.lock().insert(label, dissector);
+        self.mpls_labels.has_rules.store(true, Ordering::Release);
+        previous
+    }
+
+    /// Short name of the dissector registered for MPLS label `label`, if
+    /// any.
+    #[cfg(feature = "mpls")]
+    pub fn mpls_label_short_name(&self, label: u32) -> Option<&'static str> {
+        self.mpls_labels.lock().get(&label).map(|d| d.short_name())
     }
 
     /// Look up a dissector by pcap link-layer header type.
@@ -1560,6 +1632,10 @@ impl DissectorRegistry {
         if let Some(ref d) = self.ipv6_routing_fallback {
             push(d.as_ref());
         }
+        #[cfg(feature = "mpls")]
+        for d in self.mpls_labels.lock().values() {
+            push(d.as_ref());
+        }
         for d in self.by_link_type.values() {
             push(d.as_ref());
         }
@@ -1805,11 +1881,81 @@ impl Dissector for OspfDispatcher {
 
 // ---------------------------------------------------------------------------
 // HTTP version dispatcher — delegates to HTTP/2 when the connection preface
-// ("PRI * HTTP/2.0") is detected, otherwise falls back to HTTP/1.1.
+// ("PRI * HTTP/2.0") or an HTTP/2 frame header is detected, and keeps
+// delegating for the rest of the connection; otherwise falls back to
+// HTTP/1.1.
 // ---------------------------------------------------------------------------
 
+/// Maximum number of TCP stream directions remembered as HTTP/2 (two per
+/// connection). The oldest ones are forgotten first.
+#[cfg(feature = "http2")]
+const MAX_HTTP2_DIRECTIONS: usize = 65_536;
+
 #[cfg(any(feature = "http", feature = "http2"))]
-struct HttpDispatcher;
+struct HttpDispatcher {
+    /// TCP stream directions known to carry HTTP/2.
+    ///
+    /// RFC 9113, Section 3.4 — the client connection preface is sent once,
+    /// as "the first application data octets of a connection"
+    /// (<https://www.rfc-editor.org/rfc/rfc9113#section-3.4>), so later
+    /// segments of either direction are recognised by this memory.
+    #[cfg(feature = "http2")]
+    http2_streams: std::sync::Mutex<crate::stream_set::StreamSet>,
+}
+
+#[cfg(any(feature = "http", feature = "http2"))]
+impl HttpDispatcher {
+    fn new() -> Self {
+        Self {
+            #[cfg(feature = "http2")]
+            http2_streams: std::sync::Mutex::new(crate::stream_set::StreamSet::new(
+                MAX_HTTP2_DIRECTIONS,
+            )),
+        }
+    }
+
+    /// Whether `data` of the direction `stream` is HTTP/2.
+    ///
+    /// Only the client connection preface marks the connection (both
+    /// directions) as HTTP/2 for the following segments. A frame header
+    /// recognised by [`is_http2_start`] alone is dissected as HTTP/2 but not
+    /// remembered: an HTTP/1.1 body can start with octets that form a valid
+    /// frame header, and remembering it would send the connection's later
+    /// HTTP/1.1 messages to the HTTP/2 dissector.
+    #[cfg(feature = "http2")]
+    fn is_http2_stream(
+        &self,
+        data: &[u8],
+        stream: &packet_dissector_core::dissector::TcpStreamContext,
+    ) -> bool {
+        // A poisoned lock only means a panic elsewhere; the set itself is
+        // always consistent, so keep using it.
+        let mut streams = self
+            .http2_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if streams.contains(&stream.stream_key) {
+            return true;
+        }
+        if data.starts_with(packet_dissector_http2::CONNECTION_PREFACE) {
+            streams.insert(stream.stream_key);
+            streams.insert(stream.reverse_key());
+            return true;
+        }
+        drop(streams);
+        is_http2_start(data)
+    }
+}
+
+/// Whether `data` starts like HTTP/2 without any knowledge of the connection:
+/// with the client connection preface (RFC 9113, Section 3.4 —
+/// <https://www.rfc-editor.org/rfc/rfc9113#section-3.4>) or with a frame
+/// header (RFC 9113, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9113#section-4.1>).
+#[cfg(feature = "http2")]
+fn is_http2_start(data: &[u8]) -> bool {
+    data.starts_with(b"PRI * HTTP/2.0") || packet_dissector_http2::looks_like_frame_header(data)
+}
 
 /// Specifications behind both versions the HTTP dispatcher routes to.
 #[cfg(all(feature = "http", feature = "http2"))]
@@ -1875,16 +2021,54 @@ impl Dissector for HttpDispatcher {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
-        // RFC 9113, Section 3.4 — HTTP/2 connection preface detection
         #[cfg(feature = "http2")]
-        if data.starts_with(b"PRI * HTTP/2.0") {
+        if is_http2_start(data) {
             return packet_dissector_http2::Http2Dissector.dissect(data, buf, offset);
         }
-        #[cfg(feature = "http")]
-        {
-            packet_dissector_http::HttpDissector.dissect(data, buf, offset)
+        dissect_http1(data, buf, offset)
+    }
+
+    fn dissect_tcp_stream<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+        stream: &packet_dissector_core::dissector::TcpStreamContext,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        #[cfg(feature = "http2")]
+        if self.is_http2_stream(data, stream) {
+            return packet_dissector_http2::Http2Dissector.dissect(data, buf, offset);
         }
-        #[cfg(not(feature = "http"))]
+        #[cfg(not(feature = "http2"))]
+        let _ = stream;
+        dissect_http1(data, buf, offset)
+    }
+
+    fn release_tcp_stream(&self, stream_key: &packet_dissector_core::dissector::TcpStreamKey) {
+        #[cfg(feature = "http2")]
+        self.http2_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(stream_key);
+        #[cfg(not(feature = "http2"))]
+        let _ = stream_key;
+    }
+}
+
+/// Dissect `data` as HTTP/1.1, or fail when that dissector is disabled.
+#[cfg(any(feature = "http", feature = "http2"))]
+fn dissect_http1<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+    #[cfg(feature = "http")]
+    {
+        packet_dissector_http::HttpDissector.dissect(data, buf, offset)
+    }
+    #[cfg(not(feature = "http"))]
+    {
+        let _ = (data, buf, offset);
         Err(PacketError::InvalidHeader("HTTP/1.1 dissector not enabled"))
     }
 }
@@ -1976,6 +2160,88 @@ impl Dissector for L2tpDispatcher {
             3 => packet_dissector_l2tpv3::L2tpv3UdpDissector.dissect(data, buf, offset),
             _ => Err(PacketError::InvalidHeader("unsupported L2TP version")),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MPLS dispatcher — applies the MPLS label decode-as rules.
+// ---------------------------------------------------------------------------
+
+/// Decode-as rules keyed by bottom-of-stack MPLS label, shared between the
+/// registry (which adds rules) and [`MplsDispatcher`] (which applies them).
+///
+/// `has_rules` lets the dispatcher skip the lock while no rule exists.
+#[cfg(feature = "mpls")]
+#[derive(Default)]
+struct MplsLabelTable {
+    rules: std::sync::Mutex<HashMap<u32, Box<dyn Dissector>>>,
+    has_rules: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "mpls")]
+impl MplsLabelTable {
+    /// Lock the rules. A panic while the lock was held cannot leave the map
+    /// half-updated, so a poisoned lock is recovered.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u32, Box<dyn Dissector>>> {
+        self.rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// MPLS dissector that hands the payload after a bottom-of-stack label with
+/// a decode-as rule to the rule's dissector.
+///
+/// The PW type is signalled out of band (RFC 4385, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc4385#section-3>), so without a rule
+/// the MPLS dissector's own first-nibble heuristic applies.
+#[cfg(feature = "mpls")]
+struct MplsDispatcher {
+    labels: std::sync::Arc<MplsLabelTable>,
+}
+
+#[cfg(feature = "mpls")]
+impl Dissector for MplsDispatcher {
+    fn name(&self) -> &'static str {
+        packet_dissector_mpls::MplsDissector.name()
+    }
+
+    fn short_name(&self) -> &'static str {
+        packet_dissector_mpls::MplsDissector.short_name()
+    }
+
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        packet_dissector_mpls::MplsDissector.field_descriptors()
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        packet_dissector_mpls::MplsDissector.references()
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        packet_dissector_mpls::MplsDissector.layer()
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        if !self.labels.has_rules.load(Ordering::Acquire) {
+            return packet_dissector_mpls::MplsDissector.dissect(data, buf, offset);
+        }
+        let rules = self.labels.lock();
+        packet_dissector_mpls::MplsDissector.dissect_with_payload_override(
+            data,
+            buf,
+            offset,
+            |label, payload, buf, payload_offset| {
+                rules
+                    .get(&label)
+                    .map(|d| d.dissect(payload, buf, payload_offset))
+            },
+        )
     }
 }
 
@@ -2216,6 +2482,17 @@ impl Default for DissectorRegistry {
             Box::new(packet_dissector_ethernet::EthernetDissector),
         ));
 
+        // IEEE 802.1Q C-Tag (0x8100) and IEEE 802.1ad S-Tag (0x88A8) reached
+        // by EtherType dispatch (e.g. SLL/SLL2 protocol type, GRE protocol
+        // type); tags right after an Ethernet header are parsed inline by
+        // the Ethernet dissector.
+        // IEEE 802.1Q-2022, clause 9.6 — https://standards.ieee.org/ieee/802.1Q/10323/
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_builtin(
+                reg.register_by_ethertype(tpid, Box::new(packet_dissector_ethernet::VlanDissector)),
+            );
+        }
         // IP protocol 143 (Ethernet) — carries an Ethernet frame directly,
         // e.g. SRv6 L2 services (End.DX2 / End.DT2U / End.DT2M).
         // RFC 8986, Section 10.1 — https://www.rfc-editor.org/rfc/rfc8986#section-10.1
@@ -2385,15 +2662,34 @@ impl Default for DissectorRegistry {
             reg.register_by_ethertype(0x88CC, Box::new(packet_dissector_lldp::LldpDissector)),
         );
 
-        // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332)
+        // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332).
+        // The 0x8847 dispatcher applies the MPLS label decode-as rules.
+        // Upstream-assigned labels come from a context-specific label space
+        // (RFC 5331, Section 3 — https://www.rfc-editor.org/rfc/rfc5331#section-3),
+        // so the rules, keyed by label value alone, do not apply to 0x8848.
         #[cfg(feature = "mpls")]
         {
-            assert_builtin(
-                reg.register_by_ethertype(0x8847, Box::new(packet_dissector_mpls::MplsDissector)),
-            );
+            assert_builtin(reg.register_by_ethertype(
+                0x8847,
+                Box::new(MplsDispatcher {
+                    labels: reg.mpls_labels.clone(),
+                }),
+            ));
             assert_builtin(
                 reg.register_by_ethertype(0x8848, Box::new(packet_dissector_mpls::MplsDissector)),
             );
+            // Decode-as names for MPLS label rules: an Ethernet PW without
+            // and with the control word (RFC 4448, Section 4.6 —
+            // https://www.rfc-editor.org/rfc/rfc4448#section-4.6).
+            #[cfg(feature = "ethernet")]
+            {
+                reg.register_dissector_factory("pw-eth", || {
+                    Box::new(packet_dissector_ethernet::EthernetDissector)
+                });
+                reg.register_dissector_factory("pw-eth-cw", || {
+                    Box::new(packet_dissector_mpls::EthernetPwControlWordDissector)
+                });
+            }
         }
 
         // MPLS G-ACh / PW Associated Channel Types (IANA "MPLS Generalized
@@ -2612,11 +2908,11 @@ impl Default for DissectorRegistry {
         }
 
         // HTTP runs over TCP on port 80 (RFC 9112, RFC 9113)
-        // Uses HttpDispatcher to auto-detect HTTP/2 connection preface.
+        // Uses HttpDispatcher to auto-detect HTTP/2 connections.
         #[cfg(any(feature = "http", feature = "http2"))]
         {
             #[cfg(feature = "tcp")]
-            assert_builtin(reg.register_by_tcp_port(80, Box::new(HttpDispatcher)));
+            assert_builtin(reg.register_by_tcp_port(80, Box::new(HttpDispatcher::new())));
         }
         #[cfg(feature = "http")]
         reg.register_dissector_factory("http", || Box::new(packet_dissector_http::HttpDissector));
@@ -2826,6 +3122,13 @@ impl Default for DissectorRegistry {
                 Box::new(packet_dissector_nas5g::Nas5gDissector)
             });
         }
+
+        // EPS NAS is carried inside S1AP; register as a factory for
+        // standalone use (e.g., `bask read --dissector nas-eps`).
+        #[cfg(feature = "nas-eps")]
+        reg.register_dissector_factory("nas-eps", || {
+            Box::new(packet_dissector_nas_eps::NasEpsDissector)
+        });
 
         // BGP runs over TCP on port 179 (RFC 4271)
         #[cfg(feature = "bgp")]
@@ -4383,6 +4686,15 @@ mod tests {
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_ethertype(0x6558).is_some());
 
+        // IEEE 802.1Q-2022, clause 9.6 — standalone C-Tag / S-Tag.
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_eq!(
+                reg.get_by_ethertype(tpid).map(|d| d.short_name()),
+                Some("VLAN")
+            );
+        }
+
         #[cfg(feature = "ipv4")]
         {
             assert!(reg.get_by_ethertype(0x0800).is_some());
@@ -4771,6 +5083,9 @@ mod tests {
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());
+
+        #[cfg(feature = "nas-eps")]
+        assert!(reg.create_dissector_by_name("nas-eps").is_some());
 
         #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
         assert!(reg.create_dissector_by_name("l2tp").is_some());
