@@ -94,6 +94,10 @@
 //! | link_type=229 (IPV6) → IPv6 → UDP                   | integration_link_type_ipv6                           |
 //! | link_type=228/229 with the other IP version         | integration_link_type_ipv4_ipv6_reject_other_version |
 //! | Unregistered link type is an error, not Ethernet    | integration_unregistered_link_type_is_error          |
+//! | link_type=105 (IEEE 802.11) → SNAP → IPv4 → UDP     | integration_link_type_ieee80211_ipv4_udp             |
+//! | link_type=127 (radiotap, FCS) → 802.11 → SNAP → IPv4 → UDP | integration_link_type_radiotap_ieee80211_fcs  |
+//! | link_type=127 → 802.11 A-MSDU → 2 × SNAP → IPv4 → UDP | integration_link_type_radiotap_ieee80211_amsdu     |
+//! | link_type=127 → 802.11 Beacon                        | integration_link_type_radiotap_beacon                |
 //! | Ethernet → LACP                                     | integration_ethernet_lacp                            |
 //! | Ethernet → Slow Protocols Marker                    | integration_ethernet_slow_protocols_marker           |
 //! | Ethernet → Slow Protocols OAM (Information)         | integration_ethernet_slow_protocols_oam              |
@@ -3916,6 +3920,150 @@ fn integration_link_type_loop_ipv4() {
         .unwrap();
     assert_eq!(layer_names(&buf), ["Loop", "IPv4", "UDP"]);
     assert_layers_contiguous(&buf);
+}
+
+/// IEEE 802.11 Data frame (To DS) with an LLC/SNAP header carrying IPv4.
+fn push_ieee80211_data(pkt: &mut Vec<u8>) {
+    // Data, To DS; Address 1 = BSSID, 2 = SA, 3 = DA; Sequence Control.
+    pkt.extend_from_slice(&[0x08, 0x01, 0x2C, 0x00]);
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    pkt.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+    pkt.extend_from_slice(&[0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x01]);
+    pkt.extend_from_slice(&[0x10, 0x00]);
+    // LLC (DSAP/SSAP 0xAA, UI) + SNAP (OUI 00-00-00, EtherType IPv4).
+    pkt.extend_from_slice(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+}
+
+/// LINKTYPE_IEEE802_11 (105): 802.11 Data → LLC/SNAP → IPv4 → UDP.
+#[test]
+fn integration_link_type_ieee80211_ipv4_udp() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ieee80211_data(&mut pkt);
+    pkt.extend_from_slice(&build_ipv4_udp());
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 105, &mut buf)
+        .unwrap();
+    assert_eq!(layer_names(&buf), ["IEEE802.11", "SNAP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let wlan = buf.layer_by_name("IEEE802.11").unwrap();
+    assert_eq!(buf.field_u8(wlan, "llc_dsap"), Some(0xAA));
+    let snap = buf.layer_by_name("SNAP").unwrap();
+    assert_eq!(buf.field_u16(snap, "pid"), Some(0x0800));
+}
+
+/// LINKTYPE_IEEE802_11_RADIOTAP (127): radiotap with two presence words, a
+/// padded TSFT and the "FCS at end" flag, then an 802.11 Data frame whose
+/// FCS must not reach the upper layers.
+#[test]
+fn integration_link_type_radiotap_ieee80211_fcs() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = vec![0x00, 0x00, 0x19, 0x00];
+    pkt.extend_from_slice(&0x8000_0003u32.to_le_bytes()); // TSFT, Flags, ext
+    pkt.extend_from_slice(&0u32.to_le_bytes());
+    pkt.extend_from_slice(&[0; 4]); // pad TSFT to offset 16
+    pkt.extend_from_slice(&1u64.to_le_bytes());
+    pkt.push(0x10); // Flags: FCS at end
+    let wlan_start = pkt.len();
+    push_ieee80211_data(&mut pkt);
+    let udp = build_ipv4_udp();
+    pkt.extend_from_slice(&udp);
+    pkt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // FCS
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 127, &mut buf)
+        .unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        ["Radiotap", "IEEE802.11", "SNAP", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+    let radiotap = buf.layer_by_name("Radiotap").unwrap();
+    assert_eq!(radiotap.range, 0..wlan_start);
+    assert_eq!(buf.field_u64(radiotap, "tsft"), Some(1));
+    let wlan = buf.layer_by_name("IEEE802.11").unwrap();
+    assert_eq!(buf.field_u32(wlan, "fcs"), Some(0xEFBE_ADDE));
+    let udp_layer = buf.layer_by_name("UDP").unwrap();
+    assert_eq!(udp_layer.range.end, pkt.len() - 4);
+
+    // The summary path stops after UDP without error.
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_summary_with_link_type(&pkt, 127, &mut buf)
+        .unwrap();
+}
+
+/// LINKTYPE_IEEE802_11_RADIOTAP (127): an A-MSDU whose two subframes each
+/// get their own SNAP → IPv4 → UDP chain.
+#[test]
+fn integration_link_type_radiotap_ieee80211_amsdu() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = vec![0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+    // QoS Data, From DS, QoS Control with A-MSDU Present.
+    pkt.extend_from_slice(&[0x88, 0x02, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x01]);
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    pkt.extend_from_slice(&[0x20, 0x00, 0x80, 0x00]);
+    let udp = build_ipv4_udp();
+    for last in [false, true] {
+        let msdu_len = 8 + udp.len();
+        pkt.extend_from_slice(&[0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x01]);
+        pkt.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        pkt.extend_from_slice(&(msdu_len as u16).to_be_bytes());
+        pkt.extend_from_slice(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+        pkt.extend_from_slice(&udp);
+        if !last {
+            let padding = (14 + msdu_len).next_multiple_of(4) - (14 + msdu_len);
+            pkt.extend(std::iter::repeat_n(0, padding));
+        }
+    }
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 127, &mut buf)
+        .unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        [
+            "Radiotap",
+            "IEEE802.11",
+            "SNAP",
+            "IPv4",
+            "UDP",
+            "SNAP",
+            "IPv4",
+            "UDP"
+        ]
+    );
+}
+
+/// LINKTYPE_IEEE802_11_RADIOTAP (127): a Beacon ends the chain at 802.11.
+#[test]
+fn integration_link_type_radiotap_beacon() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = vec![0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+    pkt.extend_from_slice(&[0x80, 0x00, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0xFF; 6]);
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.extend_from_slice(&[0; 8]); // Timestamp
+    pkt.extend_from_slice(&[0x64, 0x00, 0x11, 0x04]); // Beacon Interval, Capability
+    pkt.extend_from_slice(&[0x00, 0x04, b'w', b'i', b'f', b'i']);
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 127, &mut buf)
+        .unwrap();
+    assert_eq!(layer_names(&buf), ["Radiotap", "IEEE802.11"]);
+    assert_layers_contiguous(&buf);
+    let wlan = buf.layer_by_name("IEEE802.11").unwrap();
+    assert_eq!(buf.field_u16(wlan, "beacon_interval"), Some(100));
+    assert_eq!(wlan.range.end, pkt.len());
 }
 
 /// LINKTYPE_RAW (101) carrying IPv4.

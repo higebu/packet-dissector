@@ -78,6 +78,7 @@ changelog_include = [
   "packet-dissector-icmp",
   "packet-dissector-icmpv6",
   "packet-dissector-igmp",
+  "packet-dissector-ieee80211",
   "packet-dissector-ike",
   "packet-dissector-ipv4",
   "packet-dissector-ipv6",
@@ -100,6 +101,7 @@ changelog_include = [
   "packet-dissector-pfcp",
   "packet-dissector-ppp",
   "packet-dissector-quic",
+  "packet-dissector-radiotap",
   "packet-dissector-radius",
   "packet-dissector-raw-ip",
   "packet-dissector-reassembly",
@@ -199,6 +201,10 @@ name = "packet-dissector-igmp"
 version_group = "workspace"
 
 [[package]]
+name = "packet-dissector-ieee80211"
+version_group = "workspace"
+
+[[package]]
 name = "packet-dissector-ike"
 version_group = "workspace"
 
@@ -284,6 +290,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-quic"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-radiotap"
 version_group = "workspace"
 
 [[package]]
