@@ -1980,12 +1980,9 @@ impl<'pkt> SplitMap<'_, 'pkt> {
     /// Absolute range covering virtual range `a..b`: from the lowest to the
     /// highest message offset of its octets. A later portion can lie at a
     /// lower offset (e.g. in `file` after the options field), so the octets
-    /// of every portion that `a..b` touches are considered.
+    /// of every portion that `a..b` touches are considered. An empty range
+    /// is placed at the position of `a`.
     fn range(&self, a: usize, b: usize) -> core::ops::Range<usize> {
-        if b <= a {
-            let start = self.position(a);
-            return self.offset + start..self.offset + start;
-        }
         let mut lo = usize::MAX;
         let mut hi = 0;
         let mut cover = |s: usize, e: usize| {
@@ -2012,7 +2009,7 @@ impl<'pkt> SplitMap<'_, 'pkt> {
                 cover(data_pos + from - s, data_pos + to - s);
             }
         }
-        if lo > hi {
+        if lo >= hi {
             let start = self.position(a);
             return self.offset + start..self.offset + start;
         }
@@ -3096,6 +3093,7 @@ mod tests {
     // | 7           | Split option concatenated, decoded once | rfc3396_split_classless_static_route_is_concatenated |
     // | 5, 7        | Aggregate order: options, then file | rfc3396_split_across_options_and_file_with_overload |
     // | 5, 7        | Ranges spanning options and file    | rfc3396_split_ranges_cover_portions_in_lower_fields |
+    // | 7           | Empty ranges of a split value       | rfc3396_split_map_empty_ranges_sit_at_their_start |
     // | 7           | Value straddling portions (scratch) | rfc3396_split_string_straddling_fragments_uses_scratch |
     // | 4, 7        | Single instances unchanged          | rfc3396_single_instances_are_unchanged      |
     // | 4           | Value longer than 255 octets        | rfc3396_split_value_over_255_octets         |
@@ -6205,18 +6203,46 @@ mod tests {
     /// Assert that every descendant of `parent` lies inside its range.
     fn assert_children_within(buf: &DissectBuffer<'_>, parent: &Field<'_>) {
         for child in direct_children_of(buf, parent) {
-            assert!(
-                parent.range.start <= child.range.start && child.range.end <= parent.range.end,
-                "{} {:?} is outside {} {:?}",
-                child.name(),
-                child.range,
-                parent.name(),
-                parent.range,
-            );
+            let inside =
+                parent.range.start <= child.range.start && child.range.end <= parent.range.end;
+            assert!(inside, "{} is outside {}", child.name(), parent.name());
             if child.value.as_container_range().is_some() {
                 assert_children_within(buf, child);
             }
         }
+    }
+
+    #[test]
+    fn rfc3396_split_map_empty_ranges_sit_at_their_start() {
+        // Two portions: 3 octets at data offset 20 (code at 18), then 2
+        // octets at data offset 10 (code at 8).
+        let data = [0u8; 32];
+        let parts = [
+            OptionInstance {
+                code: 12,
+                pos: 18,
+                len: 3,
+            },
+            OptionInstance {
+                code: 12,
+                pos: 8,
+                len: 2,
+            },
+        ];
+        let map = SplitMap {
+            data: &data,
+            offset: 100,
+            parts: &parts,
+            starts: &[0, 3],
+        };
+        // Code octet only, and the whole option.
+        assert_eq!(map.range(0, 1), 118..119);
+        assert_eq!(map.range(0, 7), 110..123);
+        // Empty ranges on the header, inside a portion, and past the value.
+        assert_eq!(map.range(1, 1), 119..119);
+        assert_eq!(map.range(4, 4), 122..122);
+        assert_eq!(map.range(5, 3), 110..110);
+        assert_eq!(map.range(7, 7), 111..111);
     }
 
     #[test]
