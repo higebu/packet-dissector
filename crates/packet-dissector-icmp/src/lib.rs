@@ -18,6 +18,7 @@
 
 #![deny(missing_docs)]
 
+use packet_dissector_core::checksum::{checksum_status_descriptor, verify_ip_payload_checksum};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -195,6 +196,7 @@ const FD_IPV6: usize = 24;
 const FD_PHOTURIS_RESERVED: usize = 25;
 const FD_PHOTURIS_POINTER: usize = 26;
 const FD_EXTENSIONS: usize = 27;
+const FD_CHECKSUM_STATUS: usize = 28;
 
 const IPC_VERSION: usize = 0;
 const IPC_IHL: usize = 1;
@@ -297,6 +299,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("extensions", "ICMP Extension Structure", FieldType::Object)
         .optional()
         .with_children(icmp_extension::EXTENSION_CHILDREN),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// ICMP dissector.
@@ -464,6 +467,18 @@ impl Dissector for IcmpDissector {
             FieldValue::U16(checksum),
             offset + 2..offset + 4,
         );
+        if buf.verify_checksums() {
+            // RFC 792 — "The checksum is the 16-bit ones's complement of the
+            // one's complement sum of the ICMP message starting with the
+            // ICMP Type." The message is the whole IP payload.
+            // https://www.rfc-editor.org/rfc/rfc792
+            let status = verify_ip_payload_checksum(buf, offset, data);
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 2..offset + 4,
+            );
+        }
 
         match icmp_type {
             // RFC 792 — Echo Reply (0) / Echo Request (8)

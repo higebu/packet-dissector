@@ -472,11 +472,6 @@ const RAN_NODE_AND_ULI_CHOICE_COUNT: u64 = 4;
 /// 3GPP TS 38.413, Section 9.4.5.
 const GNB_ID_CHOICE_COUNT: u64 = 2;
 
-/// `maxProtocolExtensions`.
-///
-/// 3GPP TS 38.413, Section 9.4.7.
-const MAX_PROTOCOL_EXTENSIONS: u64 = 65535;
-
 /// Returns the number of root values of the ENUMERATED type carried by
 /// Cause alternative `group`, or `None` for `choice-Extensions`.
 ///
@@ -495,135 +490,10 @@ fn cause_root_count(group: u64) -> Option<u64> {
 
 // ── Shared APER decoding helpers ───────────────────────────────────────
 
-/// Shifts a byte range relative to the IE value by `offset`.
-pub(crate) fn shift(range: Range<usize>, offset: usize) -> Range<usize> {
-    range.start + offset..range.end + offset
-}
-
-/// Checks that the decoder consumed the whole IE value.
-///
-/// ITU-T Rec. X.691, Section 11.2 — an open type field holds exactly the
-/// complete encoding of its value: the encoded bits padded to an octet
-/// boundary, or a single zero octet for an empty encoding (Section
-/// 10.1.3). Leftover octets mean the value is malformed.
-pub(crate) fn ensure_consumed(r: &AperReader<'_>, data: &[u8]) -> Result<(), PacketError> {
-    if r.bit_position().div_ceil(8).max(1) != data.len() {
-        return Err(PacketError::InvalidHeader(
-            "APER open type value has trailing octets",
-        ));
-    }
-    Ok(())
-}
-
-/// Aligns to an octet boundary, reads `n` octets and returns them with
-/// their byte range relative to the IE value.
-///
-/// Used for octet-aligned fields: fixed-size OCTET STRINGs longer than two
-/// octets (ITU-T Rec. X.691, Section 17.7) and the contents that follow a
-/// length determinant (Sections 17.8, 30.5).
-pub(crate) fn read_aligned_octets<'a>(
-    r: &mut AperReader<'a>,
-    n: usize,
-) -> Result<(&'a [u8], Range<usize>), PacketError> {
-    let octets = r.read_octets(n)?;
-    let end = r.bit_position() / 8;
-    Ok((octets, end - n..end))
-}
-
-/// Reads a fixed-size BIT STRING of `n` bits and returns the value with
-/// its byte range relative to the IE value.
-///
-/// ITU-T Rec. X.691, Section 16.9–16.10.
-fn read_bit_string_field(
-    r: &mut AperReader<'_>,
-    n: u32,
-) -> Result<(u64, Range<usize>), PacketError> {
-    if n > 16 {
-        r.align();
-    }
-    let start = r.bit_position();
-    let value = r.read_fixed_bit_string(n)?;
-    Ok((value, r.byte_range_since(start)))
-}
-
-/// Skips a `ProtocolExtensionContainer`.
-///
-/// 3GPP TS 38.413, Section 9.4.8 — `SEQUENCE (SIZE (1..maxProtocolExtensions))
-/// OF ProtocolExtensionField`, each field being `id` (INTEGER
-/// (0..65535)), `criticality` (ENUMERATED {reject, ignore, notify}) and
-/// `extensionValue` (open type, ITU-T Rec. X.691, Section 11.2).
-pub(crate) fn skip_protocol_extension_container(r: &mut AperReader<'_>) -> Result<(), PacketError> {
-    let count = r.read_length(1, Some(MAX_PROTOCOL_EXTENSIONS))?;
-    for _ in 0..count {
-        r.read_constrained_whole_number(0, 65535)?;
-        r.read_enumerated(3, false)?;
-        let len = r.read_length(0, None)?;
-        r.read_octets(len as usize)?;
-    }
-    Ok(())
-}
-
-/// Skips a `ProtocolIE-SingleContainer`, the value of a
-/// `choice-Extensions` alternative.
-///
-/// 3GPP TS 38.413, Section 9.4.8 — `ProtocolIE-Field`: `id` (INTEGER
-/// (0..65535)), `criticality` (ENUMERATED {reject, ignore, notify}) and
-/// `value` (open type, ITU-T Rec. X.691, Section 11.2).
-pub(crate) fn skip_protocol_ie_single_container(r: &mut AperReader<'_>) -> Result<(), PacketError> {
-    r.read_constrained_whole_number(0, 65535)?;
-    r.read_enumerated(3, false)?;
-    let len = r.read_length(0, None)?;
-    r.read_octets(len as usize)?;
-    Ok(())
-}
-
-/// Skips the extension additions of an extensible SEQUENCE whose
-/// extension bit was set.
-///
-/// ITU-T Rec. X.691, Section 19.8–19.9: a normally small length giving
-/// the size of the presence bitmap, the bitmap, then each present
-/// addition as an open type.
-pub(crate) fn skip_sequence_extension_additions(r: &mut AperReader<'_>) -> Result<(), PacketError> {
-    let count = r.read_normally_small()?.saturating_add(1);
-    let mut present = 0u64;
-    for _ in 0..count {
-        if r.read_bit()? {
-            present += 1;
-        }
-    }
-    for _ in 0..present {
-        let len = r.read_length(0, None)?;
-        r.read_octets(len as usize)?;
-    }
-    Ok(())
-}
-
-/// Reads the preamble of an extensible SEQUENCE with a single OPTIONAL
-/// `iE-Extensions` component. Returns `(extended, has_ie_extensions)`.
-///
-/// ITU-T Rec. X.691, Section 19.1 (extension bit) and 19.2 (bitmap of
-/// OPTIONAL components).
-pub(crate) fn read_sequence_preamble(r: &mut AperReader<'_>) -> Result<(bool, bool), PacketError> {
-    let extended = r.read_bit()?;
-    let has_ie_extensions = r.read_bit()?;
-    Ok((extended, has_ie_extensions))
-}
-
-/// Skips what follows the root components of an extensible SEQUENCE:
-/// the `iE-Extensions` container and the extension additions.
-pub(crate) fn skip_sequence_tail(
-    r: &mut AperReader<'_>,
-    extended: bool,
-    has_ie_extensions: bool,
-) -> Result<(), PacketError> {
-    if has_ie_extensions {
-        skip_protocol_extension_container(r)?;
-    }
-    if extended {
-        skip_sequence_extension_additions(r)?;
-    }
-    Ok(())
-}
+pub(crate) use packet_dissector_aper::helpers::{
+    ensure_consumed, read_aligned_octets, read_bit_string_field, read_sequence_preamble, shift,
+    skip_protocol_ie_single_container, skip_sequence_extension_additions, skip_sequence_tail,
+};
 
 /// A decoded NR-CGI or E-UTRA CGI.
 struct Cgi<'a> {
