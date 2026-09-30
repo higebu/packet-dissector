@@ -17,6 +17,8 @@ default = [
   "linux_sll2",
   "null",
   "raw_ip",
+  "ieee80211",
+  "radiotap",
   "arp",
   "lacp",
   "ipv4",
@@ -50,6 +52,7 @@ default = [
   "sgsap",
   "geneve",
   "gre",
+  "erspan",
   "vxlan",
   "lldp",
   "eap",
@@ -80,6 +83,8 @@ default = [
   "quic-decrypt",
   "stun",
   "ip-reassembly",
+  "m3ua",
+  "sccp",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
 # SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
@@ -92,6 +97,10 @@ null = ["dep:packet-dissector-null"]
 # The raw IP dispatchers add no layer of their own; without IPv4/IPv6 a
 # raw IP packet would dissect to nothing.
 raw_ip = ["dep:packet-dissector-raw-ip", "ipv4", "ipv6"]
+# 802.11 data frames reach SNAP (in the Ethernet crate) through the LLC header.
+ieee80211 = ["dep:packet-dissector-ieee80211", "dep:packet-dissector-ethernet"]
+# The radiotap header is followed by an 802.11 frame.
+radiotap = ["dep:packet-dissector-radiotap", "ieee80211"]
 arp = ["dep:packet-dissector-arp"]
 lacp = ["dep:packet-dissector-lacp"]
 ipv4 = ["dep:packet-dissector-ipv4"]
@@ -125,6 +134,7 @@ e1ap = ["dep:packet-dissector-e1ap"]
 sgsap = ["dep:packet-dissector-sgsap"]
 geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
+erspan = ["dep:packet-dissector-erspan"]
 vxlan = ["dep:packet-dissector-vxlan"]
 lldp = ["dep:packet-dissector-lldp"]
 # EAP is also decoded inside the carriers that are enabled: PPP (0xC227),
@@ -169,6 +179,8 @@ stun = ["dep:packet-dissector-stun"]
 # IPv4 / IPv6 fragment reassembly in the registry. Without it, non-initial
 # fragments still end the dissection chain after the IP layer.
 ip-reassembly = ["dep:packet-dissector-reassembly"]
+m3ua = ["dep:packet-dissector-m3ua"]
+sccp = ["dep:packet-dissector-sccp"]
 
 ## Convenience feature groups
 layer2 = [
@@ -177,6 +189,8 @@ layer2 = [
   "linux_sll2",
   "null",
   "raw_ip",
+  "ieee80211",
+  "radiotap",
   "arp",
   "lacp",
   "lldp",
@@ -205,7 +219,16 @@ application = [
   "quic",
   "stun",
 ]
-tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]
+tunneling = [
+  "gre",
+  "erspan",
+  "geneve",
+  "vxlan",
+  "l2tp",
+  "l2tpv3",
+  "mpls",
+  "nsh",
+]
 routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "ldp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = [
@@ -221,6 +244,7 @@ ipsec = ["ah", "esp", "ike"]
   "e1ap",
   "sgsap",
 ]
+sigtran = ["m3ua", "sccp"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -230,6 +254,8 @@ packet-dissector-linux-sll = { workspace = true, optional = true }
 packet-dissector-linux-sll2 = { workspace = true, optional = true }
 packet-dissector-null = { workspace = true, optional = true }
 packet-dissector-raw-ip = { workspace = true, optional = true }
+packet-dissector-ieee80211 = { workspace = true, optional = true }
+packet-dissector-radiotap = { workspace = true, optional = true }
 packet-dissector-arp = { workspace = true, optional = true }
 packet-dissector-lacp = { workspace = true, optional = true }
 packet-dissector-ipv4 = { workspace = true, optional = true }
@@ -263,6 +289,7 @@ packet-dissector-e1ap = { workspace = true, optional = true }
 packet-dissector-sgsap = { workspace = true, optional = true }
 packet-dissector-geneve = { workspace = true, optional = true }
 packet-dissector-gre = { workspace = true, optional = true }
+packet-dissector-erspan = { workspace = true, optional = true }
 packet-dissector-vxlan = { workspace = true, optional = true }
 packet-dissector-lldp = { workspace = true, optional = true }
 packet-dissector-eap = { workspace = true, optional = true }
@@ -290,6 +317,8 @@ packet-dissector-ike = { workspace = true, optional = true }
 packet-dissector-rtp = { workspace = true, optional = true }
 packet-dissector-quic = { workspace = true, optional = true }
 packet-dissector-stun = { workspace = true, optional = true }
+packet-dissector-m3ua = { workspace = true, optional = true }
+packet-dissector-sccp = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

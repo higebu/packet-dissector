@@ -84,6 +84,12 @@ pub mod dissectors {
     #[cfg(feature = "raw_ip")]
     pub use packet_dissector_raw_ip as raw_ip;
 
+    #[cfg(feature = "ieee80211")]
+    pub use packet_dissector_ieee80211 as ieee80211;
+
+    #[cfg(feature = "radiotap")]
+    pub use packet_dissector_radiotap as radiotap;
+
     #[cfg(feature = "arp")]
     pub use packet_dissector_arp as arp;
 
@@ -177,6 +183,9 @@ pub mod dissectors {
     #[cfg(feature = "gre")]
     pub use packet_dissector_gre as gre;
 
+    #[cfg(feature = "erspan")]
+    pub use packet_dissector_erspan as erspan;
+
     #[cfg(feature = "mpls")]
     pub use packet_dissector_mpls as mpls;
 
@@ -207,6 +216,12 @@ pub mod dissectors {
 
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
+
+    #[cfg(feature = "m3ua")]
+    pub use packet_dissector_m3ua as m3ua;
+
+    #[cfg(feature = "sccp")]
+    pub use packet_dissector_sccp as sccp;
 
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
@@ -258,8 +273,6 @@ pub mod dissectors {
 
 #[cfg(feature = "ip-reassembly")]
 mod ip_reassembly;
-#[cfg(feature = "http2")]
-mod stream_set;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 

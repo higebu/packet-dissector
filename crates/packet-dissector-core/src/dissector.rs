@@ -87,6 +87,35 @@ pub enum DispatchHint {
     /// <https://www.rfc-editor.org/rfc/rfc5586#section-2.1>; RFC 4385,
     /// Section 5 — <https://www.rfc-editor.org/rfc/rfc4385#section-5>.
     ByAchChannelType(u16),
+    /// Look up the next dissector by SS7 MTP3 Service Indicator.
+    ///
+    /// Used by MTP3-User adaptation layers such as M3UA, whose Protocol Data
+    /// carries the Service Indicator of the original MTP3 message (e.g. `3`
+    /// for SCCP). Mirrors Wireshark's `mtp3.service_indicator` table. RFC 4666,
+    /// Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc4666#section-3.3.1>;
+    /// ITU-T Q.704, clause 14.2.1 —
+    /// <https://www.itu.int/rec/T-REC-Q.704>.
+    ByMtp3ServiceIndicator(u8),
+    /// Look up the next dissector for SCCP user data by subsystem number.
+    ///
+    /// The registry tries the called party SSN first, then the calling party
+    /// SSN. SSN 0 ("SSN not known/not used", ITU-T Q.713, clause 3.4.2.2 —
+    /// <https://www.itu.int/rec/T-REC-Q.713>) is never looked up. Mirrors
+    /// Wireshark's `sccp.ssn` table.
+    BySccpSsn {
+        /// Subsystem number of the called party address (0 when absent).
+        called: u8,
+        /// Subsystem number of the calling party address (0 when absent).
+        calling: u8,
+    },
+    /// Look up the next dissector in the link-layer type table, by pcap
+    /// `LINKTYPE_` value.
+    ///
+    /// Used by pseudo-headers that precede another link-layer frame, e.g.
+    /// radiotap (`LINKTYPE_IEEE802_11_RADIOTAP`, 127) followed by an IEEE
+    /// 802.11 frame (`LINKTYPE_IEEE802_11`, 105) —
+    /// <https://www.tcpdump.org/linktypes.html>.
+    ByLinkType(u32),
     /// No further dissection is needed.
     End,
 }
@@ -132,6 +161,12 @@ pub enum DissectorTable {
     },
     /// Register by MPLS G-ACh Channel Type (e.g., `0x0007` for BFD).
     AchChannelType(u16),
+    /// Register by SS7 MTP3 Service Indicator (e.g., `3` for SCCP). See
+    /// [`DispatchHint::ByMtp3ServiceIndicator`].
+    Mtp3ServiceIndicator(u8),
+    /// Register by SCCP subsystem number (e.g., `6` for the HLR). SSN 0 is
+    /// never looked up; see [`DispatchHint::BySccpSsn`].
+    SccpSsn(u8),
     /// The fallback dissector for unrecognised IPv6 Routing Header types.
     Ipv6RoutingFallback,
     /// Register by pcap link-layer header type (e.g., `1` for Ethernet, `113` for Linux SLL).
