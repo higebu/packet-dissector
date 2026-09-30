@@ -127,12 +127,13 @@ impl Dissector for SnapDissector {
         );
         buf.end_layer();
 
-        // Protocol identifiers of other organizations (e.g. Cisco CDP/PVST+
-        // under 00-00-0C) have no dissector yet.
+        // The Protocol Identifier of any other organization is defined by
+        // that organization (e.g. Cisco CDP, OUI 00-00-0C, PID 0x2000), so
+        // it is looked up together with the OUI.
         let next = if pid_is_ethertype(oui) {
             DispatchHint::ByEtherType(pid)
         } else {
-            DispatchHint::End
+            DispatchHint::BySnap { oui, pid }
         };
         Ok(DissectResult::new(SNAP_HEADER_SIZE, next))
     }
@@ -146,7 +147,7 @@ mod tests {
     //! |---------------------------|-------------------------------------|----------------------------|
     //! | RFC 1042 Header Format    | OUI 0, PID = EtherType              | snap_rfc1042_ipv4          |
     //! | IEEE 802.1H               | OUI 00-00-F8, PID = EtherType       | snap_bridge_tunnel         |
-    //! | IEEE 802 clause 10        | Other OUI ends the chain            | snap_other_oui_ends_chain  |
+    //! | IEEE 802 clause 10        | Other OUI dispatches by (OUI, PID)  | snap_other_oui_dispatches_by_snap |
     //! | RFC 1042 Header Format    | Truncated header                    | snap_truncated             |
 
     use super::*;
@@ -177,12 +178,18 @@ mod tests {
     }
 
     #[test]
-    fn snap_other_oui_ends_chain() {
+    fn snap_other_oui_dispatches_by_snap() {
         // Cisco OUI 00-00-0C, PID 0x2000 (CDP).
         let data = [0x00, 0x00, 0x0C, 0x20, 0x00];
         let mut buf = DissectBuffer::new();
         let r = SnapDissector.dissect(&data, &mut buf, 0).unwrap();
-        assert_eq!(r.next, DispatchHint::End);
+        assert_eq!(
+            r.next,
+            DispatchHint::BySnap {
+                oui: 0x00_000C,
+                pid: 0x2000
+            }
+        );
         let layer = buf.layer_by_name("SNAP").unwrap();
         assert_eq!(
             buf.field_by_name(layer, "oui").unwrap().value,
