@@ -179,7 +179,16 @@ application = [
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
-3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "sgsap"]
+3gpp = [
+  "gtpv1u",
+  "gtpv1c",
+  "gtpv2c",
+  "pfcp",
+  "nas5g",
+  "nas-eps",
+  "ngap",
+  "sgsap",
+]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
