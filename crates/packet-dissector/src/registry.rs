@@ -2146,6 +2146,14 @@ impl Default for DissectorRegistry {
             );
         }
 
+        // NSH uses EtherType 0x894F (RFC 8300, Section 10.1 —
+        // https://www.rfc-editor.org/rfc/rfc8300#section-10.1), which also
+        // covers GRE Protocol Type 0x894F and VXLAN-GPE Next Protocol 0x04.
+        #[cfg(feature = "nsh")]
+        assert_builtin(
+            reg.register_by_ethertype(0x894F, Box::new(packet_dissector_nsh::NshDissector)),
+        );
+
         // MPLS G-ACh / PW Associated Channel Types (IANA "MPLS Generalized
         // Associated Channel (G-ACh) Types" registry):
         // 0x0021 IPv4 and 0x0057 IPv6 (RFC 4385, Section 6 —
@@ -4124,6 +4132,9 @@ mod tests {
             assert!(reg.get_by_ethertype(0x8847).is_some());
             assert!(reg.get_by_ethertype(0x8848).is_some());
         }
+
+        #[cfg(feature = "nsh")]
+        assert!(reg.get_by_ethertype(0x894F).is_some());
 
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_link_type(1).is_some());
