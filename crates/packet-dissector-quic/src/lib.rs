@@ -414,10 +414,14 @@ impl Dissector for QuicDissector {
                 break;
             }
 
-            match self
-                .dissect_long_header(packet, buf, offset + pos, first_byte)
-                .map_err(|e| shift_truncated(e, pos))?
-            {
+            let layers_before = buf.layers().len();
+            let result = self.dissect_long_header(packet, buf, offset + pos, first_byte);
+            if result.is_err() && buf.layers().len() > layers_before {
+                // The header failed after its layer was begun: close the
+                // layer so the fields pushed so far belong to it.
+                buf.end_layer();
+            }
+            match result.map_err(|e| shift_truncated(e, pos))? {
                 Some(len) => pos += len,
                 None => {
                     pos = data.len();
@@ -899,6 +903,7 @@ mod tests {
     // | 9000 §12.2, §16     | Length = 2^62-1 (no overflow)      | test_length_huge_varint_accepted     |
     // | 9000 §12.2          | Second packet Length exceeds data  | test_coalesced_second_packet_length_exceeds_datagram |
     // | 9000 §12.2          | Second packet header truncated     | test_coalesced_second_header_truncated |
+    // | 9000 §17.2.4        | Second packet Length truncated     | test_coalesced_second_length_truncated_closes_layer |
     // | 9000 §15            | Reserved version 0x?a?a?a?a        | test_version_name_reserved_pattern   |
     // | 9001 §5, A.2        | v1 client Initial decrypted        | test_decrypt_rfc9001_client_initial  |
     // | 9369 §3.3, A.2      | v2 client Initial decrypted        | test_decrypt_rfc9369_client_initial  |
@@ -1831,6 +1836,43 @@ mod tests {
         );
         assert_eq!(buf.layers().len(), 1);
         assert_eq!(buf.layers()[0].range, 0..first_len);
+    }
+
+    #[test]
+    fn test_coalesced_second_length_truncated_closes_layer() {
+        // The second packet's header ends before its Length field, after its
+        // layer was begun. The error is returned and the partial layer is
+        // closed, so the header fields read so far belong to it.
+        // RFC 9000, Section 17.2.4 — https://www.rfc-editor.org/rfc/rfc9000#section-17.2.4
+        let mut data = build_long_header(
+            VERSION_1,
+            PacketKind::Initial,
+            &[0x01, 0x02],
+            &[],
+            None,
+            &[0xaa; 20],
+        );
+        let first_len = data.len();
+        // Handshake, version 1, empty DCID and SCID, no Length.
+        data.extend_from_slice(&[0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+
+        let mut buf = DissectBuffer::new();
+        let err = QuicDissector.dissect(&data, &mut buf, 0).unwrap_err();
+        assert_eq!(
+            err,
+            PacketError::Truncated {
+                expected: data.len() + 1,
+                actual: data.len()
+            }
+        );
+        assert_eq!(buf.layers().len(), 2);
+        let second = &buf.layers()[1];
+        assert_eq!(second.range, first_len..data.len());
+        assert_eq!(second.field_range.end as usize, buf.fields().len());
+        assert_eq!(
+            buf.field_by_name(second, "version").unwrap().value,
+            FieldValue::U32(VERSION_1)
+        );
     }
 
     #[test]
