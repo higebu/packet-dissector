@@ -119,6 +119,9 @@ pub mod dissectors {
     #[cfg(feature = "mdns")]
     pub use packet_dissector_mdns as mdns;
 
+    #[cfg(feature = "llmnr")]
+    pub use packet_dissector_llmnr as llmnr;
+
     #[cfg(feature = "dhcp")]
     pub use packet_dissector_dhcp as dhcp;
 

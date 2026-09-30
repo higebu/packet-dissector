@@ -9231,3 +9231,94 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
 }
+
+/// LLMNR query (RFC 4795, Section 2.1.1): ID, flags C=0 TC=0 T=0, one
+/// question "host1" A IN.
+#[cfg(feature = "llmnr")]
+fn push_llmnr_query(pkt: &mut Vec<u8>) {
+    pkt.extend_from_slice(&0x1234u16.to_be_bytes()); // ID
+    pkt.extend_from_slice(&0x0000u16.to_be_bytes()); // Flags
+    pkt.extend_from_slice(&[0x00, 0x01, 0, 0, 0, 0, 0, 0]); // QDCOUNT = 1
+    pkt.extend_from_slice(&[5, b'h', b'o', b's', b't', b'1', 0]);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // A, IN
+}
+
+/// Ethernet → IPv6 → UDP 5355 → LLMNR multicast query to FF02::1:3
+/// (RFC 4795, Section 2 — https://www.rfc-editor.org/rfc/rfc4795#section-2).
+#[cfg(all(feature = "llmnr", feature = "ipv6", feature = "udp"))]
+#[test]
+fn integration_ethernet_ipv6_udp_llmnr() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x33, 0x33, 0x00, 0x01, 0x00, 0x03],
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        0x86DD,
+    );
+    let mut dst = [0u8; 16];
+    dst[0] = 0xFF;
+    dst[1] = 0x02;
+    dst[13] = 0x01;
+    dst[15] = 0x03;
+    let mut src = [0u8; 16];
+    src[0] = 0xFE;
+    src[1] = 0x80;
+    src[15] = 0x01;
+    let ipv6_start = push_ipv6(&mut pkt, 17, src, dst);
+    let udp_start = push_udp(&mut pkt, 50000, 5355);
+    let llmnr_start = pkt.len();
+    push_llmnr_query(&mut pkt);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv6_payload_length(&mut pkt, ipv6_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let llmnr = &buf.layers()[3];
+    assert_eq!(llmnr.name, "LLMNR");
+    assert_eq!(llmnr.range, llmnr_start..pkt.len());
+    assert_eq!(
+        buf.field_by_name(llmnr, "c").unwrap().value,
+        FieldValue::U8(0)
+    );
+    assert!(buf.field_by_name(llmnr, "aa").is_none());
+}
+
+/// Ethernet → IPv4 → TCP 5355 → LLMNR unicast query with the 2-octet length
+/// prefix (RFC 4795, Section 2.4 — https://www.rfc-editor.org/rfc/rfc4795#section-2.4).
+#[cfg(all(feature = "llmnr", feature = "ipv4", feature = "tcp"))]
+#[test]
+fn integration_ethernet_ipv4_tcp_llmnr() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        0x0800,
+    );
+    let ip_start = push_ipv4(&mut pkt, 6, [192, 0, 2, 1], [192, 0, 2, 2]);
+    push_tcp(&mut pkt, 50000, 5355, 0x18);
+    let llmnr_start = pkt.len();
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // length placeholder
+    push_llmnr_query(&mut pkt);
+    let msg_len = (pkt.len() - llmnr_start - 2) as u16;
+    pkt[llmnr_start..llmnr_start + 2].copy_from_slice(&msg_len.to_be_bytes());
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let llmnr = &buf.layers()[3];
+    assert_eq!(llmnr.name, "LLMNR");
+    assert_eq!(llmnr.range, llmnr_start..pkt.len());
+    assert_eq!(
+        buf.field_by_name(llmnr, "tcp_length").unwrap().value,
+        FieldValue::U16(msg_len)
+    );
+}

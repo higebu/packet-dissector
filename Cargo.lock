@@ -635,6 +635,7 @@ dependencies = [
  "packet-dissector-linux-sll",
  "packet-dissector-linux-sll2",
  "packet-dissector-lldp",
+ "packet-dissector-llmnr",
  "packet-dissector-mdns",
  "packet-dissector-mpls",
  "packet-dissector-nas5g",
@@ -942,6 +943,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-llmnr"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-dns",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-mdns"
 version = "0.5.0"
 dependencies = [
@@ -1016,6 +1027,7 @@ dependencies = [
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
+ "packet-dissector-llmnr",
  "packet-dissector-mdns",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
