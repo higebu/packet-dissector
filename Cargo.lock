@@ -626,6 +626,7 @@ dependencies = [
  "packet-dissector-icmpv6",
  "packet-dissector-igmp",
  "packet-dissector-ike",
+ "packet-dissector-ipfix",
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
@@ -859,6 +860,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-ipfix"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-ipv4"
 version = "0.5.0"
 dependencies = [
@@ -1013,6 +1023,7 @@ dependencies = [
  "packet-dissector-dns",
  "packet-dissector-icmp",
  "packet-dissector-icmpv6",
+ "packet-dissector-ipfix",
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
