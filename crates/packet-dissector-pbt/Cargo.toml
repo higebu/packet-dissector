@@ -25,6 +25,7 @@ packet-dissector-mdns = { workspace = true }
 packet-dissector-nas-eps = { workspace = true }
 packet-dissector-ntp = { workspace = true }
 packet-dissector-ospf = { workspace = true }
+packet-dissector-s1ap = { workspace = true }
 packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-tcp = { workspace = true }

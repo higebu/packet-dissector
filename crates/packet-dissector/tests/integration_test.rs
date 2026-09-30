@@ -67,6 +67,7 @@
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
 //! | EPS NAS via registry factory                      | integration_nas_eps_factory                         |
+//! | Ethernet → IPv4 → SCTP → S1AP (NAS-EPS)           | integration_ethernet_ipv4_sctp_s1ap_initial_ue_message |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
 //! | SLL → IPv4 → UDP                                  | integration_sll_ipv4_udp                            |
 //! | SLL2 → IPv6 → TCP (SYN)                           | integration_sll2_ipv6_tcp_syn                       |
@@ -3677,6 +3678,54 @@ fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
         buf.field_by_name(gtpv2c, "sequence_number").unwrap().value,
         FieldValue::U32(0x42)
     );
+}
+
+// ---------------------------------------------------------------------------
+// S1AP integration tests
+// ---------------------------------------------------------------------------
+
+/// S1AP InitialUEMessage carrying an EPS NAS Attach request, as encoded by
+/// an independent APER encoder (pycrate `S1AP`, 3GPP TS 36.413).
+#[cfg(all(feature = "sctp", feature = "s1ap"))]
+const S1AP_INITIAL_UE_MESSAGE: &[u8] = &[
+    0x00, 0x0c, 0x40, 0x48, 0x00, 0x00, 0x06, 0x00, 0x08, 0x00, 0x02, 0x00, 0x05, 0x00, 0x1a, 0x00,
+    0x16, 0x15, 0x07, 0x41, 0x71, 0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98, 0x02, 0xe0,
+    0xe0, 0x00, 0x04, 0x02, 0x01, 0xd0, 0x11, 0x00, 0x43, 0x00, 0x06, 0x00, 0x00, 0xf1, 0x10, 0x00,
+    0x01, 0x00, 0x64, 0x40, 0x08, 0x00, 0x00, 0xf1, 0x10, 0x12, 0x34, 0x56, 0x70, 0x00, 0x86, 0x40,
+    0x01, 0x30, 0x00, 0x60, 0x00, 0x06, 0x04, 0x80, 0xc0, 0x00, 0x00, 0x01,
+];
+
+/// Ethernet → IPv4 → SCTP (port 36412, PPID 18) → S1AP with the NAS-PDU
+/// decoded as EPS NAS (3GPP TS 36.412, Section 7; TS 36.413; TS 24.301).
+#[cfg(all(feature = "sctp", feature = "s1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_s1ap_initial_ue_message() {
+    for (port, ppid) in [(36412, 18), (36412, 0), (40000, 18)] {
+        let mut pkt = Vec::new();
+        push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+        let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+        push_sctp(&mut pkt, 36412 + 1000, port);
+        push_sctp_data_chunk(&mut pkt, 0x03, 1, ppid, S1AP_INITIAL_UE_MESSAGE);
+        fixup_ipv4_length(&mut pkt, ip_start);
+
+        let reg = DissectorRegistry::default();
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&pkt, &mut buf).unwrap();
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "S1AP"], "{port}/{ppid}");
+
+        let s1ap = &buf.layers()[3];
+        assert_eq!(
+            display_name_for(&buf, s1ap, "procedure_code"),
+            Some("initialUEMessage")
+        );
+        let nas_type = buf
+            .fields()
+            .iter()
+            .find(|f| f.name() == "message_type")
+            .map(|f| f.value.clone());
+        assert_eq!(nas_type, Some(FieldValue::U8(0x41)));
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,7 @@ packet-dissector-nas5g = { version = "0.5.0", path = "crates/packet-dissector-na
 packet-dissector-nas-eps = { version = "0.5.0", path = "crates/packet-dissector-nas-eps" }
 packet-dissector-ngap = { version = "0.5.0", path = "crates/packet-dissector-ngap" }
 packet-dissector-quic = { version = "0.5.0", path = "crates/packet-dissector-quic" }
+packet-dissector-s1ap = { version = "0.5.0", path = "crates/packet-dissector-s1ap" }
 packet-dissector-radius = { version = "0.5.0", path = "crates/packet-dissector-radius" }
 packet-dissector-stun = { version = "0.5.0", path = "crates/packet-dissector-stun" }
 packet-dissector-null = { version = "0.5.0", path = "crates/packet-dissector-null" }

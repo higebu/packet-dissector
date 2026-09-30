@@ -158,6 +158,8 @@ pub mod dissectors {
     pub use packet_dissector_nas5g as nas5g;
     #[cfg(feature = "ngap")]
     pub use packet_dissector_ngap as ngap;
+    #[cfg(feature = "s1ap")]
+    pub use packet_dissector_s1ap as s1ap;
 
     #[cfg(feature = "geneve")]
     pub use packet_dissector_geneve as geneve;

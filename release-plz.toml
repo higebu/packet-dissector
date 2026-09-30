@@ -106,6 +106,7 @@ changelog_include = [
   "packet-dissector-raw-ip",
   "packet-dissector-reassembly",
   "packet-dissector-rtp",
+  "packet-dissector-s1ap",
   "packet-dissector-sctp",
   "packet-dissector-sdp",
   "packet-dissector-sip",
@@ -310,6 +311,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-rtp"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-s1ap"
 version_group = "workspace"
 
 [[package]]

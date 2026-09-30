@@ -650,6 +650,7 @@ dependencies = [
  "packet-dissector-raw-ip",
  "packet-dissector-reassembly",
  "packet-dissector-rtp",
+ "packet-dissector-s1ap",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-sip",
@@ -1031,6 +1032,7 @@ dependencies = [
  "packet-dissector-nas-eps",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
+ "packet-dissector-s1ap",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
@@ -1112,6 +1114,17 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-s1ap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-nas-eps",
+ "packet-dissector-per",
  "packet-dissector-test-alloc",
 ]
 
