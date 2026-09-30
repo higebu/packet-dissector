@@ -15,6 +15,7 @@ packet-dissector-core = { workspace = true }
 proptest = "1"
 
 [dev-dependencies]
+packet-dissector-bmp = { workspace = true }
 packet-dissector-dns = { workspace = true }
 packet-dissector-icmp = { workspace = true }
 packet-dissector-icmpv6 = { workspace = true }

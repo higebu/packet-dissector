@@ -1435,6 +1435,9 @@ impl DissectorRegistry {
         push(&packet_dissector_ospf::Ospfv3Dissector);
         #[cfg(feature = "bgp")]
         push(&packet_dissector_bgp::BgpDissector);
+        // BMP is registered by decode-as name only.
+        #[cfg(feature = "bmp")]
+        push(&packet_dissector_bmp::BmpDissector);
         // The MPLS dissector emits ACH and PW control word layers itself
         // (RFC 5586, Section 2.1 — https://www.rfc-editor.org/rfc/rfc5586#section-2.1;
         // RFC 4385, Section 3 — https://www.rfc-editor.org/rfc/rfc4385#section-3).
@@ -2552,6 +2555,13 @@ impl Default for DissectorRegistry {
             reg.register_dissector_factory("bgp", || Box::new(packet_dissector_bgp::BgpDissector));
         }
 
+        // BMP has no assigned port: "The passive party is configured to
+        // listen on a particular TCP port" (RFC 7854, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc7854#section-3.2), so it is only
+        // available by decode-as name.
+        #[cfg(feature = "bmp")]
+        reg.register_dissector_factory("bmp", || Box::new(packet_dissector_bmp::BmpDissector));
+
         // Register TLS for the common HTTPS port 443 (RFC 5246, RFC 8446)
         #[cfg(feature = "tls")]
         {
@@ -3109,6 +3119,8 @@ mod tests {
         assert!(reg.create_dissector_by_name("tls").is_some());
         #[cfg(feature = "bgp")]
         assert!(reg.create_dissector_by_name("bgp").is_some());
+        #[cfg(feature = "bmp")]
+        assert!(reg.create_dissector_by_name("bmp").is_some());
         #[cfg(feature = "sip")]
         assert!(reg.create_dissector_by_name("sip").is_some());
         #[cfg(feature = "sip")]

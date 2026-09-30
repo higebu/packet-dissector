@@ -54,6 +54,7 @@ default = [
   "bfd",
   "isis",
   "bgp",
+  "bmp",
   "l2tp",
   "l2tpv3",
   "tls",
@@ -116,6 +117,8 @@ vrrp = ["dep:packet-dissector-vrrp"]
 bfd = ["dep:packet-dissector-bfd"]
 isis = ["dep:packet-dissector-isis"]
 bgp = ["dep:packet-dissector-bgp"]
+# BMP carries BGP messages, which are dissected as BGP layers.
+bmp = ["dep:packet-dissector-bmp", "bgp"]
 l2tp = ["dep:packet-dissector-l2tp"]
 l2tpv3 = ["dep:packet-dissector-l2tpv3"]
 tls = ["dep:packet-dissector-tls"]
@@ -163,7 +166,7 @@ application = [
   "stun",
 ]
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
-routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
+routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]
 
@@ -212,6 +215,7 @@ packet-dissector-vrrp = { workspace = true, optional = true }
 packet-dissector-bfd = { workspace = true, optional = true }
 packet-dissector-isis = { workspace = true, optional = true }
 packet-dissector-bgp = { workspace = true, optional = true }
+packet-dissector-bmp = { workspace = true, optional = true }
 packet-dissector-l2tp = { workspace = true, optional = true }
 packet-dissector-l2tpv3 = { workspace = true, optional = true }
 packet-dissector-tls = { workspace = true, optional = true }

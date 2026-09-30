@@ -609,6 +609,7 @@ dependencies = [
  "packet-dissector-arp",
  "packet-dissector-bfd",
  "packet-dissector-bgp",
+ "packet-dissector-bmp",
  "packet-dissector-core",
  "packet-dissector-dhcp",
  "packet-dissector-dhcpv6",
@@ -695,6 +696,16 @@ name = "packet-dissector-bgp"
 version = "0.5.0"
 dependencies = [
  "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-bmp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-bgp",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]
@@ -1009,6 +1020,7 @@ dependencies = [
 name = "packet-dissector-pbt"
 version = "0.5.0"
 dependencies = [
+ "packet-dissector-bmp",
  "packet-dissector-core",
  "packet-dissector-dns",
  "packet-dissector-icmp",

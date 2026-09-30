@@ -62,6 +62,7 @@ changelog_include = [
   "packet-dissector-arp",
   "packet-dissector-bfd",
   "packet-dissector-bgp",
+  "packet-dissector-bmp",
   "packet-dissector-core",
   "packet-dissector-dhcp",
   "packet-dissector-dhcpv6",
@@ -132,6 +133,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-bgp"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-bmp"
 version_group = "workspace"
 
 [[package]]
