@@ -167,6 +167,11 @@
 //! | Ethernet → IPv4 (snaplen-truncated) → probe                  | integration_ethernet_ipv4_snaplen_payload_ends_at_capture |
 //! | Ethernet → IPv4 → TCP (snaplen) then next segment → HTTP     | integration_ethernet_ipv4_tcp_snaplen_segment_does_not_stall_reassembly |
 //! | Ethernet → IPv6 (Payload Length 0, no HBH) → TCP              | integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded |
+//! | Ethernet → IPv4 → TCP(853, DoT) → TLS                         | integration_ethernet_ipv4_tcp_dot_tls                |
+//! | Ethernet → IPv4 → SCTP(5060, PPID 0) → SIP                    | integration_ethernet_ipv4_sctp_sip_options           |
+//! | Ethernet → IPv4 → UDP(3799) → RADIUS CoA-Request              | integration_ethernet_ipv4_udp_radius_coa_request     |
+//! | Ethernet (0x8035) → ARP (RARP request)                        | integration_ethernet_rarp_request                    |
+//! | Ethernet → IPv6 → SRv6 (NH 143) → Ethernet → IPv4 → UDP       | integration_ethernet_ipv6_srv6_ethernet_ipv4_udp     |
 
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
@@ -9230,4 +9235,139 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+// ---------------------------------------------------------------------------
+// Assigned-port / EtherType / IP protocol default registrations
+// ---------------------------------------------------------------------------
+
+/// DNS over TLS: RFC 7858, Section 3.1 — "The first data exchange on this
+/// TCP connection MUST be the client and server initiating a TLS handshake"
+/// on port 853. <https://www.rfc-editor.org/rfc/rfc7858#section-3.1>
+#[test]
+fn integration_ethernet_ipv4_tcp_dot_tls() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 6, IPV4_SRC, IPV4_DST);
+    push_tcp(&mut pkt, 50000, 853, 0x18);
+    // TLS alert record: fatal(2) handshake_failure(40)
+    push_tls_record(&mut pkt, 0x15, 0x0303, &[0x02, 0x28]);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "TCP", "TLS"]);
+    let tls = buf.layer_by_name("TLS").unwrap();
+    assert_eq!(
+        buf.field_by_name(tls, "content_type").unwrap().value,
+        FieldValue::U8(0x15)
+    );
+}
+
+/// SIP over SCTP: RFC 3261, Section 18.1.1 — the default port "is 5060 for
+/// UDP, TCP and SCTP"; RFC 4168, Section 5 — the PPID "MUST be set to
+/// zero", so dispatch falls back to the port.
+/// <https://www.rfc-editor.org/rfc/rfc3261#section-18.1.1>
+/// <https://www.rfc-editor.org/rfc/rfc4168#section-5>
+#[test]
+fn integration_ethernet_ipv4_sctp_sip_options() {
+    let reg = DissectorRegistry::default();
+    let sip = b"OPTIONS sip:bob@example.net SIP/2.0\r\n\
+                Via: SIP/2.0/SCTP pc33.example.com;branch=z9hG4bK776asdhds\r\n\
+                To: <sip:bob@example.net>\r\n\
+                From: <sip:alice@example.com>;tag=1928301774\r\n\
+                Call-ID: a84b4c76e66710@pc33.example.com\r\n\
+                CSeq: 63104 OPTIONS\r\n\r\n";
+    let pkt = build_eth_ipv4_sctp_ppid(40000, 5060, 0, sip);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "SIP"]);
+    let sip_layer = buf.layer_by_name("SIP").unwrap();
+    assert_eq!(
+        buf.field_by_name(sip_layer, "method").unwrap().value,
+        FieldValue::Str("OPTIONS")
+    );
+}
+
+/// RADIUS Dynamic Authorization: RFC 5176, Section 2.3 — "For either
+/// Disconnect-Request or CoA-Request packets UDP port 3799 is used as the
+/// destination port." <https://www.rfc-editor.org/rfc/rfc5176#section-2.3>
+#[test]
+fn integration_ethernet_ipv4_udp_radius_coa_request() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 17, IPV4_SRC, IPV4_DST);
+    let udp_start = push_udp(&mut pkt, 50000, 3799);
+    pkt.push(43); // Code: CoA-Request
+    pkt.push(7); // Identifier
+    pkt.extend_from_slice(&20u16.to_be_bytes()); // Length
+    pkt.extend_from_slice(&[0x11; 16]); // Authenticator
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "UDP", "RADIUS"]);
+    let radius = buf.layer_by_name("RADIUS").unwrap();
+    assert_eq!(
+        buf.field_by_name(radius, "code").unwrap().value,
+        FieldValue::U8(43)
+    );
+}
+
+/// RARP: RFC 903 — EtherType 0x8035 with the ARP packet format and opcode
+/// 3 ("request reverse"). <https://www.rfc-editor.org/rfc/rfc903>
+#[test]
+fn integration_ethernet_rarp_request() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = build_eth_arp_request();
+    pkt[12..14].copy_from_slice(&0x8035u16.to_be_bytes());
+    pkt[20..22].copy_from_slice(&3u16.to_be_bytes()); // OPER: request reverse
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "ARP"]);
+    let arp = buf.layer_by_name("ARP").unwrap();
+    assert_eq!(
+        buf.field_by_name(arp, "oper").unwrap().value,
+        FieldValue::U16(3)
+    );
+}
+
+/// SRv6 L2 service: RFC 8986, Section 10.1 — Next Header 143 (Ethernet)
+/// carries an Ethernet frame directly after the SRH (End.DX2, Section 4.9).
+/// <https://www.rfc-editor.org/rfc/rfc8986#section-10.1>
+#[test]
+fn integration_ethernet_ipv6_srv6_ethernet_ipv4_udp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x86DD);
+    let outer_ip_start = push_ipv6(&mut pkt, 43, IPV6_SRC, IPV6_DST);
+    push_srv6(&mut pkt, 143, 0, &[SRV6_SID_A]);
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x0800);
+    let inner_ip_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 1234, 5678);
+    pkt.extend_from_slice(b"data");
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, inner_ip_start);
+    fixup_ipv6_payload_length(&mut pkt, outer_ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv6", "SRv6", "Ethernet", "IPv4", "UDP"]
+    );
 }

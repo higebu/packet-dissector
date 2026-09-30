@@ -2122,6 +2122,17 @@ impl Default for DissectorRegistry {
             Box::new(packet_dissector_ethernet::EthernetDissector),
         ));
 
+        // IP protocol 143 (Ethernet) — carries an Ethernet frame directly,
+        // e.g. SRv6 L2 services (End.DX2 / End.DT2U / End.DT2M).
+        // RFC 8986, Section 10.1 — https://www.rfc-editor.org/rfc/rfc8986#section-10.1
+        #[cfg(feature = "ethernet")]
+        assert_builtin(
+            reg.register_by_ip_protocol(
+                143,
+                Box::new(packet_dissector_ethernet::EthernetDissector),
+            ),
+        );
+
         // LINKTYPE_LINUX_SLL (113) — Linux cooked capture v1
         #[cfg(feature = "linux_sll")]
         {
@@ -2255,9 +2266,16 @@ impl Default for DissectorRegistry {
         );
 
         #[cfg(feature = "arp")]
-        assert_builtin(
-            reg.register_by_ethertype(0x0806, Box::new(packet_dissector_arp::ArpDissector)),
-        );
+        {
+            assert_builtin(
+                reg.register_by_ethertype(0x0806, Box::new(packet_dissector_arp::ArpDissector)),
+            );
+            // RARP (0x8035) reuses the ARP packet format with opcodes 3/4.
+            // RFC 903 — https://www.rfc-editor.org/rfc/rfc903
+            assert_builtin(
+                reg.register_by_ethertype(0x8035, Box::new(packet_dissector_arp::ArpDissector)),
+            );
+        }
 
         // EtherType 0x8809 — IEEE 802.3 Slow Protocols; the dispatcher selects
         // LACP, Marker, OAM or OSSP/ESMC by subtype (IEEE 802.3 Annex 57A)
@@ -2580,6 +2598,19 @@ impl Default for DissectorRegistry {
                 reg.register_by_tcp_port(5060, Box::new(packet_dissector_sip::SipDissector)),
             );
 
+            // RFC 3261, Section 18.1.1 — the default port "is 5060 for UDP,
+            // TCP and SCTP". SCTP preserves message boundaries (RFC 4168,
+            // Section 3.2), so each DATA chunk is framed like a datagram.
+            // https://www.rfc-editor.org/rfc/rfc3261#section-18.1.1
+            // https://www.rfc-editor.org/rfc/rfc4168#section-3.2
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_port(
+                    5060,
+                    Box::new(packet_dissector_sip::SipDatagramDissector),
+                ),
+            );
+
             reg.register_dissector_factory("sip", || Box::new(packet_dissector_sip::SipDissector));
             reg.register_dissector_factory("sip.udp", || {
                 Box::new(packet_dissector_sip::SipDatagramDissector)
@@ -2604,17 +2635,22 @@ impl Default for DissectorRegistry {
         }
 
         // RADIUS runs over UDP on ports 1812 (auth) and 1813 (accounting)
-        // (RFC 2865, Section 3 / RFC 2866, Section 3)
+        // (RFC 2865, Section 3 / RFC 2866, Section 3), plus:
+        // - 3799: RFC 5176, Section 2.3 — "For either Disconnect-Request or
+        //   CoA-Request packets UDP port 3799 is used as the destination port."
+        //   https://www.rfc-editor.org/rfc/rfc5176#section-2.3
+        // - 1645 / 1646: RFC 2865, Section 3 — "The early deployment of
+        //   RADIUS was done using UDP port number 1645"; RFC 2866, Section 3
+        //   — "The early deployment of RADIUS Accounting was done using UDP
+        //   port number 1646".
+        //   https://www.rfc-editor.org/rfc/rfc2865#section-3
+        //   https://www.rfc-editor.org/rfc/rfc2866#section-3
         #[cfg(feature = "radius")]
         {
             #[cfg(feature = "udp")]
-            {
+            for port in [1812, 1813, 3799, 1645, 1646] {
                 assert_builtin(reg.register_by_udp_port(
-                    1812,
-                    Box::new(packet_dissector_radius::RadiusDissector),
-                ));
-                assert_builtin(reg.register_by_udp_port(
-                    1813,
+                    port,
                     Box::new(packet_dissector_radius::RadiusDissector),
                 ));
             }
@@ -2691,12 +2727,31 @@ impl Default for DissectorRegistry {
         }
 
         // Register TLS for the common HTTPS port 443 (RFC 5246, RFC 8446)
+        // and for the ports whose assigned service runs over implicit TLS
+        // (the TLS handshake is the first data exchanged on the connection):
+        // - 465 submissions, 993 imaps, 995 pop3s: RFC 8314, Sections 7.1–7.3
+        //   https://www.rfc-editor.org/rfc/rfc8314#section-7
+        // - 636 ldaps, 990 ftps: IANA Service Name and Transport Protocol
+        //   Port Number Registry
+        //   https://www.iana.org/assignments/service-names-port-numbers/
+        // - 853 domain-s (DNS over TLS): RFC 7858, Section 3.1
+        //   https://www.rfc-editor.org/rfc/rfc7858#section-3.1
+        // - 2083 radsec: RFC 6614, Section 2.1
+        //   https://www.rfc-editor.org/rfc/rfc6614#section-2.1
+        // - 5061 sips: RFC 3261, Section 18.2.1
+        //   https://www.rfc-editor.org/rfc/rfc3261#section-18.2.1
+        // - 5349 stuns: RFC 8489, Section 18.6
+        //   https://www.rfc-editor.org/rfc/rfc8489#section-18.6
+        // - 6697 ircs-u: RFC 7194, Section 4
+        //   https://www.rfc-editor.org/rfc/rfc7194#section-4
         #[cfg(feature = "tls")]
         {
             #[cfg(feature = "tcp")]
-            assert_builtin(
-                reg.register_by_tcp_port(443, Box::new(packet_dissector_tls::TlsDissector)),
-            );
+            for port in [443, 465, 636, 853, 990, 993, 995, 2083, 5061, 5349, 6697] {
+                assert_builtin(
+                    reg.register_by_tcp_port(port, Box::new(packet_dissector_tls::TlsDissector)),
+                );
+            }
             reg.register_dissector_factory("tls", || Box::new(packet_dissector_tls::TlsDissector));
         }
 
@@ -4415,6 +4470,64 @@ mod tests {
 
         #[cfg(all(any(feature = "l2tp", feature = "l2tpv3"), feature = "udp"))]
         assert!(reg.get_by_udp_port(1701).is_some());
+    }
+
+    #[test]
+    fn default_registry_assigned_port_registrations() {
+        let reg = DissectorRegistry::default();
+
+        // Implicit-TLS service ports (see the references in `default()`):
+        // RFC 7858, Section 3.1 — https://www.rfc-editor.org/rfc/rfc7858#section-3.1
+        // RFC 8314, Section 7 — https://www.rfc-editor.org/rfc/rfc8314#section-7
+        // RFC 6614, Section 2.1 — https://www.rfc-editor.org/rfc/rfc6614#section-2.1
+        // RFC 3261, Section 18.2.1 — https://www.rfc-editor.org/rfc/rfc3261#section-18.2.1
+        // RFC 8489, Section 18.6 — https://www.rfc-editor.org/rfc/rfc8489#section-18.6
+        // RFC 7194, Section 4 — https://www.rfc-editor.org/rfc/rfc7194#section-4
+        // IANA ldaps (636), ftps (990) — https://www.iana.org/assignments/service-names-port-numbers/
+        #[cfg(all(feature = "tls", feature = "tcp"))]
+        for port in [465, 636, 853, 990, 993, 995, 2083, 5061, 5349, 6697] {
+            assert_eq!(
+                reg.get_by_tcp_port(port).map(|d| d.short_name()),
+                Some("TLS"),
+                "TCP port {port}"
+            );
+        }
+
+        // RFC 3261, Section 18.1.1 — SIP over SCTP on 5060.
+        // https://www.rfc-editor.org/rfc/rfc3261#section-18.1.1
+        #[cfg(all(feature = "sip", feature = "sctp"))]
+        assert_eq!(
+            reg.get_by_sctp_port(5060).map(|d| d.short_name()),
+            Some("SIP")
+        );
+
+        // RFC 5176, Section 2.3 — https://www.rfc-editor.org/rfc/rfc5176#section-2.3
+        // RFC 2865, Section 3 — https://www.rfc-editor.org/rfc/rfc2865#section-3
+        // RFC 2866, Section 3 — https://www.rfc-editor.org/rfc/rfc2866#section-3
+        #[cfg(all(feature = "radius", feature = "udp"))]
+        for port in [1645, 1646, 3799] {
+            assert_eq!(
+                reg.get_by_udp_port(port).map(|d| d.short_name()),
+                Some("RADIUS"),
+                "UDP port {port}"
+            );
+        }
+
+        // RFC 903 — RARP (EtherType 0x8035) uses the ARP packet format.
+        // https://www.rfc-editor.org/rfc/rfc903
+        #[cfg(feature = "arp")]
+        assert_eq!(
+            reg.get_by_ethertype(0x8035).map(|d| d.short_name()),
+            Some("ARP")
+        );
+
+        // RFC 8986, Section 10.1 — IP protocol 143 (Ethernet).
+        // https://www.rfc-editor.org/rfc/rfc8986#section-10.1
+        #[cfg(feature = "ethernet")]
+        assert_eq!(
+            reg.get_by_ip_protocol(143).map(|d| d.short_name()),
+            Some("Ethernet")
+        );
     }
 
     #[test]
