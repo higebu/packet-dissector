@@ -72,9 +72,14 @@ const HC_NAME: usize = 0;
 const HC_VALUE: usize = 1;
 
 /// Child descriptors for each header entry object.
+///
+/// A field value is a `Str`, or `Bytes` when it holds obs-text that is not
+/// valid UTF-8 (RFC 9110, Section 5.5 —
+/// <https://www.rfc-editor.org/rfc/rfc9110#section-5.5>), so `value` is
+/// declared as [`FieldType::Any`].
 static HEADER_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("name", "Name", FieldType::Str),
-    FieldDescriptor::new("value", "Value", FieldType::Str),
+    FieldDescriptor::new("value", "Value", FieldType::Any),
 ];
 
 /// Descriptor for the HTTP header Object container.
@@ -921,6 +926,7 @@ mod tests {
     // | 9112 6.3 r8   | Close-delimited resp  | close_delimited_response_body_runs_to_end |
     // | 9112 6.3 r8   | Close-delimited + CT  | close_delimited_response_dispatches_content_type |
     // | 9110 5.5      | obs-text field value  | obs_text_header_value_is_kept           |
+    // | 9110 5.5      | obs-text value schema | header_value_descriptor_matches_obs_text_value |
     // | 9112 5        | More than 64 headers  | many_headers_are_all_parsed             |
     // | 9112 5        | Header limit error    | too_many_headers_error                  |
 
@@ -1363,6 +1369,24 @@ mod tests {
         assert_eq!(values[0], FieldValue::Bytes(b"caf\xe9"));
         assert_eq!(values[1], FieldValue::Str("0"));
         assert_eq!(buf.field_u32(layer, "content_length"), Some(0));
+    }
+
+    #[test]
+    fn header_value_descriptor_matches_obs_text_value() {
+        // The `value` descriptor must describe both the Str and the Bytes
+        // (obs-text) form of a header field value.
+        let data = b"HTTP/1.1 200 OK\r\nX-Name: caf\xe9\r\nContent-Length: 0\r\n\r\n";
+        let buf = dissect(data).unwrap();
+        for field in buf.fields() {
+            let declared = field.descriptor.field_type;
+            assert!(
+                declared == FieldType::Any || declared == field.value.field_type(),
+                "{} declared {:?}, got {:?}",
+                field.name(),
+                declared,
+                field.value.field_type()
+            );
+        }
     }
 
     fn response_with_headers(n: usize) -> Vec<u8> {
