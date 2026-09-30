@@ -67,6 +67,8 @@ default = [
   "quic",
   "quic-decrypt",
   "stun",
+  "m3ua",
+  "sccp",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
 # SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
@@ -129,6 +131,8 @@ rtp = ["dep:packet-dissector-rtp"]
 quic = ["dep:packet-dissector-quic"]
 quic-decrypt = ["quic", "packet-dissector-quic/decrypt"]
 stun = ["dep:packet-dissector-stun"]
+m3ua = ["dep:packet-dissector-m3ua"]
+sccp = ["dep:packet-dissector-sccp"]
 
 ## Convenience feature groups
 layer2 = [
@@ -166,6 +170,7 @@ tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls"]
 routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]
+sigtran = ["m3ua", "sccp"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -223,6 +228,8 @@ packet-dissector-ike = { workspace = true, optional = true }
 packet-dissector-rtp = { workspace = true, optional = true }
 packet-dissector-quic = { workspace = true, optional = true }
 packet-dissector-stun = { workspace = true, optional = true }
+packet-dissector-m3ua = { workspace = true, optional = true }
+packet-dissector-sccp = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

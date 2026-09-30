@@ -35,6 +35,7 @@ protocols include:
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE |
 | Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, TLS, PPP, RADIUS, RTP, QUIC, STUN |
 | 3GPP | GTPv1-U, GTPv2-C, PFCP, NAS5G, NGAP |
+| SIGTRAN / SS7 | M3UA, SCCP |
 
 See `crates/packet-dissector/Cargo.toml` and `crates/packet-dissector/src/lib.rs`
 for the current feature-gated protocol list.
@@ -62,6 +63,7 @@ Representative feature flags:
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`
 - Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
 - 3GPP: `gtpv1u`, `gtpv2c`, `pfcp`, `nas5g`, `ngap`
+- SIGTRAN / SS7: `m3ua`, `sccp`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
 
@@ -75,6 +77,7 @@ Convenience groups:
 - `routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]`
 - `ipsec = ["ah", "esp", "ike"]`
 - `3gpp = ["gtpv1u", "gtpv2c", "pfcp", "nas5g", "ngap"]`
+- `sigtran = ["m3ua", "sccp"]`
 
 For the authoritative, exhaustive list, see
 `crates/packet-dissector/Cargo.toml`.

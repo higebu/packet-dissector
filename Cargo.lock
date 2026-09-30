@@ -635,6 +635,7 @@ dependencies = [
  "packet-dissector-linux-sll",
  "packet-dissector-linux-sll2",
  "packet-dissector-lldp",
+ "packet-dissector-m3ua",
  "packet-dissector-mdns",
  "packet-dissector-mpls",
  "packet-dissector-nas5g",
@@ -649,6 +650,7 @@ dependencies = [
  "packet-dissector-raw-ip",
  "packet-dissector-reassembly",
  "packet-dissector-rtp",
+ "packet-dissector-sccp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-sip",
@@ -942,6 +944,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-m3ua"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-mdns"
 version = "0.5.0"
 dependencies = [
@@ -1016,9 +1027,11 @@ dependencies = [
  "packet-dissector-ipv4",
  "packet-dissector-ipv6",
  "packet-dissector-isis",
+ "packet-dissector-m3ua",
  "packet-dissector-mdns",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
+ "packet-dissector-sccp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
@@ -1089,6 +1102,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-rtp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-sccp"
 version = "0.5.0"
 dependencies = [
  "criterion",

@@ -32,6 +32,10 @@
 //! | Ethernet → IPv4 → SCTP(unknown PPID and ports) → no upper layer | integration_ethernet_ipv4_sctp_unknown_ppid_and_port |
 //! | Ethernet → IPv4 → SCTP(unknown PPID, then PPID 46) summary names Diameter | integration_ethernet_ipv4_sctp_summary_uses_first_resolvable_chunk |
 //! | Ethernet → IPv4 → SCTP(9487→40001, PPID 60) → NGAP | integration_ethernet_ipv4_sctp_ppid_ngap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(PPID 3) → M3UA DATA → SCCP UDT | integration_ethernet_ipv4_sctp_m3ua_sccp_udt |
+//! | Ethernet → IPv4 → SCTP(port 2905, PPID 0) → M3UA ASPUP | integration_ethernet_ipv4_sctp_m3ua_port_aspup |
+//! | Ethernet → IPv4 → SCTP → M3UA DATA (SI=5, no ISUP dissector) | integration_ethernet_ipv4_sctp_m3ua_unknown_si |
+//! | Ethernet → IPv4 → SCTP → M3UA → SCCP → SSN 6 user dissector | integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
 //! | 802.1ad QinQ → IPv4 → UDP                | integration_qinq_ipv4_udp                     |
@@ -9230,4 +9234,176 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+// ---------------------------------------------------------------------------
+// SIGTRAN: M3UA (RFC 4666) and SCCP (ITU-T Q.713)
+// ---------------------------------------------------------------------------
+
+/// M3UA message (RFC 4666, Section 3.1) with pre-encoded parameters.
+#[cfg(feature = "m3ua")]
+fn m3ua_message(class: u8, msg_type: u8, params: &[u8]) -> Vec<u8> {
+    let mut m = vec![1, 0, class, msg_type];
+    m.extend_from_slice(&((8 + params.len()) as u32).to_be_bytes());
+    m.extend_from_slice(params);
+    m
+}
+
+/// M3UA DATA carrying `user_data` with Service Indicator `si` in a Protocol
+/// Data parameter (RFC 4666, Section 3.3.1), followed by a Correlation Id.
+#[cfg(feature = "m3ua")]
+fn m3ua_data(si: u8, user_data: &[u8]) -> Vec<u8> {
+    let len = 4 + 12 + user_data.len();
+    let mut p = vec![0x02, 0x10];
+    p.extend_from_slice(&(len as u16).to_be_bytes());
+    p.extend_from_slice(&0x0000_0102u32.to_be_bytes()); // OPC
+    p.extend_from_slice(&0x0000_0304u32.to_be_bytes()); // DPC
+    p.extend_from_slice(&[si, 0, 0, 7]); // SI, NI, MP, SLS
+    p.extend_from_slice(user_data);
+    while p.len() % 4 != 0 {
+        p.push(0);
+    }
+    p.extend_from_slice(&[0x00, 0x13, 0x00, 0x08, 0, 0, 0, 1]); // Correlation Id
+    m3ua_message(1, 1, &p)
+}
+
+/// SCCP UDT, class 0, called SSN 6 (HLR) and calling SSN 8 (MSC), both
+/// routed on SSN (ITU-T Q.713, clause 4.10).
+#[cfg(feature = "sccp")]
+fn sccp_udt(user_data: &[u8]) -> Vec<u8> {
+    let mut m = vec![0x09, 0x00, 0x03, 0x07, 0x0b];
+    m.extend_from_slice(&[0x04, 0x43, 0x01, 0x00, 0x06]); // called: PC 1, SSN 6
+    m.extend_from_slice(&[0x04, 0x43, 0x02, 0x00, 0x08]); // calling: PC 2, SSN 8
+    m.push(user_data.len() as u8);
+    m.extend_from_slice(user_data);
+    m
+}
+
+#[cfg(all(feature = "sctp", feature = "m3ua", feature = "sccp"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_sccp_udt() {
+    let reg = DissectorRegistry::default();
+    let user = [0x62, 0x02, 0x48, 0x00]; // opaque SCCP user data
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp_udt(&user)));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP"]
+    );
+
+    let m3ua = &buf.layers()[3];
+    assert_eq!(
+        buf.resolve_display_name(m3ua, "message_type_name"),
+        Some("Payload Data (DATA)")
+    );
+    let sccp = &buf.layers()[4];
+    assert_eq!(
+        buf.resolve_display_name(sccp, "message_type_name"),
+        Some("Unitdata (UDT)")
+    );
+    assert_eq!(
+        buf.field_by_name(sccp, "data").unwrap().value,
+        FieldValue::Bytes(&user)
+    );
+    // The SCCP layer covers exactly the M3UA User Protocol Data.
+    let called = buf.field_by_name(sccp, "called_party_address").unwrap();
+    let FieldValue::Object(r) = &called.value else {
+        panic!("called_party_address is not an object")
+    };
+    let called = buf.nested_fields(r);
+    let ssn = called.iter().find(|f| f.name() == "ssn").unwrap();
+    assert_eq!(ssn.value, FieldValue::U8(6));
+    let pc = called.iter().find(|f| f.name() == "point_code").unwrap();
+    assert_eq!(pc.value, FieldValue::U16(1));
+    let sccp_len = sccp_udt(&user).len();
+    let pd_start = m3ua.range.start + 8 + 4 + 12;
+    assert_eq!(sccp.range, pd_start..pd_start + sccp_len);
+
+    let mut buf = DissectBuffer::new();
+    let summary = reg.dissect_summary(&data, &mut buf).unwrap();
+    assert_eq!(summary.next_protocol, Some("M3UA"));
+}
+
+#[cfg(all(feature = "sctp", feature = "m3ua"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_port_aspup() {
+    let reg = DissectorRegistry::default();
+    // ASP Up with an ASP Identifier (RFC 4666, Section 3.5.1).
+    let aspup = m3ua_message(3, 1, &[0x00, 0x11, 0x00, 0x08, 0, 0, 0, 42]);
+    let data = build_eth_ipv4_sctp_ppid(40000, 2905, 0, &aspup);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "SCTP", "M3UA"]);
+    let m3ua = &buf.layers()[3];
+    assert_eq!(
+        buf.resolve_display_name(m3ua, "message_type_name"),
+        Some("ASP Up (ASPUP)")
+    );
+}
+
+#[cfg(all(feature = "sctp", feature = "m3ua"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_unknown_si() {
+    let reg = DissectorRegistry::default();
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(5, &[1, 2, 3]));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "SCTP", "M3UA"]);
+}
+
+/// Test SCCP user: one layer over exactly the octets it is given.
+#[cfg(feature = "sccp")]
+struct SccpUserStub;
+
+#[cfg(feature = "sccp")]
+impl packet_dissector::dissector::Dissector for SccpUserStub {
+    fn name(&self) -> &'static str {
+        "SCCP user stub"
+    }
+    fn short_name(&self) -> &'static str {
+        "SCCPUSER"
+    }
+    fn field_descriptors(&self) -> &'static [packet_dissector::field::FieldDescriptor] {
+        &[]
+    }
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector::dissector::DissectResult, packet_dissector::error::PacketError>
+    {
+        buf.begin_layer("SCCPUSER", None, &[], offset..offset + data.len());
+        buf.end_layer();
+        Ok(packet_dissector::dissector::DissectResult::new(
+            data.len(),
+            packet_dissector::dissector::DispatchHint::End,
+        ))
+    }
+}
+
+/// The SCCP user data (not the M3UA octets after the Protocol Data) reaches
+/// the dissector registered for the called SSN (ITU-T Q.713, clause
+/// 3.4.2.2 — <https://www.itu.int/rec/T-REC-Q.713>).
+#[cfg(all(feature = "sctp", feature = "m3ua", feature = "sccp"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_m3ua_sccp_ssn_dispatch() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_sccp_ssn(6, Box::new(SccpUserStub)).unwrap();
+    let user = [0x62, 0x02, 0x48, 0x00, 0x11];
+    let data = build_eth_ipv4_sctp_ppid(40000, 40001, 3, &m3ua_data(3, &sccp_udt(&user)));
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&data, &mut buf).unwrap();
+    assert_eq!(
+        layer_names(&buf),
+        ["Ethernet", "IPv4", "SCTP", "M3UA", "SCCP", "SCCPUSER"]
+    );
+    let sccp = &buf.layers()[4];
+    let user_layer = &buf.layers()[5];
+    assert_eq!(
+        user_layer.range,
+        sccp.range.end - user.len()..sccp.range.end
+    );
+    assert_eq!(&data[user_layer.range.clone()], &user);
 }
