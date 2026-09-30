@@ -44,6 +44,7 @@ packet-dissector-sdp = { version = "0.5.0", path = "crates/packet-dissector-sdp"
 packet-dissector-diameter = { version = "0.5.0", path = "crates/packet-dissector-diameter" }
 packet-dissector-geneve = { version = "0.5.0", path = "crates/packet-dissector-geneve" }
 packet-dissector-gre = { version = "0.5.0", path = "crates/packet-dissector-gre" }
+packet-dissector-erspan = { version = "0.5.0", path = "crates/packet-dissector-erspan" }
 packet-dissector-mpls = { version = "0.5.0", path = "crates/packet-dissector-mpls" }
 packet-dissector-nsh = { version = "0.5.0", path = "crates/packet-dissector-nsh" }
 packet-dissector-vxlan = { version = "0.5.0", path = "crates/packet-dissector-vxlan" }
@@ -56,6 +57,8 @@ packet-dissector-pcap = { version = "0.5.0", path = "crates/packet-dissector-pca
 packet-dissector-vrrp = { version = "0.5.0", path = "crates/packet-dissector-vrrp" }
 packet-dissector-bfd = { version = "0.5.0", path = "crates/packet-dissector-bfd" }
 packet-dissector-ipfix = { version = "0.5.0", path = "crates/packet-dissector-ipfix" }
+packet-dissector-m3ua = { version = "0.5.0", path = "crates/packet-dissector-m3ua" }
+packet-dissector-sccp = { version = "0.5.0", path = "crates/packet-dissector-sccp" }
 packet-dissector-isis = { version = "0.5.0", path = "crates/packet-dissector-isis" }
 packet-dissector-bgp = { version = "0.5.0", path = "crates/packet-dissector-bgp" }
 packet-dissector-bmp = { version = "0.5.0", path = "crates/packet-dissector-bmp" }
