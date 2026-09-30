@@ -121,6 +121,11 @@
 //! | Ethernet → IPv4 → UDP → S-BFD / Micro-BFD            | integration_ethernet_ipv4_udp_sbfd_and_micro_bfd     |
 //! | PPP (HDLC) → IPv4 → UDP                               | integration_ppp_ipv4_udp                              |
 //! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
+//! | Ethernet → PPPoE Discovery (PADI)                      | integration_ethernet_pppoe_discovery_padi             |
+//! | Ethernet → PPPoE Session → PPP → IPv4 → UDP            | integration_ethernet_pppoe_session_ppp_ipv4_udp       |
+//! | Ethernet → PPPoE Session → PPP → LCP (padded frame)    | integration_ethernet_pppoe_session_lcp_padding        |
+//! | Ethernet → 802.1Q → PPPoE Session → PPP → IPv4 → UDP   | integration_ethernet_vlan_pppoe_session_ipv4          |
+//! | PPPoE (link type 51) → PPP → IPv4 → UDP / PADI         | integration_link_type_ppp_ether                       |
 //! | Ethernet → IPv4 → UDP → GENEVE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_geneve_ipv4        |
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
 //! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ipv4      |
@@ -6988,6 +6993,163 @@ fn integration_ppp_lcp_inline() {
         buf.field_by_name(ppp, "payload").unwrap().value,
         FieldValue::Object(_)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// PPPoE (RFC 2516) — https://www.rfc-editor.org/rfc/rfc2516
+// ---------------------------------------------------------------------------
+
+/// PPPoE header (RFC 2516, Section 4): VER=1, TYPE=1, CODE, SESSION_ID, LENGTH.
+fn push_pppoe(pkt: &mut Vec<u8>, code: u8, session_id: u16, length: u16) {
+    pkt.push(0x11);
+    pkt.push(code);
+    pkt.extend_from_slice(&session_id.to_be_bytes());
+    pkt.extend_from_slice(&length.to_be_bytes());
+}
+
+/// PPPoE Session payload: PPP Protocol 0x0021 followed by IPv4 → UDP.
+/// Returns the PPPoE payload length.
+fn push_pppoe_ppp_ipv4_udp(pkt: &mut Vec<u8>) -> u16 {
+    let ppp_start = pkt.len();
+    pkt.extend_from_slice(&[0x00, 0x21]);
+    let ipv4_start = push_ipv4(pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(pkt, 12345, 53);
+    fixup_udp_length(pkt, udp_start);
+    fixup_ipv4_length(pkt, ipv4_start);
+    (pkt.len() - ppp_start) as u16
+}
+
+#[test]
+fn integration_ethernet_pppoe_discovery_padi() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xFF; 6], [0x02, 0, 0, 0, 0, 1], 0x8863);
+    // RFC 2516, Appendix B PADI with a Host-Uniq TAG —
+    // https://www.rfc-editor.org/rfc/rfc2516#appendix-B
+    push_pppoe(&mut pkt, 0x09, 0x0000, 12);
+    pkt.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0x01, 0x03, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF]);
+    pkt.resize(60, 0); // Ethernet minimum frame padding
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 2);
+    assert_eq!(buf.layers()[1].name, "PPPoE");
+    assert_eq!(buf.layers()[1].range, 14..14 + 6 + 12);
+    assert_layers_contiguous(&buf);
+    let pppoe = buf.layer_by_name("PPPoE").unwrap();
+    assert_eq!(buf.resolve_display_name(pppoe, "code_name"), Some("PADI"));
+    assert!(matches!(
+        buf.field_by_name(pppoe, "tags").unwrap().value,
+        FieldValue::Array(_)
+    ));
+}
+
+#[test]
+fn integration_ethernet_pppoe_session_ppp_ipv4_udp() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x8864,
+    );
+    let pppoe_start = pkt.len();
+    push_pppoe(&mut pkt, 0x00, 0x0011, 0);
+    let len = push_pppoe_ppp_ipv4_udp(&mut pkt);
+    pkt[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&len.to_be_bytes());
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "PPPoE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let pppoe = buf.layer_by_name("PPPoE").unwrap();
+    assert_eq!(buf.field_u16(pppoe, "session_id"), Some(0x0011));
+    assert_eq!(buf.field_u16(pppoe, "length"), Some(len));
+}
+
+#[test]
+fn integration_ethernet_pppoe_session_lcp_padding() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x8864,
+    );
+    // LCP Echo-Request (RFC 1661, Section 5.8 —
+    // https://www.rfc-editor.org/rfc/rfc1661#section-5.8), 10 octets with the Protocol.
+    push_pppoe(&mut pkt, 0x00, 0x0011, 10);
+    pkt.extend_from_slice(&[0xC0, 0x21, 0x09, 0x02, 0x00, 0x08, 0x12, 0x34, 0x56, 0x78]);
+    pkt.resize(60, 0); // Ethernet padding must not reach PPP
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "PPPoE", "PPP"]);
+    assert_layers_contiguous(&buf);
+    let ppp = buf.layer_by_name("PPP").unwrap();
+    assert!(
+        ppp.range.end <= 14 + 6 + 10,
+        "PPP layer {:?} must not cover Ethernet padding",
+        ppp.range
+    );
+    let payload = buf.field_by_name(ppp, "payload").unwrap();
+    assert_eq!(payload.range, 14 + 6 + 2..14 + 6 + 10);
+}
+
+#[test]
+fn integration_ethernet_vlan_pppoe_session_ipv4() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x8100,
+    );
+    push_vlan_tag(&mut pkt, 100, 0x8864);
+    let pppoe_start = pkt.len();
+    push_pppoe(&mut pkt, 0x00, 0x0022, 0);
+    let len = push_pppoe_ppp_ipv4_udp(&mut pkt);
+    pkt[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&len.to_be_bytes());
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "PPPoE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+#[test]
+fn integration_link_type_ppp_ether() {
+    let registry = DissectorRegistry::default();
+
+    // LINKTYPE_PPP_ETHER (51): the packet begins with the PPPoE header.
+    // https://www.tcpdump.org/linktypes.html
+    let mut pkt = Vec::new();
+    push_pppoe(&mut pkt, 0x00, 0x0011, 0);
+    let len = push_pppoe_ppp_ipv4_udp(&mut pkt);
+    pkt[4..6].copy_from_slice(&len.to_be_bytes());
+    let mut buf = DissectBuffer::new();
+    registry.dissect_with_link_type(&pkt, 51, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["PPPoE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+
+    let mut padi = Vec::new();
+    push_pppoe(&mut padi, 0x09, 0x0000, 4);
+    padi.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&padi, 51, &mut buf)
+        .unwrap();
+    assert_eq!(buf.layers().len(), 1);
+    let pppoe = buf.layer_by_name("PPPoE").unwrap();
+    assert_eq!(buf.resolve_display_name(pppoe, "code_name"), Some("PADI"));
 }
 
 // ===========================================================================
