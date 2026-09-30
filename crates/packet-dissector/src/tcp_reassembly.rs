@@ -97,10 +97,9 @@ impl TcpReassemblyService {
         // `order` may hold `keep` more than once (a stale key left by a
         // completed stream, then the live one), so stop after one full
         // rotation rather than on the second sighting of `keep`.
-        for _ in 0..self.order.len() {
-            let Some(key) = self.order.pop_front() else {
-                break;
-            };
+        let mut remaining = self.order.len();
+        while let Some(key) = (remaining > 0).then(|| self.order.pop_front()).flatten() {
+            remaining -= 1;
             if key == *keep {
                 // The stream being processed is never evicted before its own
                 // segment is inserted; move it to the back and go on.
