@@ -21,6 +21,9 @@
 //! | 6864 §4        | Atomic datagram ID tolerated    | parse_ipv4_atomic_identification    |
 //! | 791 §3.1       | Flags (DF)                      | parse_ipv4_basic                    |
 //! | 791 §3.1       | Flags (MF) + Fragment Offset    | parse_ipv4_fragmented               |
+//! | 791 §3.2       | Non-initial fragment ends chain | parse_ipv4_non_initial_fragment_ends_chain |
+//! | 791 §3.2       | First fragment reassembly context | parse_ipv4_first_fragment_context |
+//! | 791 §3.2       | Whole datagram has no fragment context | parse_ipv4_whole_datagram_no_fragment_context |
 //! | 791 §3.1       | Flags byte range is byte 6 only | parse_ipv4_field_byte_ranges        |
 //! | 791 §3.1       | TTL                             | parse_ipv4_basic                    |
 //! | 791 §3.1       | Protocol (TCP=6)                | parse_ipv4_basic                    |
@@ -268,6 +271,74 @@ fn parse_ipv4_fragmented() {
         buf.field_by_name(layer, "fragment_offset").unwrap().value,
         FieldValue::U16(185)
     );
+}
+
+#[test]
+fn parse_ipv4_non_initial_fragment_ends_chain() {
+    // RFC 791, Section 3.2 — the Fragment Offset "identifies the fragment
+    // location, relative to the beginning of the original unfragmented
+    // datagram", so a fragment with a non-zero offset carries no upper-layer
+    // header and must not be dispatched.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+    let mut data = build_ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], 28);
+    data[4..6].copy_from_slice(&0x002au16.to_be_bytes());
+    data[6..8].copy_from_slice(&0x0001u16.to_be_bytes()); // MF=0, offset=1
+    let mut buf = DissectBuffer::new();
+    let result = Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.next, DispatchHint::End);
+    assert_eq!(result.payload_len, Some(8));
+    let ctx = result.ip_fragment_context.expect("fragment context");
+    assert_eq!(
+        ctx.frag_key,
+        (
+            // IPv4-mapped IPv6 addresses (RFC 4291, Section 2.5.5.2).
+            // https://www.rfc-editor.org/rfc/rfc4291#section-2.5.5.2
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 2],
+            17,
+            0x2a
+        )
+    );
+    assert_eq!(ctx.protocol, 17);
+    assert_eq!(ctx.offset_bytes, 8);
+    assert!(!ctx.more_fragments);
+    assert_eq!(ctx.payload_len, 8);
+    assert_eq!(ctx.unfragmentable_len, 20);
+}
+
+#[test]
+fn parse_ipv4_first_fragment_context() {
+    // RFC 791, Section 3.2 — MF=1 with offset 0 is the first fragment: it
+    // starts with the upper-layer header, so it is still dispatched.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+    let mut data = build_ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], 36);
+    data[6..8].copy_from_slice(&0x2000u16.to_be_bytes()); // MF=1, offset=0
+    let mut buf = DissectBuffer::new();
+    let result = Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+
+    assert_eq!(result.next, DispatchHint::ByIpProtocol(17));
+    let ctx = result.ip_fragment_context.expect("fragment context");
+    assert!(ctx.is_first());
+    assert!(ctx.more_fragments);
+    assert_eq!(ctx.payload_len, 16);
+}
+
+#[test]
+fn parse_ipv4_whole_datagram_no_fragment_context() {
+    // RFC 791, Section 3.2 — "a whole datagram (that is both the fragment
+    // offset and the more fragments fields are zero)"; DF does not matter
+    // (RFC 6864, Section 4 — atomic datagrams).
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+    // https://www.rfc-editor.org/rfc/rfc6864#section-4
+    for flags_frag in [0x0000u16, 0x4000] {
+        let mut data = build_ipv4_packet(6, [0; 4], [0; 4], 40);
+        data[6..8].copy_from_slice(&flags_frag.to_be_bytes());
+        let mut buf = DissectBuffer::new();
+        let result = Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.next, DispatchHint::ByIpProtocol(6));
+        assert_eq!(result.ip_fragment_context, None);
+    }
 }
 
 #[test]
