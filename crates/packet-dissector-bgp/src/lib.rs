@@ -24,6 +24,10 @@
 //! - RFC 4724 (Graceful Restart Capability): <https://www.rfc-editor.org/rfc/rfc4724>
 //! - RFC 6368 (Internal BGP as PE-CE Protocol / ATTR_SET): <https://www.rfc-editor.org/rfc/rfc6368>
 //! - RFC 6514 (BGP Encodings for Multicast in MPLS/BGP IP VPNs / PMSI Tunnel): <https://www.rfc-editor.org/rfc/rfc6514>
+//! - RFC 6515 (IPv4 and IPv6 Infrastructure Addresses in BGP Updates for Multicast VPN): <https://www.rfc-editor.org/rfc/rfc6515>
+//! - RFC 6625 (Wildcards in Multicast VPN Auto-Discovery Routes): <https://www.rfc-editor.org/rfc/rfc6625>
+//! - RFC 7441 (Encoding mLDP FECs in the NLRI of BGP MCAST-VPN Routes): <https://www.rfc-editor.org/rfc/rfc7441>
+//! - RFC 7524 (Inter-Area P2MP Segmented LSPs / Global Table Multicast Leaf A-D routes): <https://www.rfc-editor.org/rfc/rfc7524>
 //! - RFC 7311 (Accumulated IGP Metric Attribute): <https://www.rfc-editor.org/rfc/rfc7311>
 //! - RFC 8205 (BGPsec Protocol Specification): <https://www.rfc-editor.org/rfc/rfc8205>
 //! - RFC 8365 (Network Virtualization Overlay Solution Using EVPN): <https://www.rfc-editor.org/rfc/rfc8365>
@@ -302,6 +306,16 @@
 //! | §2.1 | Distinguisher, Color, IPv4 / IPv6 Endpoint; IPv4 and IPv6 + link-local next hops independent of the NLRI AFI | `parse_bgp_update_mp_reach_sr_policy` |
 //! | §2.1; RFC 7911 §3 | NLRI Length other than 96 (AFI 1) / 192 (AFI 2) and truncated NLRI kept raw; withdrawn NLRI; ADD-PATH blocks; malformed tail kept plain | `parse_bgp_update_sr_policy_malformed_withdrawn_add_path` |
 //!
+//! # MCAST-VPN NLRI Coverage (RFC 6514 / RFC 6515 / RFC 6625 / RFC 7441)
+//!
+//! | RFC Section | Description | Test |
+//! |-------------|-------------|------|
+//! | RFC 6514 §4.1-4.6 | Route Types 1-7: RD, Originating Router's IP Address, Source AS, Multicast Source / Group, Route Key | `parse_bgp_update_mp_reach_mcast_vpn_route_types` |
+//! | RFC 6514 §4; RFC 6515 §2; RFC 6625 §2 | AFI 2 C-S / C-G, IPv6 Originating Router's IP Address under AFI 1, wildcards | `parse_bgp_update_mcast_vpn_ipv6_and_wildcards` |
+//! | RFC 6515 §2; RFC 7441 §3; RFC 7524 §6.2.2; RFC 7911 §3 | Malformed bodies (including Leaf A-D Route Keys and Global Table Multicast Route Keys), mLDP and unassigned Route Types kept as `value`; overrun kept raw; withdrawn routes; ADD-PATH block | `parse_bgp_update_mcast_vpn_malformed_withdrawn_add_path` |
+//! | RFC 6514 §10; RFC 7911 §3 | SAFI 129 RD + prefix NLRI, ADD-PATH, IPv6 withdrawal, overlong prefix kept raw | `parse_bgp_update_multicast_vpn_safi_129` |
+//! | IANA BGP MCAST-VPN Route Types | Route Type names | `mcast_vpn_route_type_name_table` |
+//!
 //! # RFC 8277 (Labeled NLRI) / RFC 4364 / RFC 4659 (VPN NLRI) Coverage
 //!
 //! | RFC Section | Description | Test |
@@ -479,9 +493,12 @@ const SAFI_MPLS_LABEL: u8 = 4;
 const SAFI_MPLS_VPN: u8 = 128;
 /// SAFI for Multicast for BGP/MPLS IP VPNs, whose next hop is a VPN address
 /// (RFC 8950, Section 3 — <https://www.rfc-editor.org/rfc/rfc8950#section-3>).
-/// Its NLRI (RD + prefix, without a label; RFC 6514, Section 10 —
-/// <https://www.rfc-editor.org/rfc/rfc6514#section-10>) is not decoded.
+/// Its NLRI is an RD and a prefix, without a label (RFC 6514, Section 10 —
+/// <https://www.rfc-editor.org/rfc/rfc6514#section-10>).
 const SAFI_MULTICAST_VPN: u8 = 129;
+/// SAFI for MCAST-VPN (RFC 6514, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc6514#section-4>).
+const SAFI_MCAST_VPN: u8 = 5;
 /// AFI and SAFIs of BGP-LS (RFC 9552, Section 5.2 —
 /// <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>).
 const AFI_BGP_LS: u16 = 16388;
@@ -588,6 +605,7 @@ fn safi_name(v: u8) -> Option<&'static str> {
         1 => Some("Unicast"),
         2 => Some("Multicast"),
         4 => Some("MPLS Labels"),
+        5 => Some("MCAST-VPN"),
         65 => Some("VPLS"),
         70 => Some("EVPN"),
         71 => Some("BGP-LS"),
@@ -5436,6 +5454,12 @@ enum MpNlriEncoding {
     /// SR Policy NLRI (RFC 9830, Section 2.1 —
     /// <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>).
     SrPolicy { ipv6: bool },
+    /// MCAST-VPN NLRI (RFC 6514, Section 4 —
+    /// <https://www.rfc-editor.org/rfc/rfc6514#section-4>).
+    McastVpn,
+    /// SAFI 129 NLRI: an RD and a prefix, without a label (RFC 6514,
+    /// Section 10 — <https://www.rfc-editor.org/rfc/rfc6514#section-10>).
+    MulticastVpnPrefixes { ipv6: bool },
 }
 
 /// Shape of a labeled NLRI block.
@@ -5459,6 +5483,10 @@ struct LabeledNlri {
     withdraw: bool,
     /// Whether the prefix is IPv6.
     ipv6: bool,
+    /// Whether the entries carry labels (or a Compatibility field); SAFI 129
+    /// NLRI are an RD and a prefix only (RFC 6514, Section 10 —
+    /// <https://www.rfc-editor.org/rfc/rfc6514#section-10>).
+    labels: bool,
 }
 
 impl LabeledNlri {
@@ -5468,6 +5496,18 @@ impl LabeledNlri {
             rd_len: if vpn { RD_SIZE } else { 0 },
             withdraw,
             ipv6,
+            labels: true,
+        }
+    }
+
+    /// Shape of SAFI 129 NLRI: "a Route Distinguisher as defined in
+    /// [RFC4364] prepended to an IPv4 or IPv6 address prefix", without a
+    /// label (RFC 6514, Section 10 —
+    /// <https://www.rfc-editor.org/rfc/rfc6514#section-10>).
+    fn unlabeled_vpn(ipv6: bool) -> Self {
+        Self {
+            labels: false,
+            ..Self::new(ipv6, true, false)
         }
     }
 }
@@ -5520,6 +5560,9 @@ fn labeled_entry_layout(data: &[u8], shape: &LabeledNlri) -> Option<LabeledEntry
         })
     };
 
+    if !shape.labels {
+        return layout(0);
+    }
     if !shape.withdraw {
         // Label stack terminated by the S bit (RFC 8277, Section 2.3 —
         // https://www.rfc-editor.org/rfc/rfc8277#section-2.3).
@@ -5633,7 +5676,7 @@ fn parse_labeled_nlri<'pkt>(
 
         let labels_start = entry_start + 1;
         let labels_end = labels_start + layout.label_count * LABEL_ENTRY_SIZE;
-        if shape.withdraw {
+        if shape.labels && shape.withdraw {
             // RFC 8277, Section 2.4 — https://www.rfc-editor.org/rfc/rfc8277#section-2.4:
             // "Upon reception, the value of the Compatibility field MUST be
             // ignored." It is shown as is.
@@ -5642,7 +5685,7 @@ fn parse_labeled_nlri<'pkt>(
                 FieldValue::U32(read_be_u24(data, labels_start).unwrap_or_default()),
                 base_offset + labels_start..base_offset + labels_end,
             );
-        } else {
+        } else if shape.labels {
             let stack_idx = buf.begin_container(
                 &NLRI_ENTRY_CHILDREN[FD_NLRI_LABEL_STACK],
                 FieldValue::Array(0..0),
@@ -7124,6 +7167,282 @@ fn parse_sr_policy_nlri<'pkt>(
     consumed
 }
 
+/// Returns a human-readable name for MCAST-VPN Route Types.
+///
+/// IANA "BGP MCAST-VPN Route Types" registry —
+/// <https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#mcast-vpn-route-types>
+fn mcast_vpn_route_type_name(v: u8) -> Option<&'static str> {
+    match v {
+        // RFC 6514, Section 4 — https://www.rfc-editor.org/rfc/rfc6514#section-4
+        1 => Some("Intra-AS I-PMSI A-D route"),
+        2 => Some("Inter-AS I-PMSI A-D route"),
+        3 => Some("S-PMSI A-D route"),
+        4 => Some("Leaf A-D route"),
+        5 => Some("Source Active A-D route"),
+        6 => Some("Shared Tree Join route"),
+        7 => Some("Source Tree Join route"),
+        // RFC 7441, Section 3 — https://www.rfc-editor.org/rfc/rfc7441#section-3
+        0x43 => Some("S-PMSI A-D route for C-multicast mLDP"),
+        0x44 => Some("Leaf A-D route for C-multicast mLDP"),
+        0x47 => Some("Source Tree Join route for C-multicast mLDP"),
+        _ => None,
+    }
+}
+
+/// Route Type (1) + Length (1) of an MCAST-VPN NLRI (RFC 6514, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc6514#section-4>).
+const MCAST_VPN_HEADER_SIZE: usize = 2;
+/// Size of the Source AS field (RFC 6514, Sections 4.2 and 4.6 —
+/// <https://www.rfc-editor.org/rfc/rfc6514#section-4.2>).
+const MCAST_VPN_SOURCE_AS_SIZE: usize = 4;
+
+/// Returns the end of a Multicast Source / Group Length field and its
+/// address at `pos`, or `None` if it overruns `body` or its length in bits
+/// is not a whole number of octets.
+///
+/// RFC 6514, Section 4.3 — <https://www.rfc-editor.org/rfc/rfc6514#section-4.3>
+fn mcast_vpn_address_end(body: &[u8], pos: usize) -> Option<usize> {
+    let bits = usize::from(*body.get(pos)?);
+    let end = pos + 1 + bits / 8;
+    (bits % 8 == 0 && end <= body.len()).then_some(end)
+}
+
+/// Returns `true` when `len` octets can be an Originating Router's IP
+/// Address: "either 4 for IPv4 or 16 for IPv6" (RFC 6515, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc6515#section-2>).
+fn is_originating_router_ip_len(len: usize) -> bool {
+    len == 4 || len == 16
+}
+
+/// Returns `true` when the Route Type specific field of an MCAST-VPN NLRI of
+/// Route Type 1-7 matches its layout (RFC 6514, Sections 4.1-4.6).
+///
+/// RFC 6514, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc6514#section-4.1>
+fn mcast_vpn_body_valid(route_type: u8, body: &[u8]) -> bool {
+    let sg_end = |start: usize| {
+        mcast_vpn_address_end(body, start).and_then(|src| mcast_vpn_address_end(body, src))
+    };
+    match route_type {
+        1 => body
+            .len()
+            .checked_sub(RD_SIZE)
+            .is_some_and(is_originating_router_ip_len),
+        2 => body.len() == RD_SIZE + MCAST_VPN_SOURCE_AS_SIZE,
+        3 => sg_end(RD_SIZE).is_some_and(|end| is_originating_router_ip_len(body.len() - end)),
+        // "If the value of this octet is 0x01, 0x02, or 0x03, then this Leaf
+        // A-D route was originated in response to an S-PMSI or I-PMSI A-D
+        // route" and its Route Key is that route's NLRI; the Global Table
+        // Multicast Route Key is not decoded (RFC 7524, Section 6.2.2 —
+        // https://www.rfc-editor.org/rfc/rfc7524#section-6.2.2).
+        4 => match body {
+            [1..=3, key_len, ..] => {
+                let key_end = MCAST_VPN_HEADER_SIZE + usize::from(*key_len);
+                key_end <= body.len() && is_originating_router_ip_len(body.len() - key_end)
+            }
+            _ => false,
+        },
+        5 => sg_end(RD_SIZE) == Some(body.len()),
+        6 | 7 => sg_end(RD_SIZE + MCAST_VPN_SOURCE_AS_SIZE) == Some(body.len()),
+        _ => false,
+    }
+}
+
+/// Returns `true` when `data` frames exactly as MCAST-VPN NLRI, each
+/// preceded by `path_id_len` octets of Path Identifier, none of them of the
+/// Reserved Route Type 0 — and, with `assigned_only`, all of an assigned
+/// Route Type.
+fn mcast_vpn_block_parses(data: &[u8], path_id_len: usize, assigned_only: bool) -> bool {
+    let mut pos = 0;
+    while pos < data.len() {
+        let entry = pos + path_id_len;
+        let (Some(&route_type), Some(&len)) = (data.get(entry), data.get(entry + 1)) else {
+            return false;
+        };
+        if route_type == 0 || (assigned_only && mcast_vpn_route_type_name(route_type).is_none()) {
+            return false;
+        }
+        pos = entry + MCAST_VPN_HEADER_SIZE + usize::from(len);
+        if pos > data.len() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Returns `true` when an MCAST-VPN block carries RFC 7911 ADD-PATH Path
+/// Identifiers: it does not frame without them — a Path Identifier usually
+/// starts with a zero octet, which would read as the Reserved Route Type 0
+/// — and does with them, every Path Identifier being followed by an
+/// assigned Route Type.
+///
+/// RFC 7911, Section 3 — <https://www.rfc-editor.org/rfc/rfc7911#section-3>
+fn detect_add_path_mcast_vpn(data: &[u8]) -> bool {
+    !mcast_vpn_block_parses(data, 0, false) && mcast_vpn_block_parses(data, PATH_ID_SIZE, true)
+}
+
+/// Parses an MCAST-VPN NLRI block (AFI 1 / 2, SAFI 5) into one object per
+/// route and returns the number of octets consumed.
+///
+/// RFC 6514, Section 4 — <https://www.rfc-editor.org/rfc/rfc6514#section-4>
+///
+/// Each route is Route Type, Length ("the length in octets of the Route Type
+/// specific field") and the Route Type specific field, decoded for Route
+/// Types 1-7 (see [`push_mcast_vpn_body`]). Other Route Types, and bodies
+/// that do not match their layout, keep a `value`.
+fn parse_mcast_vpn_nlri<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    base_offset: usize,
+) -> usize {
+    let f = &MCAST_VPN_NLRI_FIELDS;
+    let id_len = if detect_add_path_mcast_vpn(data) {
+        PATH_ID_SIZE
+    } else {
+        0
+    };
+    let mut pos = 0;
+    while pos + id_len + MCAST_VPN_HEADER_SIZE <= data.len() {
+        let entry = pos + id_len;
+        let route_type = data[entry];
+        let len = data[entry + 1];
+        let body_start = entry + MCAST_VPN_HEADER_SIZE;
+        let end = body_start + usize::from(len);
+        if end > data.len() {
+            break;
+        }
+        let abs = base_offset + pos;
+        let entry_abs = base_offset + entry;
+        let obj_idx = buf.begin_container(
+            &MCAST_VPN_NLRI_OBJECT_DESCRIPTOR,
+            FieldValue::Object(0..0),
+            abs..base_offset + end,
+        );
+        if id_len != 0 {
+            buf.push_field(
+                &f[FD_MVPN_PATH_ID],
+                FieldValue::U32(read_be_u32(data, pos).unwrap_or_default()),
+                abs..abs + PATH_ID_SIZE,
+            );
+        }
+        buf.push_field(
+            &f[FD_MVPN_ROUTE_TYPE],
+            FieldValue::U16(u16::from(route_type)),
+            entry_abs..entry_abs + 1,
+        );
+        buf.push_field(
+            &f[FD_MVPN_LENGTH],
+            FieldValue::U8(len),
+            entry_abs + 1..entry_abs + MCAST_VPN_HEADER_SIZE,
+        );
+        let body = &data[body_start..end];
+        let body_abs = base_offset + body_start;
+        if mcast_vpn_body_valid(route_type, body) {
+            push_mcast_vpn_body(buf, route_type, body, body_abs);
+        } else if !body.is_empty() {
+            buf.push_field(
+                &f[FD_MVPN_VALUE],
+                FieldValue::Bytes(body),
+                body_abs..body_abs + body.len(),
+            );
+        }
+        buf.end_container(obj_idx);
+        pos = end;
+    }
+    pos
+}
+
+/// Pushes a Multicast Source / Group Length field at `pos` and its address,
+/// if not empty (a zero length is a wildcard; RFC 6625, Section 2 —
+/// <https://www.rfc-editor.org/rfc/rfc6625#section-2>). Returns its end.
+fn push_mcast_vpn_address<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    body: &'pkt [u8],
+    pos: usize,
+    offset: usize,
+    length_desc: &'static FieldDescriptor,
+    addr_desc: &'static FieldDescriptor,
+) -> usize {
+    let end = mcast_vpn_address_end(body, pos).unwrap_or(body.len());
+    buf.push_field(
+        length_desc,
+        FieldValue::U8(body[pos]),
+        offset + pos..offset + pos + 1,
+    );
+    if end > pos + 1 {
+        buf.push_field(
+            addr_desc,
+            format_address(&body[pos + 1..end], end - pos - 1 == 16),
+            offset + pos + 1..offset + end,
+        );
+    }
+    end
+}
+
+/// Pushes the Route Type specific field of an MCAST-VPN NLRI validated by
+/// [`mcast_vpn_body_valid`].
+///
+/// RFC 6514, Sections 4.1-4.6 — <https://www.rfc-editor.org/rfc/rfc6514#section-4.1>
+fn push_mcast_vpn_body<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    route_type: u8,
+    body: &'pkt [u8],
+    offset: usize,
+) {
+    let f = &MCAST_VPN_NLRI_FIELDS;
+    let mut pos = if route_type == 4 {
+        // "the Route Key of the Leaf A-D route is set to the NLRI of the
+        // received route" (RFC 6514, Section 4.4 —
+        // https://www.rfc-editor.org/rfc/rfc6514#section-4.4).
+        let key_end = MCAST_VPN_HEADER_SIZE + usize::from(body[1]);
+        buf.push_field(
+            &f[FD_MVPN_ROUTE_KEY],
+            FieldValue::Bytes(&body[..key_end]),
+            offset..offset + key_end,
+        );
+        key_end
+    } else {
+        buf.push_field(
+            &f[FD_MVPN_RD],
+            FieldValue::Bytes(&body[..RD_SIZE]),
+            offset..offset + RD_SIZE,
+        );
+        RD_SIZE
+    };
+    if matches!(route_type, 2 | 6 | 7) {
+        buf.push_field(
+            &f[FD_MVPN_SOURCE_AS],
+            FieldValue::U32(read_be_u32(body, pos).unwrap_or_default()),
+            offset + pos..offset + pos + MCAST_VPN_SOURCE_AS_SIZE,
+        );
+        pos += MCAST_VPN_SOURCE_AS_SIZE;
+    }
+    if matches!(route_type, 3 | 5 | 6 | 7) {
+        pos = push_mcast_vpn_address(
+            buf,
+            body,
+            pos,
+            offset,
+            &f[FD_MVPN_SOURCE_LENGTH],
+            &f[FD_MVPN_SOURCE],
+        );
+        pos = push_mcast_vpn_address(
+            buf,
+            body,
+            pos,
+            offset,
+            &f[FD_MVPN_GROUP_LENGTH],
+            &f[FD_MVPN_GROUP],
+        );
+    }
+    if matches!(route_type, 1 | 3 | 4) {
+        buf.push_field(
+            &f[FD_MVPN_ORIGINATING_ROUTER_IP],
+            format_address(&body[pos..], body.len() - pos == 16),
+            offset + pos..offset + body.len(),
+        );
+    }
+}
+
 /// Selects the NLRI encoding for an (AFI, SAFI) pair.
 ///
 /// Only the SAFIs that use the plain `<length, prefix>` encoding of RFC 4760,
@@ -7150,6 +7469,10 @@ fn mp_nlri_encoding(afi: u16, safi: u8) -> Option<MpNlriEncoding> {
         (AFI_BGP_LS, SAFI_BGP_LS_VPN) => Some(MpNlriEncoding::BgpLs { vpn: true }),
         (AFI_IPV4, SAFI_RT_CONSTRAINT) => Some(MpNlriEncoding::RtConstraint),
         (AFI_IPV4 | AFI_IPV6, SAFI_SR_POLICY) => Some(MpNlriEncoding::SrPolicy { ipv6 }),
+        (AFI_IPV4 | AFI_IPV6, SAFI_MCAST_VPN) => Some(MpNlriEncoding::McastVpn),
+        (AFI_IPV4 | AFI_IPV6, SAFI_MULTICAST_VPN) => {
+            Some(MpNlriEncoding::MulticastVpnPrefixes { ipv6 })
+        }
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC) => Some(MpNlriEncoding::FlowSpec { ipv6, vpn: false }),
         (AFI_IPV4 | AFI_IPV6, SAFI_FLOWSPEC_VPN) => {
             Some(MpNlriEncoding::FlowSpec { ipv6, vpn: true })
@@ -7203,6 +7526,10 @@ fn parse_mp_nlri_block<'pkt>(
             MpNlriEncoding::BgpLs { vpn } => parse_bgp_ls_nlri(buf, data, offset, vpn),
             MpNlriEncoding::RtConstraint => parse_rt_constraint_nlri(buf, data, offset),
             MpNlriEncoding::SrPolicy { ipv6 } => parse_sr_policy_nlri(buf, data, offset, ipv6),
+            MpNlriEncoding::McastVpn => parse_mcast_vpn_nlri(buf, data, offset),
+            MpNlriEncoding::MulticastVpnPrefixes { ipv6 } => {
+                parse_labeled_nlri(buf, data, offset, &LabeledNlri::unlabeled_vpn(ipv6))
+            }
         };
         if buf.field_count() == before {
             buf.pop_field(); // remove empty array placeholder
@@ -7689,7 +8016,8 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// SAFI 85 (BGP-MUP) yields MUP entries, SAFI 133 / 134 yield Flow
 /// Specification entries, SAFI 71 / 72 yield Link-State NLRI entries,
 /// SAFI 132 yields Route Target membership entries, SAFI 73 yields SR
-/// Policy entries,
+/// Policy entries, SAFI 5 yields MCAST-VPN entries, SAFI 129 yields `rd` and
+/// `prefix` entries,
 /// SAFI 4 / 128 yield labeled entries (`label_stack` or `compatibility`, `rd`
 /// for SAFI 128, `prefix`), and SAFI 1 / 2 yield plain prefix entries. All
 /// fields are therefore optional.
@@ -7701,23 +8029,36 @@ static NLRI_ENTRY_OBJECT_DESCRIPTOR: FieldDescriptor =
 /// RFC 9552, Section 5.2 — <https://www.rfc-editor.org/rfc/rfc9552#section-5.2>
 /// RFC 4684, Section 4 — <https://www.rfc-editor.org/rfc/rfc4684#section-4>
 /// RFC 9830, Section 2.1 — <https://www.rfc-editor.org/rfc/rfc9830#section-2.1>
+/// RFC 6514, Sections 4 and 10 — <https://www.rfc-editor.org/rfc/rfc6514#section-4>
 /// draft-ietf-bess-mup-safi-01 —
 /// <https://datatracker.ietf.org/doc/draft-ietf-bess-mup-safi/>
-const NLRI_ENTRY_FIELDS: [FieldDescriptor; 42] = [
+const NLRI_ENTRY_FIELDS: [FieldDescriptor; 49] = [
     PATH_ID_FIELD,
     NLRI_PREFIX_FIELD,
     // MUP NLRI entry fields (`path_id` and `prefix` are already listed above).
     MUP_NLRI_FIELDS[FD_MUP_ARCH_TYPE].optional(),
-    // BGP-MUP (U16) and EVPN (U8 widened to U16) Route Type; an entry with an
-    // `architecture_type` is a MUP route.
+    // BGP-MUP (U16), EVPN and MCAST-VPN (U8 widened to U16) Route Type; an
+    // entry with an `architecture_type` is a MUP route, one with an
+    // MCAST-VPN specific field an MCAST-VPN route.
     FieldDescriptor::new("route_type", "Route Type", FieldType::U16)
         .optional()
         .with_display_fn(|v, siblings| {
             let FieldValue::U16(t) = v else {
                 return None;
             };
-            if siblings.iter().any(|f| f.name() == "architecture_type") {
+            let has = |name: &str| siblings.iter().any(|f| f.name() == name);
+            if has("architecture_type") {
                 mup_route_type_name(*t)
+            } else if [
+                "route_key",
+                "source_as",
+                "multicast_source_length",
+                "originating_router_ip",
+            ]
+            .into_iter()
+            .any(has)
+            {
+                u8::try_from(*t).ok().and_then(mcast_vpn_route_type_name)
             } else {
                 u8::try_from(*t).ok().and_then(evpn_route_type_name)
             }
@@ -7782,6 +8123,16 @@ const NLRI_ENTRY_FIELDS: [FieldDescriptor; 42] = [
     SR_POLICY_NLRI_FIELDS[FD_SRP_DISTINGUISHER],
     SR_POLICY_NLRI_FIELDS[FD_SRP_COLOR],
     SR_POLICY_NLRI_FIELDS[FD_SRP_ENDPOINT],
+    // MCAST-VPN NLRI fields (RFC 6514, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc6514#section-4); `path_id`,
+    // `route_type`, `length`, `value` and `rd` are listed above.
+    MCAST_VPN_NLRI_FIELDS[FD_MVPN_ROUTE_KEY],
+    MCAST_VPN_NLRI_FIELDS[FD_MVPN_SOURCE_AS],
+    MCAST_VPN_NLRI_FIELDS[FD_MVPN_SOURCE_LENGTH],
+    MCAST_VPN_NLRI_FIELDS[FD_MVPN_SOURCE],
+    MCAST_VPN_NLRI_FIELDS[FD_MVPN_GROUP_LENGTH],
+    MCAST_VPN_NLRI_FIELDS[FD_MVPN_GROUP],
+    MCAST_VPN_NLRI_FIELDS[FD_MVPN_ORIGINATING_ROUTER_IP],
 ];
 
 /// Slice form of [`NLRI_ENTRY_FIELDS`].
@@ -8040,6 +8391,63 @@ const SR_POLICY_NLRI_FIELDS: [FieldDescriptor; 5] = [
 static SR_POLICY_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
     FieldDescriptor::new("sr_policy_nlri", "SR Policy NLRI", FieldType::Object)
         .with_children(&SR_POLICY_NLRI_FIELDS);
+
+/// Field descriptor indices for [`MCAST_VPN_NLRI_FIELDS`].
+const FD_MVPN_PATH_ID: usize = 0;
+const FD_MVPN_ROUTE_TYPE: usize = 1;
+const FD_MVPN_LENGTH: usize = 2;
+const FD_MVPN_VALUE: usize = 3;
+const FD_MVPN_RD: usize = 4;
+const FD_MVPN_ROUTE_KEY: usize = 5;
+const FD_MVPN_SOURCE_AS: usize = 6;
+const FD_MVPN_SOURCE_LENGTH: usize = 7;
+const FD_MVPN_SOURCE: usize = 8;
+const FD_MVPN_GROUP_LENGTH: usize = 9;
+const FD_MVPN_GROUP: usize = 10;
+const FD_MVPN_ORIGINATING_ROUTER_IP: usize = 11;
+
+/// Child field descriptors of an MCAST-VPN NLRI entry.
+///
+/// RFC 6514, Sections 4-4.6 — <https://www.rfc-editor.org/rfc/rfc6514#section-4>
+const MCAST_VPN_NLRI_FIELDS: [FieldDescriptor; 12] = [
+    PATH_ID_FIELD,
+    FieldDescriptor::new("route_type", "Route Type", FieldType::U16).with_display_fn(
+        |v, _| match v {
+            FieldValue::U16(t) => u8::try_from(*t).ok().and_then(mcast_vpn_route_type_name),
+            _ => None,
+        },
+    ),
+    EVPN_NLRI_FIELDS[FD_EVPN_LENGTH],
+    MUP_NLRI_FIELDS[FD_MUP_VALUE],
+    MUP_NLRI_FIELDS[FD_MUP_RD],
+    FieldDescriptor::new("route_key", "Route Key", FieldType::Bytes).optional(),
+    FieldDescriptor::new("source_as", "Source AS", FieldType::U32).optional(),
+    FieldDescriptor::new(
+        "multicast_source_length",
+        "Multicast Source Length",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("multicast_source", "Multicast Source", FieldType::Any).optional(),
+    FieldDescriptor::new(
+        "multicast_group_length",
+        "Multicast Group Length",
+        FieldType::U8,
+    )
+    .optional(),
+    FieldDescriptor::new("multicast_group", "Multicast Group", FieldType::Any).optional(),
+    FieldDescriptor::new(
+        "originating_router_ip",
+        "Originating Router's IP Address",
+        FieldType::Any,
+    )
+    .optional(),
+];
+
+/// Object descriptor for MCAST-VPN NLRI entries.
+static MCAST_VPN_NLRI_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("mcast_vpn_nlri", "MCAST-VPN NLRI", FieldType::Object)
+        .with_children(&MCAST_VPN_NLRI_FIELDS);
 
 /// Field descriptor indices for [`BGP_LS_DESCRIPTOR_FIELDS`].
 const FD_LSD_SUB_TLVS: usize = 2;
@@ -9843,6 +10251,26 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc6514",
     ),
     SpecReference::new(
+        "RFC 6515",
+        "IPv4 and IPv6 Infrastructure Addresses in BGP Updates for Multicast VPN",
+        "https://www.rfc-editor.org/rfc/rfc6515",
+    ),
+    SpecReference::new(
+        "RFC 6625",
+        "Wildcards in Multicast VPN Auto-Discovery Routes",
+        "https://www.rfc-editor.org/rfc/rfc6625",
+    ),
+    SpecReference::new(
+        "RFC 7441",
+        "Encoding Multipoint LDP (mLDP) Forwarding Equivalence Classes (FECs) in the NLRI of BGP MCAST-VPN Routes",
+        "https://www.rfc-editor.org/rfc/rfc7441",
+    ),
+    SpecReference::new(
+        "RFC 7524",
+        "Inter-Area Point-to-Multipoint (P2MP) Segmented Label Switched Paths (LSPs)",
+        "https://www.rfc-editor.org/rfc/rfc7524",
+    ),
+    SpecReference::new(
         "RFC 7311",
         "The Accumulated IGP Metric Attribute for BGP",
         "https://www.rfc-editor.org/rfc/rfc7311",
@@ -11089,6 +11517,7 @@ mod tests {
             (1u8, "Unicast"),
             (2, "Multicast"),
             (4, "MPLS Labels"),
+            (5, "MCAST-VPN"),
             (65, "VPLS"),
             (70, "EVPN"),
             (71, "BGP-LS"),
@@ -17812,5 +18241,361 @@ mod tests {
                 FieldValue::U32(1)
             );
         });
+    }
+
+    /// Helper: an MCAST-VPN NLRI of `route_type` with `body`.
+    fn mvpn_route(route_type: u8, body: &[u8]) -> Vec<u8> {
+        let mut raw = vec![route_type, u8::try_from(body.len()).unwrap()];
+        raw.extend_from_slice(body);
+        raw
+    }
+
+    const MVPN_RD: [u8; 8] = [0, 0, 0xfd, 0xe8, 0, 0, 0, 1];
+
+    /// Helper: RD, then optionally a Source AS, then Multicast Source and
+    /// Group fields with their bit lengths.
+    fn mvpn_sg(source_as: Option<u32>, source: &[u8], group: &[u8]) -> Vec<u8> {
+        let mut body = MVPN_RD.to_vec();
+        if let Some(asn) = source_as {
+            body.extend_from_slice(&asn.to_be_bytes());
+        }
+        body.push(u8::try_from(source.len() * 8).unwrap());
+        body.extend_from_slice(source);
+        body.push(u8::try_from(group.len() * 8).unwrap());
+        body.extend_from_slice(group);
+        body
+    }
+
+    #[test]
+    fn parse_bgp_update_mp_reach_mcast_vpn_route_types() {
+        // RFC 6514, Sections 4.1-4.6 (https://www.rfc-editor.org/rfc/rfc6514#section-4.1).
+        let mut intra = MVPN_RD.to_vec();
+        intra.extend_from_slice(&[192, 0, 2, 1]);
+        let mut inter = MVPN_RD.to_vec();
+        inter.extend_from_slice(&65001u32.to_be_bytes());
+        let mut spmsi = mvpn_sg(None, &[10, 0, 0, 1], &[232, 1, 1, 1]);
+        spmsi.extend_from_slice(&[192, 0, 2, 1]);
+        let spmsi_route = mvpn_route(3, &spmsi);
+        let mut leaf = spmsi_route.clone();
+        leaf.extend_from_slice(&[192, 0, 2, 2]);
+        let sa = mvpn_sg(None, &[10, 0, 0, 1], &[239, 1, 1, 1]);
+        let shared = mvpn_sg(Some(65001), &[10, 0, 0, 2], &[239, 1, 1, 1]);
+        let source = mvpn_sg(Some(65001), &[10, 0, 0, 1], &[232, 1, 1, 1]);
+        let mut nlri = mvpn_route(1, &intra);
+        nlri.extend(mvpn_route(2, &inter));
+        nlri.extend(&spmsi_route);
+        nlri.extend(mvpn_route(4, &leaf));
+        nlri.extend(mvpn_route(5, &sa));
+        nlri.extend(mvpn_route(6, &shared));
+        nlri.extend(mvpn_route(7, &source));
+        with_mp_reach_nlri(1, 5, &nlri, |buf, mp, entries| {
+            assert!(nested_field_by_name_opt(buf, mp, "nlri_raw").is_none());
+            assert_eq!(entries.len(), 7);
+            let e = &entries[0];
+            assert_eq!(
+                *nested_field_value(buf, e, "route_type"),
+                FieldValue::U16(1)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(e, "route_type_name"),
+                Some("Intra-AS I-PMSI A-D route")
+            );
+            assert_eq!(*nested_field_value(buf, e, "length"), FieldValue::U8(12));
+            assert_eq!(
+                *nested_field_value(buf, e, "rd"),
+                FieldValue::Bytes(&MVPN_RD)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "originating_router_ip"),
+                FieldValue::Ipv4Addr([192, 0, 2, 1])
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "source_as"),
+                FieldValue::U32(65001)
+            );
+            let e = &entries[2];
+            assert_eq!(
+                *nested_field_value(buf, e, "multicast_source_length"),
+                FieldValue::U8(32)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "multicast_source"),
+                FieldValue::Ipv4Addr([10, 0, 0, 1])
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "multicast_group_length"),
+                FieldValue::U8(32)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "multicast_group"),
+                FieldValue::Ipv4Addr([232, 1, 1, 1])
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "originating_router_ip"),
+                FieldValue::Ipv4Addr([192, 0, 2, 1])
+            );
+            let e = &entries[3];
+            assert_eq!(
+                *nested_field_value(buf, e, "route_key"),
+                FieldValue::Bytes(&spmsi_route)
+            );
+            assert_eq!(
+                *nested_field_value(buf, e, "originating_router_ip"),
+                FieldValue::Ipv4Addr([192, 0, 2, 2])
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[4], "originating_router_ip").is_none());
+            assert_eq!(
+                *nested_field_value(buf, &entries[4], "multicast_group"),
+                FieldValue::Ipv4Addr([239, 1, 1, 1])
+            );
+            for e in &entries[5..] {
+                assert_eq!(
+                    *nested_field_value(buf, e, "source_as"),
+                    FieldValue::U32(65001)
+                );
+                assert!(nested_field_by_name_opt(buf, e, "multicast_source").is_some());
+            }
+            assert_eq!(
+                buf.resolve_nested_display_name(&entries[6], "route_type_name"),
+                Some("Source Tree Join route")
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mcast_vpn_ipv6_and_wildcards() {
+        // RFC 6514, Section 4 (https://www.rfc-editor.org/rfc/rfc6514#section-4):
+        // AFI 2 carries IPv6 C-S / C-G addresses. RFC 6515, Section 2
+        // (https://www.rfc-editor.org/rfc/rfc6515#section-2): the length of
+        // the Originating Router's IP Address "can thus be inferred from the
+        // NLRI length field", independent of the AFI. RFC 6625, Section 2
+        // (https://www.rfc-editor.org/rfc/rfc6625#section-2): a wildcard is
+        // encoded with a zero Multicast Source / Group Length.
+        let v6_source = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let v6_group = [0xff, 0x3e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let mut spmsi = mvpn_sg(None, &[], &v6_group);
+        spmsi.extend_from_slice(&[192, 0, 2, 1]);
+        let mut nlri = mvpn_route(7, &mvpn_sg(Some(65001), &v6_source, &v6_group));
+        nlri.extend(mvpn_route(3, &spmsi));
+        with_mp_reach_nlri(2, 5, &nlri, |buf, _, entries| {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "multicast_source"),
+                FieldValue::Ipv6Addr(v6_source)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "multicast_group"),
+                FieldValue::Ipv6Addr(v6_group)
+            );
+            let e = &entries[1];
+            assert_eq!(
+                *nested_field_value(buf, e, "multicast_source_length"),
+                FieldValue::U8(0)
+            );
+            assert!(nested_field_by_name_opt(buf, e, "multicast_source").is_none());
+            assert_eq!(
+                *nested_field_value(buf, e, "originating_router_ip"),
+                FieldValue::Ipv4Addr([192, 0, 2, 1])
+            );
+        });
+        let mut intra = MVPN_RD.to_vec();
+        intra.extend_from_slice(&v6_source);
+        with_mp_reach_nlri(1, 5, &mvpn_route(1, &intra), |buf, _, entries| {
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "originating_router_ip"),
+                FieldValue::Ipv6Addr(v6_source)
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_mcast_vpn_malformed_withdrawn_add_path() {
+        // RFC 6515, Section 2 (https://www.rfc-editor.org/rfc/rfc6515#section-2):
+        // an Originating Router's IP Address "neither 4 nor 16" is incorrect;
+        // such routes, RFC 7441 mLDP route types
+        // (https://www.rfc-editor.org/rfc/rfc7441#section-3) and unassigned
+        // route types keep a `value`.
+        let mut bad_intra = MVPN_RD.to_vec();
+        bad_intra.extend_from_slice(&[192, 0, 2, 1, 9]);
+        let bad_source = [MVPN_RD.as_slice(), &[32, 10, 0]].concat();
+        let mut nlri = mvpn_route(1, &bad_intra);
+        nlri.extend(mvpn_route(5, &bad_source));
+        nlri.extend(mvpn_route(0x43, &[1, 2, 3]));
+        nlri.extend(mvpn_route(9, &[]));
+        nlri.extend_from_slice(&[7, 40, 0]);
+        with_mp_reach_nlri(1, 5, &nlri, |buf, mp, entries| {
+            assert_eq!(entries.len(), 4);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "value"),
+                FieldValue::Bytes(&bad_intra)
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[0], "rd").is_none());
+            assert_eq!(
+                *nested_field_value(buf, &entries[1], "value"),
+                FieldValue::Bytes(&bad_source)
+            );
+            assert_eq!(
+                buf.resolve_nested_display_name(&entries[2], "route_type_name"),
+                Some("S-PMSI A-D route for C-multicast mLDP")
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[2], "value"),
+                FieldValue::Bytes(&[1, 2, 3])
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[3], "value").is_none());
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&[7, 40, 0])
+            );
+        });
+
+        // A Leaf A-D Route Key that overruns, one that leaves a 5-octet
+        // address, a Global Table Multicast Route Key (RFC 7524, Section
+        // 6.2.2 — https://www.rfc-editor.org/rfc/rfc7524#section-6.2.2) and
+        // a Source AS route of the wrong length keep a `value`.
+        let mut gtm = vec![0u8; 8];
+        gtm.extend_from_slice(&[0, 0, 192, 0, 2, 1, 192, 0, 2, 2]);
+        for (route_type, body) in [
+            (4, vec![3, 40, 0, 0, 192, 0, 2, 1]),
+            (4, [mvpn_route(2, &[0; 12]), vec![192, 0, 2, 1, 9]].concat()),
+            (4, gtm),
+            (2, vec![0; 13]),
+            (
+                6,
+                [mvpn_sg(Some(1), &[10, 0, 0, 1], &[232, 1, 1, 1]), vec![0]].concat(),
+            ),
+        ] {
+            with_mp_reach_nlri(1, 5, &mvpn_route(route_type, &body), |buf, _, entries| {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(
+                    *nested_field_value(buf, &entries[0], "value"),
+                    FieldValue::Bytes(&body)
+                );
+            });
+        }
+
+        // Withdrawn C-multicast route.
+        let route = mvpn_route(7, &mvpn_sg(Some(65001), &[10, 0, 0, 1], &[232, 1, 1, 1]));
+        let data = build_single_attr_update(15, &build_mp_unreach(1, 5, &route));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let withdrawn = array_objs(&buf, &mp, "withdrawn_routes");
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &withdrawn[0], "source_as"),
+            FieldValue::U32(65001)
+        );
+
+        // RFC 7911, Section 3 (https://www.rfc-editor.org/rfc/rfc7911#section-3).
+        let mut add_path = 3u32.to_be_bytes().to_vec();
+        add_path.extend(&route);
+        assert!(detect_add_path_mcast_vpn(&add_path));
+        assert!(!detect_add_path_mcast_vpn(&route));
+        // Path Identifiers followed by unassigned Route Types: not ADD-PATH.
+        let mut unassigned = 3u32.to_be_bytes().to_vec();
+        unassigned.extend(mvpn_route(9, &[]));
+        assert!(!detect_add_path_mcast_vpn(&unassigned));
+        with_mp_reach_nlri(1, 5, &add_path, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(3)
+            );
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "route_type"),
+                FieldValue::U16(7)
+            );
+        });
+    }
+
+    #[test]
+    fn parse_bgp_update_multicast_vpn_safi_129() {
+        // RFC 6514, Section 10 (https://www.rfc-editor.org/rfc/rfc6514#section-10):
+        // SAFI 129 NLRI is a Length in bits and "a Route Distinguisher as
+        // defined in [RFC4364] prepended to an IPv4 or IPv6 address prefix".
+        let mut nlri = vec![64 + 24];
+        nlri.extend_from_slice(&MVPN_RD);
+        nlri.extend_from_slice(&[10, 1, 2]);
+        let mut nh = vec![0u8; 8];
+        nh.extend_from_slice(&[192, 0, 2, 1]);
+        let data = build_single_attr_update(14, &build_mp_reach(1, 129, &nh, &nlri));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        assert_eq!(
+            *nested_field_value(&buf, &mp, "next_hop"),
+            FieldValue::Ipv4Addr([192, 0, 2, 1])
+        );
+        let entries = array_objs(&buf, &mp, "nlri");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            *nested_field_value(&buf, &entries[0], "rd"),
+            FieldValue::Bytes(&MVPN_RD)
+        );
+        assert!(nested_field_by_name_opt(&buf, &entries[0], "label_stack").is_none());
+        let prefix = nested_field_by_name(&buf, &entries[0], "prefix");
+        let FieldValue::Scratch(ref r) = prefix.value else {
+            panic!("expected Scratch prefix");
+        };
+        assert_eq!(
+            &buf.scratch()[r.start as usize..r.end as usize],
+            &[24, 10, 1, 2]
+        );
+
+        // RFC 7911, Section 3 (https://www.rfc-editor.org/rfc/rfc7911#section-3):
+        // a Path Identifier before the entry.
+        let mut add_path = 5u32.to_be_bytes().to_vec();
+        add_path.extend(&nlri);
+        with_mp_reach_nlri(1, 129, &add_path, |buf, _, entries| {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(
+                *nested_field_value(buf, &entries[0], "path_id"),
+                FieldValue::U32(5)
+            );
+            assert!(nested_field_by_name_opt(buf, &entries[0], "rd").is_some());
+        });
+
+        // An IPv6 withdrawal has no Compatibility field.
+        let mut wr = vec![64 + 32];
+        wr.extend_from_slice(&MVPN_RD);
+        wr.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
+        let data = build_single_attr_update(15, &build_mp_unreach(2, 129, &wr));
+        let mut buf = DissectBuffer::new();
+        BgpDissector.dissect(&data, &mut buf, 0).unwrap();
+        let mp = first_attr_value_obj_range(&buf);
+        let withdrawn = array_objs(&buf, &mp, "withdrawn_routes");
+        assert_eq!(withdrawn.len(), 1);
+        assert!(nested_field_by_name_opt(&buf, &withdrawn[0], "compatibility").is_none());
+
+        // A prefix longer than the address after the RD stays raw.
+        let bad = [64 + 40, 0, 0, 0, 0, 0, 0, 0, 1, 10, 1, 2, 3, 4];
+        with_mp_reach_nlri(1, 129, &bad, |buf, mp, entries| {
+            assert!(entries.is_empty());
+            assert_eq!(
+                *nested_field_value(buf, mp, "nlri_raw"),
+                FieldValue::Bytes(&bad)
+            );
+        });
+    }
+
+    #[test]
+    fn mcast_vpn_route_type_name_table() {
+        // IANA BGP MCAST-VPN Route Types
+        // (https://www.iana.org/assignments/bgp-parameters/bgp-parameters.xhtml#mcast-vpn-route-types).
+        assert_eq!(
+            (0..=u8::MAX).filter_map(mcast_vpn_route_type_name).count(),
+            10
+        );
+        assert_eq!(mcast_vpn_route_type_name(4), Some("Leaf A-D route"));
+        assert_eq!(
+            mcast_vpn_route_type_name(0x44),
+            Some("Leaf A-D route for C-multicast mLDP")
+        );
+        assert_eq!(
+            mcast_vpn_route_type_name(0x47),
+            Some("Source Tree Join route for C-multicast mLDP")
+        );
+        assert_eq!(mcast_vpn_route_type_name(0), None);
     }
 }
