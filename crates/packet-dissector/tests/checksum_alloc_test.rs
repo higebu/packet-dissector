@@ -11,8 +11,11 @@
 //! | IPv4 + ICMP with verification is zero-allocation | zero_alloc_verify_checksums_ipv4_icmp |
 //! | IPv6 + ICMPv6 with verification is zero-allocation | zero_alloc_verify_checksums_ipv6_icmpv6 |
 //! | IPv4 + TCP with verification is zero-allocation | zero_alloc_verify_checksums_ipv4_tcp |
+//! | IPv4 + SCTP (CRC32c) with verification is zero-allocation | zero_alloc_verify_checksums_ipv4_sctp |
+//! | IPv4 + IGMP with verification is zero-allocation | zero_alloc_verify_checksums_ipv4_igmp |
+//! | IPv4 + GRE (C=1) with verification is zero-allocation | zero_alloc_verify_checksums_ipv4_gre |
 
-use packet_dissector::checksum::internet_checksum;
+use packet_dissector::checksum::{crc32c, internet_checksum};
 use packet_dissector::registry::DissectorRegistry;
 use packet_dissector_core::field::FieldValue;
 use packet_dissector_core::packet::DissectBuffer;
@@ -24,10 +27,10 @@ const SRC4: [u8; 4] = [192, 0, 2, 1];
 const DST4: [u8; 4] = [198, 51, 100, 2];
 
 /// Ethernet + IPv4 carrying `l4`, with the Header Checksum and the upper-layer
-/// checksum at `csum_at` filled in (pseudo-header unless `protocol` is ICMP).
+/// checksum at `csum_at` filled in (pseudo-header for TCP and UDP only).
 fn eth_ipv4(protocol: u8, mut l4: Vec<u8>, csum_at: usize) -> Vec<u8> {
     let mut pseudo = Vec::new();
-    if protocol != 1 {
+    if protocol == 6 || protocol == 17 {
         pseudo.extend_from_slice(&SRC4);
         pseudo.extend_from_slice(&DST4);
         pseudo.extend_from_slice(&[0, protocol]);
@@ -123,4 +126,33 @@ fn zero_alloc_verify_checksums_ipv6_icmpv6() {
     pkt.extend_from_slice(&dst);
     pkt.extend_from_slice(&icmp);
     assert_zero_alloc_good(&pkt, "ICMPv6");
+}
+
+#[test]
+fn zero_alloc_verify_checksums_ipv4_sctp() {
+    let mut sctp = vec![0x0b, 0x59, 0x0b, 0x59, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0];
+    sctp.extend_from_slice(&[0x0b, 0x00, 0x00, 0x04]); // COOKIE ACK
+    let crc = crc32c(&[&sctp]);
+    sctp[8..12].copy_from_slice(&crc.to_le_bytes());
+    // eth_ipv4 stores an Internet checksum in the payload, so build the
+    // frame with a placeholder and copy the finished SCTP packet in.
+    let mut pkt = eth_ipv4(132, vec![0; sctp.len()], 0);
+    let n = pkt.len();
+    pkt[n - sctp.len()..].copy_from_slice(&sctp);
+    assert_zero_alloc_good(&pkt, "SCTP");
+}
+
+#[test]
+fn zero_alloc_verify_checksums_ipv4_igmp() {
+    let igmp = vec![0x16, 0x00, 0x00, 0x00, 239, 1, 2, 3];
+    assert_zero_alloc_good(&eth_ipv4(2, igmp, 2), "IGMP");
+}
+
+#[test]
+fn zero_alloc_verify_checksums_ipv4_gre() {
+    // GRE with C=1 and a payload of the local experimental EtherType
+    // 0x88B5 (IEEE 802), which has no registered dissector.
+    let mut gre = vec![0x80, 0x00, 0x88, 0xB5, 0x00, 0x00, 0x00, 0x00];
+    gre.extend_from_slice(&[0xAB; 6]);
+    assert_zero_alloc_good(&eth_ipv4(47, gre, 4), "GRE");
 }

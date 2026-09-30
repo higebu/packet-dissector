@@ -454,6 +454,44 @@ fn push_eap_with_rollback<'pkt>(
     result
 }
 
+/// Descriptor of an optional `eap` Object holding an EAP packet embedded in
+/// a carrier attribute (RADIUS EAP-Message, Diameter EAP-Payload, IKEv2 EAP
+/// payload). Its children are [`FIELD_DESCRIPTORS`].
+pub const EAP_OBJECT_DESCRIPTOR: FieldDescriptor =
+    FieldDescriptor::new("eap", "EAP", FieldType::Object)
+        .optional()
+        .with_children(FIELD_DESCRIPTORS);
+
+/// Push `data` as an Object (`descriptor`, normally a copy of
+/// [`EAP_OBJECT_DESCRIPTOR`]) holding the decoded EAP packet.
+///
+/// A carrier value holds exactly one EAP packet and no padding, so `data`
+/// must be exactly as long as its EAP Length. Returns `false` and pushes
+/// nothing otherwise, or when the packet is malformed, so the carrier keeps
+/// only its raw value.
+pub fn push_eap_object<'pkt>(
+    descriptor: &'static FieldDescriptor,
+    data: &'pkt [u8],
+    offset: usize,
+    buf: &mut DissectBuffer<'pkt>,
+) -> bool {
+    let idx = buf.begin_container(
+        descriptor,
+        FieldValue::Object(0..0),
+        offset..offset + data.len(),
+    );
+    match parse_eap(data, offset, buf) {
+        Ok(length) if length == data.len() => {
+            buf.end_container(idx);
+            true
+        }
+        _ => {
+            buf.truncate_fields(idx as usize);
+            false
+        }
+    }
+}
+
 /// Validate the EAP header and return the Length field.
 ///
 /// RFC 3748, Section 4 — "Octets outside the range of the Length field
@@ -823,6 +861,7 @@ mod tests {
     // | 5.7         | Expanded Type truncated                   | expanded_type_truncated                |
     // | 5           | Other method keeps Type-Data raw          | md5_challenge_raw                      |
     // | —           | parse_eap pushes nothing on error         | parse_eap_error_pushes_nothing         |
+    // | —           | EAP object inside a carrier               | push_eap_object_in_carrier             |
     // | —           | Name tables                               | name_tables                            |
     //
     // # RFC 5216 (EAP-TLS) / RFC 5281 (EAP-TTLS) Coverage
@@ -1240,6 +1279,55 @@ mod tests {
         let layer = &buf.layers()[0];
         let code = buf.field_by_name(layer, "code").unwrap();
         assert_eq!(code.range, 6..7);
+    }
+
+    #[test]
+    fn push_eap_object_in_carrier() {
+        static FD: FieldDescriptor = EAP_OBJECT_DESCRIPTOR;
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("Carrier", None, &[], 0..20);
+        assert!(push_eap_object(
+            &FD,
+            &[0x02, 0x07, 0x00, 0x05, 0x01],
+            10,
+            &mut buf
+        ));
+        // Malformed, or not exactly one EAP packet (a carrier value has no
+        // padding): nothing, not even the container, is pushed.
+        let before = buf.fields().len();
+        assert!(!push_eap_object(
+            &FD,
+            &[0x02, 0x07, 0x00, 0x09],
+            10,
+            &mut buf
+        ));
+        assert!(!push_eap_object(
+            &FD,
+            &[0x03, 0x07, 0x00, 0x04, 0xFF],
+            10,
+            &mut buf
+        ));
+        assert_eq!(buf.fields().len(), before);
+        buf.end_layer();
+
+        let obj = &buf.fields()[0];
+        assert_eq!(obj.name(), "eap");
+        assert_eq!(obj.range, 10..15);
+        assert!(matches!(obj.value, FieldValue::Object(_)));
+        let r = obj.value.as_container_range().unwrap();
+        assert_eq!(
+            buf.resolve_nested_display_name(r, "type_name"),
+            Some("Identity")
+        );
+        let children = EAP_OBJECT_DESCRIPTOR.children.unwrap();
+        assert_eq!(children.len(), FIELD_DESCRIPTORS.len());
+        assert!(
+            children
+                .iter()
+                .zip(FIELD_DESCRIPTORS)
+                .all(|(a, b)| a.name == b.name)
+        );
+        const { assert!(EAP_OBJECT_DESCRIPTOR.optional) };
     }
 
     #[test]
