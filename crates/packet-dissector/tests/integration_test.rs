@@ -69,6 +69,7 @@
 //! | UDP 2123: unsupported GTP version                 | integration_udp_2123_unsupported_gtp_version        |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
+//! | EPS NAS via registry factory                      | integration_nas_eps_factory                         |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
 //! | SLL → IPv4 → UDP                                  | integration_sll_ipv4_udp                            |
 //! | SLL2 → IPv6 → TCP (SYN)                           | integration_sll2_ipv6_tcp_syn                       |
@@ -183,6 +184,9 @@
 //! | Ethernet → IPv4 (snaplen-truncated) → probe                  | integration_ethernet_ipv4_snaplen_payload_ends_at_capture |
 //! | Ethernet → IPv4 → TCP (snaplen) then next segment → HTTP     | integration_ethernet_ipv4_tcp_snaplen_segment_does_not_stall_reassembly |
 //! | Ethernet → IPv6 (Payload Length 0, no HBH) → TCP              | integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded |
+//! | SLL (0x8100) → VLAN → IPv4 → UDP                              | integration_sll_vlan_ipv4_udp                        |
+//! | SLL2 (0x88A8) → VLAN → VLAN → IPv6 → TCP                      | integration_sll2_qinq_ipv6_tcp                       |
+//! | Ethernet → IPv4 → GRE (0x8100) → VLAN → IPv4 → UDP            | integration_ethernet_ipv4_gre_vlan_ipv4              |
 //! | Ethernet → IPv4 → TCP(853, DoT) → TLS                         | integration_ethernet_ipv4_tcp_dot_tls                |
 //! | Ethernet → IPv4 → SCTP(5060, PPID 0) → SIP                    | integration_ethernet_ipv4_sctp_sip_options           |
 //! | Ethernet → IPv4 → UDP(3799) → RADIUS CoA-Request              | integration_ethernet_ipv4_udp_radius_coa_request     |
@@ -3696,6 +3700,36 @@ fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
     assert_eq!(
         buf.field_by_name(gtpv2c, "sequence_number").unwrap().value,
         FieldValue::U32(0x42)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// EPS NAS (registry factory) integration test
+// ---------------------------------------------------------------------------
+
+/// EPS NAS is carried inside S1AP; the registry exposes it as a factory for
+/// standalone decoding (3GPP TS 24.301).
+#[test]
+fn integration_nas_eps_factory() {
+    let reg = DissectorRegistry::default();
+    let nas = reg.create_dissector_by_name("nas-eps").unwrap();
+    // Integrity protected Attach complete carrying an Activate default EPS
+    // bearer context accept.
+    let data = [
+        0x27, 0x01, 0x02, 0x03, 0x04, 0x05, // security header (ciphered)
+        0x07, 0x43, 0x00, 0x03, 0x52, 0x01, 0xC2,
+    ];
+    let mut buf = DissectBuffer::new();
+    let res = nas.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(res.bytes_consumed, data.len());
+    assert_eq!(buf.layers()[0].name, "NAS-EPS");
+    assert_layers_contiguous(&buf);
+    let layer = &buf.layers()[0];
+    assert_eq!(
+        buf.field_by_name(layer, "ciphered_nas_message")
+            .unwrap()
+            .value,
+        FieldValue::Bytes(&data[6..])
     );
 }
 
@@ -9620,129 +9654,95 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 }
 
 // ---------------------------------------------------------------------------
-// ERSPAN tests (draft-foschiano-erspan-03, Section 4 —
-// https://datatracker.ietf.org/doc/html/draft-foschiano-erspan-03#section-4)
+// Standalone IEEE 802.1Q / 802.1ad tag (EtherType 0x8100 / 0x88A8)
 // ---------------------------------------------------------------------------
 
-/// Build Ethernet → IPv4 → GRE(`gre`) → `erspan` → Ethernet → IPv4 → UDP.
-fn build_erspan_packet(gre: &[u8], erspan: &[u8]) -> Vec<u8> {
-    let mut pkt = Vec::new();
-    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
-    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
-    pkt.extend_from_slice(gre);
-    pkt.extend_from_slice(erspan);
-    push_ethernet(
-        &mut pkt,
-        [0x00, 0x22, 0x33, 0x44, 0x55, 0x66],
-        [0x22; 6],
-        0x0800,
-    );
-    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
-    let udp_start = push_udp(&mut pkt, 12345, 80);
-    fixup_udp_length(&mut pkt, udp_start);
-    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
-    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
-    pkt
-}
-
-/// ERSPAN Type I: GRE Protocol Type 0x88BE with S=0; the mirrored frame
-/// follows GRE directly (draft-foschiano-erspan-03, Section 4.1). The inner
-/// destination MAC starts with nibble 1, so only the GRE S bit read from the
-/// GRE layer keeps it from being taken for a Type II header.
+/// SLL with protocol type 0x8100: the tag follows the cooked header, so it
+/// is reached by EtherType dispatch (IEEE 802.1Q-2022, clause 9.6).
 #[test]
-fn integration_ethernet_ipv4_gre_erspan_type1() {
-    let registry = DissectorRegistry::default();
-    let mut pkt = build_erspan_packet(&[0x00, 0x00, 0x88, 0xBE], &[]);
-    // Inner destination MAC: 14 (Ethernet) + 20 (IPv4) + 4 (GRE).
-    pkt[38] = 0x10;
-    let mut buf = DissectBuffer::new();
-    registry.dissect(&pkt, &mut buf).unwrap();
-    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
-    assert_eq!(
-        names,
-        ["Ethernet", "IPv4", "GRE", "Ethernet", "IPv4", "UDP"]
-    );
-    assert_layers_contiguous(&buf);
-}
-
-/// ERSPAN Type II: GRE S=1 and an 8-octet ERSPAN header
-/// (draft-foschiano-erspan-03, Section 4.2).
-#[test]
-fn integration_ethernet_ipv4_gre_erspan_type2() {
-    let registry = DissectorRegistry::default();
-    let pkt = build_erspan_packet(
-        &[0x10, 0x00, 0x88, 0xBE, 0x00, 0x00, 0x00, 0x2A],
-        &[0x10, 0x64, 0xB5, 0x55, 0x00, 0x0A, 0xBC, 0xDE],
-    );
-    let mut buf = DissectBuffer::new();
-    registry.dissect(&pkt, &mut buf).unwrap();
-    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
-    assert_eq!(
-        names,
-        [
-            "Ethernet", "IPv4", "GRE", "ERSPAN", "Ethernet", "IPv4", "UDP"
-        ]
-    );
-    assert_layers_contiguous(&buf);
-    let erspan = buf.layer_by_name("ERSPAN").unwrap();
-    assert_eq!(buf.field_u8(erspan, "version"), Some(1));
-    assert_eq!(buf.field_u16(erspan, "vlan"), Some(100));
-    assert_eq!(buf.field_u16(erspan, "session_id"), Some(0x155));
-    assert_eq!(buf.field_u32(erspan, "index"), Some(0xABCDE));
-}
-
-/// ERSPAN Type III with the platform-specific sub-header
-/// (draft-foschiano-erspan-03, Section 4.3).
-#[test]
-fn integration_ethernet_ipv4_gre_erspan_type3() {
-    let registry = DissectorRegistry::default();
-    let pkt = build_erspan_packet(
-        &[0x10, 0x00, 0x22, 0xEB, 0x00, 0x00, 0x00, 0x01],
-        &[
-            0x21, 0x23, 0x6A, 0xAA, 0x01, 0x02, 0x03, 0x04, 0xBE, 0xEF, 0x82, 0xAD, // base
-            0x0C, 0x00, 0x01, 0x02, 0xDE, 0xAD, 0xBE, 0xEF, // Platf ID 0x3
-        ],
-    );
-    let mut buf = DissectBuffer::new();
-    registry.dissect(&pkt, &mut buf).unwrap();
-    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
-    assert_eq!(
-        names,
-        [
-            "Ethernet", "IPv4", "GRE", "ERSPAN", "Ethernet", "IPv4", "UDP"
-        ]
-    );
-    assert_layers_contiguous(&buf);
-    let erspan = buf.layer_by_name("ERSPAN").unwrap();
-    assert_eq!(buf.field_u8(erspan, "version"), Some(2));
-    assert_eq!(buf.field_u8(erspan, "platform_id"), Some(3));
-    assert_eq!(erspan.range.len(), 20);
-}
-
-/// ERSPAN Type III with FT = IP packet: the payload is an IP packet without
-/// an Ethernet header (draft-foschiano-erspan-03, Section 4.3).
-#[test]
-fn integration_ethernet_ipv4_gre_erspan_type3_ip() {
+fn integration_sll_vlan_ipv4_udp() {
     let registry = DissectorRegistry::default();
     let mut pkt = Vec::new();
-    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
-    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
-    pkt.extend_from_slice(&[0x00, 0x00, 0x22, 0xEB]);
-    // FT = 2 (IP packet), O = 0.
-    pkt.extend_from_slice(&[
-        0x21, 0x23, 0x6A, 0xAA, 0x01, 0x02, 0x03, 0x04, 0xBE, 0xEF, 0x8A, 0xAC,
-    ]);
-    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
-    let udp_start = push_udp(&mut pkt, 12345, 80);
+    push_sll(&mut pkt, 0, 0x8100);
+    pkt.extend_from_slice(&[0x20, 0x64]); // TCI: PCP=1, DEI=0, VID=100
+    pkt.extend_from_slice(&0x0800u16.to_be_bytes());
+    let ipv4_start = pkt.len();
+    push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 1234, 5678);
     fixup_udp_length(&mut pkt, udp_start);
-    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
-    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 113, &mut buf)
+        .unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL", "VLAN", "IPv4", "UDP"]);
+    let vlan = buf.layer_by_name("VLAN").unwrap();
+    assert_eq!(
+        buf.field_by_name(vlan, "vlan_id").unwrap().value,
+        FieldValue::U16(100)
+    );
+    assert_eq!(
+        buf.field_by_name(vlan, "vlan_pcp").unwrap().value,
+        FieldValue::U8(1)
+    );
+}
+
+/// SLL2 with protocol type 0x88A8 (S-Tag) then a C-Tag: one VLAN layer
+/// per tag.
+#[test]
+fn integration_sll2_qinq_ipv6_tcp() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_sll2(&mut pkt, 0x88A8, 2, 0);
+    pkt.extend_from_slice(&[0x00, 0x0A]); // S-Tag VID=10
+    pkt.extend_from_slice(&0x8100u16.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x14]); // C-Tag VID=20
+    pkt.extend_from_slice(&0x86DDu16.to_be_bytes());
+    let ipv6_start = push_ipv6(&mut pkt, 6, IPV6_SRC, IPV6_DST);
+    push_tcp(&mut pkt, 54321, 8080, 0x02);
+    fixup_ipv6_payload_length(&mut pkt, ipv6_start);
+
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&pkt, 276, &mut buf)
+        .unwrap();
+    assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["SLL2", "VLAN", "VLAN", "IPv6", "TCP"]);
+    let vids: Vec<_> = buf
+        .layers()
+        .iter()
+        .filter(|l| l.name == "VLAN")
+        .map(|l| buf.field_by_name(l, "vlan_id").unwrap().value.clone())
+        .collect();
+    assert_eq!(vids, [FieldValue::U16(10), FieldValue::U16(20)]);
+}
+
+/// GRE with protocol type 0x8100 carries a tagged payload without the MAC
+/// header.
+#[test]
+fn integration_ethernet_ipv4_gre_vlan_ipv4() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let outer_start = push_ipv4(&mut pkt, 47, IPV4_SRC, IPV4_DST);
+    push_gre(&mut pkt, 0x8100);
+    pkt.extend_from_slice(&[0x00, 0x05]); // VID=5
+    pkt.extend_from_slice(&0x0800u16.to_be_bytes());
+    let inner_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 1234, 5678);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, inner_start);
+    fixup_ipv4_length(&mut pkt, outer_start);
 
     let mut buf = DissectBuffer::new();
     registry.dissect(&pkt, &mut buf).unwrap();
-    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
-    assert_eq!(names, ["Ethernet", "IPv4", "GRE", "ERSPAN", "IPv4", "UDP"]);
     assert_layers_contiguous(&buf);
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "GRE", "VLAN", "IPv4", "UDP"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -9878,4 +9878,130 @@ fn integration_ethernet_ipv6_srv6_ethernet_ipv4_udp() {
         names,
         ["Ethernet", "IPv6", "SRv6", "Ethernet", "IPv4", "UDP"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// ERSPAN tests (draft-foschiano-erspan-03, Section 4 —
+// https://datatracker.ietf.org/doc/html/draft-foschiano-erspan-03#section-4)
+// ---------------------------------------------------------------------------
+
+/// Build Ethernet → IPv4 → GRE(`gre`) → `erspan` → Ethernet → IPv4 → UDP.
+fn build_erspan_packet(gre: &[u8], erspan: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(gre);
+    pkt.extend_from_slice(erspan);
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x22, 0x33, 0x44, 0x55, 0x66],
+        [0x22; 6],
+        0x0800,
+    );
+    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+    pkt
+}
+
+/// ERSPAN Type I: GRE Protocol Type 0x88BE with S=0; the mirrored frame
+/// follows GRE directly (draft-foschiano-erspan-03, Section 4.1). The inner
+/// destination MAC starts with nibble 1, so only the GRE S bit read from the
+/// GRE layer keeps it from being taken for a Type II header.
+#[test]
+fn integration_ethernet_ipv4_gre_erspan_type1() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = build_erspan_packet(&[0x00, 0x00, 0x88, 0xBE], &[]);
+    // Inner destination MAC: 14 (Ethernet) + 20 (IPv4) + 4 (GRE).
+    pkt[38] = 0x10;
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv4", "GRE", "Ethernet", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+}
+
+/// ERSPAN Type II: GRE S=1 and an 8-octet ERSPAN header
+/// (draft-foschiano-erspan-03, Section 4.2).
+#[test]
+fn integration_ethernet_ipv4_gre_erspan_type2() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_erspan_packet(
+        &[0x10, 0x00, 0x88, 0xBE, 0x00, 0x00, 0x00, 0x2A],
+        &[0x10, 0x64, 0xB5, 0x55, 0x00, 0x0A, 0xBC, 0xDE],
+    );
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet", "IPv4", "GRE", "ERSPAN", "Ethernet", "IPv4", "UDP"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+    let erspan = buf.layer_by_name("ERSPAN").unwrap();
+    assert_eq!(buf.field_u8(erspan, "version"), Some(1));
+    assert_eq!(buf.field_u16(erspan, "vlan"), Some(100));
+    assert_eq!(buf.field_u16(erspan, "session_id"), Some(0x155));
+    assert_eq!(buf.field_u32(erspan, "index"), Some(0xABCDE));
+}
+
+/// ERSPAN Type III with the platform-specific sub-header
+/// (draft-foschiano-erspan-03, Section 4.3).
+#[test]
+fn integration_ethernet_ipv4_gre_erspan_type3() {
+    let registry = DissectorRegistry::default();
+    let pkt = build_erspan_packet(
+        &[0x10, 0x00, 0x22, 0xEB, 0x00, 0x00, 0x00, 0x01],
+        &[
+            0x21, 0x23, 0x6A, 0xAA, 0x01, 0x02, 0x03, 0x04, 0xBE, 0xEF, 0x82, 0xAD, // base
+            0x0C, 0x00, 0x01, 0x02, 0xDE, 0xAD, 0xBE, 0xEF, // Platf ID 0x3
+        ],
+    );
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Ethernet", "IPv4", "GRE", "ERSPAN", "Ethernet", "IPv4", "UDP"
+        ]
+    );
+    assert_layers_contiguous(&buf);
+    let erspan = buf.layer_by_name("ERSPAN").unwrap();
+    assert_eq!(buf.field_u8(erspan, "version"), Some(2));
+    assert_eq!(buf.field_u8(erspan, "platform_id"), Some(3));
+    assert_eq!(erspan.range.len(), 20);
+}
+
+/// ERSPAN Type III with FT = IP packet: the payload is an IP packet without
+/// an Ethernet header (draft-foschiano-erspan-03, Section 4.3).
+#[test]
+fn integration_ethernet_ipv4_gre_erspan_type3_ip() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x22, 0xEB]);
+    // FT = 2 (IP packet), O = 0.
+    pkt.extend_from_slice(&[
+        0x21, 0x23, 0x6A, 0xAA, 0x01, 0x02, 0x03, 0x04, 0xBE, 0xEF, 0x8A, 0xAC,
+    ]);
+    let inner_ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, inner_ipv4_start);
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "GRE", "ERSPAN", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
 }

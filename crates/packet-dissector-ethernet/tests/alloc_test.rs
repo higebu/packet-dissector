@@ -3,7 +3,7 @@
 use packet_dissector_core::dissector::Dissector;
 use packet_dissector_core::field::FieldValue;
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_ethernet::EthernetDissector;
+use packet_dissector_ethernet::{EthernetDissector, VlanDissector};
 use packet_dissector_test_alloc::{count_allocs, setup_counting_allocator};
 
 setup_counting_allocator!();
@@ -75,4 +75,26 @@ fn zero_alloc_dissect_llc_i_frame_and_snap() {
     });
     assert_eq!(allocs, 0, "LLC/SNAP dissect allocated {allocs} times");
     assert_eq!(buf.layers().len(), 2);
+}
+
+#[test]
+fn zero_alloc_dissect_standalone_vlan_tag() {
+    // Standalone tag reached by EtherType 0x8100: TCI + inner EtherType.
+    let raw: &[u8] = &[
+        0x20, 0x64, // TCI: PCP=1, DEI=0, VID=100
+        0x08, 0x00, // inner EtherType: IPv4
+    ];
+    let mut buf = DissectBuffer::new();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        VlanDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(allocs, 0, "VLAN tag dissect allocated {allocs} times");
+
+    assert_eq!(buf.layers().len(), 1);
+    assert_eq!(buf.layers()[0].name, "VLAN");
+    let fields = buf.layer_fields(&buf.layers()[0]);
+    assert_eq!(fields.len(), 4); // pcp, dei, vid, ethertype
+    assert_eq!(fields[2].value, FieldValue::U16(100));
 }
