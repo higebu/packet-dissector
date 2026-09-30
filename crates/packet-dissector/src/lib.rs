@@ -282,6 +282,9 @@ pub mod dissectors {
     #[cfg(feature = "rtp")]
     pub use packet_dissector_rtp as rtp;
 
+    #[cfg(feature = "rtcp")]
+    pub use packet_dissector_rtcp as rtcp;
+
     #[cfg(feature = "quic")]
     pub use packet_dissector_quic as quic;
 

@@ -8577,6 +8577,86 @@ fn integration_ethernet_ipv4_udp_rtp() {
     );
 }
 
+/// Ethernet → IPv4 → UDP → RTCP, with RTP and RTCP multiplexed on one port:
+/// a compound RR + PSFB PLI decoded through the RTP dissector is handed to
+/// RTCP (RFC 5761, Section 4 — https://www.rfc-editor.org/rfc/rfc5761#section-4).
+#[cfg(all(feature = "rtp", feature = "rtcp", feature = "udp"))]
+#[test]
+fn integration_ethernet_ipv4_udp_rtcp_mux() {
+    let mut reg = DissectorRegistry::default();
+    reg.register_by_udp_port(5004, Box::new(packet_dissector_rtp::RtpDissector))
+        .expect("test registration must succeed");
+
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 5004, 5004);
+    let rtcp_start = pkt.len();
+    // RR, RC=0, SSRC (RFC 3550, Section 6.4.2)
+    pkt.extend_from_slice(&[0x80, 201, 0x00, 0x01, 0x12, 0x34, 0x56, 0x78]);
+    // PSFB PLI (RFC 4585, Section 6.3.1)
+    pkt.extend_from_slice(&[0x81, 206, 0x00, 0x02]);
+    pkt.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+    pkt.extend_from_slice(&0x9ABC_DEF0u32.to_be_bytes());
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].name, "RTCP");
+    assert_eq!(buf.layers()[3].range, rtcp_start..pkt.len());
+    let packets = buf.field_by_name(&buf.layers()[3], "packets").unwrap();
+    let range = packets.value.as_container_range().unwrap();
+    let pts: Vec<_> = buf
+        .nested_fields(range)
+        .iter()
+        .filter(|f| f.name() == "packet_type")
+        .map(|f| f.value.clone())
+        .collect();
+    assert_eq!(pts, [FieldValue::U8(201), FieldValue::U8(206)]);
+}
+
+/// Ethernet → IPv4 → UDP → RTCP through the `rtcp` decode-as factory.
+#[cfg(all(feature = "rtcp", feature = "udp"))]
+#[test]
+fn integration_ethernet_ipv4_udp_rtcp_decode_as() {
+    let mut reg = DissectorRegistry::default();
+    let rtcp = reg
+        .create_dissector_by_name("rtcp")
+        .expect("rtcp factory is registered");
+    reg.register_by_udp_port(5005, rtcp)
+        .expect("test registration must succeed");
+
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 5005, 5005);
+    // BYE, SC=1, SSRC (RFC 3550, Section 6.6)
+    pkt.extend_from_slice(&[0x81, 203, 0x00, 0x01, 0x12, 0x34, 0x56, 0x78]);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].name, "RTCP");
+}
+
 // ---------------------------------------------------------------------------
 // Ethernet → IPv4 → UDP → mDNS
 // ---------------------------------------------------------------------------

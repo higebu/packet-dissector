@@ -422,3 +422,20 @@ fn turn_channeldata_schema_is_exposed() {
     assert!(schema.fields.iter().any(|f| f.name == "channel_number"));
     assert_names_unique(&packet_dissector::dissectors::stun::TurnChannelDataDissector);
 }
+
+#[cfg(feature = "rtcp")]
+#[test]
+fn rtcp_schema_is_exposed() {
+    // RTCP is decode-as only, but the RTP dissector also produces RTCP layers
+    // when RTP and RTCP share a port (RFC 5761, Section 4 —
+    // https://www.rfc-editor.org/rfc/rfc5761#section-4), so its fields must
+    // be discoverable through all_field_schemas().
+    let registry = DissectorRegistry::default();
+    let schemas = registry.all_field_schemas();
+    let schema = schemas
+        .iter()
+        .find(|s| s.short_name == "RTCP")
+        .expect("RTCP schema missing");
+    assert!(schema.fields.iter().any(|f| f.name == "packets"));
+    assert_names_unique(&packet_dissector::dissectors::rtcp::RtcpDissector);
+}

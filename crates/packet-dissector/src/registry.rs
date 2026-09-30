@@ -1861,6 +1861,11 @@ impl DissectorRegistry {
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
+        // RTCP has no dispatch key (decode-as only), yet its layers are also
+        // produced by the RTP dissector when RTP and RTCP share a port
+        // (RFC 5761, Section 4 — https://www.rfc-editor.org/rfc/rfc5761#section-4).
+        #[cfg(feature = "rtcp")]
+        push(&packet_dissector_rtcp::RtcpDissector);
         // The "netflow" decode-as dissector emits NetFlow v5, v9 and IPFIX
         // layers; IPFIX is also registered on port 4739 when a transport
         // feature is enabled.
@@ -3689,6 +3694,14 @@ impl Default for DissectorRegistry {
         // but is available for decode-as overrides (RFC 3550).
         #[cfg(feature = "rtp")]
         reg.register_dissector_factory("rtp", || Box::new(packet_dissector_rtp::RtpDissector));
+
+        // RTCP has no well-known port either ("RTP port + 1" is only a
+        // convention, RFC 3550, Section 11 —
+        // https://www.rfc-editor.org/rfc/rfc3550#section-11). It is reached
+        // through decode-as, or from RTP when RTP and RTCP share a port
+        // (RFC 5761, Section 4 — https://www.rfc-editor.org/rfc/rfc5761#section-4).
+        #[cfg(feature = "rtcp")]
+        reg.register_dissector_factory("rtcp", || Box::new(packet_dissector_rtcp::RtcpDissector));
 
         // QUIC runs over UDP, typically on port 443 (RFC 9000).
         #[cfg(feature = "quic")]
@@ -6002,6 +6015,9 @@ mod tests {
 
         #[cfg(feature = "rtp")]
         assert!(reg.create_dissector_by_name("rtp").is_some());
+
+        #[cfg(feature = "rtcp")]
+        assert!(reg.create_dissector_by_name("rtcp").is_some());
 
         #[cfg(feature = "quic")]
         assert!(reg.create_dissector_by_name("quic").is_some());

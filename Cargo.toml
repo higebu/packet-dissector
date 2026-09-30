@@ -73,6 +73,7 @@ packet-dissector-tls = { version = "0.5.0", path = "crates/packet-dissector-tls"
 packet-dissector-reassembly = { version = "0.5.0", path = "crates/packet-dissector-reassembly" }
 packet-dissector-rtp = { version = "0.5.0", path = "crates/packet-dissector-rtp" }
 packet-dissector-rsvp = { version = "0.5.0", path = "crates/packet-dissector-rsvp" }
+packet-dissector-rtcp = { version = "0.5.0", path = "crates/packet-dissector-rtcp" }
 packet-dissector-ah = { version = "0.5.0", path = "crates/packet-dissector-ah" }
 packet-dissector-esp = { version = "0.5.0", path = "crates/packet-dissector-esp" }
 packet-dissector-ike = { version = "0.5.0", path = "crates/packet-dissector-ike" }
