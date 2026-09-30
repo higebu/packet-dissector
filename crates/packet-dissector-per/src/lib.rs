@@ -1,6 +1,7 @@
 //! Bit-level reader for ASN.1 ALIGNED PER (APER) encodings.
 //!
-//! NGAP IE values are encoded with the ALIGNED variant of PER. Small
+//! Shared by the 3GPP application protocols (NGAP, S1AP, ...), whose
+//! messages are encoded with the ALIGNED variant of PER. Small
 //! constrained values (CHOICE indices, ENUMERATED indices, extension and
 //! optional bits, short fixed-size strings, lengths with a small upper
 //! bound) are bit-fields packed back to back; padding is only inserted
@@ -10,6 +11,10 @@
 //!
 //! ## References
 //! - ITU-T Rec. X.691 (02/2021): <https://www.itu.int/rec/T-REC-X.691>
+
+#![deny(missing_docs)]
+
+pub mod ap;
 
 use core::ops::Range;
 
@@ -21,7 +26,7 @@ use packet_dissector_core::error::PacketError;
 /// (ITU-T Rec. X.691, Section 3.7 / 10.1 — the first bit of a bit-field
 /// is the leading bit of the octet).
 #[derive(Debug, Clone)]
-pub(crate) struct AperReader<'a> {
+pub struct AperReader<'a> {
     data: &'a [u8],
     bit: usize,
 }
@@ -33,18 +38,18 @@ fn bits_for(max: u64) -> u32 {
 
 impl<'a> AperReader<'a> {
     /// Creates a reader positioned at the first bit of `data`.
-    pub(crate) fn new(data: &'a [u8]) -> Self {
+    pub fn new(data: &'a [u8]) -> Self {
         Self { data, bit: 0 }
     }
 
     /// Current position in bits from the start of the buffer.
-    pub(crate) fn bit_position(&self) -> usize {
+    pub fn bit_position(&self) -> usize {
         self.bit
     }
 
     /// Byte range (relative to the start of the buffer) that covers every
     /// bit read since `start_bit`.
-    pub(crate) fn byte_range_since(&self, start_bit: usize) -> Range<usize> {
+    pub fn byte_range_since(&self, start_bit: usize) -> Range<usize> {
         start_bit / 8..self.bit.div_ceil(8)
     }
 
@@ -61,7 +66,7 @@ impl<'a> AperReader<'a> {
     }
 
     /// Reads `n` (at most 64) bits as an unsigned big-endian number.
-    pub(crate) fn read_bits(&mut self, n: u32) -> Result<u64, PacketError> {
+    pub fn read_bits(&mut self, n: u32) -> Result<u64, PacketError> {
         if n > 64 {
             return Err(PacketError::InvalidHeader(
                 "APER bit-field wider than 64 bits",
@@ -79,7 +84,7 @@ impl<'a> AperReader<'a> {
     }
 
     /// Reads a single bit (extension bit, optional-component bit, ...).
-    pub(crate) fn read_bit(&mut self) -> Result<bool, PacketError> {
+    pub fn read_bit(&mut self) -> Result<bool, PacketError> {
         Ok(self.read_bits(1)? == 1)
     }
 
@@ -87,12 +92,12 @@ impl<'a> AperReader<'a> {
     ///
     /// ITU-T Rec. X.691, Section 11.1 — "octet-aligned in the ALIGNED
     /// variant" fields start on an octet boundary.
-    pub(crate) fn align(&mut self) {
+    pub fn align(&mut self) {
         self.bit = self.bit.div_ceil(8) * 8;
     }
 
     /// Aligns to an octet boundary and returns the next `n` octets.
-    pub(crate) fn read_octets(&mut self, n: usize) -> Result<&'a [u8], PacketError> {
+    pub fn read_octets(&mut self, n: usize) -> Result<&'a [u8], PacketError> {
         self.align();
         self.ensure(n * 8)?;
         let start = self.bit / 8;
@@ -108,11 +113,7 @@ impl<'a> AperReader<'a> {
     /// octet-aligned octets, and larger ranges use the indefinite length
     /// case (a length in octets as a constrained whole number, then the
     /// octet-aligned value in the minimum number of octets).
-    pub(crate) fn read_constrained_whole_number(
-        &mut self,
-        lb: u64,
-        ub: u64,
-    ) -> Result<u64, PacketError> {
+    pub fn read_constrained_whole_number(&mut self, lb: u64, ub: u64) -> Result<u64, PacketError> {
         if ub < lb {
             return Err(PacketError::InvalidHeader("APER constraint ub < lb"));
         }
@@ -151,7 +152,7 @@ impl<'a> AperReader<'a> {
     /// ITU-T Rec. X.691, Section 11.6: a single 0 bit followed by a 6-bit
     /// value, or a single 1 bit followed by a semi-constrained whole number
     /// (Section 11.7, a length determinant then the value octets).
-    pub(crate) fn read_normally_small(&mut self) -> Result<u64, PacketError> {
+    pub fn read_normally_small(&mut self) -> Result<u64, PacketError> {
         if !self.read_bit()? {
             return self.read_bits(6);
         }
@@ -174,7 +175,7 @@ impl<'a> AperReader<'a> {
     /// length is a constrained whole number (Section 11.9.4.1); otherwise
     /// it is octet-aligned in one octet (0..127) or two octets (up to
     /// 16K). Fragmented lengths (16K and above) are not supported.
-    pub(crate) fn read_length(&mut self, lb: u64, ub: Option<u64>) -> Result<u64, PacketError> {
+    pub fn read_length(&mut self, lb: u64, ub: Option<u64>) -> Result<u64, PacketError> {
         if let Some(ub) = ub.filter(|&ub| ub < 0x1_0000) {
             return self.read_constrained_whole_number(lb, ub);
         }
@@ -202,7 +203,7 @@ impl<'a> AperReader<'a> {
     /// extensible, then either a constrained whole number
     /// (`0..root_count-1`, Section 14.2) or a normally small number for an
     /// extension addition (Section 14.3).
-    pub(crate) fn read_enumerated(
+    pub fn read_enumerated(
         &mut self,
         root_count: u64,
         extensible: bool,
@@ -218,7 +219,7 @@ impl<'a> AperReader<'a> {
     /// ITU-T Rec. X.691, Section 23.6–23.8: an extension bit when the type
     /// is extensible, then a constrained whole number (root) or a normally
     /// small number (extension addition).
-    pub(crate) fn read_choice_index(
+    pub fn read_choice_index(
         &mut self,
         root_count: u64,
         extensible: bool,
@@ -244,7 +245,7 @@ impl<'a> AperReader<'a> {
     /// ITU-T Rec. X.691, Section 16.9–16.10: up to 16 bits it is a
     /// bit-field with no alignment; above 16 bits it is octet-aligned in
     /// the ALIGNED variant.
-    pub(crate) fn read_fixed_bit_string(&mut self, n: u32) -> Result<u64, PacketError> {
+    pub fn read_fixed_bit_string(&mut self, n: u32) -> Result<u64, PacketError> {
         if n > 16 {
             self.align();
         }
@@ -255,7 +256,7 @@ impl<'a> AperReader<'a> {
 /// Where the value of an octet-aligned length-prefixed field (an open type
 /// or an unconstrained OCTET STRING) lies.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Extent {
+pub enum Extent {
     /// A single length determinant of `len_octets` octets followed by `len`
     /// contiguous value octets.
     Contiguous {
@@ -287,7 +288,7 @@ const FRAGMENT_UNIT: usize = 16384;
 /// 1..4 is followed by `m` × 16K value octets and then another length
 /// determinant; the last part uses the one- or two-octet form (possibly
 /// zero).
-pub(crate) fn read_extent(data: &[u8], pos: usize) -> Result<Extent, PacketError> {
+pub fn read_extent(data: &[u8], pos: usize) -> Result<Extent, PacketError> {
     let truncated = |expected: usize| PacketError::Truncated {
         expected,
         actual: data.len(),

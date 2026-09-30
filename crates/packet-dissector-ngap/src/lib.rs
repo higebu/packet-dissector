@@ -10,7 +10,8 @@
 
 #![deny(missing_docs)]
 
-mod aper;
+// The APER reader is shared with the other 3GPP application protocols.
+use packet_dissector_per as aper;
 mod container;
 pub mod ie_id;
 pub mod ie_parsers;

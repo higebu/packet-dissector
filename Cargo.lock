@@ -985,6 +985,7 @@ dependencies = [
  "criterion",
  "packet-dissector-core",
  "packet-dissector-nas5g",
+ "packet-dissector-per",
  "packet-dissector-test-alloc",
 ]
 
@@ -1041,6 +1042,13 @@ name = "packet-dissector-pcap"
 version = "0.5.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "packet-dissector-per"
+version = "0.5.0"
+dependencies = [
+ "packet-dissector-core",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ description = "NGAP (NG Application Protocol) dissector for packet-dissector"
 [dependencies]
 packet-dissector-core = { workspace = true }
 packet-dissector-nas5g = { workspace = true }
+packet-dissector-per = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

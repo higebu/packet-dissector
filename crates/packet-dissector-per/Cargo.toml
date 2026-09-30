@@ -1,0 +1,14 @@
+[package]
+name = "packet-dissector-per"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "asn1", "per", "parser"]
+categories = ["network-programming", "parser-implementations"]
+description = "ASN.1 ALIGNED PER reader shared by packet-dissector 3GPP application protocol dissectors"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
