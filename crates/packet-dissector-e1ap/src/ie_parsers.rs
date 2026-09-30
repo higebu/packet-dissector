@@ -62,14 +62,6 @@ static FD_CN_SUPPORT: FieldDescriptor =
 static FD_GNB_CU_UP_CAPACITY: FieldDescriptor =
     FieldDescriptor::new("gnb_cu_up_capacity", "gNB-CU-UP Capacity", FieldType::U8);
 
-static FD_TIME_TO_WAIT: FieldDescriptor =
-    FieldDescriptor::new("time_to_wait", "Time To Wait", FieldType::U8).with_display_fn(|v, _| {
-        match v {
-            FieldValue::U8(t) => time_to_wait_name(*t),
-            _ => None,
-        }
-    });
-
 static FD_SYSTEM_CHOICE: FieldDescriptor =
     FieldDescriptor::new("system_choice", "System", FieldType::U8).with_display_fn(
         |v, _| match v {
@@ -163,6 +155,12 @@ static FD_UP_PARAMETERS_ITEM: FieldDescriptor = FieldDescriptor::new(
     FieldType::Object,
 );
 
+static FD_UP_TNL_INFORMATION: FieldDescriptor = FieldDescriptor::new(
+    "up_tnl_information",
+    "UP TNL Information",
+    FieldType::Object,
+);
+
 static FD_CELL_GROUP_ID: FieldDescriptor =
     FieldDescriptor::new("cell_group_id", "Cell Group ID", FieldType::U8);
 
@@ -238,11 +236,6 @@ const NAME_MAX: u64 = 150;
 ///
 /// 3GPP TS 37.483, Section 9.4.5.
 const CN_SUPPORT_ROOT_COUNT: u64 = 3;
-
-/// `TimeToWait ::= ENUMERATED {v1s, v2s, v5s, v10s, v20s, v60s, ...}`.
-///
-/// 3GPP TS 37.483, Section 9.4.5.
-const TIME_TO_WAIT_ROOT_COUNT: u64 = 6;
 
 /// Root sizes of `CauseRadioNetwork`, `CauseTransport`, `CauseProtocol`
 /// and `CauseMisc`.
@@ -331,14 +324,7 @@ pub(crate) fn push_ie_value<'pkt>(
             offset,
         ),
         // TimeToWait — Section 9.3.1.18.
-        12 => ies::push_enumerated(
-            buf,
-            &FD_TIME_TO_WAIT,
-            TIME_TO_WAIT_ROOT_COUNT,
-            true,
-            data,
-            offset,
-        ),
+        12 => ies::push_time_to_wait(buf, data, offset),
         // System-BearerContextSetupRequest / -SetupResponse /
         // -ModificationRequest / -ModificationResponse /
         // -ModificationConfirm / -ModificationRequired — Section 9.4.4.
@@ -354,7 +340,7 @@ pub(crate) fn push_ie_value<'pkt>(
             ies::push_extensible_unsigned(buf, &FD_TRANSACTION_ID, TRANSACTION_ID_MAX, data, offset)
         }
         // Serving-PLMN — PLMN-Identity, Section 9.3.1.7.
-        58 => push_plmn_identity(buf, data, offset),
+        58 => ies::push_plmn_identity(buf, data, offset),
         // gNB-CU-UP-Capacity — Section 9.3.1.30.
         64 => ies::push_unsigned(
             buf,
@@ -368,27 +354,6 @@ pub(crate) fn push_ie_value<'pkt>(
 }
 
 // ── Individual decoders ────────────────────────────────────────────────
-
-/// `PLMN-Identity ::= OCTET STRING (SIZE(3))`: octet-aligned with no
-/// length (ITU-T Rec. X.691, Section 17.7), so the value is exactly the
-/// three octets.
-///
-/// 3GPP TS 37.483, Section 9.3.1.7.
-fn push_plmn_identity<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    data: &'pkt [u8],
-    offset: usize,
-) -> bool {
-    if data.len() != 3 {
-        return false;
-    }
-    buf.push_field(
-        &ies::FD_PLMN_IDENTITY,
-        FieldValue::Bytes(data),
-        offset..offset + 3,
-    );
-    true
-}
 
 /// `System-BearerContext... ::= CHOICE { e-UTRAN-... ProtocolIE-Container,
 /// nG-RAN-... ProtocolIE-Container, choice-extension
@@ -700,8 +665,7 @@ fn push_up_parameters<'pkt>(
         |buf, r| {
             ies::push_object(buf, &FD_UP_PARAMETERS_ITEM, r, offset, |buf, r| {
                 let (extended, ie_extensions) = read_sequence_preamble(r)?;
-                let tnl = ies::read_up_tnl(r)?;
-                ies::push_up_tnl_fields(buf, &tnl, offset);
+                ies::push_up_tnl_object(buf, &FD_UP_TNL_INFORMATION, r, offset)?;
                 ies::push_small_integer(buf, &FD_CELL_GROUP_ID, r, offset, 0, CELL_GROUP_ID_MAX)?;
                 skip_sequence_tail(r, extended, ie_extensions)
             })
@@ -720,28 +684,13 @@ fn protection_result_name(v: &FieldValue<'_>) -> Option<&'static str> {
     }
 }
 
-/// Returns the name of a TimeToWait value.
-///
-/// 3GPP TS 37.483, Section 9.4.5.
-fn time_to_wait_name(value: u8) -> Option<&'static str> {
-    Some(match value {
-        0 => "v1s",
-        1 => "v2s",
-        2 => "v5s",
-        3 => "v10s",
-        4 => "v20s",
-        5 => "v60s",
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     //! # 3GPP TS 37.483 IE Decoder Coverage
     //!
     //! | Spec Section | Description                             | Test                            |
     //! |--------------|-----------------------------------------|---------------------------------|
-    //! | 9.3.1.7      | PLMN identity of the wrong size         | plmn_identity_wrong_size        |
+    //! | 9.3.1.7      | Serving PLMN                            | plmn_identity_dispatch          |
     //! | 9.4.4        | System CHOICE: choice-extension / empty | system_choice_not_decoded       |
     //! | 9.4.4        | Nested container beyond the depth limit | system_beyond_depth_kept_raw    |
     //! | 9.4.5        | Names                                   | names                           |
@@ -749,9 +698,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plmn_identity_wrong_size() {
+    fn plmn_identity_dispatch() {
         let mut buf = DissectBuffer::new();
-        assert!(!push_plmn_identity(&mut buf, &[0x00], 0));
+        assert!(!push_ie_value(&mut buf, 58, &[0x00], 0, 0));
         assert!(push_ie_value(&mut buf, 58, &[0x00, 0xf1, 0x10], 0, 0));
     }
 
@@ -780,9 +729,6 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(time_to_wait_name(0), Some("v1s"));
-        assert_eq!(time_to_wait_name(3), Some("v10s"));
-        assert_eq!(time_to_wait_name(6), None);
         assert_eq!(
             protection_result_name(&FieldValue::U8(1)),
             Some("not-performed")
@@ -799,8 +745,6 @@ mod tests {
         assert_eq!(f(&FD_SYSTEM_CHOICE, FieldValue::U8(3)), None);
         assert_eq!(f(&FD_DL_UP_UNCHANGED, FieldValue::U8(0)), Some("true"));
         assert_eq!(f(&FD_DL_UP_UNCHANGED, FieldValue::U8(1)), None);
-        assert_eq!(f(&FD_TIME_TO_WAIT, FieldValue::U8(5)), Some("v60s"));
-        assert_eq!(f(&FD_TIME_TO_WAIT, FieldValue::U16(5)), None);
         assert_eq!(
             f(&FD_INTEGRITY_PROTECTION_RESULT, FieldValue::U8(0)),
             Some("performed")

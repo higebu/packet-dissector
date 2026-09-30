@@ -18,8 +18,8 @@ use proptest::prelude::*;
 
 /// IE IDs that have a structured value decoder.
 const DECODED_IE_IDS: &[u16] = &[
-    0, 20, 21, 26, 27, 28, 29, 40, 41, 42, 44, 45, 50, 63, 64, 77, 78, 82, 95, 111, 128, 165, 218,
-    241,
+    0, 20, 21, 26, 27, 28, 29, 40, 41, 42, 44, 45, 47, 50, 63, 64, 77, 78, 82, 95, 111, 128, 165,
+    217, 218, 219, 221, 224, 241, 376,
 ];
 
 /// A valid message (pycrate APER encoding).

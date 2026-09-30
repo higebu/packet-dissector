@@ -294,6 +294,8 @@ mod tests {
         assert_eq!(values(&buf, "system_choice"), u8s(&[0]));
         assert_eq!(values(&buf, "drb_id"), u8s(&[5, 6]));
         assert_eq!(values(&buf, "cell_group_id"), u8s(&[0, 1, 2]));
+        // Each UP-Parameters item nests its tunnel as an object.
+        assert_eq!(values(&buf, "up_tnl_information").len(), 3);
         assert_eq!(values(&buf, "dl_up_unchanged"), u8s(&[0]));
         let teids: Vec<_> = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]
             .iter()

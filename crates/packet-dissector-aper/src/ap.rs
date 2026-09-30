@@ -415,9 +415,10 @@ fn push_fields<'pkt>(
     if error.is_none() && pos < data.len() && !(extended && is_extension_additions(&data[pos..])) {
         error = Some("octets after the last IE");
     }
-    let array_end = if error.is_none() { data.len() } else { pos };
+    // The array covers the count and the IEs, not any extension additions
+    // or undecoded octets that follow them.
     if let Some(field) = buf.field_mut(array_idx as usize) {
-        field.range = offset..offset + array_end;
+        field.range = offset..offset + pos;
     }
     buf.end_container(array_idx);
     if let Some(reason) = error {
@@ -834,6 +835,8 @@ mod tests {
         let mut buf = DissectBuffer::new();
         dissect_pdu(&SPEC, &data, &mut buf, 0).unwrap();
         assert!(!names(&buf).contains(&"ie_container_error"));
+        // The `ies` array ends after the IE count, before the additions.
+        assert_eq!(buf.fields()[4].range, 5..7);
     }
 
     #[test]

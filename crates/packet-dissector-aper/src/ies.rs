@@ -86,6 +86,32 @@ pub static FD_TRANSPORT_LAYER_ADDRESS: FieldDescriptor = FieldDescriptor::new(
 pub static FD_GTP_TEID: FieldDescriptor =
     FieldDescriptor::new("gtp_teid", "GTP-TEID", FieldType::U32).optional();
 
+/// `time_to_wait` — the TimeToWait ENUMERATED index.
+pub static FD_TIME_TO_WAIT: FieldDescriptor =
+    FieldDescriptor::new("time_to_wait", "Time To Wait", FieldType::U8).with_display_fn(|v, _| {
+        match v {
+            FieldValue::U8(t) => time_to_wait_name(*t),
+            _ => None,
+        }
+    });
+
+/// Returns the name of a TimeToWait value.
+///
+/// XnAP, F1AP and E1AP all define `TimeToWait ::= ENUMERATED {v1s, v2s,
+/// v5s, v10s, v20s, v60s, ...}` (3GPP TS 38.423, Section 9.3.5; TS 38.473,
+/// Section 9.4.5; TS 37.483, Section 9.4.5).
+pub fn time_to_wait_name(value: u8) -> Option<&'static str> {
+    Some(match value {
+        0 => "v1s",
+        1 => "v2s",
+        2 => "v5s",
+        3 => "v10s",
+        4 => "v20s",
+        5 => "v60s",
+        _ => return None,
+    })
+}
+
 /// Returns a human-readable name for the Cause CHOICE index.
 ///
 /// XnAP, F1AP and E1AP all define `Cause ::= CHOICE { radioNetwork,
@@ -428,6 +454,40 @@ pub fn push_enumerated_field(
     Ok(())
 }
 
+/// Decodes a TimeToWait IE value (see [`time_to_wait_name`]): an
+/// extensible ENUMERATED with six root values (ITU-T Rec. X.691, Section
+/// 14).
+pub fn push_time_to_wait<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    push_enumerated(buf, &FD_TIME_TO_WAIT, 6, true, data, offset)
+}
+
+/// Decodes a `PLMN-Identity ::= OCTET STRING (SIZE(3))` IE value: a
+/// fixed-size OCTET STRING longer than two octets is octet-aligned with
+/// no length (ITU-T Rec. X.691, Section 17.7), so the value is exactly the
+/// three octets.
+///
+/// 3GPP TS 38.423, Section 9.3.5; TS 38.473, Section 9.4.5; TS 37.483,
+/// Section 9.4.5.
+pub fn push_plmn_identity<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    data: &'pkt [u8],
+    offset: usize,
+) -> bool {
+    if data.len() != 3 {
+        return false;
+    }
+    buf.push_field(
+        &FD_PLMN_IDENTITY,
+        FieldValue::Bytes(data),
+        offset..offset + 3,
+    );
+    true
+}
+
 // ── Cause ──────────────────────────────────────────────────────────────
 
 /// A decoded Cause.
@@ -749,6 +809,8 @@ mod tests {
     //! | TS 37.483 9.4.5       | UP-TNL-Information choice-extension      | up_tnl_choice_extension            |
     //! | X.691 16.11           | Address size extension rejected          | up_tnl_size_extension_rejected     |
     //! | —                     | UP TNL as an object                      | up_tnl_object                      |
+    //! | TS 38.473 9.4.5       | TimeToWait                               | time_to_wait                       |
+    //! | TS 38.473 9.4.5       | PLMN-Identity                            | plmn_identity                      |
     //! | —                     | Cause group names                        | cause_group_names                  |
 
     use super::*;
@@ -1180,6 +1242,44 @@ mod tests {
         assert_eq!(buf.fields()[0].range, 20..30);
         let mut r = AperReader::new(&data[..4]);
         assert!(push_up_tnl_object(&mut buf, &FD_OBJ, &mut r, 0).is_err());
+    }
+
+    #[test]
+    fn time_to_wait() {
+        // TimeToWait v10s (pycrate `F1AP_IEs`).
+        let mut buf = DissectBuffer::new();
+        assert!(push_time_to_wait(&mut buf, hex_static("30"), 0));
+        assert_eq!(pushed(&buf), [("time_to_wait", FieldValue::U8(3))]);
+        let names: Vec<_> = (0..7).map(time_to_wait_name).collect();
+        assert_eq!(
+            names,
+            [
+                Some("v1s"),
+                Some("v2s"),
+                Some("v5s"),
+                Some("v10s"),
+                Some("v20s"),
+                Some("v60s"),
+                None
+            ]
+        );
+        let f = FD_TIME_TO_WAIT.display_fn.unwrap();
+        assert_eq!(f(&FieldValue::U8(1), &[]), Some("v2s"));
+        assert_eq!(f(&FieldValue::U16(1), &[]), None);
+    }
+
+    #[test]
+    fn plmn_identity() {
+        let mut buf = DissectBuffer::new();
+        assert!(push_plmn_identity(&mut buf, hex_static("00f110"), 4));
+        assert_eq!(
+            pushed(&buf),
+            [("plmn_identity", FieldValue::Bytes(&[0x00, 0xf1, 0x10]))]
+        );
+        assert_eq!(buf.fields()[0].range, 4..7);
+        assert!(!push_plmn_identity(&mut buf, hex_static("00f1"), 0));
+        assert!(!push_plmn_identity(&mut buf, hex_static("00f11000"), 0));
+        assert_eq!(buf.fields().len(), 1);
     }
 
     #[test]

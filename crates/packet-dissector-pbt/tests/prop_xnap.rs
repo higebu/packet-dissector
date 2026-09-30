@@ -17,7 +17,9 @@ use packet_dissector_xnap::XnapDissector;
 use proptest::prelude::*;
 
 /// IE IDs that have a structured value decoder.
-const DECODED_IE_IDS: &[u16] = &[7, 14, 23, 24, 42, 64, 72, 73, 76, 77, 78, 79, 130, 161, 254];
+const DECODED_IE_IDS: &[u16] = &[
+    7, 14, 23, 24, 27, 29, 42, 64, 71, 72, 73, 76, 77, 78, 79, 130, 161, 254, 313, 314, 457,
+];
 
 /// A valid message (pycrate APER encoding).
 const VALID: &[u8] = &[

@@ -79,14 +79,6 @@ static FD_EUTRA_CELL_IDENTITY: FieldDescriptor = FieldDescriptor::new(
 )
 .optional();
 
-static FD_TIME_TO_WAIT: FieldDescriptor =
-    FieldDescriptor::new("time_to_wait", "Time To Wait", FieldType::U8).with_display_fn(|v, _| {
-        match v {
-            FieldValue::U8(t) => time_to_wait_name(*t),
-            _ => None,
-        }
-    });
-
 static FD_INTERFACE_INSTANCE_INDICATION: FieldDescriptor = FieldDescriptor::new(
     "interface_instance_indication",
     "Interface Instance Indication",
@@ -217,11 +209,6 @@ const UE_XNAP_ID_MAX: u64 = 4_294_967_295;
 /// 3GPP TS 38.423, Section 9.3.5.
 const INTERFACE_INSTANCE_INDICATION_MAX: u64 = 255;
 
-/// `TimeToWait ::= ENUMERATED { v1s, v2s, v5s, v10s, v20s, v60s, ... }`.
-///
-/// 3GPP TS 38.423, Section 9.3.5.
-const TIME_TO_WAIT_ROOT_COUNT: u64 = 6;
-
 /// Root sizes of `CauseRadioNetworkLayer`, `CauseTransportLayer`,
 /// `CauseProtocol` and `CauseMisc`.
 ///
@@ -294,18 +281,11 @@ pub(crate) fn push_ie_value<'pkt>(
         // PDUSessionResourcesAdmitted-List — Section 9.2.1.2.
         42 => push_pdu_session_resources_admitted_list(buf, data, offset),
         // selectedPLMN — PLMN-Identity, Section 9.2.2.4.
-        64 => push_plmn_identity(buf, data, offset),
+        64 => ies::push_plmn_identity(buf, data, offset),
         // SN-to-MN-Container — OCTET STRING, Section 9.1.2.2.
         72 => ies::push_octet_string(buf, &FD_SN_TO_MN_CONTAINER, data, offset),
         // TimeToWait — Section 9.2.3.28.
-        76 => ies::push_enumerated(
-            buf,
-            &FD_TIME_TO_WAIT,
-            TIME_TO_WAIT_ROOT_COUNT,
-            true,
-            data,
-            offset,
-        ),
+        76 => ies::push_time_to_wait(buf, data, offset),
         // Target2SourceNG-RANnodeTranspContainer — OCTET STRING, Section
         // 9.1.1.2.
         77 => ies::push_octet_string(buf, &FD_TARGET_TO_SOURCE_CONTAINER, data, offset),
@@ -325,27 +305,6 @@ pub(crate) fn push_ie_value<'pkt>(
 }
 
 // ── Individual decoders ────────────────────────────────────────────────
-
-/// `PLMN-Identity ::= OCTET STRING (SIZE(3))`: octet-aligned with no
-/// length (ITU-T Rec. X.691, Section 17.7), so the value is exactly the
-/// three octets.
-///
-/// 3GPP TS 38.423, Section 9.2.2.4.
-fn push_plmn_identity<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    data: &'pkt [u8],
-    offset: usize,
-) -> bool {
-    if data.len() != 3 {
-        return false;
-    }
-    buf.push_field(
-        &ies::FD_PLMN_IDENTITY,
-        FieldValue::Bytes(data),
-        offset..offset + 3,
-    );
-    true
-}
 
 /// A decoded node or cell identity: `(descriptor, value, byte range)`.
 type IdField = (&'static FieldDescriptor, FieldValue<'static>, Range<usize>);
@@ -714,21 +673,6 @@ fn push_data_forwarding_info_from_target<'pkt>(
     )
 }
 
-/// Returns the name of a TimeToWait value.
-///
-/// 3GPP TS 38.423, Section 9.3.5.
-fn time_to_wait_name(value: u8) -> Option<&'static str> {
-    Some(match value {
-        0 => "v1s",
-        1 => "v2s",
-        2 => "v5s",
-        3 => "v10s",
-        4 => "v20s",
-        5 => "v60s",
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     //! # 3GPP TS 38.423 IE Decoder Coverage
@@ -862,7 +806,7 @@ mod tests {
     #[test]
     fn plmn_identity() {
         let mut buf = DissectBuffer::new();
-        assert!(!push_plmn_identity(&mut buf, &[0x00], 0));
+        assert!(!push_ie_value(&mut buf, 64, &[0x00], 0, 0));
         assert!(push_ie_value(&mut buf, 64, &[0x00, 0xf1, 0x10], 0, 0));
         assert!(push_ie_value(&mut buf, 24, &[0x01, 0xaa], 0, 0));
         assert!(push_ie_value(&mut buf, 72, &[0x01, 0xbb], 0, 0));
@@ -872,12 +816,6 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(time_to_wait_name(0), Some("v1s"));
-        assert_eq!(time_to_wait_name(3), Some("v10s"));
-        assert_eq!(time_to_wait_name(4), Some("v20s"));
-        assert_eq!(time_to_wait_name(5), Some("v60s"));
-        assert_eq!(time_to_wait_name(2), Some("v5s"));
-        assert_eq!(time_to_wait_name(6), None);
         let f = |d: &FieldDescriptor, v: FieldValue<'_>| (d.display_fn.unwrap())(&v, &[]);
         assert_eq!(
             f(&FD_NODE_CHOICE, FieldValue::U8(2)),
@@ -903,7 +841,6 @@ mod tests {
             Some("choice-extension")
         );
         assert_eq!(f(&FD_CGI_CHOICE, FieldValue::U8(3)), None);
-        assert_eq!(f(&FD_TIME_TO_WAIT, FieldValue::U16(0)), None);
         assert_eq!(
             f(&FD_DL_NG_U_TNL_INFORMATION_UNCHANGED, FieldValue::U8(0)),
             Some("true")

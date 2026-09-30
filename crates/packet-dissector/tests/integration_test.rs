@@ -7822,8 +7822,11 @@ fn integration_ethernet_ipv4_sctp_xnap() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "XnAP"]);
+    // The SCTP layer spans its chunks, so the XnAP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + XNAP_SETUP_FAILURE.len());
     let layer = &buf.layers()[3];
-    assert_eq!(layer.range.len(), XNAP_SETUP_FAILURE.len());
     assert_eq!(
         buf.field_by_name(layer, "pdu_type").unwrap().value,
         FieldValue::U8(2)
@@ -7857,6 +7860,10 @@ fn integration_ethernet_ipv4_sctp_ppid_xnap_nondefault_port() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "XnAP"]);
+    // The SCTP layer spans its chunks, so the XnAP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + XNAP_SETUP_FAILURE.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -7888,8 +7895,11 @@ fn integration_ethernet_ipv4_sctp_f1ap() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "F1AP"]);
+    // The SCTP layer spans its chunks, so the F1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + F1AP_SETUP_FAILURE.len());
     let layer = &buf.layers()[3];
-    assert_eq!(layer.range.len(), F1AP_SETUP_FAILURE.len());
     assert_eq!(
         buf.field_by_name(layer, "pdu_type").unwrap().value,
         FieldValue::U8(2)
@@ -7923,6 +7933,10 @@ fn integration_ethernet_ipv4_sctp_ppid_f1ap_nondefault_port() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "F1AP"]);
+    // The SCTP layer spans its chunks, so the F1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + F1AP_SETUP_FAILURE.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -7954,8 +7968,11 @@ fn integration_ethernet_ipv4_sctp_e1ap() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "E1AP"]);
+    // The SCTP layer spans its chunks, so the E1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + E1AP_SETUP_FAILURE.len());
     let layer = &buf.layers()[3];
-    assert_eq!(layer.range.len(), E1AP_SETUP_FAILURE.len());
     assert_eq!(
         buf.field_by_name(layer, "pdu_type").unwrap().value,
         FieldValue::U8(2)
@@ -7989,6 +8006,10 @@ fn integration_ethernet_ipv4_sctp_ppid_e1ap_nondefault_port() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "E1AP"]);
+    // The SCTP layer spans its chunks, so the E1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + E1AP_SETUP_FAILURE.len());
 }
 
 /// NGAP InitialUEMessage with parsed IE values: RAN-UE-NGAP-ID, NAS-PDU

@@ -14,7 +14,7 @@
 use packet_dissector_aper::ap::{self, MAX_DEPTH};
 use packet_dissector_aper::helpers::{read_sequence_preamble, skip_sequence_tail};
 use packet_dissector_aper::ies;
-use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
+use packet_dissector_core::field::{FieldDescriptor, FieldType};
 use packet_dissector_core::packet::DissectBuffer;
 
 use crate::SPEC;
@@ -42,14 +42,6 @@ static FD_GNB_CU_NAME: FieldDescriptor =
 static FD_C_RNTI: FieldDescriptor = FieldDescriptor::new("c_rnti", "C-RNTI", FieldType::U16);
 
 static FD_SRB_ID: FieldDescriptor = FieldDescriptor::new("srb_id", "SRB ID", FieldType::U8);
-
-static FD_TIME_TO_WAIT: FieldDescriptor =
-    FieldDescriptor::new("time_to_wait", "Time To Wait", FieldType::U8).with_display_fn(|v, _| {
-        match v {
-            FieldValue::U8(t) => time_to_wait_name(*t),
-            _ => None,
-        }
-    });
 
 static FD_RRC_CONTAINER: FieldDescriptor =
     FieldDescriptor::new("rrc_container", "RRC-Container", FieldType::Bytes);
@@ -121,11 +113,6 @@ const SRB_ID_MAX: u64 = 3;
 ///
 /// 3GPP TS 38.473, Section 9.4.5.
 const DRB_ID_AND_LCID_MAX: u64 = 32;
-
-/// `TimeToWait ::= ENUMERATED {v1s, v2s, v5s, v10s, v20s, v60s, ...}`.
-///
-/// 3GPP TS 38.473, Section 9.4.5.
-const TIME_TO_WAIT_ROOT_COUNT: u64 = 6;
 
 /// `PrintableString (SIZE(1..150, ...))` of `GNB-DU-Name` / `GNB-CU-Name`.
 ///
@@ -212,14 +199,7 @@ pub(crate) fn push_ie_value<'pkt>(
         // SRBID — Section 9.3.1.7.
         64 => ies::push_extensible_unsigned(buf, &FD_SRB_ID, SRB_ID_MAX, data, offset),
         // TimeToWait — Section 9.3.1.13.
-        77 => ies::push_enumerated(
-            buf,
-            &FD_TIME_TO_WAIT,
-            TIME_TO_WAIT_ROOT_COUNT,
-            true,
-            data,
-            offset,
-        ),
+        77 => ies::push_time_to_wait(buf, data, offset),
         // TransactionID — Section 9.3.1.23.
         78 => {
             ies::push_extensible_unsigned(buf, &FD_TRANSACTION_ID, TRANSACTION_ID_MAX, data, offset)
@@ -232,7 +212,7 @@ pub(crate) fn push_ie_value<'pkt>(
         128 => ies::push_octet_string(buf, &FD_DU_TO_CU_RRC_CONTAINER, data, offset),
         // ServingPLMN / PLMNAssistanceInfoForNetShar / SelectedPLMNID —
         // PLMN-Identity, Section 9.3.1.14.
-        165 | 221 | 224 => push_plmn_identity(buf, data, offset),
+        165 | 221 | 224 => ies::push_plmn_identity(buf, data, offset),
         // RedirectedRRCmessage — OCTET STRING, Section 9.2.3.2.
         218 => ies::push_octet_string(buf, &FD_REDIRECTED_RRC_MESSAGE, data, offset),
         // RRCContainer-RRCSetupComplete — Section 9.3.1.6.
@@ -242,27 +222,6 @@ pub(crate) fn push_ie_value<'pkt>(
 }
 
 // ── Individual decoders ────────────────────────────────────────────────
-
-/// `PLMN-Identity ::= OCTET STRING (SIZE(3))`: a fixed-size OCTET STRING
-/// longer than two octets is octet-aligned with no length (ITU-T Rec.
-/// X.691, Section 17.7), so the value is exactly the three octets.
-///
-/// 3GPP TS 38.473, Section 9.3.1.14.
-fn push_plmn_identity<'pkt>(
-    buf: &mut DissectBuffer<'pkt>,
-    data: &'pkt [u8],
-    offset: usize,
-) -> bool {
-    if data.len() != 3 {
-        return false;
-    }
-    buf.push_field(
-        &ies::FD_PLMN_IDENTITY,
-        FieldValue::Bytes(data),
-        offset..offset + 3,
-    );
-    true
-}
 
 /// DRBs-Setup-Item / DRBs-SetupMod-Item / DRBs-Modified-Item —
 /// `SEQUENCE { dRBID DRBID, lCID LCID OPTIONAL,
@@ -299,41 +258,18 @@ fn push_drb_item<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: 
     })
 }
 
-/// Returns the name of a TimeToWait value.
-///
-/// 3GPP TS 38.473, Section 9.4.5.
-fn time_to_wait_name(value: u8) -> Option<&'static str> {
-    Some(match value {
-        0 => "v1s",
-        1 => "v2s",
-        2 => "v5s",
-        3 => "v10s",
-        4 => "v20s",
-        5 => "v60s",
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     //! # 3GPP TS 38.473 IE Decoder Coverage
     //!
     //! | Spec Section | Description                           | Test                          |
     //! |--------------|---------------------------------------|-------------------------------|
-    //! | 9.3.1.14     | PLMN identity of the wrong size       | plmn_identity_wrong_size      |
     //! | 9.4.5        | DRB item with extended DRB ID / LCID  | drb_item_extended_drb_id      |
     //! | 9.4.5        | DRB item, malformed                   | drb_item_malformed            |
-    //! | 9.4.5        | Time To Wait names                    | time_to_wait_names            |
     //! | —            | Lists beyond the nesting limit        | lists_beyond_depth_kept_raw   |
 
     use super::*;
-
-    #[test]
-    fn plmn_identity_wrong_size() {
-        let mut buf = DissectBuffer::new();
-        assert!(!push_plmn_identity(&mut buf, &[0x00, 0xf1], 0));
-        assert!(buf.fields().is_empty());
-    }
+    use packet_dissector_core::field::FieldValue;
 
     #[test]
     fn drb_item_extended_drb_id() {
@@ -375,16 +311,6 @@ mod tests {
         assert!(buf.fields().is_empty());
         assert!(!push_drb_item(&mut buf, &valid[..8], 0));
         assert!(buf.fields().is_empty());
-    }
-
-    #[test]
-    fn time_to_wait_names() {
-        assert_eq!(time_to_wait_name(0), Some("v1s"));
-        assert_eq!(time_to_wait_name(5), Some("v60s"));
-        assert_eq!(time_to_wait_name(6), None);
-        let f = FD_TIME_TO_WAIT.display_fn.unwrap();
-        assert_eq!(f(&FieldValue::U8(1), &[]), Some("v2s"));
-        assert_eq!(f(&FieldValue::U16(1), &[]), None);
     }
 
     #[test]
