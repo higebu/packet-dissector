@@ -634,9 +634,17 @@ impl Dissector for TcpDissector {
 
         buf.end_layer();
 
-        // Compute TCP payload length from the IP layer's total/payload length
-        let payload_len =
-            ip_payload_len(buf, offset, header_len).unwrap_or(data.len() - header_len);
+        // Compute TCP payload length from the IP layer's total/payload length.
+        // The IP length can exceed the captured bytes (snaplen truncation),
+        // and the captured bytes can exceed it when the segment comes from a
+        // reassembled IP datagram, whose length is not in the header of the
+        // fragment that completed it (RFC 791, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2). The dispatch
+        // loop already ends `data` at the IP length otherwise, so the larger
+        // of the two is the segment's length.
+        let captured_len = data.len() - header_len;
+        let payload_len = ip_payload_len(buf, offset, header_len)
+            .map_or(captured_len, |ip_len| ip_len.max(captured_len));
 
         match extract_stream_key(buf, src_port, dst_port) {
             Some(key) => Ok(DissectResult::with_tcp_context(

@@ -856,6 +856,12 @@ static FRAGMENT_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("m_flag", "More Fragments", FieldType::U8),
     // RFC 8200, Section 4.5 — Identification (32 bits)
     FieldDescriptor::new("identification", "Identification", FieldType::U32),
+    // Not emitted by this dissector: the registry's IP fragment reassembly
+    // appends them to the Fragment layer of the fragment that completes a
+    // packet (number of fragments, length of the reassembled Fragmentable
+    // Part).
+    FieldDescriptor::new("fragment_count", "Fragment Count", FieldType::U32).optional(),
+    FieldDescriptor::new("reassembled_length", "Reassembled Length", FieldType::U32).optional(),
 ];
 
 impl Dissector for FragmentDissector {

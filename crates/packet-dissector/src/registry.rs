@@ -75,6 +75,9 @@ pub struct DissectorRegistry {
     /// Factory functions for creating fresh dissector instances by decode-as name.
     /// Keys are lowercase protocol names (e.g., "http", "dns", "dns.tcp").
     dissector_factories: HashMap<String, fn() -> Box<dyn Dissector>>,
+    /// Centralized IP fragment reassembly service.
+    #[cfg(feature = "ip-reassembly")]
+    pub(crate) ip_reassembly: std::sync::Mutex<super::ip_reassembly::IpReassemblyService>,
     /// Centralized TCP stream reassembly service.
     #[cfg(feature = "tcp")]
     pub(crate) tcp_reassembly: std::sync::Mutex<super::tcp_reassembly::TcpReassemblyService>,
@@ -101,6 +104,8 @@ impl DissectorRegistry {
             by_link_type: HashMap::new(),
             by_ach_channel_type: HashMap::new(),
             dissector_factories: HashMap::new(),
+            #[cfg(feature = "ip-reassembly")]
+            ip_reassembly: super::ip_reassembly::new_ip_reassembly(),
             #[cfg(feature = "tcp")]
             tcp_reassembly: super::tcp_reassembly::new_tcp_reassembly(),
             #[cfg(feature = "esp-decrypt")]
@@ -1008,7 +1013,7 @@ impl DissectorRegistry {
     /// The predicate is a generic parameter (not `&mut dyn FnMut`) so the
     /// full-dissection instantiation inlines the always-`false` predicate
     /// and keeps the existing fast path free of indirect calls.
-    fn dispatch_loop<'pkt, F>(
+    pub(crate) fn dispatch_loop<'pkt, F>(
         &self,
         data: &'pkt [u8],
         buf: &mut DissectBuffer<'pkt>,
@@ -1151,6 +1156,25 @@ impl DissectorRegistry {
                 break;
             }
 
+            // IP fragment reassembly middleware: a fragment's data is
+            // buffered, and the packet that completes a datagram continues
+            // with the upper layers of the reassembled datagram. Packets
+            // carrying an incomplete datagram end here, including the first
+            // fragment. A fragment whose data was not captured in full
+            // (snaplen truncation) cannot be reassembled.
+            // RFC 791, Section 3.2 —
+            // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+            // RFC 8200, Section 4.5 —
+            // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
+            #[cfg(feature = "ip-reassembly")]
+            if let Some(ref ctx) = result.ip_fragment_context {
+                if end.saturating_sub(offset) < ctx.payload_len {
+                    break;
+                }
+                let payload = &data[offset..offset + ctx.payload_len];
+                return self.handle_ip_fragment(ctx, payload, buf, offset, stop);
+            }
+
             // TCP reassembly middleware: if the dissector provided TCP stream
             // context, buffer the payload and pass reassembled contiguous data
             // to the upper-layer dissector.
@@ -1228,7 +1252,7 @@ impl DissectorRegistry {
         }
     }
 
-    fn aux_bytes<'pkt>(
+    pub(crate) fn aux_bytes<'pkt>(
         buf: &DissectBuffer<'pkt>,
         aux_handle: AuxDataHandle,
         range: core::ops::Range<usize>,
@@ -1241,8 +1265,9 @@ impl DissectorRegistry {
         // the `DissectBuffer`. We extend the borrow lifetime from `'_` to `'pkt`
         // because the `DissectBuffer<'pkt>` owns the `Box<[u8]>` and will not
         // drop or modify it until `clear()` is called (which resets the lifetime).
-        // The caller (`merge_tmp_buf`) only uses this during a single `dissect`
-        // call, before `clear()` is invoked for the next packet.
+        // The callers (`merge_tmp_buf` and the IP reassembly middleware) only
+        // use this during a single `dissect` call, before `clear()` is invoked
+        // for the next packet.
         unsafe {
             core::slice::from_raw_parts(slice.as_ptr(), slice.len())
         }

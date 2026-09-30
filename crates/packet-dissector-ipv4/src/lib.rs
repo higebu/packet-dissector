@@ -75,6 +75,11 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("options", "Options", FieldType::Array)
         .optional()
         .with_children(options::OPTION_CHILDREN),
+    // Not emitted by this dissector: the registry's IP fragment reassembly
+    // appends them to the IPv4 layer of the fragment that completes a
+    // datagram (number of fragments, length of the reassembled data).
+    FieldDescriptor::new("fragment_count", "Fragment Count", FieldType::U32).optional(),
+    FieldDescriptor::new("reassembled_length", "Reassembled Length", FieldType::U32).optional(),
 ];
 
 /// IPv4 dissector.

@@ -70,3 +70,23 @@ fn zero_alloc_dissect_ipv4_with_options() {
     );
     assert_eq!(buf.layers().len(), 1);
 }
+
+#[test]
+fn zero_alloc_dissect_ipv4_fragment() {
+    // Non-initial fragment: MF=1, Fragment Offset=1 (RFC 791, Section 3.1).
+    // Building the reassembly context must not allocate.
+    let raw: &[u8] = &[
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x2a, 0x20, 0x01, 0x40, 0x11, 0x00, 0x00, //
+        0x0a, 0x00, 0x00, 0x01, 0x0a, 0x00, 0x00, 0x02, //
+        0xde, 0xad, 0xbe, 0xef, 0x00, 0x10, 0x00, 0x00,
+    ];
+    let mut buf = DissectBuffer::new();
+
+    let mut result = None;
+    let allocs = count_allocs(|| {
+        buf.clear();
+        result = Some(Ipv4Dissector.dissect(raw, &mut buf, 0).unwrap());
+    });
+    assert_eq!(allocs, 0, "IPv4 fragment dissect allocated {allocs} times");
+    assert!(result.unwrap().ip_fragment_context.is_some());
+}
