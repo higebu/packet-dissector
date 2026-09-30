@@ -1984,6 +1984,18 @@ impl Default for DissectorRegistry {
             Box::new(packet_dissector_ethernet::EthernetDissector),
         ));
 
+        // IEEE 802.1Q C-Tag (0x8100) and IEEE 802.1ad S-Tag (0x88A8) reached
+        // by EtherType dispatch (e.g. SLL/SLL2 protocol type, GRE protocol
+        // type); tags right after an Ethernet header are parsed inline by
+        // the Ethernet dissector.
+        // IEEE 802.1Q-2022, clause 9.6 — https://standards.ieee.org/ieee/802.1Q/10323/
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_builtin(
+                reg.register_by_ethertype(tpid, Box::new(packet_dissector_ethernet::VlanDissector)),
+            );
+        }
+
         // LINKTYPE_LINUX_SLL (113) — Linux cooked capture v1
         #[cfg(feature = "linux_sll")]
         {
@@ -4059,6 +4071,15 @@ mod tests {
 
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_ethertype(0x6558).is_some());
+
+        // IEEE 802.1Q-2022, clause 9.6 — standalone C-Tag / S-Tag.
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_eq!(
+                reg.get_by_ethertype(tpid).map(|d| d.short_name()),
+                Some("VLAN")
+            );
+        }
 
         #[cfg(feature = "ipv4")]
         {

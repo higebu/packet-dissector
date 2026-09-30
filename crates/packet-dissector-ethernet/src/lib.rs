@@ -22,8 +22,10 @@
 
 pub mod llc;
 mod snap;
+mod vlan;
 
 pub use snap::SnapDissector;
+pub use vlan::VlanDissector;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
@@ -45,6 +47,20 @@ const TPID_8021Q: u16 = 0x8100;
 /// IEEE 802.1Q-2022, clause 9.6 (originally introduced by IEEE 802.1ad-2005
 /// and rolled into IEEE 802.1Q-2011 and later).
 const TPID_8021AD: u16 = 0x88A8;
+
+/// Size of a VLAN tag (TPID + TCI), and equally of the TCI plus the
+/// Length/Type that follows it. IEEE 802.1Q-2022, clause 9.6.
+const TAG_SIZE: usize = 4;
+
+/// Split a Tag Control Information value into (PCP, DEI, VID).
+/// IEEE 802.1Q-2022, clause 9.6 — bit layout (MSB first): PCP[3] | DEI[1] | VID[12].
+fn split_tci(tci: u16) -> (u8, u8, u16) {
+    (
+        ((tci >> 13) & 0x07) as u8,
+        ((tci >> 12) & 0x01) as u8,
+        tci & 0x0FFF,
+    )
+}
 
 /// Minimum value of a valid EtherType field in an Ethernet II frame.
 /// IEEE 802.3-2022, clause 3.2.6: values less than 0x0600 indicate a length field
@@ -106,6 +122,18 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("novell_raw", "Novell raw IEEE 802.3 (IPX)", FieldType::U8).optional(),
 ];
 
+static TYPE_LENGTH_FIELDS: TypeLengthFields = TypeLengthFields {
+    ethertype: &FIELD_DESCRIPTORS[FD_ETHERTYPE],
+    length: &FIELD_DESCRIPTORS[FD_LENGTH],
+    llc: [
+        &FIELD_DESCRIPTORS[FD_LLC_DSAP],
+        &FIELD_DESCRIPTORS[FD_LLC_SSAP],
+        &FIELD_DESCRIPTORS[FD_LLC_CONTROL],
+        &FIELD_DESCRIPTORS[FD_LLC_CONTROL_EXT],
+    ],
+    novell_raw: &FIELD_DESCRIPTORS[FD_NOVELL_RAW],
+};
+
 /// Returns a human-readable name for well-known EtherType values.
 pub(crate) fn ethertype_name(v: u16) -> Option<&'static str> {
     match v {
@@ -120,6 +148,89 @@ pub(crate) fn ethertype_name(v: u16) -> Option<&'static str> {
         0x88CC => Some("LLDP"),
         _ => None,
     }
+}
+
+/// Field descriptors a dissector uses for the Type/Length field and what
+/// follows it (see [`dissect_type_or_length`]).
+pub(crate) struct TypeLengthFields {
+    pub(crate) ethertype: &'static FieldDescriptor,
+    pub(crate) length: &'static FieldDescriptor,
+    pub(crate) llc: [&'static FieldDescriptor; 4],
+    pub(crate) novell_raw: &'static FieldDescriptor,
+}
+
+/// Decode the 2-octet Length/Type value that ends at `header_len` in `data`
+/// (IEEE 802.3-2022, clause 3.2.6), shared by the Ethernet header and a
+/// standalone IEEE 802.1Q tag (IEEE 802.1Q-2022, clause 9.6).
+///
+/// An EtherType dispatches by EtherType; a Length is followed by an
+/// IEEE 802.2 LLC header (or a Novell raw IPX packet) that is decoded here.
+/// Returns the header length including any LLC header, the dispatch hint,
+/// and the payload bound set by a Length value.
+pub(crate) fn dissect_type_or_length<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    mut header_len: usize,
+    current_type: u16,
+    fds: &TypeLengthFields,
+) -> Result<(usize, DispatchHint, Option<usize>), PacketError> {
+    let mut llc_payload_len = None;
+    let dispatch_hint = if current_type <= LENGTH_MAX {
+        // IEEE 802.3-2022, clause 3.2.6: values ≤ 1500 indicate a length field
+        // (IEEE 802.3 frame with LLC encapsulation).
+        buf.push_field(
+            fds.length,
+            FieldValue::U16(current_type),
+            offset + header_len - 2..offset + header_len,
+        );
+        let llc_start = header_len;
+        // IEEE 802.3-2022, clause 3.2.6: the Length value is the number of
+        // MAC client data octets (the LLC PDU) that follow. Octets after
+        // them are Pad (clause 3.2.8), so the data handed to the LLC
+        // client ends at the Length value.
+        let client_end = llc_start + current_type as usize;
+        let client_data = &data[llc_start..client_end.min(data.len())];
+
+        if client_data.starts_with(&NOVELL_RAW_MARKER) {
+            // Novell raw 802.3: an IPX packet (starting with its 0xFFFF
+            // checksum) directly follows the Length field, without an
+            // LLC header. The flag has no octets of its own.
+            buf.push_field(
+                fds.novell_raw,
+                FieldValue::U8(1),
+                offset + llc_start..offset + llc_start,
+            );
+            llc_payload_len = Some(current_type as usize);
+            DispatchHint::End
+        } else {
+            // IEEE 802.2 — DSAP, SSAP, then a 1-octet (U-format) or
+            // 2-octet (I-/S-format) control field.
+            // A Length shorter than the LLC header is tolerated: the
+            // header is still decoded and the client data is empty.
+            let llc = llc::LlcHeader::parse_at(data, llc_start, data.len())?;
+            llc.push_fields(buf, fds.llc, offset + llc_start);
+            llc_payload_len = Some((current_type as usize).saturating_sub(llc.header_len()));
+            header_len = llc_start + llc.header_len();
+            llc.next_hint()
+        }
+    } else if current_type < ETHERTYPE_MIN {
+        // IEEE 802.3-2022, clause 3.2.6: values 1501–1535 are undefined/reserved.
+        return Err(PacketError::InvalidFieldValue {
+            field: "type_length",
+            value: current_type as u32,
+        });
+    } else {
+        // Valid Ethernet II EtherType (≥ 0x0600).
+        buf.push_field(
+            fds.ethertype,
+            FieldValue::U16(current_type),
+            offset + header_len - 2..offset + header_len,
+        );
+
+        DispatchHint::ByEtherType(current_type)
+    };
+    Ok((header_len, dispatch_hint, llc_payload_len))
 }
 
 /// Ethernet II frame dissector.
@@ -214,7 +325,7 @@ impl Dissector for EthernetDissector {
         // a VLAN TPID. If a VLAN TPID is present but the remaining data cannot
         // hold the required 4-byte tag, the frame is truncated.
         while current_type == TPID_8021Q || current_type == TPID_8021AD {
-            let vlan_end = header_len + 4;
+            let vlan_end = header_len + TAG_SIZE;
             if data.len() < vlan_end {
                 return Err(PacketError::Truncated {
                     expected: vlan_end,
@@ -224,10 +335,7 @@ impl Dissector for EthernetDissector {
 
             // IEEE 802.1Q-2022, clause 9.6: Tag Control Information (TCI), 2 octets.
             // Bit layout (MSB first): PCP[3] | DEI[1] | VID[12].
-            let tci = read_be_u16(data, header_len)?;
-            let pcp = (tci >> 13) & 0x07;
-            let dei = (tci >> 12) & 0x01;
-            let vlan_id = tci & 0x0FFF;
+            let (pcp, dei, vlan_id) = split_tci(read_be_u16(data, header_len)?);
             let inner_type = read_be_u16(data, header_len + 2)?;
 
             buf.push_field(
@@ -237,12 +345,12 @@ impl Dissector for EthernetDissector {
             );
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_VLAN_PCP],
-                FieldValue::U8(pcp as u8),
+                FieldValue::U8(pcp),
                 offset + header_len..offset + header_len + 2,
             );
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_VLAN_DEI],
-                FieldValue::U8(dei as u8),
+                FieldValue::U8(dei),
                 offset + header_len..offset + header_len + 2,
             );
             buf.push_field(
@@ -255,70 +363,14 @@ impl Dissector for EthernetDissector {
             current_type = inner_type;
         }
 
-        let mut llc_payload_len = None;
-        let dispatch_hint = if current_type <= LENGTH_MAX {
-            // IEEE 802.3-2022, clause 3.2.6: values ≤ 1500 indicate a length field
-            // (IEEE 802.3 frame with LLC encapsulation).
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_LENGTH],
-                FieldValue::U16(current_type),
-                offset + header_len - 2..offset + header_len,
-            );
-            let llc_start = header_len;
-            // IEEE 802.3-2022, clause 3.2.6: the Length value is the number of
-            // MAC client data octets (the LLC PDU) that follow. Octets after
-            // them are Pad (clause 3.2.8), so the data handed to the LLC
-            // client ends at the Length value.
-            let client_end = llc_start + current_type as usize;
-            let client_data = &data[llc_start..client_end.min(data.len())];
-
-            if client_data.starts_with(&NOVELL_RAW_MARKER) {
-                // Novell raw 802.3: an IPX packet (starting with its 0xFFFF
-                // checksum) directly follows the Length field, without an
-                // LLC header. The flag has no octets of its own.
-                buf.push_field(
-                    &FIELD_DESCRIPTORS[FD_NOVELL_RAW],
-                    FieldValue::U8(1),
-                    offset + llc_start..offset + llc_start,
-                );
-                llc_payload_len = Some(current_type as usize);
-                DispatchHint::End
-            } else {
-                // IEEE 802.2 — DSAP, SSAP, then a 1-octet (U-format) or
-                // 2-octet (I-/S-format) control field.
-                // A Length shorter than the LLC header is tolerated: the
-                // header is still decoded and the client data is empty.
-                let llc = llc::LlcHeader::parse_at(data, llc_start, data.len())?;
-                llc.push_fields(
-                    buf,
-                    [
-                        &FIELD_DESCRIPTORS[FD_LLC_DSAP],
-                        &FIELD_DESCRIPTORS[FD_LLC_SSAP],
-                        &FIELD_DESCRIPTORS[FD_LLC_CONTROL],
-                        &FIELD_DESCRIPTORS[FD_LLC_CONTROL_EXT],
-                    ],
-                    offset + llc_start,
-                );
-                llc_payload_len = Some((current_type as usize).saturating_sub(llc.header_len()));
-                header_len = llc_start + llc.header_len();
-                llc.next_hint()
-            }
-        } else if current_type < ETHERTYPE_MIN {
-            // IEEE 802.3-2022, clause 3.2.6: values 1501–1535 are undefined/reserved.
-            return Err(PacketError::InvalidFieldValue {
-                field: "type_length",
-                value: current_type as u32,
-            });
-        } else {
-            // Valid Ethernet II EtherType (≥ 0x0600).
-            buf.push_field(
-                &FIELD_DESCRIPTORS[FD_ETHERTYPE],
-                FieldValue::U16(current_type),
-                offset + header_len - 2..offset + header_len,
-            );
-
-            DispatchHint::ByEtherType(current_type)
-        };
+        let (header_len, dispatch_hint, llc_payload_len) = dissect_type_or_length(
+            data,
+            buf,
+            offset,
+            header_len,
+            current_type,
+            &TYPE_LENGTH_FIELDS,
+        )?;
 
         // Now that we know the header length, add the layer with the correct field range.
         let layer_field_end = buf.field_count();
