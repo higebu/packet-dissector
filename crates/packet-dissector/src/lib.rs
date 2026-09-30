@@ -217,6 +217,12 @@ pub mod dissectors {
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
 
+    #[cfg(feature = "m3ua")]
+    pub use packet_dissector_m3ua as m3ua;
+
+    #[cfg(feature = "sccp")]
+    pub use packet_dissector_sccp as sccp;
+
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
 
