@@ -269,9 +269,7 @@ fn enclosing_ip(buf: &DissectBuffer<'_>, offset: usize) -> Option<EnclosingIp> {
                 // Routing header, the Destination Address used in the
                 // pseudo-header is that of the final destination."
                 // https://www.rfc-editor.org/rfc/rfc8200#section-8.1
-                ("segments_left", FieldValue::U8(left))
-                    if *left != 0 && (ext.name == "IPv6 Routing" || ext.name == "SRv6") =>
-                {
+                ("segments_left", FieldValue::U8(left)) if *left != 0 => {
                     final_addrs = false;
                 }
                 // RFC 6275, Section 9.3.1 — the receiver processes the option
@@ -460,7 +458,7 @@ mod tests {
     //! | RFC 3720 B.4    | CRC32c examples (SCTP checksum algorithm)   | crc32c_rfc3720_vectors                      |
     //! | RFC 8200 §8.1   | IP payload bounded by the IP header         | ip_payload_is_the_rest_of_the_datagram      |
     //! | RFC 8200 §8.1   | Routing header only affects pseudo-header   | ip_payload_checksum_ignores_routing_header  |
-    //! | RFC 8200 §8.1   | Segments Left read from Routing headers only | segments_left_only_counts_in_routing_headers |
+    //! | RFC 8200 §8.1   | Segments Left in any extension layer        | segments_left_in_any_extension_layer_counts |
 
     use super::*;
 
@@ -895,19 +893,20 @@ mod tests {
     }
 
     #[test]
-    fn segments_left_only_counts_in_routing_headers() {
-        // A field of the same name in another layer (e.g. an upper-layer
-        // protocol dissected before this message) is not a Routing header.
+    fn segments_left_in_any_extension_layer_counts() {
+        // Any Routing header type (SRv6, RPL Source Routing, ...) is
+        // dissected under its own layer name; a pending segment in any of
+        // them leaves the final destination unknown.
         let mut msg = vec![128, 0, 0, 0, 0x12, 0x34, 0x00, 0x01];
         fill_checksum(&v6_pseudo(58, msg.len() as u32), &mut msg, 2);
         let mut buf = DissectBuffer::new();
         push_ipv6(&mut buf, 24 + msg.len() as u16);
-        buf.begin_layer("Other", None, EXT_FIELDS, 40..64);
+        buf.begin_layer("Other Routing", None, EXT_FIELDS, 40..64);
         buf.push_field(&EXT_FIELDS[0], FieldValue::U8(2), 43..44);
         buf.end_layer();
         assert_eq!(
             verify_pseudo_header_checksum(&buf, 64, 58, &msg, None),
-            ChecksumStatus::Good
+            ChecksumStatus::Unverified
         );
     }
 }

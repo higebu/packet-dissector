@@ -365,8 +365,20 @@ impl Dissector for VrrpDissector {
             // https://www.rfc-editor.org/rfc/rfc3768#section-5.3.8
             let status = if ipv6 {
                 verify_pseudo_header_checksum(buf, offset, IP_PROTO_VRRP, data, Some(total_pos))
+            } else if internet_checksum(&[&data[..total_pos]]) == 0 {
+                ChecksumStatus::Good
+            } else if !is_v2
+                && verify_pseudo_header_checksum(buf, offset, IP_PROTO_VRRP, data, Some(total_pos))
+                    == ChecksumStatus::Good
+            {
+                // RFC 5798, Section 5.2.8 included the pseudo-header for IPv4
+                // as well; RFC 9568, Section 1.1 clarified that it does not.
+                // Senders that follow RFC 5798 are still valid.
+                // https://www.rfc-editor.org/rfc/rfc5798#section-5.2.8
+                // https://www.rfc-editor.org/rfc/rfc9568#section-1.1
+                ChecksumStatus::Good
             } else {
-                ChecksumStatus::from_valid(internet_checksum(&[&data[..total_pos]]) == 0)
+                ChecksumStatus::Bad
             };
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
@@ -445,6 +457,7 @@ mod tests {
     // | 5.2.8       | Checksum                      | parse_vrrp_ipv4_advertisement       |
     // | 5.2.8       | Checksum verified (IPv4)      | checksum_status_ipv4                |
     // | 5.2.8       | IPv6 without IP addresses     | checksum_status_ipv6_without_ip_layer_fields |
+    // | 5.2.8 (5798) | IPv4 with RFC 5798 pseudo-header | checksum_status_ipv4_rfc5798_pseudo_header |
     // | 5.2.9       | IPvX Addresses (IPv4)         | parse_vrrp_ipv4_advertisement       |
     // | 5.2.9       | IPvX Addresses (IPv6)         | parse_vrrp_ipv6_advertisement       |
     // | 5.2.9       | Address serialization         | address_child_field_has_no_format_fn|
@@ -1057,5 +1070,44 @@ mod tests {
         buf.set_verify_checksums(true);
         VrrpDissector.dissect(&raw, &mut buf, 40).unwrap();
         assert_eq!(checksum_status(&buf), Some(2));
+    }
+
+    #[test]
+    fn checksum_status_ipv4_rfc5798_pseudo_header() {
+        // RFC 5798, Section 5.2.8 included a pseudo-header for IPv4 too;
+        // RFC 9568, Section 1.1 clarified that it does not. Implementations
+        // following RFC 5798 are still accepted.
+        // https://www.rfc-editor.org/rfc/rfc5798#section-5.2.8
+        // https://www.rfc-editor.org/rfc/rfc9568#section-1.1
+        static IPV4_FIELDS: &[FieldDescriptor] = &[
+            FieldDescriptor::new("total_length", "Total Length", FieldType::U16),
+            FieldDescriptor::new("flags", "Flags", FieldType::U8),
+            FieldDescriptor::new("fragment_offset", "Fragment Offset", FieldType::U16),
+            FieldDescriptor::new("src", "Source Address", FieldType::Ipv4Addr),
+            FieldDescriptor::new("dst", "Destination Address", FieldType::Ipv4Addr),
+        ];
+        let src = [192, 168, 1, 2];
+        let dst = [224, 0, 0, 18];
+        let mut raw = vec![
+            0x31, 0x01, 0x64, 0x01, 0x00, 0x64, 0x00, 0x00, 192, 168, 1, 1,
+        ];
+        let mut pseudo = Vec::new();
+        pseudo.extend_from_slice(&src);
+        pseudo.extend_from_slice(&dst);
+        pseudo.extend_from_slice(&[0, 112, 0, raw.len() as u8]);
+        let c = packet_dissector_core::checksum::internet_checksum(&[&pseudo, &raw]);
+        raw[6..8].copy_from_slice(&c.to_be_bytes());
+
+        let mut buf = DissectBuffer::new();
+        buf.set_verify_checksums(true);
+        buf.begin_layer("IPv4", None, IPV4_FIELDS, 0..20);
+        buf.push_field(&IPV4_FIELDS[0], FieldValue::U16(32), 2..4);
+        buf.push_field(&IPV4_FIELDS[1], FieldValue::U8(0), 6..7);
+        buf.push_field(&IPV4_FIELDS[2], FieldValue::U16(0), 6..8);
+        buf.push_field(&IPV4_FIELDS[3], FieldValue::Ipv4Addr(src), 12..16);
+        buf.push_field(&IPV4_FIELDS[4], FieldValue::Ipv4Addr(dst), 16..20);
+        buf.end_layer();
+        VrrpDissector.dissect(&raw, &mut buf, 20).unwrap();
+        assert_eq!(checksum_status(&buf), Some(1));
     }
 }

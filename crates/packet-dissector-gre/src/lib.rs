@@ -467,10 +467,11 @@ fn dissect_v0<'pkt>(
         pos += 4;
     }
     if buf.verify_checksums() {
-        // RFC 2784, Section 2.5 — "the Checksum field contains the IP (one's
+        // RFC 2784, Section 2.5 — "The Checksum field contains the IP (one's
         // complement) checksum sum of the all the 16 bit words in the GRE
-        // header and the payload packet." It is present only with C=1
-        // (Section 2.1); otherwise the status sits on the C bit.
+        // header and the payload packet. [...] This field is present only if
+        // the Checksum Present bit is set to one." Without it the status
+        // sits on the C bit.
         // https://www.rfc-editor.org/rfc/rfc2784#section-2.5
         let (status, range) = if c_flag {
             (
@@ -1419,7 +1420,9 @@ mod tests {
     #[test]
     fn field_descriptors_consistent() {
         let descs = GreDissector.field_descriptors();
-        assert_eq!(descs.len(), 21);
+        assert_eq!(descs.len(), 22);
+        assert_eq!(descs[FD_CHECKSUM_STATUS].name, "checksum_status");
+        assert!(descs[FD_CHECKSUM_STATUS].optional);
         assert_eq!(descs[FD_CHECKSUM_PRESENT].name, "checksum_present");
         assert_eq!(descs[FD_KEY_PRESENT].name, "key_present");
         assert_eq!(

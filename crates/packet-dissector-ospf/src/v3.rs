@@ -9,7 +9,9 @@
 //! - RFC 8666 (Segment Routing): <https://www.rfc-editor.org/rfc/rfc8666>
 //! - RFC 9513 (SRv6): <https://www.rfc-editor.org/rfc/rfc9513>
 
-use packet_dissector_core::checksum::{checksum_status_descriptor, verify_pseudo_header_checksum};
+use packet_dissector_core::checksum::{
+    ChecksumStatus, checksum_status_descriptor, verify_pseudo_header_checksum,
+};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
 };
@@ -352,6 +354,7 @@ impl Dissector for Ospfv3Dissector {
             FieldValue::U16(checksum),
             offset + 12..offset + 14,
         );
+        let mut checksum_status_idx = None;
         if buf.verify_checksums() {
             // RFC 5340, Appendix A.3.1 — the standard IPv6 upper-layer
             // checksum; "The "Upper-Layer Packet Length" in the pseudo-header
@@ -360,6 +363,7 @@ impl Dissector for Ospfv3Dissector {
             // https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.1
             let status =
                 verify_pseudo_header_checksum(buf, offset, IP_PROTO_OSPF, data, Some(total_len));
+            checksum_status_idx = Some(buf.fields().len());
             buf.push_field(
                 &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
                 status.to_field_value(),
@@ -641,6 +645,13 @@ impl Dissector for Ospfv3Dissector {
                     &FIELD_DESCRIPTORS[FD_AUTH_TRAILER],
                 );
                 consumed += len;
+                // RFC 7166, Section 4.2 — "For received OSPFv3 packets
+                // including an OSPFv3 Authentication Trailer, OSPFv3 header
+                // checksum verification MUST be omitted."
+                // https://www.rfc-editor.org/rfc/rfc7166#section-4.2
+                if let Some(field) = checksum_status_idx.and_then(|i| buf.field_mut(i)) {
+                    field.value = ChecksumStatus::NotPresent.to_field_value();
+                }
             }
         }
 
@@ -700,6 +711,7 @@ mod tests {
     // | RFC 7166 Sec. 2.1, 4.1 | Authentication Trailer     | parse_hello_lls_and_auth_trailer,         |
     // |                     |                               | parse_hello_without_at_bit_ignores_trailer, |
     // |                     |                               | parse_auth_trailer_on_lsack_and_dd        |
+    // | RFC 7166 Sec. 4.2   | No header checksum with AT    | checksum_status_not_present_with_auth_trailer |
 
     /// Build an OSPFv3 common header (16 bytes).
     fn build_header(ospf_type: u8, packet_length: u16, router_id: [u8; 4]) -> Vec<u8> {
@@ -1739,5 +1751,36 @@ mod tests {
         let mut buf = DissectBuffer::new();
         let result = Ospfv3Dissector.dissect(&pkt, &mut buf, 0).unwrap();
         assert_eq!(result.bytes_consumed, pkt.len());
+    }
+
+    #[test]
+    fn checksum_status_not_present_with_auth_trailer() {
+        // RFC 7166, Section 4.2 — "For received OSPFv3 packets including an
+        // OSPFv3 Authentication Trailer, OSPFv3 header checksum verification
+        // MUST be omitted."
+        // https://www.rfc-editor.org/rfc/rfc7166#section-4.2
+        let mut pkt = build_header(1, 36, [1, 1, 1, 1]);
+        pkt.extend(hello_body(0x413)); // AT | V6 | E | R
+        pkt.extend(auth_trailer());
+        let mut buf = DissectBuffer::new();
+        buf.set_verify_checksums(true);
+        Ospfv3Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("OSPFv3").unwrap();
+        let status = buf.field_by_name(layer, "checksum_status").unwrap();
+        assert_eq!(status.value, FieldValue::U8(3));
+        assert_eq!(status.range, 12..14);
+
+        // Without the trailer there is no enclosing IPv6 layer here, so the
+        // pseudo-header is unknown.
+        let mut pkt = build_header(1, 36, [1, 1, 1, 1]);
+        pkt.extend(hello_body(0x013));
+        let mut buf = DissectBuffer::new();
+        buf.set_verify_checksums(true);
+        Ospfv3Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("OSPFv3").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "checksum_status").unwrap().value,
+            FieldValue::U8(2)
+        );
     }
 }

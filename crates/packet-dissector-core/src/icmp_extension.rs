@@ -7,7 +7,7 @@
 //! - RFC 5837 (Interface Information Object, Class-Num 2): <https://www.rfc-editor.org/rfc/rfc5837>
 //! - RFC 8335 (Interface Identification Object, Class-Num 3): <https://www.rfc-editor.org/rfc/rfc8335>
 
-use crate::checksum::{ChecksumStatus, checksum_status_descriptor, internet_checksum, ip_payload};
+use crate::checksum::{ChecksumStatus, checksum_status_descriptor, verify_ip_payload_checksum};
 use crate::field::{FieldDescriptor, FieldType, FieldValue};
 use crate::packet::DissectBuffer;
 use crate::util::{read_be_u16, read_be_u32};
@@ -154,12 +154,7 @@ pub fn push_extension_structure<'pkt>(
         let status = if checksum == 0 {
             ChecksumStatus::NotPresent
         } else {
-            match ip_payload(buf, offset, data) {
-                Some(s) if s.len() == data.len() => {
-                    ChecksumStatus::from_valid(internet_checksum(&[data]) == 0)
-                }
-                _ => ChecksumStatus::Unverified,
-            }
+            verify_ip_payload_checksum(buf, offset, data)
         };
         buf.push_field(
             &EXTENSION_CHILDREN[EXT_CHECKSUM_STATUS],

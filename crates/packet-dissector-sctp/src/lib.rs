@@ -2684,7 +2684,9 @@ mod tests {
     #[test]
     fn field_descriptors_list() {
         let descs = SctpDissector.field_descriptors();
-        assert_eq!(descs.len(), 5);
+        assert_eq!(descs.len(), 6);
+        assert_eq!(descs[FD_CHECKSUM_STATUS].name, "checksum_status");
+        assert!(descs[FD_CHECKSUM_STATUS].optional);
         assert_eq!(descs[FD_SRC_PORT].name, "src_port");
         assert_eq!(descs[FD_DST_PORT].name, "dst_port");
         assert_eq!(descs[FD_VERIFICATION_TAG].name, "verification_tag");

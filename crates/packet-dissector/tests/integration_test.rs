@@ -9718,7 +9718,7 @@ fn integration_checksum_ipv4_gre() {
     gre.extend_from_slice(&inner);
     let c = internet_checksum(&[&gre]);
     gre[4..6].copy_from_slice(&c.to_be_bytes());
-    let (mut pkt, start) = build_checksummed_ipv4(47, &gre);
+    let (mut pkt, _) = build_checksummed_ipv4(47, &gre);
 
     let registry = verifying_registry();
     let mut buf = DissectBuffer::new();
@@ -9760,7 +9760,6 @@ fn integration_checksum_ipv4_gre() {
         layer_checksum_status(&buf, "GRE"),
         Some(ChecksumStatus::NotPresent)
     );
-    let _ = start;
 }
 
 const CK_V6_SRC: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
@@ -9856,7 +9855,7 @@ fn integration_checksum_icmp_extension_structure() {
     icmp.extend_from_slice(&ext);
     let c = internet_checksum(&[&icmp]);
     icmp[2..4].copy_from_slice(&c.to_be_bytes());
-    let (mut pkt, start) = build_checksummed_ipv4(1, &icmp);
+    let (mut pkt, _) = build_checksummed_ipv4(1, &icmp);
 
     let registry = verifying_registry();
     let mut buf = DissectBuffer::new();
@@ -9880,5 +9879,4 @@ fn integration_checksum_icmp_extension_structure() {
         Some(ChecksumStatus::Bad)
     );
     assert_eq!(icmp_extension_status(&buf), Some(ChecksumStatus::Bad as u8));
-    let _ = start;
 }
