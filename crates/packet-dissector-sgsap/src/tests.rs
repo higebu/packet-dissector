@@ -2,7 +2,7 @@
 //!
 //! | Section  | Description                                          | Test                                  |
 //! |----------|------------------------------------------------------|---------------------------------------|
-//! | 9.1      | Message too short / message type only                | header                                |
+//! | 7.2, 9.2 | Message too short / message type only                | header                                |
 //! | 9.2      | Message type names                                   | message_type_names                    |
 //! | 9.3      | IE identifier names                                  | ie_type_names                         |
 //! | 9.3a     | One-octet length indicator; truncated IE             | truncated_ie                          |
@@ -220,8 +220,7 @@ fn ie_type_names() {
 #[test]
 fn location_update_request() {
     let mme_name: &[u8] = &[
-        0x09, 0x0E, 0x04, b'm', b'm', b'e', b'1', 0x03, b'e', b'p', b'c', 0x03, b'o', b'r', b'g',
-        0x00,
+        0x09, 0x0D, 0x04, b'm', b'm', b'e', b'1', 0x03, b'e', b'p', b'c', 0x03, b'o', b'r', b'g',
     ];
     let data = msg(
         0x09,
@@ -295,15 +294,15 @@ fn paging_request() {
         0x01,
         &[
             &IMSI,
-            &[0x02, 0x05, 0x03, b'v', b'l', b'r', 0x00], // VLR name
-            &[0x20, 0x01, 0x01],                         // CS call indicator
-            &[0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF],       // TMSI
-            &[0x1C, 0x04, 0x91, 0x21, 0x43, 0xF5],       // CLI +12345
+            &[0x02, 0x04, 0x03, b'v', b'l', b'r'], // VLR name
+            &[0x20, 0x01, 0x01],                   // CS call indicator
+            &[0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF], // TMSI
+            &[0x1C, 0x04, 0x91, 0x21, 0x43, 0xF5], // CLI +12345
             &[0x04, 0x05, 0x00, 0xF1, 0x10, 0x00, 0x01], // LAI
             &[0x0B, 0x05, 0x00, 0xF1, 0x10, 0x0F, 0xFF], // Global CN-Id
-            &[0x05, 0x01, 0x40],                         // Channel needed
-            &[0x06, 0x01, 0x03],                         // eMLPP priority
-            &[0x26, 0x01, 0x01],                         // CSRI
+            &[0x05, 0x01, 0x40],                   // Channel needed
+            &[0x06, 0x01, 0x03],                   // eMLPP priority
+            &[0x26, 0x01, 0x01],                   // CSRI
         ],
     );
     let buf = dissect(&data);
@@ -325,6 +324,11 @@ fn paging_request() {
     let cn = ie(&buf, 11);
     assert_eq!(formatted(field(cn, "mnc")), "\"01\"");
     assert_eq!(get(cn, "cn_id"), &FieldValue::U16(0x0FFF));
+    // Bits above the 12-bit CN-Id are shown as sent (TS 29.018, Section
+    // 18.4.27: they are set to 0 by the sender).
+    let cn_data = msg(0x01, &[&[0x0B, 0x05, 0x00, 0xF1, 0x10, 0xF1, 0x23]]);
+    let cn_buf = dissect(&cn_data);
+    assert_eq!(get(ie(&cn_buf, 11), "cn_id"), &FieldValue::U16(0xF123));
 
     assert_eq!(get(ie(&buf, 5), "channel_needed"), &FieldValue::U8(0x40));
     assert_eq!(get(ie(&buf, 6), "emlpp_priority"), &FieldValue::U8(3));
@@ -379,6 +383,10 @@ fn cli_with_presentation() {
     assert_eq!(get(cli, "presentation_indicator"), &FieldValue::U8(1));
     assert_eq!(get(cli, "screening_indicator"), &FieldValue::U8(3));
     assert_eq!(formatted(field(cli, "digits")), "\"123\"");
+    // TS 24.008, Table 10.5.118: 1010 "*", 1011 "#", 1100-1110 "a"-"c".
+    let data = msg(0x01, &[&[0x1C, 0x04, 0x81, 0xA1, 0xCB, 0xFE]]);
+    let buf = dissect(&data);
+    assert_eq!(formatted(field(ie(&buf, 28), "digits")), "\"1*#ac\"");
     // Octet 3 alone: no digits.
     let data = msg(0x01, &[&[0x1C, 0x01, 0x81]]);
     let buf = dissect(&data);
@@ -519,7 +527,8 @@ fn value_name_tables() {
     assert_eq!(count(ie::eps_location_update_type_name), 2);
     assert_eq!(count(ie::imsi_detach_from_eps_name), 3);
     assert_eq!(count(ie::imsi_detach_from_non_eps_name), 3);
-    assert_eq!(count(ie::lcs_indicator_name), 1);
+    assert_eq!(count(ie::lcs_indicator_name), 2);
+    assert_eq!(ie::lcs_indicator_name(0), Some("Normal, unspecified"));
     assert_eq!(count(ie::service_indicator_name), 2);
     assert_eq!(count(ie::sgs_cause_name), 15);
     assert_eq!(count(ie::ue_emm_mode_name), 2);
@@ -564,15 +573,16 @@ fn unknown_ie_skipped() {
 #[test]
 fn truncated_ie() {
     // A length past the end of the message: the rest is kept raw and the
-    // walk ends (TS 29.118, Section 7.2).
+    // walk ends.
     let data = msg(0x09, &[&IMSI, &[0x0A, 0x05, 0x01]]);
     let buf = dissect(&data);
     let all = ies(&buf);
     assert_eq!(all.len(), 2);
-    assert!(!has(all[1], "length"));
+    // The declared length is kept; the value is what is left.
+    assert_eq!(get(all[1], "length"), &FieldValue::U8(5));
     let f = field(all[1], "value");
-    assert_eq!(f.value, FieldValue::Bytes(&[0x05, 0x01]));
-    assert_eq!(f.range, 12..14);
+    assert_eq!(f.value, FieldValue::Bytes(&[0x01]));
+    assert_eq!(f.range, 13..14);
     // An IE identifier without a length indicator.
     let buf = dissect(&[0x09, 0x01]);
     let all = ies(&buf);

@@ -137,6 +137,7 @@ pub(crate) fn imsi_detach_from_non_eps_name(v: u8) -> Option<&'static str> {
 /// 3GPP TS 29.118, Section 9.4.10, Table 9.4.10.1.
 pub(crate) fn lcs_indicator_name(v: u8) -> Option<&'static str> {
     match v {
+        0 => Some("Normal, unspecified"),
         1 => Some("MT-LR"),
         _ => None,
     }
@@ -197,15 +198,16 @@ pub(crate) fn type_of_identity_name(v: u8) -> Option<&'static str> {
 }
 
 /// Writes BCD digits as a JSON string, stopping at the "1111" end mark.
+///
+/// TS 24.008, Table 10.5.118 — 1010 "*", 1011 "#", 1100 "a", 1101 "b",
+/// 1110 "c".
 fn write_digits(w: &mut dyn Write, digits: impl Iterator<Item = u8>) -> io::Result<()> {
+    const DIGITS: &[u8; 15] = b"0123456789*#abc";
     w.write_all(b"\"")?;
     for d in digits {
-        if d == 0x0F {
+        let Some(&c) = DIGITS.get(usize::from(d)) else {
             break;
-        }
-        // Digits above 9 are not BCD; show them as hexadecimal so that they
-        // stay visible.
-        let c = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+        };
         w.write_all(&[c])?;
     }
     w.write_all(b"\"")
@@ -413,44 +415,42 @@ pub(crate) static IE_FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
 /// Walks the IEs in `data` (the message after its message type); `base` is
 /// the absolute offset of `data`.
 ///
-/// An IE whose length indicator is missing or runs past the message ends
-/// the walk; the octets after its identifier are kept as its raw `value`
-/// (3GPP TS 29.118, Section 7.2).
+/// An IE whose length indicator runs past the message ends the walk; the
+/// declared length is kept and the octets that are present become its raw
+/// `value`.
 pub(crate) fn parse_ies<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], base: usize) {
     let mut pos = 0;
     while pos < data.len() {
         let ie_type = data[pos];
         let start = base + pos;
-        let obj = buf.begin_container(&FD_IE, FieldValue::Object(0..0), start..start);
-        push(buf, FD_TYPE, FieldValue::U8(ie_type), start..start + 1);
-
         // Section 9.3a — one-octet length of the value part.
         let len = data.get(pos + 1).map(|&l| usize::from(l));
-        let Some(len) = len.filter(|len| pos + 2 + len <= data.len()) else {
-            if pos + 1 < data.len() {
-                push_raw(buf, &data[pos + 1..], start + 1);
-            }
-            close(buf, obj, start..base + data.len());
+        let value_start = (pos + 2).min(data.len());
+        let end = len.map_or(data.len(), |len| (pos + 2 + len).min(data.len()));
+        let complete = len.is_some_and(|len| pos + 2 + len <= data.len());
+
+        let obj = buf.begin_container(&FD_IE, FieldValue::Object(0..0), start..base + end);
+        push(buf, FD_TYPE, FieldValue::U8(ie_type), start..start + 1);
+        if let Some(len) = len {
+            push(
+                buf,
+                FD_LENGTH,
+                FieldValue::U8(len as u8),
+                start + 1..start + 2,
+            );
+        }
+        let value = &data[value_start..end];
+        if complete {
+            push_ie_value(buf, ie_type, value, base + value_start);
+        } else if !value.is_empty() {
+            push_raw(buf, value, base + value_start);
+        }
+        buf.end_container(obj);
+        if !complete {
             break;
-        };
-        push(
-            buf,
-            FD_LENGTH,
-            FieldValue::U8(len as u8),
-            start + 1..start + 2,
-        );
-        let end = pos + 2 + len;
-        push_ie_value(buf, ie_type, &data[pos + 2..end], start + 2);
-        close(buf, obj, start..base + end);
+        }
         pos = end;
     }
-}
-
-fn close(buf: &mut DissectBuffer<'_>, obj: u32, range: Range<usize>) {
-    if let Some(f) = buf.field_mut(obj as usize) {
-        f.range = range;
-    }
-    buf.end_container(obj);
 }
 
 fn push<'pkt>(buf: &mut DissectBuffer<'pkt>, fd: usize, value: FieldValue<'pkt>, r: Range<usize>) {
@@ -511,7 +511,9 @@ fn push_ie_value<'pkt>(buf: &mut DissectBuffer<'pkt>, ie_type: u8, v: &'pkt [u8]
         IE_VLR_NAME | IE_MME_NAME => push_bytes(buf, FD_NAME, v, off),
         // TS 29.018, Section 18.4.23.
         IE_TMSI => push_u32(buf, FD_TMSI, v, off),
-        IE_LAI => push_lai(buf, v, off),
+        // TS 29.118, Section 9.4.11 — the TS 24.008 Location area
+        // identification value part (Section 10.5.1.3): PLMN and LAC.
+        IE_LAI => push_plmn_u16(buf, FD_LAC, v, off),
         // TS 29.018, Sections 18.4.2 and 18.4.4 — carried as in TS 44.018
         // and TS 48.008.
         IE_CHANNEL_NEEDED => push_u8(buf, FD_CHANNEL_NEEDED, v, off, 0xFF),
@@ -520,7 +522,10 @@ fn push_ie_value<'pkt>(buf: &mut DissectBuffer<'pkt>, ie_type: u8, v: &'pkt [u8]
         IE_TMSI_STATUS => push_u8(buf, FD_TMSI_FLAG, v, off, 0x01),
         IE_SGS_CAUSE => push_u8(buf, FD_SGS_CAUSE, v, off, 0xFF),
         IE_EPS_LOCATION_UPDATE_TYPE => push_u8(buf, FD_EPS_LOCATION_UPDATE_TYPE, v, off, 0xFF),
-        IE_GLOBAL_CN_ID => push_global_cn_id(buf, v, off),
+        // TS 29.018, Section 18.4.27 — PLMN and the CN-Id (0..4095) in
+        // octets 6-7, whose unused high bits the sender sets to 0; they
+        // are shown as sent.
+        IE_GLOBAL_CN_ID => push_plmn_u16(buf, FD_CN_ID, v, off),
         IE_MOBILE_IDENTITY => push_mobile_identity(buf, v, off),
         // TS 29.018, Section 18.4.21 — the TS 24.008 reject cause value.
         IE_REJECT_CAUSE => push_u8(buf, FD_REJECT_CAUSE, v, off, 0xFF),
@@ -540,8 +545,9 @@ fn push_ie_value<'pkt>(buf: &mut DissectBuffer<'pkt>, ie_type: u8, v: &'pkt [u8]
         // TS 29.118, Section 9.4.21b — Time Zone of TS 24.008, Section
         // 10.5.3.8.
         IE_UE_TIME_ZONE => push_u8(buf, FD_UE_TIME_ZONE, v, off, 0xFF),
-        // TS 29.118, Section 9.4.21a — the TS 24.301 TAI value part.
-        IE_TAI => push_tai(buf, v, off),
+        // TS 29.118, Section 9.4.21a — the TS 24.301 TAI value part
+        // (Section 9.9.3.32): PLMN and TAC.
+        IE_TAI => push_plmn_u16(buf, FD_TAC, v, off),
         IE_ECGI => push_ecgi(buf, v, off),
         IE_UE_EMM_MODE => push_u8(buf, FD_UE_EMM_MODE, v, off, 0xFF),
         // TS 29.118, Sections 9.4.25 and 9.4.31 — the flag is bit 1.
@@ -570,27 +576,18 @@ fn push_ie_value<'pkt>(buf: &mut DissectBuffer<'pkt>, ie_type: u8, v: &'pkt [u8]
     }
 }
 
-/// TS 29.118, Section 9.4.11 — the TS 24.008 Location area identification
-/// value part (Section 10.5.1.3): PLMN identity and a two-octet LAC.
-fn push_lai<'pkt>(buf: &mut DissectBuffer<'pkt>, v: &'pkt [u8], off: usize) -> bool {
+/// Pushes a PLMN identity followed by a two-octet value, as `fd`.
+fn push_plmn_u16<'pkt>(
+    buf: &mut DissectBuffer<'pkt>,
+    fd: usize,
+    v: &'pkt [u8],
+    off: usize,
+) -> bool {
     let &[_, _, _, a, b] = v else { return false };
     push_plmn(buf, v, off);
     push(
         buf,
-        FD_LAC,
-        FieldValue::U16(u16::from_be_bytes([a, b])),
-        off + 3..off + 5,
-    );
-    true
-}
-
-/// TS 24.301, Section 9.9.3.32 — PLMN identity and a two-octet TAC.
-fn push_tai<'pkt>(buf: &mut DissectBuffer<'pkt>, v: &'pkt [u8], off: usize) -> bool {
-    let &[_, _, _, a, b] = v else { return false };
-    push_plmn(buf, v, off);
-    push(
-        buf,
-        FD_TAC,
+        fd,
         FieldValue::U16(u16::from_be_bytes([a, b])),
         off + 3..off + 5,
     );
@@ -606,16 +603,6 @@ fn push_ecgi<'pkt>(buf: &mut DissectBuffer<'pkt>, v: &'pkt [u8], off: usize) -> 
     push_plmn(buf, v, off);
     let eci = u32::from_be_bytes([a, b, c, d]) & 0x0FFF_FFFF;
     push(buf, FD_ECI, FieldValue::U32(eci), off + 3..off + 7);
-    true
-}
-
-/// TS 29.018, Section 18.4.27 — PLMN identity and a CN-Id (0..4095) in
-/// octets 6 and 7.
-fn push_global_cn_id<'pkt>(buf: &mut DissectBuffer<'pkt>, v: &'pkt [u8], off: usize) -> bool {
-    let &[_, _, _, a, b] = v else { return false };
-    push_plmn(buf, v, off);
-    let cn_id = u16::from_be_bytes([a, b]) & 0x0FFF;
-    push(buf, FD_CN_ID, FieldValue::U16(cn_id), off + 3..off + 5);
     true
 }
 
@@ -637,41 +624,27 @@ fn push_mobile_identity<'pkt>(buf: &mut DissectBuffer<'pkt>, v: &'pkt [u8], off:
         return false;
     };
     let identity_type = first & 0x07;
+    if identity_type == 4 && v.len() != 5 {
+        return false;
+    }
+    push(
+        buf,
+        FD_TYPE_OF_IDENTITY,
+        FieldValue::U8(identity_type),
+        off..off + 1,
+    );
     match (identity_type, v) {
         (1..=3, _) => {
-            push(
-                buf,
-                FD_TYPE_OF_IDENTITY,
-                FieldValue::U8(identity_type),
-                off..off + 1,
-            );
-            push_bytes(buf, FD_IDENTITY_DIGITS, v, off)
+            push_bytes(buf, FD_IDENTITY_DIGITS, v, off);
         }
         (4, &[_, a, b, c, d]) => {
-            push(
-                buf,
-                FD_TYPE_OF_IDENTITY,
-                FieldValue::U8(identity_type),
-                off..off + 1,
-            );
             let tmsi = u32::from_be_bytes([a, b, c, d]);
             push(buf, FD_TMSI, FieldValue::U32(tmsi), off + 1..off + 5);
-            true
         }
-        (4, _) => false,
-        _ => {
-            push(
-                buf,
-                FD_TYPE_OF_IDENTITY,
-                FieldValue::U8(identity_type),
-                off..off + 1,
-            );
-            if v.len() > 1 {
-                push_raw(buf, &v[1..], off + 1);
-            }
-            true
-        }
+        _ if v.len() > 1 => push_raw(buf, &v[1..], off + 1),
+        _ => {}
     }
+    true
 }
 
 /// TS 29.018, Section 18.4.5 — the erroneous message, starting with its
