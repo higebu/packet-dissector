@@ -10,8 +10,14 @@ keywords = ["packet", "network", "dissector", "parser", "diameter"]
 categories = ["network-programming", "parser-implementations"]
 description = "Diameter (RFC 6733) dissector for packet-dissector"
 
+[features]
+# Decode EAP-Payload / EAP-Reissued-Payload values as EAP (RFC 4072,
+# Section 4.1 — https://www.rfc-editor.org/rfc/rfc4072#section-4.1).
+eap = ["dep:packet-dissector-eap"]
+
 [dependencies]
 packet-dissector-core = { workspace = true }
+packet-dissector-eap = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
