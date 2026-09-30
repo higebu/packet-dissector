@@ -183,6 +183,9 @@ pub mod dissectors {
     #[cfg(feature = "gre")]
     pub use packet_dissector_gre as gre;
 
+    #[cfg(feature = "erspan")]
+    pub use packet_dissector_erspan as erspan;
+
     #[cfg(feature = "mpls")]
     pub use packet_dissector_mpls as mpls;
 
@@ -216,6 +219,12 @@ pub mod dissectors {
 
     #[cfg(feature = "snmp")]
     pub use packet_dissector_snmp as snmp;
+
+    #[cfg(feature = "m3ua")]
+    pub use packet_dissector_m3ua as m3ua;
+
+    #[cfg(feature = "sccp")]
+    pub use packet_dissector_sccp as sccp;
 
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
@@ -264,8 +273,6 @@ pub mod dissectors {
 
 #[cfg(feature = "ip-reassembly")]
 mod ip_reassembly;
-#[cfg(feature = "http2")]
-mod stream_set;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 
