@@ -551,6 +551,7 @@ mod tests {
     //! | TLV                       | TLV past end of data                      | tlv_overrun                      |
     //! | TLV                       | TLV header truncated                      | tlv_header_truncated             |
     //! | —                         | Name tables                               | name_tables                      |
+    //! | —                         | Display fns on other value types          | display_fns_ignore_other_value_types |
 
     use super::*;
     use packet_dissector_core::field::Field;
@@ -570,9 +571,7 @@ mod tests {
 
     fn tlv_objects<'a>(buf: &'a DissectBuffer<'_>) -> Vec<&'a [Field<'a>]> {
         let layer = &buf.layers()[0];
-        let Some(FieldValue::Array(r)) = buf.field_by_name(layer, "tlvs").map(|f| &f.value) else {
-            panic!("tlvs must be an Array");
-        };
+        let r = container(buf.field_by_name(layer, "tlvs").unwrap());
         buf.nested_fields(r)
             .iter()
             .filter_map(|f| match &f.value {
@@ -580,6 +579,11 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Child range of an Array or Object field.
+    fn container<'a>(f: &'a Field<'_>) -> &'a core::ops::Range<u32> {
+        f.value.as_container_range().unwrap()
     }
 
     fn child<'a>(fields: &'a [Field<'a>], name: &str) -> Option<&'a Field<'a>> {
@@ -625,9 +629,7 @@ mod tests {
             child(tlvs[1], "address_count").unwrap().value,
             FieldValue::U32(1)
         );
-        let FieldValue::Array(ar) = &child(tlvs[1], "addresses").unwrap().value else {
-            panic!("addresses must be an Array");
-        };
+        let ar = container(child(tlvs[1], "addresses").unwrap());
         let entry = buf.nested_fields(ar);
         assert_eq!(entry[0].name(), "address");
         assert_eq!(entry[1].value, FieldValue::U8(PROTO_TYPE_NLPID));
@@ -646,9 +648,7 @@ mod tests {
             child(tlvs[3], "capabilities").unwrap().value,
             FieldValue::U32(0x29)
         );
-        let FieldValue::Object(cr) = &child(tlvs[3], "capability_flags").unwrap().value else {
-            panic!("capability_flags must be an Object");
-        };
+        let cr = container(child(tlvs[3], "capability_flags").unwrap());
         let flags = buf.nested_fields(cr);
         assert_eq!(flags.len(), CAPABILITY_BITS.len());
         let set: Vec<_> = flags
@@ -706,9 +706,7 @@ mod tests {
         let mut buf = DissectBuffer::new();
         CdpDissector.dissect(&raw, &mut buf, 0).unwrap();
         let tlvs = tlv_objects(&buf);
-        let FieldValue::Array(ar) = &child(tlvs[0], "addresses").unwrap().value else {
-            panic!("addresses must be an Array");
-        };
+        let ar = container(child(tlvs[0], "addresses").unwrap());
         let entry = buf.nested_fields(ar);
         assert_eq!(entry[5].value, FieldValue::Ipv6Addr(addr));
         assert_eq!(
@@ -739,9 +737,7 @@ mod tests {
         let mut buf = DissectBuffer::new();
         CdpDissector.dissect(&raw, &mut buf, 0).unwrap();
         let tlvs = tlv_objects(&buf);
-        let FieldValue::Array(ar) = &child(tlvs[0], "addresses").unwrap().value else {
-            panic!("addresses must be an Array");
-        };
+        let ar = container(child(tlvs[0], "addresses").unwrap());
         let entry = buf.nested_fields(ar);
         assert_eq!(entry[5].value, FieldValue::Bytes(&[0x49, 0x00, 0x01]));
     }
@@ -894,9 +890,47 @@ mod tests {
         ] {
             assert!(tlv_type_name(t).is_some(), "TLV {t:#06x}");
         }
+        for (t, n) in [
+            (TLV_DEVICE_ID, "Device ID"),
+            (TLV_ADDRESSES, "Addresses"),
+            (TLV_PORT_ID, "Port ID"),
+            (TLV_CAPABILITIES, "Capabilities"),
+            (TLV_SOFTWARE_VERSION, "Software Version"),
+            (TLV_PLATFORM, "Platform"),
+            (TLV_VTP_MGMT_DOMAIN, "VTP Management Domain"),
+            (TLV_NATIVE_VLAN, "Native VLAN"),
+            (TLV_DUPLEX, "Duplex"),
+            (TLV_SYSTEM_NAME, "System Name"),
+            (TLV_MANAGEMENT_ADDRESSES, "Management Addresses"),
+        ] {
+            assert_eq!(tlv_type_name(t), Some(n));
+        }
         assert_eq!(tlv_type_name(0x0000), None);
+        assert_eq!(protocol_type_name(PROTO_TYPE_NLPID), Some("NLPID"));
         assert_eq!(protocol_type_name(3), None);
         assert_eq!(duplex_name(0), "Half");
+    }
+
+    #[test]
+    fn display_fns_ignore_other_value_types() {
+        let other = FieldValue::Bytes(&[]);
+        for fd in [
+            &TLV_CHILD_FIELDS[FD_TLV_TYPE],
+            &TLV_CHILD_FIELDS[FD_TLV_DUPLEX],
+            &ADDRESS_CHILD_FIELDS[FD_ADDR_PROTOCOL_TYPE],
+            &FD_TLV,
+        ] {
+            assert_eq!(fd.display_fn.unwrap()(&other, &[]), None);
+        }
+        // A TLV object without a type child has no label.
+        assert_eq!(
+            FD_TLV.display_fn.unwrap()(&FieldValue::Object(0..0), &[]),
+            None
+        );
+        assert_eq!(
+            TLV_CHILD_FIELDS[FD_TLV_TYPE].display_fn.unwrap()(&FieldValue::U16(1), &[]),
+            Some("Device ID")
+        );
     }
 
     #[test]
