@@ -205,6 +205,12 @@
 //! | Ethernet → IPv4 fragments → UDP, verified after reassembly   | integration_checksum_ipv4_fragments                  |
 //! | Ethernet → IPv6 → Fragment → UDP, verified after reassembly  | integration_checksum_ipv6_fragments                  |
 //! | Ethernet → IPv4 + Ethernet pad → UDP, pad not checksummed    | integration_checksum_ethernet_padding_ignored        |
+//! | Ethernet → IPv4 → SCTP, CRC32c good / bad / zero             | integration_checksum_ipv4_sctp_crc32c                |
+//! | Ethernet → IPv4 → IGMPv2, checksum good / bad                | integration_checksum_ipv4_igmp                       |
+//! | Ethernet → IPv4 → GRE (C=1 / C=0) → IPv4                     | integration_checksum_ipv4_gre                        |
+//! | Ethernet → IPv6 → VRRPv3, pseudo-header checksum             | integration_checksum_ipv6_vrrp                       |
+//! | Ethernet → IPv6 → OSPFv3, pseudo-header checksum             | integration_checksum_ipv6_ospfv3                     |
+//! | Ethernet → IPv4 → ICMP Time Exceeded + RFC 4884 extension    | integration_checksum_icmp_extension_structure        |
 //! | SLL (0x8100) → VLAN → IPv4 → UDP                              | integration_sll_vlan_ipv4_udp                        |
 //! | SLL2 (0x88A8) → VLAN → VLAN → IPv6 → TCP                      | integration_sll2_qinq_ipv6_tcp                       |
 //! | Ethernet → IPv4 → GRE (0x8100) → VLAN → IPv4 → UDP            | integration_ethernet_ipv4_gre_vlan_ipv4              |
@@ -214,7 +220,7 @@
 //! | Ethernet (0x8035) → ARP (RARP request)                        | integration_ethernet_rarp_request                    |
 //! | Ethernet → IPv6 → SRv6 (NH 143) → Ethernet → IPv4 → UDP       | integration_ethernet_ipv6_srv6_ethernet_ipv4_udp     |
 
-use packet_dissector::checksum::{ChecksumStatus, internet_checksum};
+use packet_dissector::checksum::{ChecksumStatus, crc32c, internet_checksum};
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
 };
@@ -10508,6 +10514,286 @@ fn integration_checksum_ethernet_padding_ignored() {
         layer_checksum_status(&buf, "UDP"),
         Some(ChecksumStatus::Good)
     );
+}
+
+/// The second `checksum_status` of the ICMP layer: the one inside the RFC
+/// 4884 extension structure.
+fn icmp_extension_status(buf: &DissectBuffer<'_>) -> Option<u8> {
+    let icmp = buf.layer_by_name("ICMP").unwrap();
+    buf.layer_fields(icmp)
+        .iter()
+        .filter(|f| f.name() == "checksum_status")
+        .nth(1)
+        .and_then(|f| f.value.as_u8())
+}
+
+/// Ethernet + IPv4 (`protocol`) carrying `payload`, with a correct header
+/// checksum. Returns the packet and the payload offset.
+fn build_checksummed_ipv4(protocol: u8, payload: &[u8]) -> (Vec<u8>, usize) {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x0800);
+    let ip = push_ipv4(&mut pkt, protocol, CK_V4_SRC, CK_V4_DST);
+    let start = pkt.len();
+    pkt.extend_from_slice(payload);
+    fixup_ipv4_length(&mut pkt, ip);
+    fill_ipv4_header_checksum(&mut pkt, ip);
+    (pkt, start)
+}
+
+#[test]
+fn integration_checksum_ipv4_sctp_crc32c() {
+    // Common header + COOKIE ACK chunk.
+    let mut sctp = vec![0x0b, 0x59, 0x0b, 0x59, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0];
+    sctp.extend_from_slice(&[0x0b, 0x00, 0x00, 0x04]);
+    // RFC 9260, Section 6.8 — CRC32c over the packet with the checksum
+    // field set to 0, transmitted least significant byte first (RFC 9260,
+    // Appendix A).
+    // https://www.rfc-editor.org/rfc/rfc9260#section-6.8
+    let crc = crc32c(&[&sctp]);
+    sctp[8..12].copy_from_slice(&crc.to_le_bytes());
+    let (pkt, start) = build_checksummed_ipv4(132, &sctp);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "SCTP"),
+        Some(ChecksumStatus::Good)
+    );
+
+    let mut bad = pkt.clone();
+    bad[start + 4] ^= 0x01; // verification tag
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&bad, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "SCTP"),
+        Some(ChecksumStatus::Bad)
+    );
+
+    // RFC 9653 — a zero checksum is used with an alternate error detection
+    // method.
+    // https://www.rfc-editor.org/rfc/rfc9653#section-5.3
+    let mut zero = pkt.clone();
+    zero[start + 8..start + 12].copy_from_slice(&[0; 4]);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&zero, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "SCTP"),
+        Some(ChecksumStatus::NotPresent)
+    );
+
+    // Snaplen cut: not verifiable.
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt[..pkt.len() - 2], &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "SCTP"),
+        Some(ChecksumStatus::Unverified)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv4_igmp() {
+    // IGMPv2 Membership Report for 239.1.2.3.
+    let mut igmp = vec![0x16, 0x00, 0x00, 0x00, 239, 1, 2, 3];
+    // RFC 2236, Section 2.3 — checksum over the whole IGMP message.
+    // https://www.rfc-editor.org/rfc/rfc2236#section-2.3
+    let c = internet_checksum(&[&igmp]);
+    igmp[2..4].copy_from_slice(&c.to_be_bytes());
+    let (mut pkt, start) = build_checksummed_ipv4(2, &igmp);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "IGMP"),
+        Some(ChecksumStatus::Good)
+    );
+
+    pkt[start + 7] = 4;
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "IGMP"),
+        Some(ChecksumStatus::Bad)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv4_gre() {
+    // Inner IPv4 datagram (header only) with a correct header checksum.
+    let mut inner = Vec::new();
+    let inner_ip = push_ipv4(&mut inner, 59, [192, 0, 2, 7], [192, 0, 2, 8]);
+    fixup_ipv4_length(&mut inner, inner_ip);
+    fill_ipv4_header_checksum(&mut inner, inner_ip);
+
+    // RFC 2784, Section 2.5 — with C=1 the checksum covers the GRE header
+    // and the payload packet.
+    // https://www.rfc-editor.org/rfc/rfc2784#section-2.5
+    let mut gre = vec![0x80, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+    gre.extend_from_slice(&inner);
+    let c = internet_checksum(&[&gre]);
+    gre[4..6].copy_from_slice(&c.to_be_bytes());
+    let (mut pkt, _) = build_checksummed_ipv4(47, &gre);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "GRE"),
+        Some(ChecksumStatus::Good)
+    );
+    // Both IPv4 headers are verified; the inner one is the last IPv4 layer.
+    let inner_layer = buf
+        .layers()
+        .iter()
+        .rev()
+        .find(|l| l.name == "IPv4")
+        .unwrap();
+    assert_eq!(
+        buf.field_by_name(inner_layer, "checksum_status")
+            .unwrap()
+            .value,
+        FieldValue::U8(ChecksumStatus::Good as u8)
+    );
+
+    let last = pkt.len() - 1;
+    pkt[last] ^= 0x01;
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "GRE"),
+        Some(ChecksumStatus::Bad)
+    );
+
+    // C=0: no checksum in the header.
+    let mut plain = vec![0x00, 0x00, 0x08, 0x00];
+    plain.extend_from_slice(&inner);
+    let (pkt, _) = build_checksummed_ipv4(47, &plain);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "GRE"),
+        Some(ChecksumStatus::NotPresent)
+    );
+}
+
+const CK_V6_SRC: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+const CK_V6_DST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12];
+
+/// Ethernet + IPv6 (`next_header`) carrying `payload` whose checksum at
+/// `csum_at` covers the RFC 8200, Section 8.1 pseudo-header.
+/// https://www.rfc-editor.org/rfc/rfc8200#section-8.1
+fn build_checksummed_ipv6(next_header: u8, payload: &[u8], csum_at: usize) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x86DD);
+    let ip = push_ipv6(&mut pkt, next_header, CK_V6_SRC, CK_V6_DST);
+    let start = pkt.len();
+    pkt.extend_from_slice(payload);
+    fixup_ipv6_payload_length(&mut pkt, ip);
+    let end = pkt.len();
+    let pseudo = ipv6_pseudo(CK_V6_SRC, CK_V6_DST, next_header, payload.len());
+    fill_l4_checksum(&mut pkt, &pseudo, start, end, csum_at);
+    pkt
+}
+
+#[test]
+fn integration_checksum_ipv6_vrrp() {
+    // RFC 9568, Section 5.2.8 — for IPv6 the checksum includes the
+    // pseudo-header with Next Header 112.
+    // https://www.rfc-editor.org/rfc/rfc9568#section-5.2.8
+    let mut vrrp = vec![0x31, 0x01, 0x64, 0x01, 0x00, 0x64, 0x00, 0x00];
+    vrrp.extend_from_slice(&CK_V6_SRC);
+    let mut pkt = build_checksummed_ipv6(112, &vrrp, 6);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "VRRP"),
+        Some(ChecksumStatus::Good)
+    );
+
+    let last = pkt.len() - 1;
+    pkt[last] ^= 0x02;
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "VRRP"),
+        Some(ChecksumStatus::Bad)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv6_ospfv3() {
+    // OSPFv3 Link State Acknowledgment with no LSA headers (16 bytes).
+    // RFC 5340, Appendix A.3.1 — pseudo-header with Next Header 89.
+    // https://www.rfc-editor.org/rfc/rfc5340#appendix-A.3.1
+    let ospf = vec![
+        0x03, 0x05, 0x00, 0x10, 1, 1, 1, 1, 0, 0, 0, 0, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let mut pkt = build_checksummed_ipv6(89, &ospf, 12);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "OSPFv3"),
+        Some(ChecksumStatus::Good)
+    );
+
+    let n = pkt.len();
+    pkt[n - 12] = 2; // Router ID
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "OSPFv3"),
+        Some(ChecksumStatus::Bad)
+    );
+}
+
+#[test]
+fn integration_checksum_icmp_extension_structure() {
+    // ICMP Time Exceeded with a 128-octet original datagram (length = 32
+    // words) and an RFC 4884 extension structure holding one MPLS object.
+    // https://www.rfc-editor.org/rfc/rfc4884#section-7
+    let mut ext = vec![0x20, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x01];
+    ext.extend_from_slice(&[0x00, 0x01, 0x01, 0x40]);
+    let c = internet_checksum(&[&ext]);
+    ext[2..4].copy_from_slice(&c.to_be_bytes());
+
+    let mut icmp = vec![11, 0, 0, 0, 0x00, 32, 0x00, 0x00];
+    let mut orig = Vec::new();
+    let orig_ip = push_ipv4(&mut orig, 17, CK_V4_DST, [203, 0, 113, 9]);
+    orig.resize(128, 0);
+    orig[orig_ip + 2..orig_ip + 4].copy_from_slice(&128u16.to_be_bytes());
+    icmp.extend_from_slice(&orig);
+    icmp.extend_from_slice(&ext);
+    let c = internet_checksum(&[&icmp]);
+    icmp[2..4].copy_from_slice(&c.to_be_bytes());
+    let (mut pkt, _) = build_checksummed_ipv4(1, &icmp);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "ICMP"),
+        Some(ChecksumStatus::Good)
+    );
+    assert_eq!(
+        icmp_extension_status(&buf),
+        Some(ChecksumStatus::Good as u8)
+    );
+
+    // Corrupt the MPLS label: both the extension and the ICMP checksum fail.
+    let n = pkt.len();
+    pkt[n - 2] ^= 0x10;
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "ICMP"),
+        Some(ChecksumStatus::Bad)
+    );
+    assert_eq!(icmp_extension_status(&buf), Some(ChecksumStatus::Bad as u8));
 }
 
 // ---------------------------------------------------------------------------
