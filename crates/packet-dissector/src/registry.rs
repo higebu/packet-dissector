@@ -2796,6 +2796,25 @@ impl Default for DissectorRegistry {
             );
         }
 
+        // PPPoE — EtherType 0x8863 (Discovery) and 0x8864 (Session)
+        // (RFC 2516, Section 4 — https://www.rfc-editor.org/rfc/rfc2516#section-4),
+        // and LINKTYPE_PPP_ETHER (51), where the packet begins with the PPPoE
+        // header (https://www.tcpdump.org/linktypes.html).
+        #[cfg(feature = "pppoe")]
+        {
+            assert_builtin(reg.register_by_ethertype(
+                0x8863,
+                Box::new(packet_dissector_pppoe::PppoeDiscoveryDissector),
+            ));
+            assert_builtin(reg.register_by_ethertype(
+                0x8864,
+                Box::new(packet_dissector_pppoe::PppoeSessionDissector),
+            ));
+            assert_builtin(
+                reg.register_by_link_type(51, Box::new(packet_dissector_pppoe::PppoeDissector)),
+            );
+        }
+
         // RTP has no well-known port (dynamically negotiated via SDP/SIP),
         // but is available for decode-as overrides (RFC 3550).
         #[cfg(feature = "rtp")]
@@ -4345,6 +4364,13 @@ mod tests {
             assert!(reg.get_by_link_type(9).is_some());
             assert!(reg.get_by_link_type(50).is_some());
             assert!(reg.get_by_ethertype(0x880B).is_some());
+        }
+
+        #[cfg(feature = "pppoe")]
+        {
+            assert!(reg.get_by_ethertype(0x8863).is_some());
+            assert!(reg.get_by_ethertype(0x8864).is_some());
+            assert!(reg.get_by_link_type(51).is_some());
         }
 
         #[cfg(feature = "stp")]

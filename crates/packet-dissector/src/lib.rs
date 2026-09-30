@@ -204,6 +204,8 @@ pub mod dissectors {
 
     #[cfg(feature = "ppp")]
     pub use packet_dissector_ppp as ppp;
+    #[cfg(feature = "pppoe")]
+    pub use packet_dissector_pppoe as pppoe;
 
     #[cfg(feature = "radius")]
     pub use packet_dissector_radius as radius;
