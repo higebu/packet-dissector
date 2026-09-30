@@ -72,6 +72,9 @@ pub struct DissectorRegistry {
     /// MPLS G-ACh Channel Type table — dispatches the message after an
     /// Associated Channel Header (RFC 5586, Section 2.1).
     by_ach_channel_type: HashMap<u16, Box<dyn Dissector>>,
+    /// SNAP (Organization Code, Protocol Identifier) table — dispatches SNAP
+    /// payloads whose PID is not an EtherType (IEEE Std 802-2014, Clause 10).
+    by_snap: HashMap<(u32, u16), Box<dyn Dissector>>,
     /// Factory functions for creating fresh dissector instances by decode-as name.
     /// Keys are lowercase protocol names (e.g., "http", "dns", "dns.tcp").
     dissector_factories: HashMap<String, fn() -> Box<dyn Dissector>>,
@@ -100,6 +103,7 @@ impl DissectorRegistry {
             by_llc_sap: HashMap::new(),
             by_link_type: HashMap::new(),
             by_ach_channel_type: HashMap::new(),
+            by_snap: HashMap::new(),
             dissector_factories: HashMap::new(),
             #[cfg(feature = "tcp")]
             tcp_reassembly: super::tcp_reassembly::new_tcp_reassembly(),
@@ -545,6 +549,53 @@ impl DissectorRegistry {
             .map(|d| d.as_ref())
     }
 
+    /// Register a dissector for a SNAP Organization Code (OUI) and Protocol
+    /// Identifier.
+    ///
+    /// The SNAP dissector looks this table up only for Organization Codes
+    /// whose Protocol Identifier is not an EtherType, so registering OUI
+    /// 00-00-00 or 00-00-F8 has no effect. `oui` holds the 24-bit code in
+    /// its low three octets.
+    ///
+    /// Returns an error if a dissector is already registered for this pair.
+    /// Use [`register_by_snap_or_replace`](Self::register_by_snap_or_replace)
+    /// to intentionally override an existing registration.
+    pub fn register_by_snap(
+        &mut self,
+        oui: u32,
+        pid: u16,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        if let Some(existing) = self.by_snap.get(&(oui, pid)) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "snap",
+                key: (u64::from(oui) << 16) | u64::from(pid),
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        self.by_snap.insert((oui, pid), dissector);
+        Ok(())
+    }
+
+    /// Register a dissector for a SNAP OUI and Protocol Identifier,
+    /// replacing any existing one.
+    ///
+    /// Returns the previously registered dissector, if any.
+    pub fn register_by_snap_or_replace(
+        &mut self,
+        oui: u32,
+        pid: u16,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        self.by_snap.insert((oui, pid), dissector)
+    }
+
+    /// Look up a dissector by SNAP Organization Code and Protocol Identifier.
+    pub fn get_by_snap(&self, oui: u32, pid: u16) -> Option<&dyn Dissector> {
+        self.by_snap.get(&(oui, pid)).map(|d| d.as_ref())
+    }
+
     /// Look up a dissector by pcap link-layer header type.
     pub fn get_by_link_type(&self, link_type: u32) -> Option<&dyn Dissector> {
         self.by_link_type.get(&link_type).map(|d| d.as_ref())
@@ -986,6 +1037,7 @@ impl DissectorRegistry {
             DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
             DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
             DispatchHint::ByAchChannelType(ct) => self.get_by_ach_channel_type(*ct),
+            DispatchHint::BySnap { oui, pid } => self.get_by_snap(*oui, *pid),
         }
     }
 
@@ -1419,6 +1471,9 @@ impl DissectorRegistry {
         for d in self.by_ach_channel_type.values() {
             push(d.as_ref());
         }
+        for d in self.by_snap.values() {
+            push(d.as_ref());
+        }
         if let Some(ref d) = self.ipv6_routing_fallback {
             push(d.as_ref());
         }
@@ -1531,6 +1586,7 @@ impl DissectorRegistry {
             }
             DissectorTable::LinkType(lt) => self.register_by_link_type(lt, dissector),
             DissectorTable::AchChannelType(ct) => self.register_by_ach_channel_type(ct, dissector),
+            DissectorTable::Snap { oui, pid } => self.register_by_snap(oui, pid, dissector),
         }
     }
 
@@ -1572,6 +1628,9 @@ impl DissectorRegistry {
             DissectorTable::LinkType(lt) => self.register_by_link_type_or_replace(lt, dissector),
             DissectorTable::AchChannelType(ct) => {
                 self.register_by_ach_channel_type_or_replace(ct, dissector)
+            }
+            DissectorTable::Snap { oui, pid } => {
+                self.register_by_snap_or_replace(oui, pid, dissector)
             }
         }
     }
@@ -2108,6 +2167,14 @@ impl Default for DissectorRegistry {
         assert_builtin(reg.register_by_llc_sap(
             packet_dissector_ethernet::llc::SAP_SNAP,
             Box::new(packet_dissector_ethernet::SnapDissector),
+        ));
+
+        // CDP runs over SNAP with the Cisco OUI 00-00-0C and PID 0x2000.
+        #[cfg(feature = "cdp")]
+        assert_builtin(reg.register_by_snap(
+            packet_dissector_cdp::SNAP_OUI_CISCO,
+            packet_dissector_cdp::SNAP_PID_CDP,
+            Box::new(packet_dissector_cdp::CdpDissector),
         ));
 
         // IS-IS runs over IEEE 802.2 LLC with SAP 0xFE (ISO 10589)
@@ -3260,6 +3327,94 @@ mod tests {
     }
 
     #[test]
+    fn get_by_snap_returns_none_for_unknown() {
+        let reg = DissectorRegistry::new();
+        assert!(reg.get_by_snap(0x00_000C, 0x2000).is_none());
+    }
+
+    #[test]
+    fn duplicate_snap_registration_returns_error() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_snap(0x00_000C, 0x2000, Box::new(StubDissector("cdp")))
+            .unwrap();
+        let result = reg.register_by_snap(0x00_000C, 0x2000, Box::new(StubDissector("cdp-dup")));
+        assert!(matches!(
+            result,
+            Err(RegistrationError::DuplicateDispatchKey {
+                table: "snap",
+                key: 0x0000_000C_2000,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn register_by_snap_or_replace_returns_previous() {
+        let mut reg = DissectorRegistry::new();
+        assert!(
+            reg.register_by_snap_or_replace(0x00_000C, 0x2004, Box::new(StubDissector("a")))
+                .is_none()
+        );
+        let prev = reg.register_by_snap_or_replace(0x00_000C, 0x2004, Box::new(StubDissector("b")));
+        assert_eq!(prev.map(|d| d.short_name()), Some("a"));
+        assert_eq!(
+            reg.get_by_snap(0x00_000C, 0x2004).map(|d| d.short_name()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn register_dissector_dispatches_to_snap() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_dissector(
+            DissectorTable::Snap {
+                oui: 0x00_000C,
+                pid: 0x2000,
+            },
+            Box::new(StubDissector("cdp")),
+        )
+        .unwrap();
+        assert!(reg.get_by_snap(0x00_000C, 0x2000).is_some());
+        assert!(
+            reg.register_dissector_or_replace(
+                DissectorTable::Snap {
+                    oui: 0x00_000C,
+                    pid: 0x2000,
+                },
+                Box::new(StubDissector("cdp2")),
+            )
+            .is_some()
+        );
+        assert!(
+            reg.all_field_schemas()
+                .iter()
+                .any(|schema| schema.short_name == "cdp2")
+        );
+    }
+
+    #[test]
+    fn lookup_dissector_by_snap_hint() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_snap(0x00_000C, 0x2000, Box::new(StubDissector("cdp")))
+            .unwrap();
+        assert_eq!(
+            reg.lookup_dissector(&DispatchHint::BySnap {
+                oui: 0x00_000C,
+                pid: 0x2000
+            })
+            .map(|d| d.short_name()),
+            Some("cdp")
+        );
+        assert!(
+            reg.lookup_dissector(&DispatchHint::BySnap {
+                oui: 0x00_000C,
+                pid: 0x2004
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
     fn get_by_link_type_returns_none_for_unknown() {
         let reg = DissectorRegistry::new();
         assert!(reg.get_by_link_type(9999).is_none());
@@ -4159,6 +4314,9 @@ mod tests {
 
         #[cfg(feature = "isis")]
         assert!(reg.get_by_llc_sap(0xFE).is_some());
+
+        #[cfg(feature = "cdp")]
+        assert!(reg.get_by_snap(0x00_000C, 0x2000).is_some());
     }
 
     #[test]

@@ -33,6 +33,7 @@ packet-dissector-linux-sll = { version = "0.5.0", path = "crates/packet-dissecto
 packet-dissector-linux-sll2 = { version = "0.5.0", path = "crates/packet-dissector-linux-sll2" }
 packet-dissector-ppp = { version = "0.5.0", path = "crates/packet-dissector-ppp" }
 packet-dissector-stp = { version = "0.5.0", path = "crates/packet-dissector-stp" }
+packet-dissector-cdp = { version = "0.5.0", path = "crates/packet-dissector-cdp" }
 packet-dissector-http = { version = "0.5.0", path = "crates/packet-dissector-http" }
 packet-dissector-http2 = { version = "0.5.0", path = "crates/packet-dissector-http2" }
 packet-dissector-sip = { version = "0.5.0", path = "crates/packet-dissector-sip" }

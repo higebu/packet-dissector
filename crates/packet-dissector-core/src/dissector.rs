@@ -65,6 +65,19 @@ pub enum DispatchHint {
     /// an IEEE 802.3 LLC frame (value ≤ 1500). The DSAP byte identifies
     /// the upper-layer protocol (e.g., `0x42` for STP/RSTP).
     ByLlcSap(u8),
+    /// Look up the next dissector by SNAP Organization Code and Protocol
+    /// Identifier.
+    ///
+    /// Used by the SNAP dissector when the Organization Code is not one whose
+    /// Protocol Identifier is an EtherType (e.g., OUI `0x00000C` with PID
+    /// `0x2000` for Cisco CDP). IEEE Std 802-2014, Clause 10 —
+    /// <https://standards.ieee.org/standard/802-2014.html>.
+    BySnap {
+        /// 24-bit Organization Code (OUI) in the low three octets.
+        oui: u32,
+        /// Protocol Identifier.
+        pid: u16,
+    },
     /// Look up the next dissector by MPLS Generic Associated Channel (G-ACh)
     /// Channel Type.
     ///
@@ -109,6 +122,14 @@ pub enum DissectorTable {
     ContentType(&'static str),
     /// Register by IEEE 802.2 LLC DSAP value (e.g., `0x42` for STP).
     LlcSap(u8),
+    /// Register by SNAP Organization Code and Protocol Identifier (e.g.,
+    /// OUI `0x00000C`, PID `0x2000` for CDP).
+    Snap {
+        /// 24-bit Organization Code (OUI) in the low three octets.
+        oui: u32,
+        /// Protocol Identifier.
+        pid: u16,
+    },
     /// Register by MPLS G-ACh Channel Type (e.g., `0x0007` for BFD).
     AchChannelType(u16),
     /// The fallback dissector for unrecognised IPv6 Routing Header types.

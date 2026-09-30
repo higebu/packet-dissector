@@ -104,7 +104,8 @@
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
 //! | Ethernet → LLC → MST BPDU with an MSTI message      | integration_ethernet_llc_mstp                        |
 //! | Ethernet → LLC → SNAP (RFC 1042) → IPv4 → ICMP      | integration_ethernet_llc_snap_ipv4_icmp              |
-//! | Ethernet → LLC → SNAP (non-zero OUI) ends the chain | integration_ethernet_llc_snap_other_oui              |
+//! | Ethernet → LLC → SNAP (unregistered OUI/PID) ends   | integration_ethernet_llc_snap_other_oui              |
+//! | Ethernet → LLC → SNAP (00-00-0C / 0x2000) → CDP     | integration_ethernet_llc_snap_cdp                    |
 //! | SLL (protocol 0x0004) → LLC → STP                   | integration_sll_llc_stp                              |
 //! | SLL2 (protocol 0x0004) → LLC → SNAP → IPv4          | integration_sll2_llc_snap_ipv4                       |
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
@@ -8986,15 +8987,15 @@ fn integration_ethernet_llc_snap_ipv4_icmp() {
     assert_eq!(buf.field_u16(snap, "pid"), Some(0x0800));
 }
 
-/// Ethernet → LLC → SNAP with Cisco OUI 00-00-0C (CDP): the SNAP layer is
-/// shown and the chain ends.
+/// Ethernet → LLC → SNAP with Cisco OUI 00-00-0C and a PID without a
+/// dissector (0x2004, DTP): the SNAP layer is shown and the chain ends.
 #[test]
 fn integration_ethernet_llc_snap_other_oui() {
     let reg = DissectorRegistry::default();
     let mut pkt = vec![
         0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
     ];
-    let llc = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x00, 0x02, 0xB4];
+    let llc = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x04, 0x01, 0x00];
     pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
     pkt.extend_from_slice(&llc);
 
@@ -9002,6 +9003,40 @@ fn integration_ethernet_llc_snap_other_oui() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "SNAP"]);
+}
+
+/// Ethernet (802.3 Length) → LLC → SNAP (OUI 00-00-0C, PID 0x2000) → CDP,
+/// in a frame padded to the Ethernet minimum.
+#[test]
+fn integration_ethernet_llc_snap_cdp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let mut llc = vec![0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x00];
+    // CDPv2, TTL 180; Device ID "sw1"; Addresses with one IPv4 address.
+    llc.extend_from_slice(&[0x02, 0xB4, 0x00, 0x00]);
+    llc.extend_from_slice(&[0x00, 0x01, 0x00, 0x07, b's', b'w', b'1']);
+    llc.extend_from_slice(&[
+        0x00, 0x02, 0x00, 0x11, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0xCC,
+    ]);
+    llc.extend_from_slice(&[0x00, 0x04, 192, 0, 2, 1]);
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP", "CDP"]);
+    assert_layers_contiguous(&buf);
+    let cdp = buf.layer_by_name("CDP").unwrap();
+    assert_eq!(cdp.range, 22..14 + llc.len());
+    assert_eq!(buf.field_u8(cdp, "version"), Some(2));
+    assert!(matches!(
+        buf.field_by_name(cdp, "tlvs").unwrap().value,
+        FieldValue::Array(_)
+    ));
 }
 
 /// SLL header (LINKTYPE_LINUX_SLL) with the given protocol type.
