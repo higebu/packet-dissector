@@ -30,7 +30,7 @@ protocols include:
 
 | Category | Protocols |
 |----------|-----------|
-| L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), 802.1Q VLAN, 802.1ad QinQ (stacked tags; also standalone tags after SLL, SLL2 or GRE), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP, CDP, PPPoE, EAPOL / EAP (802.1X) |
+| L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), IEEE 802.11 (MAC header, management elements, LLC/SNAP, A-MSDU), radiotap, 802.1Q VLAN, 802.1ad QinQ (stacked tags; also standalone tags after SLL, SLL2 or GRE), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP, CDP, PPPoE, EAPOL / EAP (802.1X) |
 | L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, IS-IS, AH, ESP, SRv6, GRE, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE, NSH |
 | Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, BMP, TLS, PPP, RADIUS, RTP, QUIC, STUN |
@@ -57,7 +57,7 @@ packet-dissector = { version = "0.3", default-features = false, features = ["lay
 
 Representative feature flags:
 
-- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `arp`, `lacp`, `lldp`, `eap`, `stp`, `cdp`, `pppoe`
+- Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `ieee80211`, `radiotap`, `arp`, `lacp`, `lldp`, `eap`, `stp`, `cdp`, `pppoe`
 - Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`, `nsh`
 - Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `bmp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
@@ -68,7 +68,7 @@ Representative feature flags:
 
 Convenience groups:
 
-- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "arp", "lacp", "lldp", "eap", "stp", "cdp", "ppp", "pppoe"]`
+- `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "ieee80211", "radiotap", "arp", "lacp", "lldp", "eap", "stp", "cdp", "ppp", "pppoe"]`
 - `layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]`
 - `layer4 = ["tcp", "udp", "sctp"]`
 - `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun"]`
@@ -135,8 +135,10 @@ default registry handles these
 | 9 | `LINKTYPE_PPP` | `ppp` |
 | 50 | `LINKTYPE_PPP_HDLC` | `ppp` |
 | 101 | `LINKTYPE_RAW` | `raw_ip` |
+| 105 | `LINKTYPE_IEEE802_11` | `ieee80211` |
 | 108 | `LINKTYPE_LOOP` | `null` |
 | 113 | `LINKTYPE_LINUX_SLL` | `linux_sll` |
+| 127 | `LINKTYPE_IEEE802_11_RADIOTAP` | `radiotap` |
 | 228 | `LINKTYPE_IPV4` | `raw_ip` |
 | 229 | `LINKTYPE_IPV6` | `raw_ip` |
 | 276 | `LINKTYPE_LINUX_SLL2` | `linux_sll2` |

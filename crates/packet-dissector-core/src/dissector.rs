@@ -87,6 +87,14 @@ pub enum DispatchHint {
     /// <https://www.rfc-editor.org/rfc/rfc5586#section-2.1>; RFC 4385,
     /// Section 5 — <https://www.rfc-editor.org/rfc/rfc4385#section-5>.
     ByAchChannelType(u16),
+    /// Look up the next dissector in the link-layer type table, by pcap
+    /// `LINKTYPE_` value.
+    ///
+    /// Used by pseudo-headers that precede another link-layer frame, e.g.
+    /// radiotap (`LINKTYPE_IEEE802_11_RADIOTAP`, 127) followed by an IEEE
+    /// 802.11 frame (`LINKTYPE_IEEE802_11`, 105) —
+    /// <https://www.tcpdump.org/linktypes.html>.
+    ByLinkType(u32),
     /// No further dissection is needed.
     End,
 }
