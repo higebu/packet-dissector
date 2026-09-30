@@ -13,6 +13,9 @@
 
 mod options;
 
+use packet_dissector_core::checksum::{
+    ChecksumStatus, checksum_status_descriptor, internet_checksum,
+};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, IpFragmentContext, ProtocolLayer, SpecReference,
 };
@@ -46,6 +49,7 @@ const FD_CHECKSUM: usize = 10;
 const FD_SRC: usize = 11;
 const FD_DST: usize = 12;
 const FD_OPTIONS: usize = 13;
+const FD_CHECKSUM_STATUS: usize = 16;
 
 static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     FieldDescriptor::new("version", "Version", FieldType::U8),
@@ -80,6 +84,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     // datagram (number of fragments, length of the reassembled data).
     FieldDescriptor::new("fragment_count", "Fragment Count", FieldType::U32).optional(),
     FieldDescriptor::new("reassembled_length", "Reassembled Length", FieldType::U32).optional(),
+    checksum_status_descriptor("checksum_status", "Header Checksum Status"),
 ];
 
 /// IPv4 dissector.
@@ -301,6 +306,19 @@ impl Dissector for Ipv4Dissector {
             FieldValue::U16(checksum),
             offset + 10..offset + 12,
         );
+        if buf.verify_checksums() {
+            // RFC 791, Section 3.1 — "The checksum field is the 16 bit one's
+            // complement of the one's complement sum of all 16 bit words in
+            // the header." Summing the header including the checksum field
+            // yields zero when it is correct.
+            // https://www.rfc-editor.org/rfc/rfc791#section-3.1
+            let status = ChecksumStatus::from_valid(internet_checksum(&[&data[..header_len]]) == 0);
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 10..offset + 12,
+            );
+        }
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_SRC],
             FieldValue::Ipv4Addr(src),

@@ -122,6 +122,9 @@ pub struct DissectBuffer<'pkt> {
     aux_chunks: Vec<AuxChunk>,
     /// Upper-layer payloads recorded by dissectors and not yet dispatched.
     embedded_payloads: Vec<EmbeddedPayload>,
+    /// Whether dissectors should verify checksums and report the result in
+    /// a `checksum_status` field. Kept across [`clear`](Self::clear).
+    verify_checksums: bool,
 }
 
 impl<'pkt> DissectBuffer<'pkt> {
@@ -134,6 +137,7 @@ impl<'pkt> DissectBuffer<'pkt> {
             aux_data_len: 0,
             aux_chunks: Vec::new(),
             embedded_payloads: Vec::new(),
+            verify_checksums: false,
         }
     }
 
@@ -394,6 +398,25 @@ impl<'pkt> DissectBuffer<'pkt> {
     /// reassembly fields).
     pub fn layers_iter_mut(&mut self) -> core::slice::IterMut<'_, Layer> {
         self.layers.iter_mut()
+    }
+
+    /// Whether dissectors should verify checksums.
+    ///
+    /// When `true`, dissectors that carry a checksum compute it and add a
+    /// `checksum_status` field (see
+    /// [`ChecksumStatus`](crate::checksum::ChecksumStatus)). When `false`
+    /// (the default) no checksum is computed and no status field is added.
+    pub fn verify_checksums(&self) -> bool {
+        self.verify_checksums
+    }
+
+    /// Enable or disable checksum verification for subsequent dissections.
+    ///
+    /// The setting is kept across [`clear`](Self::clear) and
+    /// [`clear_into`](Self::clear_into). `DissectorRegistry` overwrites it
+    /// with its own setting at the start of every dissection.
+    pub fn set_verify_checksums(&mut self, verify: bool) {
+        self.verify_checksums = verify;
     }
 
     /// Append fields to the last layer matching `layer_name` and extend its field range.
@@ -1044,5 +1067,19 @@ mod tests {
 
         buf.clear();
         assert!(buf.embedded_payloads().is_empty());
+    }
+
+    #[test]
+    fn verify_checksums_defaults_off_and_survives_clear() {
+        let mut buf = DissectBuffer::new();
+        assert!(!buf.verify_checksums());
+        buf.set_verify_checksums(true);
+        assert!(buf.verify_checksums());
+        buf.clear();
+        assert!(buf.verify_checksums());
+        let buf = buf.clear_into();
+        assert!(buf.verify_checksums());
+        buf.set_verify_checksums(false);
+        assert!(!buf.verify_checksums());
     }
 }

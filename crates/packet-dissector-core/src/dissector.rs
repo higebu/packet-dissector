@@ -65,6 +65,19 @@ pub enum DispatchHint {
     /// an IEEE 802.3 LLC frame (value ≤ 1500). The DSAP byte identifies
     /// the upper-layer protocol (e.g., `0x42` for STP/RSTP).
     ByLlcSap(u8),
+    /// Look up the next dissector by SNAP Organization Code and Protocol
+    /// Identifier.
+    ///
+    /// Used by the SNAP dissector when the Organization Code is not one whose
+    /// Protocol Identifier is an EtherType (e.g., OUI `0x00000C` with PID
+    /// `0x2000` for Cisco CDP). IEEE Std 802-2014, Clause 10 —
+    /// <https://standards.ieee.org/standard/802-2014.html>.
+    BySnap {
+        /// 24-bit Organization Code (OUI) in the low three octets.
+        oui: u32,
+        /// Protocol Identifier.
+        pid: u16,
+    },
     /// Look up the next dissector by MPLS Generic Associated Channel (G-ACh)
     /// Channel Type.
     ///
@@ -74,6 +87,35 @@ pub enum DispatchHint {
     /// <https://www.rfc-editor.org/rfc/rfc5586#section-2.1>; RFC 4385,
     /// Section 5 — <https://www.rfc-editor.org/rfc/rfc4385#section-5>.
     ByAchChannelType(u16),
+    /// Look up the next dissector by SS7 MTP3 Service Indicator.
+    ///
+    /// Used by MTP3-User adaptation layers such as M3UA, whose Protocol Data
+    /// carries the Service Indicator of the original MTP3 message (e.g. `3`
+    /// for SCCP). Mirrors Wireshark's `mtp3.service_indicator` table. RFC 4666,
+    /// Section 3.3.1 — <https://www.rfc-editor.org/rfc/rfc4666#section-3.3.1>;
+    /// ITU-T Q.704, clause 14.2.1 —
+    /// <https://www.itu.int/rec/T-REC-Q.704>.
+    ByMtp3ServiceIndicator(u8),
+    /// Look up the next dissector for SCCP user data by subsystem number.
+    ///
+    /// The registry tries the called party SSN first, then the calling party
+    /// SSN. SSN 0 ("SSN not known/not used", ITU-T Q.713, clause 3.4.2.2 —
+    /// <https://www.itu.int/rec/T-REC-Q.713>) is never looked up. Mirrors
+    /// Wireshark's `sccp.ssn` table.
+    BySccpSsn {
+        /// Subsystem number of the called party address (0 when absent).
+        called: u8,
+        /// Subsystem number of the calling party address (0 when absent).
+        calling: u8,
+    },
+    /// Look up the next dissector in the link-layer type table, by pcap
+    /// `LINKTYPE_` value.
+    ///
+    /// Used by pseudo-headers that precede another link-layer frame, e.g.
+    /// radiotap (`LINKTYPE_IEEE802_11_RADIOTAP`, 127) followed by an IEEE
+    /// 802.11 frame (`LINKTYPE_IEEE802_11`, 105) —
+    /// <https://www.tcpdump.org/linktypes.html>.
+    ByLinkType(u32),
     /// No further dissection is needed.
     End,
 }
@@ -109,8 +151,22 @@ pub enum DissectorTable {
     ContentType(&'static str),
     /// Register by IEEE 802.2 LLC DSAP value (e.g., `0x42` for STP).
     LlcSap(u8),
+    /// Register by SNAP Organization Code and Protocol Identifier (e.g.,
+    /// OUI `0x00000C`, PID `0x2000` for CDP).
+    Snap {
+        /// 24-bit Organization Code (OUI) in the low three octets.
+        oui: u32,
+        /// Protocol Identifier.
+        pid: u16,
+    },
     /// Register by MPLS G-ACh Channel Type (e.g., `0x0007` for BFD).
     AchChannelType(u16),
+    /// Register by SS7 MTP3 Service Indicator (e.g., `3` for SCCP). See
+    /// [`DispatchHint::ByMtp3ServiceIndicator`].
+    Mtp3ServiceIndicator(u8),
+    /// Register by SCCP subsystem number (e.g., `6` for the HLR). SSN 0 is
+    /// never looked up; see [`DispatchHint::BySccpSsn`].
+    SccpSsn(u8),
     /// The fallback dissector for unrecognised IPv6 Routing Header types.
     Ipv6RoutingFallback,
     /// Register by pcap link-layer header type (e.g., `1` for Ethernet, `113` for Linux SLL).
@@ -146,6 +202,13 @@ pub trait DissectorPlugin {
     fn dissectors(&self) -> Vec<(DissectorTable, Box<dyn Dissector>)>;
 }
 
+/// Directional TCP stream key: (source address, destination address, source
+/// port, destination port). IP addresses are encoded as 16 bytes
+/// (IPv4-mapped for IPv4).
+///
+/// See [`TcpStreamContext::stream_key`].
+pub type TcpStreamKey = ([u8; 16], [u8; 16], u16, u16);
+
 /// Context for TCP stream reassembly, provided by the TCP dissector
 /// when dispatching to upper-layer protocol dissectors.
 ///
@@ -159,7 +222,7 @@ pub struct TcpStreamContext {
     /// Each direction of a connection has its own key, so the reverse direction
     /// (dst→src) maintains a separate reassembly buffer and sequence space.
     /// IP addresses are encoded as 16 bytes (IPv4-mapped for IPv4).
-    pub stream_key: ([u8; 16], [u8; 16], u16, u16),
+    pub stream_key: TcpStreamKey,
     /// TCP sequence number of this segment's first payload octet.
     ///
     /// For a SYN segment this is ISN+1, not the header's Sequence Number:
@@ -194,12 +257,7 @@ impl TcpStreamContext {
 
     /// Create a stream context. `seq` is the sequence number of the first
     /// payload octet (see [`TcpStreamContext::seq`]).
-    pub fn new(
-        stream_key: ([u8; 16], [u8; 16], u16, u16),
-        seq: u32,
-        payload_len: usize,
-        flags: u8,
-    ) -> Self {
+    pub fn new(stream_key: TcpStreamKey, seq: u32, payload_len: usize, flags: u8) -> Self {
         Self {
             stream_key,
             seq,
@@ -231,7 +289,7 @@ impl TcpStreamContext {
     }
 
     /// Stream key of the opposite direction of the same connection.
-    pub fn reverse_key(&self) -> ([u8; 16], [u8; 16], u16, u16) {
+    pub fn reverse_key(&self) -> TcpStreamKey {
         let (src, dst, sport, dport) = self.stream_key;
         (dst, src, dport, sport)
     }
@@ -622,6 +680,50 @@ pub trait Dissector: Send {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<DissectResult, PacketError>;
+
+    /// Dissect one message of a TCP byte stream.
+    ///
+    /// The registry's TCP reassembly middleware calls this method, instead
+    /// of [`dissect`](Self::dissect), for every upper-layer message it
+    /// dissects from a TCP stream. `stream` identifies the direction of the
+    /// connection the message belongs to ([`TcpStreamContext::stream_key`])
+    /// and carries the control bits of the segment that completed the
+    /// message; its sequence number and payload length describe that
+    /// segment, not the message.
+    ///
+    /// Dissectors that keep per-connection state (for example which
+    /// protocol a connection switched to) override this method and key the
+    /// state by `stream.stream_key`. The default implementation ignores
+    /// `stream` and calls [`dissect`](Self::dissect).
+    fn dissect_tcp_stream<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+        stream: &TcpStreamContext,
+    ) -> Result<DissectResult, PacketError> {
+        let _ = stream;
+        self.dissect(data, buf, offset)
+    }
+
+    /// Release any state kept for one direction of a TCP connection.
+    ///
+    /// The registry calls this on the upper-layer dissector of a TCP
+    /// connection when it drops its own reassembly state for the direction
+    /// `stream_key`: before the data of a SYN segment (the 4-tuple starts a
+    /// new connection, RFC 9293, Section 3.5 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.5>), after the data
+    /// of a FIN segment that leaves no data missing before it (no more data
+    /// from the sender, RFC 9293, Section 3.1 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>),
+    /// and for both directions after an RST segment (RFC 9293,
+    /// Section 3.10.7.4 —
+    /// <https://www.rfc-editor.org/rfc/rfc9293#section-3.10.7.4>).
+    ///
+    /// The default implementation does nothing.
+    fn release_tcp_stream(&self, stream_key: &TcpStreamKey) {
+        let _ = stream_key;
+    }
 }
 
 #[cfg(test)]
@@ -713,6 +815,18 @@ mod tests {
         assert_eq!(result.bytes_consumed, 20);
         assert_eq!(result.next, DispatchHint::ByIpProtocol(6));
         assert_eq!(result.payload_len, Some(16));
+    }
+
+    #[test]
+    fn dissector_defaults_dissect_tcp_stream_as_dissect() {
+        let dissector = DefaultsDissector;
+        let ctx = TcpStreamContext::new(([0; 16], [1; 16], 1, 2), 0, 1, 0);
+        let mut buf = DissectBuffer::new();
+
+        let result = dissector.dissect_tcp_stream(&[0], &mut buf, 0, &ctx);
+        assert_eq!(result, Ok(DissectResult::new(0, DispatchHint::End)));
+        // The default release hook has nothing to release.
+        dissector.release_tcp_stream(&ctx.stream_key);
     }
 
     #[test]

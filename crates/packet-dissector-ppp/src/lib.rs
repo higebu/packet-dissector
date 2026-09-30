@@ -8,6 +8,8 @@
 //! - **LCP** -- Link Control Protocol ([RFC 1661], [RFC 2153])
 //! - **PAP** -- Password Authentication Protocol ([RFC 1334])
 //! - **CHAP** -- Challenge Handshake Authentication Protocol ([RFC 1994])
+//! - **EAP** -- Extensible Authentication Protocol ([RFC 3748]), with the
+//!   `eap` feature
 //!
 //! The sub-protocol parsers accept raw PPP packet bytes (starting with the Code
 //! field) and push fields directly into a [`DissectBuffer`].
@@ -19,6 +21,7 @@
 //! - RFC 1334 (PAP): <https://www.rfc-editor.org/rfc/rfc1334>
 //! - RFC 1877 (DNS/NBNS extensions for IPCP): <https://www.rfc-editor.org/rfc/rfc1877>
 //! - RFC 1994 (CHAP, obsoletes RFC 1334 CHAP): <https://www.rfc-editor.org/rfc/rfc1994>
+//! - RFC 3748 (EAP, PPP Protocol 0xC227): <https://www.rfc-editor.org/rfc/rfc3748>
 //!
 //! [RFC 1332]: https://www.rfc-editor.org/rfc/rfc1332
 //! [RFC 1334]: https://www.rfc-editor.org/rfc/rfc1334
@@ -26,6 +29,7 @@
 //! [RFC 1877]: https://www.rfc-editor.org/rfc/rfc1877
 //! [RFC 1994]: https://www.rfc-editor.org/rfc/rfc1994
 //! [RFC 2153]: https://www.rfc-editor.org/rfc/rfc2153
+//! [RFC 3748]: https://www.rfc-editor.org/rfc/rfc3748
 
 #![deny(missing_docs)]
 
@@ -218,15 +222,36 @@ pub fn parse_protocol<'pkt>(
         PPP_PROTO_LCP => lcp::parse(data, offset, buf),
         PPP_PROTO_PAP => pap::parse(data, offset, buf),
         PPP_PROTO_CHAP => chap::parse(data, offset, buf),
-        _ => {
-            static FD_RAW: FieldDescriptor = FieldDescriptor::new("data", "Data", FieldType::Bytes);
-            buf.push_field(
-                &FD_RAW,
-                FieldValue::Bytes(data),
-                offset..offset + data.len(),
-            );
+        // RFC 3748, Section 3.2.1 — <https://www.rfc-editor.org/rfc/rfc3748#section-3.2.1>
+        // A malformed EAP packet pushes nothing and is shown raw.
+        #[cfg(feature = "eap")]
+        PPP_PROTO_EAP => {
+            if packet_dissector_eap::parse_eap(data, offset, buf).is_err() {
+                push_raw_data(data, offset, buf);
+            }
         }
+        _ => push_raw_data(data, offset, buf),
     }
+}
+
+/// Raw payload of a sub-protocol that is not decoded.
+static FD_RAW: FieldDescriptor = FieldDescriptor::new("data", "Data", FieldType::Bytes);
+
+/// Push `data` as a raw `data` field.
+fn push_raw_data<'pkt>(data: &'pkt [u8], offset: usize, buf: &mut DissectBuffer<'pkt>) {
+    buf.push_field(
+        &FD_RAW,
+        FieldValue::Bytes(data),
+        offset..offset + data.len(),
+    );
+}
+
+/// Whether [`parse_protocol`] decodes this PPP Protocol inline.
+fn is_inline_protocol(proto: u16) -> bool {
+    matches!(
+        proto,
+        PPP_PROTO_IPCP | PPP_PROTO_LCP | PPP_PROTO_PAP | PPP_PROTO_CHAP
+    ) || (cfg!(feature = "eap") && proto == PPP_PROTO_EAP)
 }
 
 /// Parse TLV-encoded configuration options into a DissectBuffer. Returns `true` if any parsed.
@@ -300,6 +325,11 @@ const PPP_PROTO_IPCP: u16 = 0x8021;
 const PPP_PROTO_LCP: u16 = 0xC021;
 const PPP_PROTO_PAP: u16 = 0xC023;
 const PPP_PROTO_CHAP: u16 = 0xC223;
+// RFC 3748, Section 3.2.1 — "Exactly one EAP packet is encapsulated in the
+// Information field of a PPP Data Link Layer frame where the protocol field
+// indicates type hex C227 (PPP EAP)."
+// <https://www.rfc-editor.org/rfc/rfc3748#section-3.2.1>
+const PPP_PROTO_EAP: u16 = 0xC227;
 
 const FD_ADDRESS: usize = 0;
 const FD_CONTROL: usize = 1;
@@ -333,6 +363,7 @@ fn protocol_name(proto: u16) -> Option<&'static str> {
         0xC021 => Some("LCP"),
         0xC023 => Some("PAP"),
         0xC223 => Some("CHAP"),
+        0xC227 => Some("EAP"),
         0x0031 => Some("Bridging PDU"),
         0x003D => Some("Multi-Link"),
         0x00FD => Some("MPPC/MPPE"),
@@ -376,6 +407,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 1994",
         "PPP Challenge Handshake Authentication Protocol (CHAP)",
         "https://www.rfc-editor.org/rfc/rfc1994",
+    ),
+    SpecReference::new(
+        "RFC 3748",
+        "Extensible Authentication Protocol (EAP)",
+        "https://www.rfc-editor.org/rfc/rfc3748",
     ),
 ];
 
@@ -449,19 +485,14 @@ impl Dissector for PppDissector {
             FieldValue::U16(proto),
             offset + header_len - 2..offset + header_len,
         );
-        match proto {
-            PPP_PROTO_IPCP | PPP_PROTO_LCP | PPP_PROTO_PAP | PPP_PROTO_CHAP
-                if !payload.is_empty() =>
-            {
-                let obj_idx = buf.begin_container(
-                    &FIELD_DESCRIPTORS[FD_PAYLOAD],
-                    FieldValue::Object(0..0),
-                    offset + pos..offset + data.len(),
-                );
-                parse_protocol(proto, payload, offset + pos, buf);
-                buf.end_container(obj_idx);
-            }
-            _ => {}
+        if is_inline_protocol(proto) && !payload.is_empty() {
+            let obj_idx = buf.begin_container(
+                &FIELD_DESCRIPTORS[FD_PAYLOAD],
+                FieldValue::Object(0..0),
+                offset + pos..offset + data.len(),
+            );
+            parse_protocol(proto, payload, offset + pos, buf);
+            buf.end_container(obj_idx);
         }
         buf.end_layer();
         Ok(DissectResult::new(header_len, dispatch))
@@ -480,6 +511,8 @@ mod tests {
     //! | 2           | IPv6 dispatch (0x0057)                  | dissect_ipv6                  |
     //! | 2           | LCP inline parsing (0xC021)             | dissect_lcp_inline            |
     //! | 2           | IPCP inline parsing (0x8021)            | dispatch_ipcp                 |
+    //! | 2           | EAP inline parsing (0xC227, RFC 3748)   | dissect_eap_inline            |
+    //! | 2           | Malformed EAP -> raw Data               | dispatch_eap_malformed_raw    |
     //! | 2           | Unknown protocol -> raw Data            | dispatch_unknown              |
     //! | 2           | Unknown protocol -> End dispatch        | dissect_unknown_protocol      |
     //! | 5           | Shared packet header parser             | parse_header_valid            |
@@ -603,6 +636,45 @@ mod tests {
         let display = fields[0].descriptor.display_fn.unwrap()(&fields[0].value, fields);
         assert_eq!(display, Some("LCP"));
         assert!(matches!(fields[1].value, FieldValue::Object(_)));
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn dissect_eap_inline() {
+        // PPP Protocol 0xC227 (RFC 3748, Section 3.2.1 —
+        // https://www.rfc-editor.org/rfc/rfc3748#section-3.2.1) carrying an
+        // EAP Request/Identity.
+        let data = [0xC2, 0x27, 0x01, 0x01, 0x00, 0x05, 0x01];
+        let mut buf = DissectBuffer::new();
+        let result = PppDissector.dissect(&data, &mut buf, 0).unwrap();
+        assert_eq!(result.bytes_consumed, 2);
+        assert_eq!(result.next, DispatchHint::End);
+        let layer = buf.layer_by_name("PPP").unwrap();
+        let fields = buf.layer_fields(layer);
+        let display = fields[0].descriptor.display_fn.unwrap()(&fields[0].value, fields);
+        assert_eq!(display, Some("EAP"));
+        let FieldValue::Object(r) = &fields[1].value else {
+            panic!("payload must be an Object");
+        };
+        let eap = buf.nested_fields(r);
+        assert_eq!(eap[0].name(), "code");
+        assert_eq!(eap[0].value, FieldValue::U8(1));
+        assert_eq!(eap[0].range, 2..3);
+        assert!(eap.iter().any(|f| f.name() == "identity"));
+    }
+
+    #[cfg(feature = "eap")]
+    #[test]
+    fn dispatch_eap_malformed_raw() {
+        // EAP Length 9 larger than the 5 received octets.
+        let data = [0x01, 0x01, 0x00, 0x09, 0x01];
+        let mut buf = DissectBuffer::new();
+        buf.begin_layer("test", None, &[], 0..5);
+        parse_protocol(0xC227, &data, 0, &mut buf);
+        buf.end_layer();
+        let fields = buf.layer_fields(&buf.layers()[0]);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].value, FieldValue::Bytes(&data));
     }
 
     #[test]

@@ -1,0 +1,23 @@
+[package]
+name = "packet-dissector-ieee80211"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["packet", "network", "dissector", "parser", "wifi"]
+categories = ["network-programming", "parser-implementations"]
+description = "IEEE 802.11 (Wi-Fi) MAC frame dissector for packet-dissector"
+
+[dependencies]
+packet-dissector-core = { workspace = true }
+packet-dissector-ethernet = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+packet-dissector-test-alloc = { workspace = true }
+
+[[bench]]
+name = "dissect"
+harness = false

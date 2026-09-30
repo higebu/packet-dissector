@@ -127,7 +127,7 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
     (0x79, 7),        // 120 'x'
     (0x7a, 7),        // 121 'y'
     (0x7b, 7),        // 122 'z'
-    (0x7fffe, 19),    // 123 '{'
+    (0x7ffe, 15),     // 123 '{'
     (0x7fc, 11),      // 124 '|'
     (0x3ffd, 14),     // 125 '}'
     (0x1ffd, 13),     // 126 '~'
@@ -272,11 +272,13 @@ pub fn huffman_decode(data: &[u8]) -> Result<Vec<u8>, &'static str> {
     // For better performance a lookup table could be used, but this is
     // sufficient for a packet dissector.
     let mut result = Vec::new();
-    let mut bits: u32 = 0;
+    // At most 29 undecoded bits (one less than the longest code, RFC 7541,
+    // Appendix B) are pending when an octet is added, so 37 bits fit.
+    let mut bits: u64 = 0;
     let mut bit_count: u8 = 0;
 
     for &byte in data {
-        bits = (bits << 8) | u32::from(byte);
+        bits = (bits << 8) | u64::from(byte);
         bit_count += 8;
 
         // Try to decode symbols while we have enough bits
@@ -289,19 +291,21 @@ pub fn huffman_decode(data: &[u8]) -> Result<Vec<u8>, &'static str> {
                 // Extract the top `len` bits from our accumulator
                 let shift = bit_count - len;
                 let candidate = bits >> shift;
-                if candidate == code {
+                if candidate == u64::from(code) {
                     if sym == 256 {
                         // EOS in the middle of data is invalid
                         return Err("unexpected EOS symbol in Huffman data");
                     }
                     result.push(sym as u8);
                     // Mask off the consumed bits
-                    bits &= (1u32 << shift) - 1;
+                    bits &= (1u64 << shift) - 1;
                     bit_count = shift;
                     continue 'outer;
                 }
             }
-            // No symbol matched — might need more bits
+            // No symbol matched — might need more bits. The code is
+            // complete (see `table_is_a_complete_prefix_code`), so any 30
+            // bits match a symbol and at most 29 bits stay pending.
             break;
         }
     }
@@ -311,7 +315,7 @@ pub fn huffman_decode(data: &[u8]) -> Result<Vec<u8>, &'static str> {
         return Err("invalid Huffman padding (too many bits remaining)");
     }
     if bit_count > 0 {
-        let mask = (1u32 << bit_count) - 1;
+        let mask = (1u64 << bit_count) - 1;
         if bits & mask != mask {
             return Err("invalid Huffman padding (not all ones)");
         }
@@ -353,5 +357,50 @@ mod tests {
         // '0' has code 0x0 with 5 bits → 00000, padded with 111 → 00000111 = 0x07
         let decoded = huffman_decode(&[0x07]).unwrap();
         assert_eq!(decoded, b"0");
+    }
+
+    #[test]
+    fn long_codes_do_not_overflow_the_accumulator() {
+        // 40 one-bits: no code of 5..=29 bits matches before more than 32
+        // bits are buffered; the 30-bit EOS code then matches.
+        assert_eq!(
+            huffman_decode(&[0xff; 5]),
+            Err("unexpected EOS symbol in Huffman data")
+        );
+        // '0' (00000) and ' ' (010100), then 5 + 24 one-bits pending with
+        // no match: the next octet makes 37 buffered bits.
+        assert_eq!(
+            huffman_decode(&[0x02, 0x9f, 0xff, 0xff, 0xff, 0xff]),
+            Err("unexpected EOS symbol in Huffman data")
+        );
+    }
+
+    #[test]
+    fn decode_left_brace() {
+        // RFC 7541, Appendix B — '{' ( 123) |11111111|1111110  7ffe [15],
+        // followed by one padding bit.
+        assert_eq!(huffman_decode(&[0xff, 0xfd]).unwrap(), b"{");
+    }
+
+    #[test]
+    fn table_is_a_complete_prefix_code() {
+        // The codes of RFC 7541, Appendix B form a complete prefix code:
+        // the Kraft sum of 2^-len is exactly 1 and no code is a prefix of
+        // another.
+        let kraft: u64 = HUFFMAN_TABLE
+            .iter()
+            .map(|&(_, len)| 1u64 << (30 - len))
+            .sum();
+        assert_eq!(kraft, 1 << 30);
+        for (i, &(a, la)) in HUFFMAN_TABLE.iter().enumerate() {
+            for &(b, lb) in &HUFFMAN_TABLE[i + 1..] {
+                let (short, ls, long, ll) = if la <= lb {
+                    (a, la, b, lb)
+                } else {
+                    (b, lb, a, la)
+                };
+                assert_ne!(long >> (ll - ls), short, "prefix clash");
+            }
+        }
     }
 }

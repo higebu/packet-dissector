@@ -8,10 +8,16 @@ rust-version.workspace = true
 readme = "README.md"
 keywords = ["packet", "network", "dissector", "parser", "ppp"]
 categories = ["network-programming", "parser-implementations"]
-description = "PPP frame dissector and sub-protocol parsers (IPCP, LCP, PAP, CHAP) for packet-dissector"
+description = "PPP frame dissector and sub-protocol parsers (IPCP, LCP, PAP, CHAP, optional EAP) for packet-dissector"
+
+[features]
+# Decode EAP (PPP Protocol 0xC227) inline (RFC 3748, Section 3.2.1 —
+# https://www.rfc-editor.org/rfc/rfc3748#section-3.2.1).
+eap = ["dep:packet-dissector-eap"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
+packet-dissector-eap = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

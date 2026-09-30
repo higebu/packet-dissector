@@ -58,6 +58,7 @@
 #![deny(missing_docs)]
 
 // Re-export core types so users can `use packet_dissector::dissector::Dissector` etc.
+pub use packet_dissector_core::checksum;
 pub use packet_dissector_core::dissector;
 pub use packet_dissector_core::error;
 pub use packet_dissector_core::field;
@@ -82,6 +83,12 @@ pub mod dissectors {
 
     #[cfg(feature = "raw_ip")]
     pub use packet_dissector_raw_ip as raw_ip;
+
+    #[cfg(feature = "ieee80211")]
+    pub use packet_dissector_ieee80211 as ieee80211;
+
+    #[cfg(feature = "radiotap")]
+    pub use packet_dissector_radiotap as radiotap;
 
     #[cfg(feature = "arp")]
     pub use packet_dissector_arp as arp;
@@ -155,10 +162,20 @@ pub mod dissectors {
     #[cfg(feature = "diameter")]
     pub use packet_dissector_diameter as diameter;
 
+    #[cfg(feature = "e1ap")]
+    pub use packet_dissector_e1ap as e1ap;
+    #[cfg(feature = "f1ap")]
+    pub use packet_dissector_f1ap as f1ap;
+    #[cfg(feature = "nas-eps")]
+    pub use packet_dissector_nas_eps as nas_eps;
     #[cfg(feature = "nas5g")]
     pub use packet_dissector_nas5g as nas5g;
     #[cfg(feature = "ngap")]
     pub use packet_dissector_ngap as ngap;
+    #[cfg(feature = "sgsap")]
+    pub use packet_dissector_sgsap as sgsap;
+    #[cfg(feature = "xnap")]
+    pub use packet_dissector_xnap as xnap;
 
     #[cfg(feature = "geneve")]
     pub use packet_dissector_geneve as geneve;
@@ -166,15 +183,25 @@ pub mod dissectors {
     #[cfg(feature = "gre")]
     pub use packet_dissector_gre as gre;
 
+    #[cfg(feature = "erspan")]
+    pub use packet_dissector_erspan as erspan;
+
     #[cfg(feature = "mpls")]
     pub use packet_dissector_mpls as mpls;
+
+    #[cfg(feature = "nsh")]
+    pub use packet_dissector_nsh as nsh;
 
     #[cfg(feature = "vxlan")]
     pub use packet_dissector_vxlan as vxlan;
 
+    #[cfg(feature = "eap")]
+    pub use packet_dissector_eap as eap;
     #[cfg(feature = "lldp")]
     pub use packet_dissector_lldp as lldp;
 
+    #[cfg(feature = "cdp")]
+    pub use packet_dissector_cdp as cdp;
     #[cfg(feature = "stp")]
     pub use packet_dissector_stp as stp;
 
@@ -184,11 +211,35 @@ pub mod dissectors {
     #[cfg(feature = "ospf")]
     pub use packet_dissector_ospf as ospf;
 
+    #[cfg(feature = "pim")]
+    pub use packet_dissector_pim as pim;
+
     #[cfg(feature = "vrrp")]
     pub use packet_dissector_vrrp as vrrp;
 
+    #[cfg(feature = "rsvp")]
+    pub use packet_dissector_rsvp as rsvp;
+
     #[cfg(feature = "bfd")]
     pub use packet_dissector_bfd as bfd;
+
+    #[cfg(feature = "ipfix")]
+    pub use packet_dissector_ipfix as ipfix;
+
+    #[cfg(feature = "snmp")]
+    pub use packet_dissector_snmp as snmp;
+
+    #[cfg(feature = "m3ua")]
+    pub use packet_dissector_m3ua as m3ua;
+
+    #[cfg(feature = "sccp")]
+    pub use packet_dissector_sccp as sccp;
+
+    #[cfg(feature = "tcap")]
+    pub use packet_dissector_tcap as tcap;
+
+    #[cfg(feature = "map")]
+    pub use packet_dissector_map as map;
 
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
@@ -196,11 +247,17 @@ pub mod dissectors {
     #[cfg(feature = "bgp")]
     pub use packet_dissector_bgp as bgp;
 
+    #[cfg(feature = "bmp")]
+    pub use packet_dissector_bmp as bmp;
+
     #[cfg(feature = "l2tp")]
     pub use packet_dissector_l2tp as l2tp;
 
     #[cfg(feature = "l2tpv3")]
     pub use packet_dissector_l2tpv3 as l2tpv3;
+
+    #[cfg(feature = "ldp")]
+    pub use packet_dissector_ldp as ldp;
 
     #[cfg(feature = "tls")]
     pub use packet_dissector_tls as tls;
