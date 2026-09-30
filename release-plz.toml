@@ -72,6 +72,7 @@ changelog_include = [
   "packet-dissector-ethernet",
   "packet-dissector-geneve",
   "packet-dissector-gre",
+  "packet-dissector-gtpv1c",
   "packet-dissector-gtpv1u",
   "packet-dissector-gtpv2c",
   "packet-dissector-http",
@@ -100,6 +101,7 @@ changelog_include = [
   "packet-dissector-pcap",
   "packet-dissector-pfcp",
   "packet-dissector-ppp",
+  "packet-dissector-pppoe",
   "packet-dissector-quic",
   "packet-dissector-radius",
   "packet-dissector-raw-ip",
@@ -173,6 +175,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-gre"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-gtpv1c"
 version_group = "workspace"
 
 [[package]]
@@ -285,6 +291,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-ppp"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-pppoe"
 version_group = "workspace"
 
 [[package]]
