@@ -27,6 +27,7 @@ packet-dissector-isis = { workspace = true }
 packet-dissector-m3ua = { workspace = true }
 packet-dissector-map = { workspace = true }
 packet-dissector-mdns = { workspace = true }
+packet-dissector-nas-eps = { workspace = true }
 packet-dissector-ntp = { workspace = true }
 packet-dissector-ospf = { workspace = true }
 packet-dissector-pppoe = { workspace = true }
