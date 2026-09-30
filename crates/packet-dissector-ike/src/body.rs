@@ -163,8 +163,20 @@ fn d_id_type_v2(v: &FieldValue<'_>, _: &[Field<'_>]) -> Option<&'static str> {
 fn d_id_type_v1(v: &FieldValue<'_>, _: &[Field<'_>]) -> Option<&'static str> {
     v1_ipsec_id_type_name(u8_of(v)?)
 }
+/// IP protocol of a Traffic Selector or IKEv1 Identification payload. Zero
+/// is not a protocol number there, so it has no name.
+///
+/// RFC 7296, Section 3.13.1 — "A value of zero means that the protocol ID
+/// is not relevant to this Traffic Selector".
+/// <https://www.rfc-editor.org/rfc/rfc7296#section-3.13.1>
+/// RFC 2407, Section 4.6.2 — "A value of zero means that the Protocol ID
+/// field should be ignored."
+/// <https://www.rfc-editor.org/rfc/rfc2407#section-4.6.2>
 fn d_ip_protocol(v: &FieldValue<'_>, _: &[Field<'_>]) -> Option<&'static str> {
-    ip_protocol_name(u8_of(v)?)
+    match u8_of(v)? {
+        0 => None,
+        p => ip_protocol_name(p),
+    }
 }
 fn d_cert_encoding(v: &FieldValue<'_>, _: &[Field<'_>]) -> Option<&'static str> {
     cert_encoding_name(u8_of(v)?)
@@ -1496,12 +1508,14 @@ mod tests {
     //! | 7296 §3.11          | Delete                               | v2_delete                             |
     //! | 7296 §3.12          | Vendor ID                            | v2_nonce_and_vendor_id                |
     //! | 7296 §3.13          | Traffic Selectors (IPv4/IPv6/other)  | v2_traffic_selectors                  |
+    //! | 7296 §3.13.1        | IP Protocol ID 0 has no name         | v2_traffic_selectors                  |
     //! | 7296 §3.15          | Configuration                        | v2_configuration                      |
     //! | 7383 §2.5           | Encrypted Fragment (SKF)             | v2_encrypted_fragment                 |
     //! | 2408 §3.4-3.6       | IKEv1 SA / Proposal / Transform      | v1_sa_main_mode                       |
     //! | 2407 §4.5           | IKEv1 IPsec SA attributes (ESP)      | v1_sa_quick_mode_esp                  |
     //! | 2408 §3.7, 3.13     | IKEv1 KE / Nonce                     | v1_ke_nonce_id                        |
     //! | 2407 §4.6.2         | IKEv1 Identification                 | v1_ke_nonce_id                        |
+    //! | 2407 §4.6.2         | Protocol ID 0 has no name            | v1_identification_protocol_zero_is_not_named |
     //! | 2408 §3.14          | IKEv1 Notification                   | v1_notification                       |
     //! | 2408 §3.15-3.16     | IKEv1 Delete / Vendor ID             | v1_delete_and_vendor_id               |
     //! | 7296 §3.16          | EAP payload decoded as EAP (eap)     | v2_eap_payload                        |
@@ -2012,6 +2026,23 @@ mod tests {
         );
         // TS_SECLABEL has no IP Protocol ID.
         assert!(!has(&buf, &sels[2], "ip_protocol"));
+        // RFC 7296, Section 3.13.1 — "A value of zero means that the
+        // protocol ID is not relevant", so it is not named as HOPOPT.
+        // <https://www.rfc-editor.org/rfc/rfc7296#section-3.13.1>
+        assert_eq!(*get(&buf, &sels[1], "ip_protocol"), FieldValue::U8(0));
+        assert_eq!(display(&buf, &sels[1], "ip_protocol"), None);
+    }
+
+    /// RFC 2407, Section 4.6.2 — "A value of zero means that the Protocol ID
+    /// field should be ignored."
+    /// <https://www.rfc-editor.org/rfc/rfc2407#section-4.6.2>
+    #[test]
+    fn v1_identification_protocol_zero_is_not_named() {
+        let data = message(1, &[(5, vec![1, 0, 0, 0, 192, 0, 2, 1])]);
+        let buf = dissect(&data);
+        let p = payload(&buf, 0);
+        assert_eq!(*get(&buf, &p, "id_protocol_id"), FieldValue::U8(0));
+        assert_eq!(display(&buf, &p, "id_protocol_id"), None);
     }
 
     #[test]
