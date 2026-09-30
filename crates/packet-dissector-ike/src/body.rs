@@ -2043,6 +2043,12 @@ mod tests {
         let p = payload(&buf, 0);
         assert_eq!(*get(&buf, &p, "id_protocol_id"), FieldValue::U8(0));
         assert_eq!(display(&buf, &p, "id_protocol_id"), None);
+
+        // Non-zero values keep their IP protocol name.
+        let data = message(1, &[(5, vec![1, 17, 0x01, 0xf4, 192, 0, 2, 1])]);
+        let buf = dissect(&data);
+        let p = payload(&buf, 0);
+        assert_eq!(display(&buf, &p, "id_protocol_id"), Some("UDP"));
     }
 
     #[test]
