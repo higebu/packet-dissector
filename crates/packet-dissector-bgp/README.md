@@ -56,6 +56,11 @@ BGP-LS (AFI 16388 / SAFI 71, 72) entries carry `nlri_type`,
 [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552#section-5.2); other NLRI
 Types keep a `value`.
 
+Route Target membership (AFI 1 / SAFI 132) entries carry `prefix_length`,
+and the octets it covers as `origin_as` and `route_target`, per
+[RFC 4684](https://www.rfc-editor.org/rfc/rfc4684#section-4); a length other
+than 0 or 32-96 bits ends the decoded entries.
+
 Every `nlri` / `withdrawn_routes` array — top level and inside
 `MP_REACH_NLRI` / `MP_UNREACH_NLRI` — declares the same entry `children`: the
 union of the plain prefix fields and the
