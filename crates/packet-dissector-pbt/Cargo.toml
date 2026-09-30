@@ -15,6 +15,8 @@ packet-dissector-core = { workspace = true }
 proptest = "1"
 
 [dev-dependencies]
+# Registry-level properties (IP fragment reassembly).
+packet-dissector = { path = "../packet-dissector" }
 packet-dissector-dns = { workspace = true }
 packet-dissector-icmp = { workspace = true }
 packet-dissector-icmpv6 = { workspace = true }

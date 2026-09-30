@@ -19,7 +19,7 @@ use packet_dissector_core::dissector::{
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
-use packet_dissector_core::util::{read_be_u16, read_be_u32};
+use packet_dissector_core::util::{ipv4_mapped, read_be_u16, read_be_u32};
 
 /// Minimum TCP header size (no options).
 const MIN_HEADER_SIZE: usize = 20;
@@ -190,11 +190,11 @@ fn extract_stream_key(buf: &DissectBuffer, src_port: u16, dst_port: u16) -> Opti
 
     let (src_ip, dst_ip): ([u8; 16], [u8; 16]) = if ip_layer.name == "IPv4" {
         let src = match &fields.iter().find(|f| f.name() == "src")?.value {
-            FieldValue::Ipv4Addr(addr) => ipv4_mapped(addr),
+            FieldValue::Ipv4Addr(addr) => ipv4_mapped(*addr),
             _ => return None,
         };
         let dst = match &fields.iter().find(|f| f.name() == "dst")?.value {
-            FieldValue::Ipv4Addr(addr) => ipv4_mapped(addr),
+            FieldValue::Ipv4Addr(addr) => ipv4_mapped(*addr),
             _ => return None,
         };
         (src, dst)
@@ -234,7 +234,8 @@ fn canonicalize_key(key: StreamKey) -> StreamKey {
 /// For IPv6: `payload = payload_length - tcp_header_len`
 ///
 /// Returns `None` when no IP layer is present or the fields cannot be parsed.
-/// The result is clamped to the captured slice length to handle truncated captures.
+/// The result may exceed the captured bytes (snaplen truncation); the
+/// caller takes the larger of it and the captured length.
 fn ip_payload_len(buf: &DissectBuffer, tcp_offset: usize, tcp_header_len: usize) -> Option<usize> {
     // Use the innermost (last) IP layer whose range precedes the TCP offset.
     let ip_layer = buf
@@ -267,18 +268,6 @@ fn ip_payload_len(buf: &DissectBuffer, tcp_offset: usize, tcp_header_len: usize)
             .checked_add(tcp_header_len)?;
         Some(payload_length.saturating_sub(ext_and_tcp))
     }
-}
-
-/// Encode an IPv4 address as an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`).
-///
-/// This avoids key collisions between IPv4 and IPv6 addresses whose last
-/// 12 bytes happen to be zero.
-fn ipv4_mapped(addr: &[u8; 4]) -> [u8; 16] {
-    let mut mapped = [0u8; 16];
-    mapped[10] = 0xff;
-    mapped[11] = 0xff;
-    mapped[12..16].copy_from_slice(addr);
-    mapped
 }
 
 /// Maximum number of tracked TCP streams before the coldest (oldest)
@@ -634,9 +623,17 @@ impl Dissector for TcpDissector {
 
         buf.end_layer();
 
-        // Compute TCP payload length from the IP layer's total/payload length
-        let payload_len =
-            ip_payload_len(buf, offset, header_len).unwrap_or(data.len() - header_len);
+        // Compute TCP payload length from the IP layer's total/payload length.
+        // The IP length can exceed the captured bytes (snaplen truncation),
+        // and the captured bytes can exceed it when the segment comes from a
+        // reassembled IP datagram, whose length is not in the header of the
+        // fragment that completed it (RFC 791, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2). The dispatch
+        // loop already ends `data` at the IP length otherwise, so the larger
+        // of the two is the segment's length.
+        let captured_len = data.len() - header_len;
+        let payload_len = ip_payload_len(buf, offset, header_len)
+            .map_or(captured_len, |ip_len| ip_len.max(captured_len));
 
         match extract_stream_key(buf, src_port, dst_port) {
             Some(key) => Ok(DissectResult::with_tcp_context(

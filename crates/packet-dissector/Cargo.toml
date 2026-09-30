@@ -67,6 +67,7 @@ default = [
   "quic",
   "quic-decrypt",
   "stun",
+  "ip-reassembly",
   "dtls",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
@@ -130,6 +131,9 @@ rtp = ["dep:packet-dissector-rtp"]
 quic = ["dep:packet-dissector-quic"]
 quic-decrypt = ["quic", "packet-dissector-quic/decrypt"]
 stun = ["dep:packet-dissector-stun"]
+# IPv4 / IPv6 fragment reassembly in the registry. Without it, non-initial
+# fragments still end the dissection chain after the IP layer.
+ip-reassembly = ["dep:packet-dissector-reassembly"]
 # DTLS lives in the TLS crate, which shares its handshake decoders.
 dtls = ["dep:packet-dissector-tls"]
 

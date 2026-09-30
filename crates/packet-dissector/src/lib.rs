@@ -232,6 +232,8 @@ pub mod dissectors {
     pub use packet_dissector_tls as dtls;
 }
 
+#[cfg(feature = "ip-reassembly")]
+mod ip_reassembly;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 
