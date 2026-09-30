@@ -31,6 +31,7 @@ default = [
   "sctp",
   "dns",
   "mdns",
+  "llmnr",
   "dhcp",
   "dhcpv6",
   "srv6",
@@ -120,6 +121,7 @@ udp = ["dep:packet-dissector-udp"]
 sctp = ["dep:packet-dissector-sctp"]
 dns = ["dep:packet-dissector-dns"]
 mdns = ["dep:packet-dissector-mdns"]
+llmnr = ["dep:packet-dissector-llmnr"]
 dhcp = ["dep:packet-dissector-dhcp"]
 dhcpv6 = ["dep:packet-dissector-dhcpv6"]
 srv6 = ["dep:packet-dissector-srv6"]
@@ -220,6 +222,7 @@ layer4 = ["tcp", "udp", "sctp"]
 application = [
   "dns",
   "mdns",
+  "llmnr",
   "dhcp",
   "dhcpv6",
   "http",
@@ -286,6 +289,7 @@ packet-dissector-udp = { workspace = true, optional = true }
 packet-dissector-sctp = { workspace = true, optional = true }
 packet-dissector-dns = { workspace = true, optional = true }
 packet-dissector-mdns = { workspace = true, optional = true }
+packet-dissector-llmnr = { workspace = true, optional = true }
 packet-dissector-dhcp = { workspace = true, optional = true }
 packet-dissector-dhcpv6 = { workspace = true, optional = true }
 packet-dissector-srv6 = { workspace = true, optional = true }
