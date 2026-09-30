@@ -1008,18 +1008,21 @@ impl Dissector for FragmentDissector {
 /// between the IPv6 header and fragment itself".
 /// <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>
 ///
-/// Returns `None` without an enclosing IPv6 layer, or when the Payload
+/// Returns `None` when the innermost enclosing IP layer is not IPv6, or when the Payload
 /// Length is 0 (a Jumbo Payload, RFC 2675, Section 3 —
 /// <https://www.rfc-editor.org/rfc/rfc2675#section-3>) or too small.
 fn enclosing_ipv6(
     buf: &DissectBuffer<'_>,
     fragment_start: usize,
 ) -> Option<([u8; 16], [u8; 16], usize, usize)> {
+    // The innermost IP layer before the Fragment header must be IPv6 (the
+    // Fragment header never follows an IPv4 header, e.g. inside a tunnel).
     let layer = buf
         .layers()
         .iter()
         .rev()
-        .find(|l| l.name == "IPv6" && l.range.end <= fragment_start)?;
+        .find(|l| (l.name == "IPv6" || l.name == "IPv4") && l.range.end <= fragment_start)
+        .filter(|l| l.name == "IPv6")?;
     // Extension headers between the IPv6 header and the Fragment header.
     let unfragmentable_len = fragment_start - layer.range.end;
     let (mut src, mut dst, mut payload_length) = (None, None, None);
@@ -1258,6 +1261,7 @@ mod tests {
     //! | 4.5         | Whole datagram (offset 0, M 0)      | fragment_atomic_has_no_context              |
     //! | 4.5         | No IPv6 layer: no reassembly key    | fragment_without_ipv6_layer_has_no_context  |
     //! | 2675 §3     | Jumbo Payload Length 0: no context  | fragment_with_jumbo_payload_length_has_no_context |
+    //! | 4.5         | Inner IPv4 before Fragment: no context | fragment_after_inner_ipv4_has_no_context |
     //!
     //! # RFC 6275 (Mobility Header) Coverage
     //!
@@ -1631,8 +1635,9 @@ mod tests {
         assert_eq!(buf.layer_fields(layer).len(), 6);
     }
 
-    /// IPv6 header (RFC 8200, Section 3) with the given Payload Length and
-    /// Next Header, dissected into `buf` at offset 0.
+    /// IPv6 header (RFC 8200, Section 3 —
+    /// <https://www.rfc-editor.org/rfc/rfc8200#section-3>) with the given
+    /// Payload Length and Next Header, dissected into `buf` at offset 0.
     fn push_ipv6_layer<'a>(
         buf: &mut DissectBuffer<'a>,
         storage: &'a mut [u8; 40],
@@ -1656,6 +1661,7 @@ mod tests {
     #[test]
     fn fragment_non_initial_ends_chain() {
         // RFC 8200, Section 4.5 — Fragment Offset=1 (8 octets), M=0.
+        // <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>
         let mut header = [0u8; 40];
         let mut buf = DissectBuffer::new();
         push_ipv6_layer(&mut buf, &mut header, 8 + 8, 44);
@@ -1678,6 +1684,7 @@ mod tests {
     #[test]
     fn fragment_first_context_from_ipv6_layer() {
         // RFC 8200, Section 4.5 — first fragment: offset 0, M=1.
+        // <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>
         let mut header = [0u8; 40];
         let mut buf = DissectBuffer::new();
         push_ipv6_layer(&mut buf, &mut header, 8 + 16, 44);
@@ -1720,6 +1727,7 @@ mod tests {
         // RFC 8200, Section 4.5 — "If the fragment is a whole datagram (that
         // is, both the Fragment Offset field and the M flag are zero), then
         // it does not need any further reassembly".
+        // <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>
         let mut header = [0u8; 40];
         let mut buf = DissectBuffer::new();
         push_ipv6_layer(&mut buf, &mut header, 8 + 8, 44);
@@ -1743,9 +1751,27 @@ mod tests {
     }
 
     #[test]
+    fn fragment_after_inner_ipv4_has_no_context() {
+        // An IPv4 layer between the IPv6 layer and the Fragment header (e.g.
+        // IPv4-in-IPv6 with Protocol 44): the outer IPv6 addresses and
+        // lengths do not describe this fragment.
+        let mut header = [0u8; 40];
+        let mut buf = DissectBuffer::new();
+        push_ipv6_layer(&mut buf, &mut header, 20 + 8 + 8, 4);
+        buf.begin_layer("IPv4", None, &[], 40..60);
+        buf.end_layer();
+        let data: [u8; 8] = [17, 0, 0x00, 0x09, 0, 0, 0, 1];
+        let result = FragmentDissector.dissect(&data, &mut buf, 60).unwrap();
+
+        assert_eq!(result.next, DispatchHint::End);
+        assert_eq!(result.ip_fragment_context, None);
+    }
+
+    #[test]
     fn fragment_with_jumbo_payload_length_has_no_context() {
         // RFC 2675, Section 3 — Payload Length 0 announces a Jumbo Payload,
         // so no fragment length can be derived from it.
+        // <https://www.rfc-editor.org/rfc/rfc2675#section-3>
         let mut header = [0u8; 40];
         let mut buf = DissectBuffer::new();
         push_ipv6_layer(&mut buf, &mut header, 0, 44);

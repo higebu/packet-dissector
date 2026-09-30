@@ -13,13 +13,14 @@
 //! | —                    | Conflicting last fragments abandon the datagram          | ipv4_conflicting_last_fragment_abandons_datagram        |
 //! | —                    | Snaplen-truncated fragment is dissected, not buffered    | ipv4_truncated_fragment_is_not_buffered                 |
 //! | RFC 9293 3.1         | TCP segment in a fragmented datagram keeps its length    | ipv4_fragmented_tcp_segment_reassembles                 |
+//! | RFC 9293 3.10        | Fragmented segment completes a buffered TCP stream       | ipv4_fragmented_segment_completes_buffered_tcp_stream   |
 //! | —                    | Summary dissection leaves the reassembly state alone     | ipv4_summary_does_not_reassemble                        |
 //! | —                    | Projected dissection leaves the reassembly state alone   | ipv4_projected_does_not_reassemble                      |
 //! | RFC 8200 4.5         | In-order IPv6 fragments reassemble into UDP/DNS          | ipv6_fragments_in_order_reassemble                      |
 //! | RFC 8200 4.5         | Reverse-order IPv6 fragments reassemble                  | ipv6_fragments_in_reverse_order_reassemble              |
 //! | RFC 8200 4.5         | Next Header of the offset-zero fragment is used          | ipv6_next_header_from_first_fragment                    |
 //! | RFC 8200 4.5         | Per-fragment extension headers precede Fragment header   | ipv6_fragments_after_hop_by_hop_reassemble              |
-//! | RFC 8200 4.5         | Overlapping IPv6 fragments abandon the datagram          | ipv6_overlap_abandons_datagram                          |
+//! | RFC 8200 4.5, 5722 4 | Overlapping IPv6 fragments abandon the datagram          | ipv6_overlap_abandons_datagram                          |
 //! | RFC 8200 4.5         | Exact duplicate IPv6 fragment is dropped, rest kept      | ipv6_exact_duplicate_is_dropped                         |
 //! | RFC 8200 4.5         | M=1 fragment length not a multiple of 8 is discarded     | ipv6_fragment_not_multiple_of_8_is_discarded            |
 //! | RFC 8200 4.5         | Reassembled Payload Length above 65,535 is discarded     | ipv6_oversized_fragment_is_discarded                    |
@@ -429,6 +430,37 @@ fn ipv4_fragmented_tcp_segment_reassembles() {
 }
 
 #[test]
+fn ipv4_fragmented_segment_completes_buffered_tcp_stream() {
+    // An HTTP request split across two TCP segments; the second segment is
+    // fragmented. The request is reassembled by the TCP middleware inside
+    // the reassembled datagram, and its fields must stay valid after the
+    // inner dissection is merged into the packet's buffer.
+    let request = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    let (head, tail) = request.split_at(10);
+    let tcp80 = |seq: u32, payload: &[u8]| {
+        let mut d = tcp(seq, payload);
+        d[0..2].copy_from_slice(&40000u16.to_be_bytes());
+        d[2..4].copy_from_slice(&80u16.to_be_bytes());
+        d
+    };
+    let reg = DissectorRegistry::default();
+    feed(&reg, &[ipv4(20, 6, false, 0, &tcp80(1, head))]);
+    let segment = tcp80(1 + head.len() as u32, tail);
+    let frags: Vec<_> = split(&segment, &[24])
+        .into_iter()
+        .map(|(off, mf, d)| ipv4(21, 6, mf, off, d))
+        .collect();
+    feed(&reg, &frags[..1]);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&frags[1], &mut buf).unwrap();
+    assert_eq!(names(&buf), ["Ethernet", "IPv4", "TCP", "HTTP"]);
+    let http = buf.layer_by_name("HTTP").unwrap();
+    assert_eq!(buf.field_str(http, "method"), Some("GET"));
+    assert_eq!(buf.field_str(http, "uri"), Some("/index.html"));
+}
+
+#[test]
 fn ipv4_summary_does_not_reassemble() {
     // Shallow dissection leaves the (stateful) reassembly alone: the first
     // fragment is summarized by its own transport header and a non-initial
@@ -564,15 +596,18 @@ fn ipv6_overlap_abandons_datagram() {
             ipv6(4, 17, true, 2, &datagram[16..40]),
         ],
     );
-    // The received fragments are gone: the rest does not complete it.
-    let layers = feed(&reg, &[ipv6(4, 17, false, 5, &datagram[40..])]);
-    assert_eq!(layers, vec![vec!["Ethernet", "IPv6", "IPv6 Fragment"]]);
-    // Fragments arriving after the abandonment are reassembled afresh.
-    assert_matches_unfragmented(
+    // RFC 5722, Section 4 — "the entire datagram (and any constituent
+    // fragments, including those not yet received) MUST be silently
+    // discarded." Well-formed fragments sent afterwards do not complete it.
+    // https://www.rfc-editor.org/rfc/rfc5722#section-4
+    let layers = feed(
         &reg,
-        &ipv6(4, 17, true, 0, &datagram[..40]),
-        &ipv6_raw(17, &[], &datagram),
+        &[
+            ipv6(4, 17, false, 5, &datagram[40..]),
+            ipv6(4, 17, true, 0, &datagram[..40]),
+        ],
     );
+    assert_eq!(layers, vec![vec!["Ethernet", "IPv6", "IPv6 Fragment"]; 2]);
 }
 
 #[test]

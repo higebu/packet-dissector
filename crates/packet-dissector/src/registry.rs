@@ -1315,9 +1315,9 @@ impl DissectorRegistry {
         // start at its current length instead.
         let field_offset = buf.field_count() - prefix.fields;
         let scratch_offset = buf.scratch_len() - prefix.scratch;
-        let (tmp_layers, tmp_fields, tmp_scratch) = tmp_buf.into_parts();
-        buf.extend_scratch(&tmp_scratch[prefix.scratch as usize..]);
-        for mut layer in tmp_layers.into_iter().skip(prefix.layers) {
+        buf.extend_scratch(&tmp_buf.scratch()[prefix.scratch as usize..]);
+        for layer in &tmp_buf.layers()[prefix.layers..] {
+            let mut layer = layer.clone();
             layer.field_range.start += field_offset;
             layer.field_range.end += field_offset;
             buf.push_layer(layer);
@@ -1332,13 +1332,17 @@ impl DissectorRegistry {
             scratch_offset,
         };
 
-        for field in tmp_fields.into_iter().skip(prefix.fields as usize) {
+        // `tmp_buf` stays alive while its fields are remapped: values that
+        // borrow from its own auxiliary data (e.g. TCP reassembly inside the
+        // inner dissection) are copied into `buf` before it is dropped.
+        for field in &tmp_buf.fields()[prefix.fields as usize..] {
             // Remap borrowed field values from `padded` to `buf.aux_data`.
-            let new_value: FieldValue<'pkt> = Self::remap_field_value(field.value, buf, &remap_ctx);
+            let new_value: FieldValue<'pkt> =
+                Self::remap_field_value(field.value.clone(), buf, &remap_ctx);
             buf.push_raw_field(Field {
                 descriptor: field.descriptor,
                 value: new_value,
-                range: field.range,
+                range: field.range.clone(),
             });
         }
     }

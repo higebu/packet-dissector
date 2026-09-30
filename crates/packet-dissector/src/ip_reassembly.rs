@@ -73,10 +73,12 @@ struct FragmentGroup {
     /// Byte ranges of the distinct fragments received, sorted by
     /// `(start, end)`. For IPv6 they never overlap.
     fragments: Vec<Range<usize>>,
-    /// End of the furthest fragment received.
-    max_end: usize,
-    /// Protocol of the offset-zero fragment, once it has arrived.
-    protocol: Option<u8>,
+    /// Protocol and [`IpFragmentContext::unfragmentable_len`] of the
+    /// offset-zero fragment, once it has arrived.
+    first: Option<(u8, usize)>,
+    /// The datagram was abandoned because of overlapping IPv6 fragments;
+    /// its remaining fragments are discarded on arrival.
+    abandoned: bool,
     /// Generation the group was created with, to skip stale `order` entries.
     generation: u64,
 }
@@ -126,6 +128,8 @@ impl IpReassemblyService {
         ctx: &IpFragmentContext,
         data: &[u8],
     ) -> Option<Reassembled> {
+        let key = ctx.frag_key;
+        let ipv6 = is_ipv6(&key);
         let start = ctx.offset_bytes;
         let end = start.checked_add(data.len())?;
 
@@ -140,18 +144,21 @@ impl IpReassemblyService {
         if ctx.more_fragments && data.len() % 8 != 0 {
             return None;
         }
-        // A reassembled length field above 65,535 octets cannot exist: RFC
-        // 791, Section 3.1 defines a 16-bit Total Length
-        // (https://www.rfc-editor.org/rfc/rfc791#section-3.1), and RFC 8200,
-        // Section 4.5 requires discarding such a fragment
-        // (https://www.rfc-editor.org/rfc/rfc8200#section-4.5).
-        if ctx.unfragmentable_len.saturating_add(end) > MAX_DATAGRAM_LEN {
+        // RFC 8200, Section 4.5 — "If the length and offset of a fragment are
+        // such that the Payload Length of the packet reassembled from that
+        // fragment would exceed 65,535 octets, then that fragment must be
+        // discarded". For IPv4 only the data is bounded here; the header of
+        // the reassembled datagram is the offset-zero fragment's, checked on
+        // completion.
+        // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
+        let headers = if ipv6 { ctx.unfragmentable_len } else { 0 };
+        if headers.saturating_add(end) > MAX_DATAGRAM_LEN {
             return None;
         }
 
-        let key = ctx.frag_key;
-        if !self.groups.contains_key(&key) {
-            self.evict_for_new_group();
+        let is_new = !self.groups.contains_key(&key);
+        self.evict_to_limits(&key, is_new);
+        if is_new {
             self.generation += 1;
             self.order.push_back((key, self.generation));
             self.groups.insert(
@@ -159,31 +166,36 @@ impl IpReassemblyService {
                 FragmentGroup {
                     buffer: ReassemblyBuffer::new(),
                     fragments: Vec::new(),
-                    max_end: 0,
-                    protocol: None,
+                    first: None,
+                    abandoned: false,
                     generation: self.generation,
                 },
             );
         }
         let group = self.groups.get_mut(&key)?;
-        let ipv6 = is_ipv6(&key);
+        if group.abandoned {
+            return None;
+        }
         let position = group
             .fragments
             .binary_search_by(|r| (r.start, r.end).cmp(&(start, end)));
 
-        let abandon = match position {
+        let overlap = match position {
             // RFC 8200, Section 4.5 — "an implementation may choose to detect
             // this case and drop exact duplicate fragments while keeping the
             // other fragments belonging to the same packet."
+            // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
             Ok(_) if ipv6 && group.buffer.data().get(start..end) == Some(data) => return None,
             // Same range with different data: an overlap for IPv6.
             Ok(_) => ipv6,
-            Err(i) => {
-                group.fragments.len() >= MAX_FRAGMENTS_PER_DATAGRAM
-                    || (ipv6 && Self::overlaps_neighbour(&group.fragments, i, start, end))
-            }
-        } || Self::length_conflict(group, ctx.more_fragments, end);
-        if abandon {
+            Err(i) => ipv6 && Self::overlaps_neighbour(&group.fragments, i, start, end),
+        };
+        if overlap {
+            self.abandon(&key);
+            return None;
+        }
+        let too_many = position.is_err() && group.fragments.len() >= MAX_FRAGMENTS_PER_DATAGRAM;
+        if too_many || Self::length_conflict(group, ctx.more_fragments, end) {
             self.remove(&key);
             return None;
         }
@@ -193,9 +205,8 @@ impl IpReassemblyService {
         if let Err(i) = position {
             group.fragments.insert(i, start..end);
         }
-        group.max_end = group.max_end.max(end);
         if start == 0 {
-            group.protocol = Some(ctx.protocol);
+            group.first = Some((ctx.protocol, ctx.unfragmentable_len));
         }
         if !ctx.more_fragments {
             group.buffer.set_total_len(end);
@@ -205,9 +216,16 @@ impl IpReassemblyService {
         if !group.buffer.is_complete() {
             return None;
         }
-        let protocol = group.protocol?;
+        let (protocol, headers) = group.first?;
         let total = group.buffer.total_len()?;
         let group = self.remove(&key)?;
+        // RFC 791, Section 3.2 — the reassembled datagram takes the header
+        // of the first fragment: "TL <- TDL+(IHL*4)", which must fit the
+        // 16-bit Total Length (RFC 791, Section 3.1).
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+        if headers.saturating_add(total) > MAX_DATAGRAM_LEN {
+            return None;
+        }
         let fragment_count = group.fragments.len() as u32;
         let mut data = group.buffer.into_data();
         data.truncate(total);
@@ -248,7 +266,25 @@ impl IpReassemblyService {
     fn length_conflict(group: &FragmentGroup, more_fragments: bool, end: usize) -> bool {
         match group.buffer.total_len() {
             Some(total) => end > total || (!more_fragments && end != total),
-            None => !more_fragments && end < group.max_end,
+            // The buffer grows to the end of the furthest fragment.
+            None => !more_fragments && end < group.buffer.data().len(),
+        }
+    }
+
+    /// Abandon an IPv6 datagram with overlapping fragments: drop its data
+    /// but keep the group, so fragments of it that arrive later are
+    /// discarded too.
+    ///
+    /// RFC 5722, Section 4 — "the entire datagram (and any constituent
+    /// fragments, including those not yet received) MUST be silently
+    /// discarded." <https://www.rfc-editor.org/rfc/rfc5722#section-4>
+    fn abandon(&mut self, key: &FragKey) {
+        if let Some(group) = self.groups.get_mut(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(group.bytes());
+            group.buffer = ReassemblyBuffer::new();
+            group.fragments = Vec::new();
+            group.first = None;
+            group.abandoned = true;
         }
     }
 
@@ -264,19 +300,35 @@ impl IpReassemblyService {
         Some(group)
     }
 
-    /// Drop the oldest datagrams until a new one fits within the limits.
-    fn evict_for_new_group(&mut self) {
-        while self.groups.len() >= MAX_FRAGMENT_GROUPS || self.total_bytes > MAX_FRAGMENT_BYTES {
+    /// Drop the oldest datagrams other than `keep` (the datagram of the
+    /// fragment being processed) until the group count, counting a new
+    /// group for `keep` when `is_new`, and the byte budget are within the
+    /// limits. The byte budget may be exceeded by the fragment being added.
+    fn evict_to_limits(&mut self, keep: &FragKey, is_new: bool) {
+        let mut kept = false;
+        while self.groups.len() + usize::from(is_new) > MAX_FRAGMENT_GROUPS
+            || self.total_bytes > MAX_FRAGMENT_BYTES
+        {
             let Some((key, generation)) = self.order.pop_front() else {
                 break;
             };
-            if self
+            let live = self
                 .groups
                 .get(&key)
-                .is_some_and(|group| group.generation == generation)
-            {
-                self.remove(&key);
+                .is_some_and(|group| group.generation == generation);
+            if !live {
+                continue;
             }
+            if key == *keep {
+                // Only `keep` is left to evict.
+                self.order.push_back((key, generation));
+                if kept {
+                    break;
+                }
+                kept = true;
+                continue;
+            }
+            self.remove(&key);
         }
     }
 }
@@ -328,8 +380,9 @@ impl DissectorRegistry {
         Self::add_ip_reassembly_fields(buf, &reassembled);
 
         let aux_handle = buf.push_aux_data(&reassembled.data);
-        let mut padded = vec![0u8; offset];
-        padded.extend_from_slice(&reassembled.data);
+        let protocol = reassembled.protocol;
+        let mut padded = reassembled.data;
+        padded.splice(0..0, core::iter::repeat_n(0u8, offset));
 
         let mut tmp_buf = DissectBuffer::new();
         for layer in buf.layers() {
@@ -357,7 +410,7 @@ impl DissectorRegistry {
             &mut tmp_buf,
             offset,
             padded.len(),
-            DispatchHint::ByIpProtocol(reassembled.protocol),
+            DispatchHint::ByIpProtocol(protocol),
             &mut full,
             true,
         );
@@ -440,7 +493,14 @@ mod tests {
             service.add_fragment(&ctx(v6(1), 8, true, 16), &[1; 16]),
             None
         );
-        assert!(service.groups.is_empty());
+        assert!(service.groups[&v6(1)].abandoned);
+        assert_eq!(service.total_bytes, 0);
+        // RFC 5722, Section 4 — fragments not yet received are discarded too.
+        assert_eq!(service.add_fragment(&ctx(v6(1), 0, true, 8), &[0; 8]), None);
+        assert_eq!(
+            service.add_fragment(&ctx(v6(1), 8, false, 8), &[0; 8]),
+            None
+        );
         assert_eq!(service.total_bytes, 0);
     }
 
@@ -449,7 +509,46 @@ mod tests {
         let mut service = IpReassemblyService::new();
         service.add_fragment(&ctx(v6(1), 0, true, 8), &[0; 8]);
         service.add_fragment(&ctx(v6(1), 0, true, 8), &[1; 8]);
+        assert!(service.groups[&v6(1)].abandoned);
+    }
+
+    #[test]
+    fn reassembled_header_must_fit_total_length() {
+        // RFC 791, Section 3.2 — TL <- TDL+(IHL*4) with the first fragment's
+        // header: 60 + 65,480 > 65,535.
+        let mut service = IpReassemblyService::new();
+        let first = ctx(v4(1), 0, true, 8).with_unfragmentable_len(60);
+        service.add_fragment(&first, &[0; 8]);
+        let data = vec![0u8; 65_472];
+        let last = ctx(v4(1), 8, false, data.len()).with_unfragmentable_len(20);
+        assert_eq!(service.add_fragment(&last, &data), None);
         assert!(service.groups.is_empty());
+    }
+
+    #[test]
+    fn byte_budget_is_enforced_for_existing_groups() {
+        let mut service = IpReassemblyService::new();
+        let groups = MAX_FRAGMENT_BYTES / 65_000 + 2;
+        for id in 0..groups as u32 {
+            service.add_fragment(&ctx(v4(id), 0, true, 8), &[0; 8]);
+        }
+        // Growing existing groups evicts the oldest other ones.
+        for id in 0..groups as u32 {
+            service.add_fragment(&ctx(v4(id), 64_992, true, 8), &[0; 8]);
+        }
+        assert!(service.total_bytes <= MAX_FRAGMENT_BYTES + 65_000);
+        assert!(service.groups.len() < groups);
+        assert!(service.groups.contains_key(&v4(groups as u32 - 1)));
+    }
+
+    #[test]
+    fn eviction_keeps_the_datagram_being_processed() {
+        let mut service = IpReassemblyService::new();
+        service.add_fragment(&ctx(v4(0), 0, true, 8), &[0; 8]);
+        // Pretend the budget is exceeded by the only group: it is kept.
+        service.total_bytes = MAX_FRAGMENT_BYTES + 1;
+        service.evict_to_limits(&v4(0), false);
+        assert!(service.groups.contains_key(&v4(0)));
     }
 
     #[test]
@@ -501,8 +600,9 @@ mod tests {
     fn remove_compacts_order() {
         let mut service = IpReassemblyService::new();
         for id in 0..200 {
-            service.add_fragment(&ctx(v6(id), 0, true, 8), &[0; 8]);
-            service.add_fragment(&ctx(v6(id), 0, true, 8), &[1; 8]);
+            // A second last fragment with another end: removed.
+            service.add_fragment(&ctx(v4(id), 8, false, 8), &[0; 8]);
+            service.add_fragment(&ctx(v4(id), 8, false, 16), &[0; 16]);
         }
         assert!(service.groups.is_empty());
         assert!(service.order.len() <= 64);
@@ -528,6 +628,7 @@ mod tests {
             .add_fragment(&ctx(v4(1), 8, false, 1), b"z")
             .unwrap();
         // RFC 791, Section 3.2 — the more recently arrived copy is used.
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
         assert_eq!(done.data, b"ABCDEFGHz");
         assert_eq!(done.fragment_count, 2);
     }

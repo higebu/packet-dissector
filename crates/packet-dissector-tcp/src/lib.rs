@@ -234,7 +234,8 @@ fn canonicalize_key(key: StreamKey) -> StreamKey {
 /// For IPv6: `payload = payload_length - tcp_header_len`
 ///
 /// Returns `None` when no IP layer is present or the fields cannot be parsed.
-/// The result is clamped to the captured slice length to handle truncated captures.
+/// The result may exceed the captured bytes (snaplen truncation); the
+/// caller takes the larger of it and the captured length.
 fn ip_payload_len(buf: &DissectBuffer, tcp_offset: usize, tcp_header_len: usize) -> Option<usize> {
     // Use the innermost (last) IP layer whose range precedes the TCP offset.
     let ip_layer = buf
