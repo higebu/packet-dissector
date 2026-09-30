@@ -67,6 +67,7 @@ changelog_include = [
   "packet-dissector-dhcpv6",
   "packet-dissector-diameter",
   "packet-dissector-dns",
+  "packet-dissector-eap",
   "packet-dissector-esp",
   "packet-dissector-ethernet",
   "packet-dissector-geneve",
@@ -112,6 +113,7 @@ changelog_include = [
   "packet-dissector-sccp",
   "packet-dissector-sctp",
   "packet-dissector-sdp",
+  "packet-dissector-sgsap",
   "packet-dissector-sip",
   "packet-dissector-srv6",
   "packet-dissector-stp",
@@ -159,6 +161,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-dns"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-eap"
 version_group = "workspace"
 
 [[package]]
@@ -339,6 +345,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-sdp"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-sgsap"
 version_group = "workspace"
 
 [[package]]
