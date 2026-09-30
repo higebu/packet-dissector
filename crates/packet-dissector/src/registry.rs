@@ -1590,6 +1590,11 @@ impl DissectorRegistry {
             push(&packet_dissector_lacp::OsspDissector);
             push(&packet_dissector_lacp::EsmcDissector);
         }
+        // GtpcDispatcher delegates by version; expose both GTP-C schemas.
+        #[cfg(feature = "gtpv1c")]
+        push(&packet_dissector_gtpv1c::Gtpv1cDissector);
+        #[cfg(feature = "gtpv2c")]
+        push(&packet_dissector_gtpv2c::Gtpv2cDissector);
         // StunDissector emits TURN ChannelData layers on the shared STUN port.
         #[cfg(feature = "stun")]
         push(&packet_dissector_stun::TurnChannelDataDissector);
@@ -2053,6 +2058,95 @@ impl Dissector for UdpEncapDispatcher {
         }
 
         self.esp.dissect(data, buf, offset)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GTP-C version dispatcher — GTPv1-C and GTPv2-C share UDP port 2123 and are
+// told apart by the version field in bits 8-6 of octet 1.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
+struct GtpcDispatcher;
+
+/// Specifications behind both versions the GTP-C dispatcher routes to.
+#[cfg(all(feature = "gtpv1c", feature = "gtpv2c", feature = "udp"))]
+static GTPC_REFERENCES: &[SpecReference] = &[
+    SpecReference::new(
+        "3GPP TS 29.060",
+        "General Packet Radio Service (GPRS); GPRS Tunnelling Protocol (GTP) across the Gn and \
+         Gp interface",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.060/",
+    ),
+    SpecReference::new(
+        "3GPP TS 29.274",
+        "3GPP Evolved Packet System (EPS); Evolved General Packet Radio Service (GPRS) \
+         Tunnelling Protocol for Control plane (GTPv2-C); Stage 3",
+        "https://www.3gpp.org/ftp/Specs/archive/29_series/29.274/",
+    ),
+];
+
+#[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
+impl Dissector for GtpcDispatcher {
+    fn name(&self) -> &'static str {
+        "GPRS Tunnelling Protocol Control Plane"
+    }
+
+    fn short_name(&self) -> &'static str {
+        "GTP-C"
+    }
+
+    /// Empty: this dispatcher never emits a layer of its own. The GTPv1-C
+    /// and GTPv2-C schemas are exposed by
+    /// [`DissectorRegistry::for_each_unique_dissector`].
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        &[]
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        #[cfg(all(feature = "gtpv1c", feature = "gtpv2c"))]
+        {
+            GTPC_REFERENCES
+        }
+        #[cfg(all(feature = "gtpv1c", not(feature = "gtpv2c")))]
+        {
+            packet_dissector_gtpv1c::Gtpv1cDissector.references()
+        }
+        #[cfg(not(feature = "gtpv1c"))]
+        {
+            packet_dissector_gtpv2c::Gtpv2cDissector.references()
+        }
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        Some(ProtocolLayer::Application)
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        let Some(&first) = data.first() else {
+            return Err(PacketError::Truncated {
+                expected: 1,
+                actual: 0,
+            });
+        };
+        // 3GPP TS 29.060, Section 6 and TS 29.274, Section 5.1 — the
+        // Version field is bits 8-6 of octet 1 in both headers; TS 29.060,
+        // Section 11.1.1 covers a message "of an unsupported version".
+        match first >> 5 {
+            #[cfg(feature = "gtpv1c")]
+            1 => packet_dissector_gtpv1c::Gtpv1cDissector.dissect(data, buf, offset),
+            #[cfg(feature = "gtpv2c")]
+            2 => packet_dissector_gtpv2c::Gtpv2cDissector.dissect(data, buf, offset),
+            version => Err(PacketError::InvalidFieldValue {
+                field: "version",
+                value: u32::from(version),
+            }),
+        }
     }
 }
 
@@ -2555,13 +2649,16 @@ impl Default for DissectorRegistry {
             });
         }
 
-        // GTPv2-C runs over UDP on port 2123 (3GPP TS 29.274)
+        // GTPv1-C (3GPP TS 29.060, Section 10.1.1.1) and GTPv2-C (3GPP
+        // TS 29.274) share UDP port 2123; GtpcDispatcher picks by version.
+        #[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
+        assert_builtin(reg.register_by_udp_port(2123, Box::new(GtpcDispatcher)));
+        #[cfg(feature = "gtpv1c")]
+        reg.register_dissector_factory("gtpv1c", || {
+            Box::new(packet_dissector_gtpv1c::Gtpv1cDissector)
+        });
         #[cfg(feature = "gtpv2c")]
         {
-            #[cfg(feature = "udp")]
-            assert_builtin(
-                reg.register_by_udp_port(2123, Box::new(packet_dissector_gtpv2c::Gtpv2cDissector)),
-            );
             reg.register_dissector_factory("gtpv2c", || {
                 Box::new(packet_dissector_gtpv2c::Gtpv2cDissector)
             });
@@ -4459,7 +4556,7 @@ mod tests {
         #[cfg(all(feature = "gtpv1u", feature = "udp"))]
         assert!(reg.get_by_udp_port(2152).is_some());
 
-        #[cfg(all(feature = "gtpv2c", feature = "udp"))]
+        #[cfg(all(any(feature = "gtpv1c", feature = "gtpv2c"), feature = "udp"))]
         assert!(reg.get_by_udp_port(2123).is_some());
 
         #[cfg(all(feature = "pfcp", feature = "udp"))]
@@ -4496,6 +4593,49 @@ mod tests {
 
         #[cfg(all(any(feature = "l2tp", feature = "l2tpv3"), feature = "udp"))]
         assert!(reg.get_by_udp_port(1701).is_some());
+    }
+
+    #[cfg(all(feature = "gtpv1c", feature = "gtpv2c", feature = "udp"))]
+    #[test]
+    fn gtpc_dispatcher_routes_by_version() {
+        let reg = DissectorRegistry::default();
+        let d = reg.get_by_udp_port(2123).unwrap();
+        assert_eq!(d.short_name(), "GTP-C");
+        assert!(d.field_descriptors().is_empty());
+        assert_eq!(d.references().len(), 2);
+        assert_eq!(d.layer(), Some(ProtocolLayer::Application));
+        assert!(!d.name().is_empty());
+
+        // GTPv1-C Echo Request (TS 29.060) and GTPv2-C Echo Request (TS 29.274)
+        let v1 = [0x32, 1, 0, 4, 0, 0, 0, 0, 0, 1, 0, 0];
+        let v2 = [0x40, 1, 0, 4, 0, 0, 1, 0];
+        let mut buf = DissectBuffer::new();
+        d.dissect(&v1, &mut buf, 0).unwrap();
+        d.dissect(&v2, &mut buf, 12).unwrap();
+        let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+        assert_eq!(names, ["GTPv1-C", "GTPv2-C"]);
+
+        let mut buf = DissectBuffer::new();
+        assert!(matches!(
+            d.dissect(&[], &mut buf, 0),
+            Err(PacketError::Truncated {
+                expected: 1,
+                actual: 0
+            })
+        ));
+        assert!(matches!(
+            d.dissect(&[0x60, 1, 0, 4], &mut buf, 0),
+            Err(PacketError::InvalidFieldValue {
+                field: "version",
+                value: 3
+            })
+        ));
+
+        let schemas = reg.all_field_schemas();
+        for name in ["GTPv1-C", "GTPv2-C"] {
+            let schema = schemas.iter().find(|s| s.short_name == name).unwrap();
+            assert!(schema.fields.iter().any(|f| f.name == "ies"), "{name}");
+        }
     }
 
     #[test]
@@ -4580,6 +4720,9 @@ mod tests {
 
         #[cfg(feature = "gtpv1u")]
         assert!(reg.create_dissector_by_name("gtpv1u").is_some());
+
+        #[cfg(feature = "gtpv1c")]
+        assert!(reg.create_dissector_by_name("gtpv1c").is_some());
 
         #[cfg(feature = "gtpv2c")]
         assert!(reg.create_dissector_by_name("gtpv2c").is_some());
