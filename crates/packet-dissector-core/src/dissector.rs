@@ -239,6 +239,110 @@ impl TcpStreamContext {
     }
 }
 
+/// Context for IP fragment reassembly, provided by the IPv4 dissector and
+/// the IPv6 Fragment header dissector for every fragment that is not a whole
+/// datagram.
+///
+/// A fragment is a datagram (or packet) whose More Fragments flag is set or
+/// whose Fragment Offset is non-zero. RFC 791, Section 3.2 — "If this is a
+/// whole datagram (that is both the fragment offset and the more fragments
+/// fields are zero), then any reassembly resources associated with this
+/// buffer identifier are released and the datagram is forwarded to the next
+/// step in datagram processing." —
+/// <https://www.rfc-editor.org/rfc/rfc791#section-3.2>. RFC 8200,
+/// Section 4.5 — "If the fragment is a whole datagram (that is, both the
+/// Fragment Offset field and the M flag are zero), then it does not need
+/// any further reassembly" —
+/// <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>.
+///
+/// The registry uses this context to buffer fragments and to dissect the
+/// upper layers of the reassembled datagram once every fragment has arrived.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpFragmentContext {
+    /// Reassembly key: (source address, destination address, protocol,
+    /// identification). Addresses are encoded as 16 bytes (IPv4-mapped for
+    /// IPv4, see [`ipv4_mapped`](crate::util::ipv4_mapped)).
+    ///
+    /// IPv4 fragments are grouped by source, destination, protocol and
+    /// identification (RFC 791, Section 3.2 — "The internet identification
+    /// field (ID) is used together with the source and destination address,
+    /// and the protocol fields, to identify datagram fragments for
+    /// reassembly." —
+    /// <https://www.rfc-editor.org/rfc/rfc791#section-3.2>).
+    ///
+    /// IPv6 fragments are grouped by source, destination and identification
+    /// only (RFC 8200, Section 4.5 — "An original packet is reassembled only
+    /// from fragment packets that have the same Source Address, Destination
+    /// Address, and Fragment Identification." —
+    /// <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>), so the
+    /// protocol element of an IPv6 key is always
+    /// [`IpFragmentContext::IPV6_KEY_PROTOCOL`].
+    pub frag_key: ([u8; 16], [u8; 16], u8, u32),
+    /// Protocol of the fragmentable part as carried by this fragment: the
+    /// IPv4 Protocol field, or the Next Header field of the IPv6 Fragment
+    /// header. The registry dispatches the reassembled payload by the value
+    /// of the fragment whose offset is zero.
+    pub protocol: u8,
+    /// Offset of this fragment's data in the reassembled payload, in bytes
+    /// (the Fragment Offset field multiplied by 8).
+    pub offset_bytes: usize,
+    /// More Fragments flag (IPv4 MF / IPv6 M).
+    pub more_fragments: bool,
+    /// Length of this fragment's data as declared by the IP length fields
+    /// (it may exceed the captured bytes when the capture was truncated).
+    pub payload_len: usize,
+    /// Octets that the reassembled datagram's length field counts in
+    /// addition to the fragment data: the IPv4 header (Total Length includes
+    /// it), or the IPv6 extension headers between the IPv6 header and the
+    /// Fragment header (Payload Length excludes the IPv6 header itself).
+    ///
+    /// The registry uses it to discard fragments that would make the
+    /// reassembled length field exceed 65,535 octets.
+    pub unfragmentable_len: usize,
+}
+
+impl IpFragmentContext {
+    /// Protocol element of every IPv6 reassembly key: 44, the IPv6 Fragment
+    /// header's own protocol number. The IPv6 key does not include the Next
+    /// Header value (RFC 8200, Section 4.5 — "The Next Header values in the
+    /// Fragment headers of different fragments of the same original packet
+    /// may differ." — <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>).
+    pub const IPV6_KEY_PROTOCOL: u8 = 44;
+
+    /// Create a fragment context. [`unfragmentable_len`] starts at 0; set it
+    /// with [`with_unfragmentable_len`](Self::with_unfragmentable_len).
+    ///
+    /// [`unfragmentable_len`]: IpFragmentContext::unfragmentable_len
+    pub fn new(
+        frag_key: ([u8; 16], [u8; 16], u8, u32),
+        protocol: u8,
+        offset_bytes: usize,
+        more_fragments: bool,
+        payload_len: usize,
+    ) -> Self {
+        Self {
+            frag_key,
+            protocol,
+            offset_bytes,
+            more_fragments,
+            payload_len,
+            unfragmentable_len: 0,
+        }
+    }
+
+    /// Set [`IpFragmentContext::unfragmentable_len`].
+    pub fn with_unfragmentable_len(mut self, unfragmentable_len: usize) -> Self {
+        self.unfragmentable_len = unfragmentable_len;
+        self
+    }
+
+    /// Whether this is the first fragment (Fragment Offset zero).
+    pub fn is_first(&self) -> bool {
+        self.offset_bytes == 0
+    }
+}
+
 /// Decrypted payload produced by a protocol dissector (e.g. ESP).
 ///
 /// When a dissector successfully decrypts an encrypted payload, it returns
@@ -316,6 +420,10 @@ pub struct DissectResult {
     /// Payload Length (RFC 8200, Section 3 —
     /// <https://www.rfc-editor.org/rfc/rfc8200#section-3>).
     pub payload_len: Option<usize>,
+    /// Optional IP fragment context for registry-driven fragment
+    /// reassembly. Set by the IPv4 dissector and the IPv6 Fragment header
+    /// dissector for fragments that are not whole datagrams.
+    pub ip_fragment_context: Option<IpFragmentContext>,
 }
 
 impl DissectResult {
@@ -328,6 +436,7 @@ impl DissectResult {
             embedded_payload: None,
             decrypted_payload: None,
             payload_len: None,
+            ip_fragment_context: None,
         }
     }
 
@@ -344,6 +453,7 @@ impl DissectResult {
             embedded_payload: None,
             decrypted_payload: None,
             payload_len: None,
+            ip_fragment_context: None,
         }
     }
 
@@ -363,6 +473,7 @@ impl DissectResult {
             embedded_payload: Some(payload_range),
             decrypted_payload: None,
             payload_len: None,
+            ip_fragment_context: None,
         }
     }
 
@@ -370,6 +481,13 @@ impl DissectResult {
     /// bytes. See [`DissectResult::payload_len`].
     pub fn with_payload_len(mut self, payload_len: usize) -> Self {
         self.payload_len = Some(payload_len);
+        self
+    }
+
+    /// Attach an IP fragment context. See
+    /// [`DissectResult::ip_fragment_context`].
+    pub fn with_ip_fragment_context(mut self, ctx: IpFragmentContext) -> Self {
+        self.ip_fragment_context = Some(ctx);
         self
     }
 
@@ -385,6 +503,7 @@ impl DissectResult {
             embedded_payload: None,
             decrypted_payload: Some(Box::new(decrypted)),
             payload_len: None,
+            ip_fragment_context: None,
         }
     }
 }
@@ -652,6 +771,62 @@ mod tests {
         assert_eq!(result, Ok(DissectResult::new(0, DispatchHint::End)));
         // The default release hook has nothing to release.
         dissector.release_tcp_stream(&ctx.stream_key);
+    }
+
+    #[test]
+    fn dissect_result_constructors_leave_ip_fragment_context_unset() {
+        assert_eq!(
+            DissectResult::new(20, DispatchHint::End).ip_fragment_context,
+            None
+        );
+        assert_eq!(
+            DissectResult::with_tcp_context(
+                20,
+                DispatchHint::End,
+                TcpStreamContext::new(([0; 16], [0; 16], 1, 2), 0, 0, 0),
+            )
+            .ip_fragment_context,
+            None
+        );
+        assert_eq!(
+            DissectResult::with_embedded_payload(12, DispatchHint::End, 28..32).ip_fragment_context,
+            None
+        );
+        assert_eq!(
+            DissectResult::with_decrypted_payload(
+                8,
+                DecryptedPayload {
+                    data: vec![],
+                    next: DispatchHint::End,
+                },
+            )
+            .ip_fragment_context,
+            None
+        );
+    }
+
+    #[test]
+    fn dissect_result_with_ip_fragment_context_sets_context() {
+        let ctx = IpFragmentContext::new(([1; 16], [2; 16], 17, 0x2a), 17, 8, false, 8)
+            .with_unfragmentable_len(20);
+        let result =
+            DissectResult::new(20, DispatchHint::End).with_ip_fragment_context(ctx.clone());
+        assert_eq!(result.bytes_consumed, 20);
+        assert_eq!(result.next, DispatchHint::End);
+        assert_eq!(result.ip_fragment_context, Some(ctx));
+    }
+
+    #[test]
+    fn ip_fragment_context_new_stores_all_parts() {
+        let ctx = IpFragmentContext::new(([1; 16], [2; 16], 44, 0xDEAD_BEEF), 6, 1448, true, 1448);
+        assert_eq!(ctx.frag_key, ([1; 16], [2; 16], 44, 0xDEAD_BEEF));
+        assert_eq!(ctx.protocol, 6);
+        assert_eq!(ctx.offset_bytes, 1448);
+        assert!(ctx.more_fragments);
+        assert_eq!(ctx.payload_len, 1448);
+        assert_eq!(ctx.unfragmentable_len, 0);
+        assert!(!ctx.is_first());
+        assert!(IpFragmentContext::new(([0; 16], [0; 16], 17, 1), 17, 0, true, 8).is_first());
     }
 
     #[test]

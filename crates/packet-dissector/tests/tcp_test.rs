@@ -42,6 +42,8 @@
 //! | 3.1         | Reassembly context carries flags and ISN+1     | tcp_stream_context_syn_seq_and_flags    |
 //! | 3.1         | ISN+1 carried per direction (stream_start)     | tcp_stream_context_stream_start_per_direction |
 //! | —           | Oldest connection evicted past the table limit | tcp_stream_id_table_evicts_oldest       |
+//! | 3.1         | Payload length from the IP length fields       | tcp_payload_len_from_ip_total_length    |
+//! | 3.1         | Payload length of a reassembled IP datagram    | tcp_payload_len_of_reassembled_datagram |
 //!
 //! # TCP Option RFC Coverage
 //!
@@ -1231,4 +1233,56 @@ fn tcp_stream_id_table_evicts_oldest() {
         d.dissect(&tcp_data, &mut buf, 20).unwrap();
     }
     assert_ne!(stream_id_of(&d, false, 2, 0x10), first);
+}
+
+/// IPv4 layer with src/dst and the given Total Length at bytes 0..20.
+fn add_ipv4_layer_with_total_length(buf: &mut DissectBuffer<'_>, total_length: u16) {
+    buf.begin_layer("IPv4", None, &[], 0..20);
+    buf.push_field(
+        test_desc("total_length", "Total Length"),
+        FieldValue::U16(total_length),
+        2..4,
+    );
+    buf.push_field(
+        test_desc("src", "Source Address"),
+        FieldValue::Ipv4Addr([10, 0, 0, 1]),
+        12..16,
+    );
+    buf.push_field(
+        test_desc("dst", "Destination Address"),
+        FieldValue::Ipv4Addr([10, 0, 0, 2]),
+        16..20,
+    );
+    buf.end_layer();
+}
+
+#[test]
+fn tcp_payload_len_from_ip_total_length() {
+    // A snaplen-truncated capture holds fewer payload bytes than the IP
+    // Total Length declares; the segment still occupies the declared
+    // length in sequence space.
+    let mut tcp_data = build_tcp_packet(12345, 80, 0, 0, 0x18);
+    tcp_data.extend_from_slice(&[0u8; 40]);
+    let mut buf = DissectBuffer::new();
+    add_ipv4_layer_with_total_length(&mut buf, 20 + 20 + 100);
+    let result = TcpDissector::new()
+        .dissect(&tcp_data, &mut buf, 20)
+        .unwrap();
+    assert_eq!(result.tcp_stream_context.unwrap().payload_len, 100);
+}
+
+#[test]
+fn tcp_payload_len_of_reassembled_datagram() {
+    // A segment dissected from a reassembled IP datagram is longer than the
+    // Total Length of the IPv4 header of the fragment that completed it
+    // (RFC 791, Section 3.2); the reassembled bytes all belong to it.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+    let mut tcp_data = build_tcp_packet(12345, 80, 0, 0, 0x18);
+    tcp_data.extend_from_slice(&[0u8; 100]);
+    let mut buf = DissectBuffer::new();
+    add_ipv4_layer_with_total_length(&mut buf, 20 + 16);
+    let result = TcpDissector::new()
+        .dissect(&tcp_data, &mut buf, 20)
+        .unwrap();
+    assert_eq!(result.tcp_stream_context.unwrap().payload_len, 100);
 }
