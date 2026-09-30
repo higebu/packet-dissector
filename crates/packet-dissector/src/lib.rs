@@ -214,6 +214,9 @@ pub mod dissectors {
     #[cfg(feature = "bgp")]
     pub use packet_dissector_bgp as bgp;
 
+    #[cfg(feature = "bmp")]
+    pub use packet_dissector_bmp as bmp;
+
     #[cfg(feature = "l2tp")]
     pub use packet_dissector_l2tp as l2tp;
 

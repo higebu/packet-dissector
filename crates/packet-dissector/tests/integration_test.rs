@@ -69,6 +69,7 @@
 //! | Ethernet → IPv4 → TCP → HTTP 200 OK           | integration_ethernet_ipv4_tcp_http_response         |
 //! | Ethernet → IPv4 → UDP → SIP INVITE            | integration_ethernet_ipv4_udp_sip_invite            |
 //! | Ethernet → IPv4 → TCP → SIP 200 OK            | integration_ethernet_ipv4_tcp_sip_response          |
+//! | Ethernet → IPv4 → TCP → BMP ×2 → BGP (decode-as) | ethernet_ipv4_tcp_bmp_decode_as                |
 //! | Ethernet → IPv4 → UDP → SIP INVITE → SDP      | integration_ethernet_ipv4_udp_sip_invite_with_sdp   |
 //! | Ethernet → IPv4 → TCP → HTTP 200 → SDP        | integration_ethernet_ipv4_tcp_http_response_sdp_body |
 //! | Ethernet → IPv4 → TCP → SIP (invalid SDP body) | integration_ethernet_ipv4_tcp_sip_invalid_sdp_body  |
@@ -6576,6 +6577,97 @@ fn ethernet_ipv4_tcp_bgp_open() {
     assert_eq!(
         buf.field_by_name(bgp, "bgp_identifier").unwrap().value,
         FieldValue::Ipv4Addr([10, 0, 0, 1])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BMP
+// ---------------------------------------------------------------------------
+
+/// Push a BMP Initiation message with one sysName TLV (RFC 7854, Section 4.3).
+fn push_bmp_initiation(pkt: &mut Vec<u8>, sys_name: &[u8]) {
+    pkt.push(3); // Version
+    pkt.extend_from_slice(&((6 + 4 + sys_name.len()) as u32).to_be_bytes());
+    pkt.push(4); // Initiation
+    pkt.extend_from_slice(&2u16.to_be_bytes()); // sysName
+    pkt.extend_from_slice(&(sys_name.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(sys_name);
+}
+
+/// Push a BMP Peer Down message (IPv4 Global Instance Peer) whose reason is
+/// 3 and whose data is a BGP NOTIFICATION (RFC 7854, Section 4.9).
+fn push_bmp_peer_down_notification(pkt: &mut Vec<u8>) {
+    let notification: &[u8] = &[
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0, 21, 3, 6, 2, // NOTIFICATION Cease / Administrative Shutdown
+    ];
+    let len = 6 + 42 + 1 + notification.len();
+    pkt.push(3); // Version
+    pkt.extend_from_slice(&(len as u32).to_be_bytes());
+    pkt.push(2); // Peer Down Notification
+    pkt.extend_from_slice(&[0, 0]); // Global Instance Peer, no flags
+    pkt.extend_from_slice(&[0; 8]); // Peer Distinguisher
+    pkt.extend_from_slice(&[0; 12]);
+    pkt.extend_from_slice(&[10, 0, 0, 3]); // Peer Address
+    pkt.extend_from_slice(&65003u32.to_be_bytes()); // Peer AS
+    pkt.extend_from_slice(&[10, 0, 0, 3]); // Peer BGP ID
+    pkt.extend_from_slice(&[0; 8]); // Timestamp
+    pkt.push(3); // Reason: Remote system closed, NOTIFICATION PDU follows
+    pkt.extend_from_slice(notification);
+}
+
+#[test]
+fn ethernet_ipv4_tcp_bmp_decode_as() {
+    // BMP has no well-known port (RFC 7854, Section 3.2); map one by name.
+    let mut registry = DissectorRegistry::default();
+    let bmp = registry.create_dissector_by_name("bmp").unwrap();
+    registry.register_by_tcp_port_or_replace(11019, bmp);
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x01; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_tcp(&mut pkt, 54321, 11019, 0x18);
+    let bmp_start = pkt.len();
+    push_bmp_initiation(&mut pkt, b"router1");
+    let second = pkt.len();
+    push_bmp_peer_down_notification(&mut pkt);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "TCP", "BMP", "BMP", "BGP"]);
+
+    // Each BMP message is its own layer; the BGP NOTIFICATION it carries
+    // follows as a BGP layer inside the second message's range. Like SCTP
+    // with bundled DATA chunks, the carrier layer spans the whole message,
+    // so only the layers up to the first BMP message are contiguous.
+    let layers = buf.layers();
+    let mut outer = DissectBuffer::new();
+    for layer in &layers[..4] {
+        outer.push_layer(layer.clone());
+    }
+    assert_layers_contiguous(&outer);
+    assert_eq!(layers[2].range.end, bmp_start);
+    assert_eq!(layers[3].range, bmp_start..second);
+    assert_eq!(layers[4].range, second..pkt.len());
+    assert_eq!(layers[5].range, second + 49..pkt.len());
+    assert_eq!(
+        display_name_for(&buf, &layers[3], "message_type"),
+        Some("Initiation")
+    );
+    assert_eq!(
+        display_name_for(&buf, &layers[4], "message_type"),
+        Some("Peer Down Notification")
+    );
+    assert_eq!(
+        buf.field_by_name(&layers[4], "peer_as").unwrap().value,
+        FieldValue::U32(65003)
+    );
+    assert_eq!(
+        display_name_for(&buf, &layers[5], "type"),
+        Some("NOTIFICATION")
     );
 }
 
