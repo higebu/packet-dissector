@@ -18,6 +18,7 @@
 //! | IEEE 802.1Q §14.4.1       | MSTI Configuration Messages              | parse_mst_bpdu_two_mstis      |
 //! | IEEE 802.1Q §14.5 d)      | Bad Version 3 Length → RST + unparsed    | parse_mst_bpdu_bad_version3_length |
 //! | IEEE 802.1Q §14.5 d) 1)   | Version 3 but < 102 octets → RST         | parse_mst_bpdu_short          |
+//! | IEEE 802.1Q §14.5 e)      | MST BPDU with missing MSTI → Truncated   | parse_mst_bpdu_truncated_msti |
 //! | IEEE 802.1Q §14.4 w)      | SPT BPDU: Version 4 Length + unparsed    | parse_spt_bpdu_version4       |
 //! | IEEE 802.1Q §14.4 w)      | SPT data bounded by Version 4 Length     | parse_spt_bpdu_version4       |
 //! | IEEE 802.1Q §14.5 f)/g)   | Malformed SPT part → MST                 | parse_spt_bpdu_version4       |
@@ -581,17 +582,23 @@ fn parse_mst_bpdu_bad_version3_length() {
     let mut buf = DissectBuffer::new();
     StpDissector.dissect(&data, &mut buf, 0).unwrap();
     assert!(field(&buf, "mst_config_name").is_none());
+}
 
-    // Version 3 Length claims an MSTI message that was not captured.
+#[test]
+fn parse_mst_bpdu_truncated_msti() {
+    // 102 octets, Version 1 Length 0 and a Version 3 Length of one MSTI
+    // message: an MST BPDU (§14.5 e)) whose MSTI message is missing.
     let mut data = build_mst_bpdu(&[]);
     data[36..38].copy_from_slice(&80u16.to_be_bytes());
     let mut buf = DissectBuffer::new();
-    StpDissector.dissect(&data, &mut buf, 0).unwrap();
-    assert!(field(&buf, "mst_config_name").is_none());
-    assert_eq!(
-        field(&buf, "unparsed"),
-        Some(&FieldValue::Bytes(&data[36..]))
-    );
+    let err = StpDissector.dissect(&data, &mut buf, 0).unwrap_err();
+    assert!(matches!(
+        err,
+        packet_dissector::error::PacketError::Truncated {
+            expected: 118,
+            actual: 102
+        }
+    ));
 }
 
 #[test]

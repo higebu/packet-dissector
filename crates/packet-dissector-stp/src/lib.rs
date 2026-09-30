@@ -363,17 +363,16 @@ fn system_id_extension(id_priority: u16) -> u16 {
 ///
 /// IEEE 802.1Q-2022, Section 14.5 e): 102 or more octets, a Version 1
 /// Length of 0, and a Version 3 Length representing an integral number,
-/// from 0 to 64 inclusive, of MSTI Configuration Messages. The messages
-/// must also be present in `data`.
+/// from 0 to 64 inclusive, of MSTI Configuration Messages. Whether the
+/// messages are present in `data` is checked by the caller.
 fn mst_version3_length(data: &[u8]) -> Option<usize> {
     if data.len() < MST_BPDU_MIN_SIZE || data[CONFIG_BPDU_SIZE] != 0 {
         return None;
     }
     let v3 = read_be_u16(data, VERSION3_LENGTH_OFFSET).ok()? as usize;
     let msti_octets = v3.checked_sub(VERSION3_FIXED_LENGTH)?;
-    let well_formed = msti_octets % MSTI_MESSAGE_SIZE == 0
-        && msti_octets / MSTI_MESSAGE_SIZE <= MAX_MSTIS
-        && VERSION3_START + v3 <= data.len();
+    let well_formed =
+        msti_octets % MSTI_MESSAGE_SIZE == 0 && msti_octets / MSTI_MESSAGE_SIZE <= MAX_MSTIS;
     well_formed.then_some(v3)
 }
 
@@ -529,6 +528,16 @@ impl Dissector for StpDissector {
                 } else {
                     None
                 };
+                // An MST BPDU whose MSTI Configuration Messages are missing
+                // is truncated, not an RST BPDU.
+                if let Some(v3) = mst {
+                    if data.len() < VERSION3_START + v3 {
+                        return Err(PacketError::Truncated {
+                            expected: VERSION3_START + v3,
+                            actual: data.len(),
+                        });
+                    }
+                }
                 let consumed = match mst {
                     Some(v3) if version >= VERSION_SPT => {
                         spt_end(data, VERSION3_START + v3).unwrap_or(VERSION3_START + v3)
