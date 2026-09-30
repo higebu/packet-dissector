@@ -1,6 +1,8 @@
 //! Dissector registry for managing and dispatching protocol dissectors.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "mpls")]
+use std::sync::atomic::Ordering;
 
 use packet_dissector_core::dissector::{
     DispatchHint, Dissector, DissectorPlugin, DissectorTable, ProtocolLayer, SpecReference,
@@ -96,6 +98,10 @@ pub struct DissectorRegistry {
     /// Shared ESP Security Association database for decryption.
     #[cfg(feature = "esp-decrypt")]
     esp_sa_db: packet_dissector_esp::EspSaDb,
+    /// MPLS label table — decode-as rules for the payload after a
+    /// bottom-of-stack label, shared with the built-in MPLS dispatcher.
+    #[cfg(feature = "mpls")]
+    mpls_labels: std::sync::Arc<MplsLabelTable>,
 }
 
 impl DissectorRegistry {
@@ -123,6 +129,8 @@ impl DissectorRegistry {
             tcp_reassembly: super::tcp_reassembly::new_tcp_reassembly(),
             #[cfg(feature = "esp-decrypt")]
             esp_sa_db: std::sync::Arc::new(packet_dissector_esp::SharedEspSaDb::new()),
+            #[cfg(feature = "mpls")]
+            mpls_labels: std::sync::Arc::new(MplsLabelTable::default()),
         }
     }
 
@@ -561,6 +569,70 @@ impl DissectorRegistry {
         self.by_ach_channel_type
             .get(&channel_type)
             .map(|d| d.as_ref())
+    }
+
+    /// Register a dissector for the payload after the bottom-of-stack MPLS
+    /// label `label` (a decode-as rule, e.g. `pw-eth` or `pw-eth-cw`).
+    ///
+    /// The PW type, and hence the payload type, is signalled out of band
+    /// (RFC 4385, Section 3 — <https://www.rfc-editor.org/rfc/rfc4385#section-3>),
+    /// so the MPLS dissector otherwise guesses it from the first nibble
+    /// (RFC 4928, Section 3 — <https://www.rfc-editor.org/rfc/rfc4928#section-3>).
+    /// A rule replaces that guess for `label`. It is consulted by the
+    /// built-in MPLS dissector registered for EtherType 0x8847 only:
+    /// upstream-assigned labels (0x8848) come from a context-specific label
+    /// space (RFC 5331, Section 3 —
+    /// <https://www.rfc-editor.org/rfc/rfc5331#section-3>). It is never
+    /// consulted for bottom labels with a fixed meaning (IPv4 / IPv6
+    /// Explicit NULL and the GAL) or for a bottom entropy label, and it has
+    /// no effect once 0x8847 is re-registered with another dissector.
+    /// Labels are 20 bits wide, so a larger value never matches.
+    ///
+    /// Returns an error if a dissector is already registered for this
+    /// label. Use
+    /// [`register_by_mpls_label_or_replace`](Self::register_by_mpls_label_or_replace)
+    /// to intentionally override an existing registration.
+    #[cfg(feature = "mpls")]
+    pub fn register_by_mpls_label(
+        &mut self,
+        label: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        let mut rules = self.mpls_labels.lock();
+        if let Some(existing) = rules.get(&label) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "mpls_label",
+                key: u64::from(label),
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        rules.insert(label, dissector);
+        self.mpls_labels.has_rules.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Register a dissector for the payload after the bottom-of-stack MPLS
+    /// label `label`, replacing any existing one.
+    ///
+    /// See [`register_by_mpls_label`](Self::register_by_mpls_label). Returns
+    /// the previously registered dissector, if any.
+    #[cfg(feature = "mpls")]
+    pub fn register_by_mpls_label_or_replace(
+        &mut self,
+        label: u32,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        let previous = self.mpls_labels.lock().insert(label, dissector);
+        self.mpls_labels.has_rules.store(true, Ordering::Release);
+        previous
+    }
+
+    /// Short name of the dissector registered for MPLS label `label`, if
+    /// any.
+    #[cfg(feature = "mpls")]
+    pub fn mpls_label_short_name(&self, label: u32) -> Option<&'static str> {
+        self.mpls_labels.lock().get(&label).map(|d| d.short_name())
     }
 
     /// Register a dissector for a SNAP Organization Code (OUI) and Protocol
@@ -1615,6 +1687,10 @@ impl DissectorRegistry {
         if let Some(ref d) = self.ipv6_routing_fallback {
             push(d.as_ref());
         }
+        #[cfg(feature = "mpls")]
+        for d in self.mpls_labels.lock().values() {
+            push(d.as_ref());
+        }
         for d in self.by_link_type.values() {
             push(d.as_ref());
         }
@@ -2039,6 +2115,88 @@ impl Dissector for L2tpDispatcher {
 }
 
 // ---------------------------------------------------------------------------
+// MPLS dispatcher — applies the MPLS label decode-as rules.
+// ---------------------------------------------------------------------------
+
+/// Decode-as rules keyed by bottom-of-stack MPLS label, shared between the
+/// registry (which adds rules) and [`MplsDispatcher`] (which applies them).
+///
+/// `has_rules` lets the dispatcher skip the lock while no rule exists.
+#[cfg(feature = "mpls")]
+#[derive(Default)]
+struct MplsLabelTable {
+    rules: std::sync::Mutex<HashMap<u32, Box<dyn Dissector>>>,
+    has_rules: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "mpls")]
+impl MplsLabelTable {
+    /// Lock the rules. A panic while the lock was held cannot leave the map
+    /// half-updated, so a poisoned lock is recovered.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u32, Box<dyn Dissector>>> {
+        self.rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// MPLS dissector that hands the payload after a bottom-of-stack label with
+/// a decode-as rule to the rule's dissector.
+///
+/// The PW type is signalled out of band (RFC 4385, Section 3 —
+/// <https://www.rfc-editor.org/rfc/rfc4385#section-3>), so without a rule
+/// the MPLS dissector's own first-nibble heuristic applies.
+#[cfg(feature = "mpls")]
+struct MplsDispatcher {
+    labels: std::sync::Arc<MplsLabelTable>,
+}
+
+#[cfg(feature = "mpls")]
+impl Dissector for MplsDispatcher {
+    fn name(&self) -> &'static str {
+        packet_dissector_mpls::MplsDissector.name()
+    }
+
+    fn short_name(&self) -> &'static str {
+        packet_dissector_mpls::MplsDissector.short_name()
+    }
+
+    fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+        packet_dissector_mpls::MplsDissector.field_descriptors()
+    }
+
+    fn references(&self) -> &'static [SpecReference] {
+        packet_dissector_mpls::MplsDissector.references()
+    }
+
+    fn layer(&self) -> Option<ProtocolLayer> {
+        packet_dissector_mpls::MplsDissector.layer()
+    }
+
+    fn dissect<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        if !self.labels.has_rules.load(Ordering::Acquire) {
+            return packet_dissector_mpls::MplsDissector.dissect(data, buf, offset);
+        }
+        let rules = self.labels.lock();
+        packet_dissector_mpls::MplsDissector.dissect_with_payload_override(
+            data,
+            buf,
+            offset,
+            |label, payload, buf, payload_offset| {
+                rules
+                    .get(&label)
+                    .map(|d| d.dissect(payload, buf, payload_offset))
+            },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UDP port 4500 dispatcher — RFC 3948 multiplexes UDP-encapsulated ESP, IKE
 // (behind a Non-ESP marker) and NAT-keepalives onto a single port.
 // ---------------------------------------------------------------------------
@@ -2452,15 +2610,34 @@ impl Default for DissectorRegistry {
             reg.register_by_ethertype(0x88CC, Box::new(packet_dissector_lldp::LldpDissector)),
         );
 
-        // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332)
+        // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332).
+        // The 0x8847 dispatcher applies the MPLS label decode-as rules.
+        // Upstream-assigned labels come from a context-specific label space
+        // (RFC 5331, Section 3 — https://www.rfc-editor.org/rfc/rfc5331#section-3),
+        // so the rules, keyed by label value alone, do not apply to 0x8848.
         #[cfg(feature = "mpls")]
         {
-            assert_builtin(
-                reg.register_by_ethertype(0x8847, Box::new(packet_dissector_mpls::MplsDissector)),
-            );
+            assert_builtin(reg.register_by_ethertype(
+                0x8847,
+                Box::new(MplsDispatcher {
+                    labels: reg.mpls_labels.clone(),
+                }),
+            ));
             assert_builtin(
                 reg.register_by_ethertype(0x8848, Box::new(packet_dissector_mpls::MplsDissector)),
             );
+            // Decode-as names for MPLS label rules: an Ethernet PW without
+            // and with the control word (RFC 4448, Section 4.6 —
+            // https://www.rfc-editor.org/rfc/rfc4448#section-4.6).
+            #[cfg(feature = "ethernet")]
+            {
+                reg.register_dissector_factory("pw-eth", || {
+                    Box::new(packet_dissector_ethernet::EthernetDissector)
+                });
+                reg.register_dissector_factory("pw-eth-cw", || {
+                    Box::new(packet_dissector_mpls::EthernetPwControlWordDissector)
+                });
+            }
         }
 
         // MPLS G-ACh / PW Associated Channel Types (IANA "MPLS Generalized
