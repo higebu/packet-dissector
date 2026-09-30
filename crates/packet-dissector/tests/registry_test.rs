@@ -777,3 +777,54 @@ fn default_registry_has_ipv6_routing_fallback() {
     // Unknown routing type should still resolve via fallback
     assert!(registry.get_by_ipv6_routing_type(255).is_some());
 }
+
+// --- MPLS label decode-as table ---
+
+/// Registering a dissector for an MPLS label that already has one is an
+/// error; `_or_replace` returns the previous dissector.
+#[cfg(feature = "mpls")]
+#[test]
+fn register_by_mpls_label_duplicate_and_replace() {
+    let mut reg = DissectorRegistry::new();
+    reg.register_by_mpls_label(16, Box::new(MockL2Dissector))
+        .unwrap();
+    let err = reg
+        .register_by_mpls_label(16, Box::new(MockL2Dissector))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        RegistrationError::DuplicateDispatchKey {
+            table: "mpls_label",
+            key: 16,
+            ..
+        }
+    ));
+    let previous = reg.register_by_mpls_label_or_replace(16, Box::new(MockL2Dissector));
+    assert_eq!(previous.map(|d| d.short_name()), Some("L2"));
+    assert!(
+        reg.register_by_mpls_label_or_replace(17, Box::new(MockL2Dissector))
+            .is_none()
+    );
+    assert_eq!(reg.mpls_label_short_name(16), Some("L2"));
+    assert_eq!(reg.mpls_label_short_name(18), None);
+}
+
+/// The PW decode-as names are registered by default.
+#[cfg(all(feature = "mpls", feature = "ethernet"))]
+#[test]
+fn mpls_pw_decode_as_names_are_registered() {
+    let reg = DissectorRegistry::default();
+    let names = reg.available_decode_as_protocols();
+    assert!(names.contains(&"pw-eth"));
+    assert!(names.contains(&"pw-eth-cw"));
+    assert_eq!(
+        reg.create_dissector_by_name("pw-eth").unwrap().short_name(),
+        "Ethernet"
+    );
+    assert_eq!(
+        reg.create_dissector_by_name("pw-eth-cw")
+            .unwrap()
+            .short_name(),
+        "PW-CW"
+    );
+}
