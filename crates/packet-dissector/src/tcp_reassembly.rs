@@ -671,6 +671,7 @@ impl DissectorRegistry {
         let mut pos = 0;
         while pos < contiguous_data.len() {
             let mut tmp_buf = DissectBuffer::new();
+            tmp_buf.set_verify_checksums(buf.verify_checksums());
             match self.dissect_stream_message(
                 upper,
                 ctx,

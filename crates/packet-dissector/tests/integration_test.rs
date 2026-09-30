@@ -184,6 +184,16 @@
 //! | Ethernet → IPv4 (snaplen-truncated) → probe                  | integration_ethernet_ipv4_snaplen_payload_ends_at_capture |
 //! | Ethernet → IPv4 → TCP (snaplen) then next segment → HTTP     | integration_ethernet_ipv4_tcp_snaplen_segment_does_not_stall_reassembly |
 //! | Ethernet → IPv6 (Payload Length 0, no HBH) → TCP              | integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded |
+//! | Ethernet → IPv4 → UDP → DNS, verification off (default)     | integration_checksum_verification_off_by_default     |
+//! | Ethernet → IPv4 → UDP → DNS, checksums good / bad            | integration_checksum_ipv4_udp_good_and_bad           |
+//! | Ethernet → IPv4 → UDP, checksum 0 (RFC 768)                  | integration_checksum_ipv4_udp_zero_not_present       |
+//! | Ethernet → IPv4 → TCP, checksum good / bad                   | integration_checksum_ipv4_tcp_good_and_bad           |
+//! | Ethernet → IPv4 → ICMP Echo, checksum good / bad             | integration_checksum_ipv4_icmp_good_and_bad          |
+//! | Ethernet → IPv6 → HBH → UDP / TCP / ICMPv6, checksum good / bad | integration_checksum_ipv6_upper_layers_good_and_bad |
+//! | Ethernet → IPv4 (snaplen-truncated) → TCP, unverified        | integration_checksum_snaplen_truncated_unverified    |
+//! | Ethernet → IPv4 fragments → UDP, verified after reassembly   | integration_checksum_ipv4_fragments                  |
+//! | Ethernet → IPv6 → Fragment → UDP, verified after reassembly  | integration_checksum_ipv6_fragments                  |
+//! | Ethernet → IPv4 + Ethernet pad → UDP, pad not checksummed    | integration_checksum_ethernet_padding_ignored        |
 //! | SLL (0x8100) → VLAN → IPv4 → UDP                              | integration_sll_vlan_ipv4_udp                        |
 //! | SLL2 (0x88A8) → VLAN → VLAN → IPv6 → TCP                      | integration_sll2_qinq_ipv6_tcp                       |
 //! | Ethernet → IPv4 → GRE (0x8100) → VLAN → IPv4 → UDP            | integration_ethernet_ipv4_gre_vlan_ipv4              |
@@ -193,6 +203,7 @@
 //! | Ethernet (0x8035) → ARP (RARP request)                        | integration_ethernet_rarp_request                    |
 //! | Ethernet → IPv6 → SRv6 (NH 143) → Ethernet → IPv4 → UDP       | integration_ethernet_ipv6_srv6_ethernet_ipv4_udp     |
 
+use packet_dissector::checksum::{ChecksumStatus, internet_checksum};
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
 };
@@ -9800,6 +9811,439 @@ fn integration_ethernet_ipv6_zero_payload_length_tcp_not_bounded() {
 
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv6", "TCP"]);
+}
+
+// ---------------------------------------------------------------------------
+// Checksum verification (opt-in)
+// ---------------------------------------------------------------------------
+
+/// A registry with checksum verification enabled.
+fn verifying_registry() -> DissectorRegistry {
+    let mut registry = DissectorRegistry::default();
+    registry.set_verify_checksums(true);
+    registry
+}
+
+/// The `checksum_status` of the first layer named `layer_name`.
+fn layer_checksum_status(buf: &DissectBuffer<'_>, layer_name: &str) -> Option<ChecksumStatus> {
+    let layer = buf.layer_by_name(layer_name).unwrap();
+    buf.field_by_name(layer, "checksum_status")
+        .map(|f| ChecksumStatus::from_u8(f.value.as_u8().unwrap()).unwrap())
+}
+
+/// Fill the IPv4 Header Checksum (RFC 791, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc791#section-3.1>).
+fn fill_ipv4_header_checksum(pkt: &mut [u8], ipv4_start: usize) {
+    let ihl = usize::from(pkt[ipv4_start] & 0x0F) * 4;
+    pkt[ipv4_start + 10..ipv4_start + 12].copy_from_slice(&[0, 0]);
+    let c = internet_checksum(&[&pkt[ipv4_start..ipv4_start + ihl]]);
+    pkt[ipv4_start + 10..ipv4_start + 12].copy_from_slice(&c.to_be_bytes());
+}
+
+/// Fill the checksum at `l4_start + csum_at` over the message
+/// `pkt[l4_start..l4_end]` and `pseudo`.
+fn fill_l4_checksum(pkt: &mut [u8], pseudo: &[u8], l4_start: usize, l4_end: usize, csum_at: usize) {
+    let at = l4_start + csum_at;
+    pkt[at..at + 2].copy_from_slice(&[0, 0]);
+    let c = internet_checksum(&[pseudo, &pkt[l4_start..l4_end]]);
+    pkt[at..at + 2].copy_from_slice(&c.to_be_bytes());
+}
+
+/// IPv4 pseudo-header (RFC 9293, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>;
+/// RFC 768 — <https://www.rfc-editor.org/rfc/rfc768>).
+fn ipv4_pseudo(src: [u8; 4], dst: [u8; 4], protocol: u8, len: usize) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&src);
+    p.extend_from_slice(&dst);
+    p.extend_from_slice(&[0, protocol]);
+    p.extend_from_slice(&(len as u16).to_be_bytes());
+    p
+}
+
+/// IPv6 pseudo-header (RFC 8200, Section 8.1 — <https://www.rfc-editor.org/rfc/rfc8200#section-8.1>).
+fn ipv6_pseudo(src: [u8; 16], dst: [u8; 16], next_header: u8, len: usize) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&src);
+    p.extend_from_slice(&dst);
+    p.extend_from_slice(&(len as u32).to_be_bytes());
+    p.extend_from_slice(&[0, 0, 0, next_header]);
+    p
+}
+
+const CK_V4_SRC: [u8; 4] = [10, 0, 0, 1];
+const CK_V4_DST: [u8; 4] = [10, 0, 0, 2];
+
+/// Ethernet + IPv4 + UDP + DNS query with correct checksums.
+fn build_checksummed_ipv4_udp_dns() -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x0800);
+    let ip = push_ipv4(&mut pkt, 17, CK_V4_SRC, CK_V4_DST);
+    let udp = push_udp(&mut pkt, 12345, 53);
+    push_dns_query(&mut pkt, 0x1234);
+    fixup_udp_length(&mut pkt, udp);
+    fixup_ipv4_length(&mut pkt, ip);
+    fill_ipv4_header_checksum(&mut pkt, ip);
+    let end = pkt.len();
+    let pseudo = ipv4_pseudo(CK_V4_SRC, CK_V4_DST, 17, end - udp);
+    fill_l4_checksum(&mut pkt, &pseudo, udp, end, 6);
+    pkt
+}
+
+#[test]
+fn integration_checksum_verification_off_by_default() {
+    let registry = DissectorRegistry::default();
+    assert!(!registry.verify_checksums());
+    let pkt = build_checksummed_ipv4_udp_dns();
+    let mut buf = DissectBuffer::new();
+    // A buffer flag set by the caller is overridden by the registry setting.
+    buf.set_verify_checksums(true);
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert!(!buf.verify_checksums());
+    assert_eq!(layer_checksum_status(&buf, "IPv4"), None);
+    assert_eq!(layer_checksum_status(&buf, "UDP"), None);
+}
+
+#[test]
+fn integration_checksum_ipv4_udp_good_and_bad() {
+    let registry = verifying_registry();
+    assert!(registry.verify_checksums());
+    let pkt = build_checksummed_ipv4_udp_dns();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    assert!(buf.layer_by_name("DNS").is_some());
+    assert_eq!(
+        layer_checksum_status(&buf, "IPv4"),
+        Some(ChecksumStatus::Good)
+    );
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::Good)
+    );
+
+    // A corrupted DNS byte breaks only the UDP checksum; dissection still
+    // succeeds.
+    let mut bad = pkt.clone();
+    let last = bad.len() - 1;
+    bad[last] ^= 0x01;
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&bad, &mut buf).unwrap();
+    assert!(buf.layer_by_name("DNS").is_some());
+    assert_eq!(
+        layer_checksum_status(&buf, "IPv4"),
+        Some(ChecksumStatus::Good)
+    );
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::Bad)
+    );
+
+    // A changed TTL breaks the IPv4 header checksum only (TTL is not part
+    // of the UDP pseudo-header).
+    let mut bad = pkt.clone();
+    bad[14 + 8] = 1;
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&bad, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "IPv4"),
+        Some(ChecksumStatus::Bad)
+    );
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::Good)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv4_udp_zero_not_present() {
+    let mut pkt = build_checksummed_ipv4_udp_dns();
+    pkt[14 + 20 + 6..14 + 20 + 8].copy_from_slice(&[0, 0]);
+    let mut buf = DissectBuffer::new();
+    verifying_registry().dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::NotPresent)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv4_tcp_good_and_bad() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x0800);
+    let ip = push_ipv4(&mut pkt, 6, CK_V4_SRC, CK_V4_DST);
+    let tcp = pkt.len();
+    push_tcp(&mut pkt, 40000, 9, 0x18);
+    pkt.extend_from_slice(b"odd");
+    fixup_ipv4_length(&mut pkt, ip);
+    fill_ipv4_header_checksum(&mut pkt, ip);
+    let end = pkt.len();
+    let pseudo = ipv4_pseudo(CK_V4_SRC, CK_V4_DST, 6, end - tcp);
+    fill_l4_checksum(&mut pkt, &pseudo, tcp, end, 16);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "IPv4"),
+        Some(ChecksumStatus::Good)
+    );
+    assert_eq!(
+        layer_checksum_status(&buf, "TCP"),
+        Some(ChecksumStatus::Good)
+    );
+
+    pkt[tcp + 14] ^= 0x10; // window
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "TCP"),
+        Some(ChecksumStatus::Bad)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv4_icmp_good_and_bad() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x0800);
+    let ip = push_ipv4(&mut pkt, 1, CK_V4_SRC, CK_V4_DST);
+    let icmp = pkt.len();
+    push_icmp_echo(&mut pkt, 8, 0x0001, 0x0002);
+    pkt.extend_from_slice(b"ping");
+    fixup_ipv4_length(&mut pkt, ip);
+    fill_ipv4_header_checksum(&mut pkt, ip);
+    let end = pkt.len();
+    fill_l4_checksum(&mut pkt, &[], icmp, end, 2);
+
+    let registry = verifying_registry();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "ICMP"),
+        Some(ChecksumStatus::Good)
+    );
+
+    pkt[icmp] = 0; // Echo Reply
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "ICMP"),
+        Some(ChecksumStatus::Bad)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv6_upper_layers_good_and_bad() {
+    let src: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a,
+    ];
+    let dst: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b,
+    ];
+    let registry = verifying_registry();
+    // (upper protocol, checksum offset, layer name)
+    for (proto, csum_at, layer) in [(17u8, 6usize, "UDP"), (6, 16, "TCP"), (58, 2, "ICMPv6")] {
+        let mut pkt = Vec::new();
+        push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x86DD);
+        let ip = push_ipv6(&mut pkt, 0, src, dst); // Hop-by-Hop next
+        push_ipv6_hop_by_hop(&mut pkt, proto);
+        let l4 = pkt.len();
+        match proto {
+            17 => {
+                push_udp(&mut pkt, 5000, 5001);
+                pkt.extend_from_slice(b"abcde");
+                fixup_udp_length(&mut pkt, l4);
+            }
+            6 => {
+                push_tcp(&mut pkt, 40000, 9, 0x18);
+                pkt.extend_from_slice(b"abc");
+            }
+            _ => {
+                push_icmpv6_echo(&mut pkt, 128, 1, 2);
+                pkt.extend_from_slice(b"abc");
+            }
+        }
+        fixup_ipv6_payload_length(&mut pkt, ip);
+        let end = pkt.len();
+        // RFC 8200, Section 8.1 — the pseudo-header carries the upper-layer
+        // protocol, not the IPv6 Next Header (Hop-by-Hop), and excludes the
+        // extension header from the length.
+        // https://www.rfc-editor.org/rfc/rfc8200#section-8.1
+        let pseudo = ipv6_pseudo(src, dst, proto, end - l4);
+        fill_l4_checksum(&mut pkt, &pseudo, l4, end, csum_at);
+
+        let mut buf = DissectBuffer::new();
+        registry.dissect(&pkt, &mut buf).unwrap();
+        assert_layers_contiguous(&buf);
+        assert_eq!(
+            layer_checksum_status(&buf, layer),
+            Some(ChecksumStatus::Good),
+            "{layer}"
+        );
+
+        let last = pkt.len() - 1;
+        pkt[last] ^= 0x20;
+        let mut buf = DissectBuffer::new();
+        registry.dissect(&pkt, &mut buf).unwrap();
+        assert_eq!(
+            layer_checksum_status(&buf, layer),
+            Some(ChecksumStatus::Bad),
+            "{layer}"
+        );
+    }
+}
+
+#[test]
+fn integration_checksum_snaplen_truncated_unverified() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x0800);
+    let ip = push_ipv4(&mut pkt, 6, CK_V4_SRC, CK_V4_DST);
+    let tcp = pkt.len();
+    push_tcp(&mut pkt, 40000, 9, 0x18);
+    pkt.extend_from_slice(&[0x55; 100]);
+    fixup_ipv4_length(&mut pkt, ip);
+    fill_ipv4_header_checksum(&mut pkt, ip);
+    let end = pkt.len();
+    let pseudo = ipv4_pseudo(CK_V4_SRC, CK_V4_DST, 6, end - tcp);
+    fill_l4_checksum(&mut pkt, &pseudo, tcp, end, 16);
+
+    // Captured with a snaplen that cuts the payload: the IPv4 header can
+    // still be verified, the TCP checksum cannot.
+    let captured = &pkt[..tcp + 40];
+    let mut buf = DissectBuffer::new();
+    verifying_registry().dissect(captured, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "IPv4"),
+        Some(ChecksumStatus::Good)
+    );
+    assert_eq!(
+        layer_checksum_status(&buf, "TCP"),
+        Some(ChecksumStatus::Unverified)
+    );
+}
+
+/// Split the IPv4 datagram in `pkt` (Ethernet + IPv4 at 14) after
+/// `first_len` payload bytes into two fragments (RFC 791, Section 3.2).
+/// https://www.rfc-editor.org/rfc/rfc791#section-3.2
+fn ipv4_fragments(pkt: &[u8], first_len: usize) -> (Vec<u8>, Vec<u8>) {
+    let (eth_ip, payload) = pkt.split_at(14 + 20);
+    let frag = |part: &[u8], offset_units: u16, more: bool| {
+        let mut f = eth_ip.to_vec();
+        f.extend_from_slice(part);
+        let word = offset_units | if more { 0x2000 } else { 0 };
+        f[14 + 6..14 + 8].copy_from_slice(&word.to_be_bytes());
+        fixup_ipv4_length(&mut f, 14);
+        fill_ipv4_header_checksum(&mut f, 14);
+        f
+    };
+    (
+        frag(&payload[..first_len], 0, true),
+        frag(&payload[first_len..], (first_len / 8) as u16, false),
+    )
+}
+
+#[test]
+fn integration_checksum_ipv4_fragments() {
+    // The UDP checksum covers the whole datagram, so a lone fragment is not
+    // verifiable, but the datagram reassembled from both fragments is.
+    // RFC 791, Section 3.1 (MF, Fragment Offset) —
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
+    let registry = verifying_registry();
+    let (first, second) = ipv4_fragments(&build_checksummed_ipv4_udp_dns(), 16);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&first, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "IPv4"),
+        Some(ChecksumStatus::Good)
+    );
+    assert!(buf.layer_by_name("UDP").is_none());
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&second, &mut buf).unwrap();
+    assert!(buf.layer_by_name("DNS").is_some());
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::Good)
+    );
+
+    // A byte changed in the second fragment breaks the reassembled datagram.
+    let mut pkt = build_checksummed_ipv4_udp_dns();
+    let last = pkt.len() - 1;
+    pkt[last] ^= 0x01;
+    let (first, second) = ipv4_fragments(&pkt, 16);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&first, &mut buf).unwrap();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&second, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::Bad)
+    );
+}
+
+#[test]
+fn integration_checksum_ipv6_fragments() {
+    // RFC 8200, Section 4.5 — the pseudo-header of the reassembled packet
+    // uses the upper-layer length of the reassembled data.
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
+    let src: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0c,
+    ];
+    let dst: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0d,
+    ];
+    let mut udp = Vec::new();
+    let u = push_udp(&mut udp, 40000, 40001);
+    udp.extend_from_slice(&[0x5a; 24]);
+    fixup_udp_length(&mut udp, u);
+    let len = udp.len();
+    fill_l4_checksum(&mut udp, &ipv6_pseudo(src, dst, 17, len), 0, len, 6);
+
+    let frag = |part: &[u8], offset_units: u16, more: bool| {
+        let mut f = Vec::new();
+        push_ethernet(&mut f, [0x02; 6], [0x04; 6], 0x86DD);
+        let ip = push_ipv6(&mut f, 44, src, dst);
+        push_ipv6_fragment(&mut f, 17, offset_units, more, 0x0102_0304);
+        f.extend_from_slice(part);
+        fixup_ipv6_payload_length(&mut f, ip);
+        f
+    };
+    let registry = verifying_registry();
+    let (first, second) = (frag(&udp[..16], 0, true), frag(&udp[16..], 2, false));
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&first, &mut buf).unwrap();
+    assert!(buf.layer_by_name("UDP").is_none());
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&second, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::Good)
+    );
+}
+
+#[test]
+fn integration_checksum_ethernet_padding_ignored() {
+    // A short UDP datagram padded to the Ethernet minimum frame size: the
+    // pad is outside the IPv4 Total Length and not checksummed.
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x0800);
+    let ip = push_ipv4(&mut pkt, 17, CK_V4_SRC, CK_V4_DST);
+    let udp = push_udp(&mut pkt, 40000, 40001);
+    pkt.push(0x42);
+    fixup_udp_length(&mut pkt, udp);
+    fixup_ipv4_length(&mut pkt, ip);
+    fill_ipv4_header_checksum(&mut pkt, ip);
+    let end = pkt.len();
+    let pseudo = ipv4_pseudo(CK_V4_SRC, CK_V4_DST, 17, end - udp);
+    fill_l4_checksum(&mut pkt, &pseudo, udp, end, 6);
+    pkt.resize(60, 0xEE);
+
+    let mut buf = DissectBuffer::new();
+    verifying_registry().dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(
+        layer_checksum_status(&buf, "UDP"),
+        Some(ChecksumStatus::Good)
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -99,6 +99,9 @@ pub struct DissectorRegistry {
     /// bottom-of-stack label, shared with the built-in MPLS dispatcher.
     #[cfg(feature = "mpls")]
     mpls_labels: std::sync::Arc<MplsLabelTable>,
+    /// Whether dissectors verify checksums; see
+    /// [`set_verify_checksums`](Self::set_verify_checksums).
+    verify_checksums: bool,
 }
 
 impl DissectorRegistry {
@@ -127,7 +130,29 @@ impl DissectorRegistry {
             esp_sa_db: std::sync::Arc::new(packet_dissector_esp::SharedEspSaDb::new()),
             #[cfg(feature = "mpls")]
             mpls_labels: std::sync::Arc::new(MplsLabelTable::default()),
+            verify_checksums: false,
         }
+    }
+
+    /// Enable or disable checksum verification (off by default).
+    ///
+    /// When enabled, dissectors that carry a checksum compute it and add an
+    /// informational `checksum_status` field holding a
+    /// [`ChecksumStatus`](packet_dissector_core::checksum::ChecksumStatus)
+    /// (`good`, `bad`, `unverified` or `not_present`). A bad checksum is never
+    /// a dissection error.
+    ///
+    /// Verification is off by default because captures taken on the sending
+    /// host often carry checksums that the NIC fills in after the capture
+    /// point (TX checksum offload), which would be reported as `bad`.
+    pub fn set_verify_checksums(&mut self, verify: bool) {
+        self.verify_checksums = verify;
+    }
+
+    /// Whether checksum verification is enabled; see
+    /// [`set_verify_checksums`](Self::set_verify_checksums).
+    pub fn verify_checksums(&self) -> bool {
+        self.verify_checksums
     }
 
     /// Add an ESP Security Association for decryption.
@@ -989,6 +1014,7 @@ impl DissectorRegistry {
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
     {
+        buf.set_verify_checksums(self.verify_checksums);
         let payloads_base = buf.embedded_payloads().len();
         let result = match entry.dissect(data, buf, 0) {
             Ok(result) => result,
@@ -1294,6 +1320,7 @@ impl DissectorRegistry {
                 // terminates. `full` is passed on so a shallow caller never
                 // feeds inner IP fragments to the reassembly state.
                 let mut tmp_buf = DissectBuffer::new();
+                tmp_buf.set_verify_checksums(buf.verify_checksums());
                 let mut inner_stop = no_stop;
                 self.dispatch_loop(
                     &padded,

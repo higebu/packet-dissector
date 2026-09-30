@@ -58,6 +58,7 @@
 #![deny(missing_docs)]
 
 // Re-export core types so users can `use packet_dissector::dissector::Dissector` etc.
+pub use packet_dissector_core::checksum;
 pub use packet_dissector_core::dissector;
 pub use packet_dissector_core::error;
 pub use packet_dissector_core::field;
