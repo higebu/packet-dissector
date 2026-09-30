@@ -33,13 +33,21 @@ jobs:
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
+      - name: Detect crates new to crates.io
+        id: detect
+        run: ./scripts/publish-missing-crates.sh --detect-new
+
       - name: Publish crates missing from crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          # Trusted Publishing cannot create new crates; this API token
-          # (publish-new + trusted-publishing scopes) is used only for crates
-          # that do not exist on crates.io yet. See the script header.
-          NEW_CRATE_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # Trusted Publishing cannot create new crates. This API token
+          # (publish-new + trusted-publishing scopes) is handed to the step
+          # only when a new crate exists, and is used only for those crates.
+          # See the script header.
+          NEW_CRATE_TOKEN: ${{ steps.detect.outputs.new_crates != '' && secrets.CARGO_REGISTRY_TOKEN || '' }}
+          # Must match `environment:` of this job; used for the Trusted
+          # Publishing config registered for new crates.
+          TRUSTPUB_ENVIRONMENT: release
         run: ./scripts/publish-missing-crates.sh
 
       - name: Run release-plz (release)
