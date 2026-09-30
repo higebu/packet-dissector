@@ -116,6 +116,10 @@
 //! | Ethernet → MPLS → PW-ACH → IPv4 → UDP                | integration_ethernet_mpls_pw_ach_ipv4                |
 //! | Ethernet → MPLS → PW-CW → Ethernet → IPv4 → UDP      | integration_ethernet_mpls_pw_control_word_ethernet   |
 //! | Ethernet → MPLS → Ethernet PW without CW (DA 00:..)  | integration_ethernet_mpls_pw_without_control_word_does_not_fail |
+//! | Ethernet → MPLS (rule pw-eth) → Ethernet → IPv4 → UDP | integration_ethernet_mpls_pw_decode_as_ethernet |
+//! | Ethernet → MPLS (rule pw-eth-cw) → PW-CW → Ethernet  | integration_ethernet_mpls_pw_decode_as_ethernet_cw |
+//! | Ethernet → MPLS (rule on another label) → heuristic  | integration_ethernet_mpls_pw_decode_as_other_label |
+//! | Ethernet → MPLS 0x8848 (rule not applied) → heuristic | integration_ethernet_mpls_upstream_label_ignores_rule |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
 //! | Ethernet → IPv4 → UDP → NTP (Control, mode 6)        | integration_ethernet_ipv4_udp_ntp_control_request    |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
@@ -5066,6 +5070,110 @@ fn integration_ethernet_mpls_pw_without_control_word_does_not_fail() {
     reg.dissect(&pkt, &mut buf).unwrap();
     assert_layers_contiguous(&buf);
     assert_eq!(buf.layers()[1].name, "MPLS");
+}
+
+/// Ethernet PW without a control word whose inner destination MAC starts
+/// with nibble 4 (RFC 4928 §3 — <https://www.rfc-editor.org/rfc/rfc4928#section-3>).
+fn build_mpls_pw_nibble4_packet(label: u32) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, label, 0, 1, 64);
+    push_ethernet(
+        &mut pkt,
+        [0x40, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    pkt
+}
+
+/// Binding label 16 to `pw-eth` decodes an Ethernet PW without a control
+/// word even though the first nibble is 4 (RFC 4448 §4.6 —
+/// <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>). Without the rule
+/// the payload is taken for IPv4 (RFC 4928 §3).
+#[test]
+fn integration_ethernet_mpls_pw_decode_as_ethernet() {
+    let pkt = build_mpls_pw_nibble4_packet(16);
+
+    let mut reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_ne!(
+        buf.layers().get(2).map(|l| l.name),
+        Some("Ethernet"),
+        "without a rule the nibble heuristic applies"
+    );
+
+    let pw_eth = reg.create_dissector_by_name("pw-eth").unwrap();
+    reg.register_by_mpls_label(16, pw_eth).unwrap();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "Ethernet", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// Binding label 16 to `pw-eth-cw` decodes the control word and then
+/// Ethernet even when the inner EtherType is one the heuristic rejects
+/// (RFC 4448 §4.6 — <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>).
+#[test]
+fn integration_ethernet_mpls_pw_decode_as_ethernet_cw() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, 16, 0, 1, 64);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x07]); // control word, sequence 7
+    // Inner Ethernet with local experimental EtherType 0x88B5 (IEEE 802)
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x88B5);
+    pkt.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    let mut reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "PW-CW"]);
+
+    let pw_eth_cw = reg.create_dissector_by_name("pw-eth-cw").unwrap();
+    reg.register_by_mpls_label(16, pw_eth_cw).unwrap();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "PW-CW", "Ethernet"]);
+    assert_layers_contiguous(&buf);
+    let cw = buf.layer_by_name("PW-CW").unwrap();
+    assert_eq!(buf.field_u16(cw, "sequence_number"), Some(7));
+    assert!(buf.field_by_name(cw, "payload_heuristic").is_none());
+}
+
+/// Upstream-assigned labels (EtherType 0x8848) come from a context-specific
+/// label space (RFC 5331 §3 — <https://www.rfc-editor.org/rfc/rfc5331#section-3>),
+/// so a rule for a downstream-assigned label does not apply to them.
+#[test]
+fn integration_ethernet_mpls_upstream_label_ignores_rule() {
+    let mut pkt = build_mpls_pw_nibble4_packet(16);
+    pkt[12..14].copy_from_slice(&0x8848u16.to_be_bytes());
+    let mut reg = DissectorRegistry::default();
+    let pw_eth = reg.create_dissector_by_name("pw-eth").unwrap();
+    reg.register_by_mpls_label(16, pw_eth).unwrap();
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_eq!(buf.layers()[1].name, "MPLS");
+    assert_ne!(buf.layers().get(2).map(|l| l.name), Some("Ethernet"));
+}
+
+/// A rule for one label leaves other labels to the heuristic.
+#[test]
+fn integration_ethernet_mpls_pw_decode_as_other_label() {
+    let pkt = build_mpls_pw_nibble4_packet(17);
+    let mut reg = DissectorRegistry::default();
+    let pw_eth = reg.create_dissector_by_name("pw-eth").unwrap();
+    reg.register_by_mpls_label(16, pw_eth).unwrap();
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_ne!(buf.layers().get(2).map(|l| l.name), Some("Ethernet"));
 }
 
 /// Ethernet → MPLS → PW control word → Ethernet → IPv4 → UDP (RFC 4385 §3 —
