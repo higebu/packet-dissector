@@ -894,6 +894,7 @@ mod tests {
     //! | 8879 §3       | compress_certificate algorithms     | parse_compress_certificate_extension          |
     //! | 9001 §8.2     | quic_transport_parameters           | parse_quic_transport_parameters_extension     |
     //! | 9849 §5       | encrypted_client_hello              | parse_encrypted_client_hello_extension        |
+    //! | 9849 §4-5     | ECH retry_configs (ECHConfigList)   | parse_encrypted_extensions_ech_retry_configs  |
     //! | 8701 §2       | GREASE values                       | parse_extension_names_and_grease              |
     //! | 9345 §4.1     | delegated_credential name           | parse_extension_names_and_grease              |
     //! | 5246 §7.4.2   | Certificate (TLS 1.2)               | parse_certificate_tls12                       |
@@ -903,6 +904,7 @@ mod tests {
     //! | 5246 §7.4.3   | ServerKeyExchange (DHE)             | parse_server_key_exchange_dhe                 |
     //! | 5246 §7.4.4   | CertificateRequest (TLS 1.2)        | parse_certificate_request_forms               |
     //! | 9846 §4.4.2   | CertificateRequest (TLS 1.3)        | parse_certificate_request_forms               |
+    //! | 9846 §4.5.1.1 | status_request in CertificateRequest | parse_certificate_request_status_request_not_decoded |
     //! | 5077 §3.3     | NewSessionTicket (TLS 1.2)          | parse_new_session_ticket_forms                |
     //! | 9846 §4.7.1   | NewSessionTicket (TLS 1.3)          | parse_new_session_ticket_forms                |
     //! | 9846 §4.4.1   | EncryptedExtensions                 | parse_encrypted_extensions                    |
@@ -3046,6 +3048,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_certificate_request_status_request_not_decoded() {
+        // RFC 9846, Section 4.5.1.1 — https://www.rfc-editor.org/rfc/rfc9846#section-4.5.1.1
+        // "A server MAY request that a client present an OCSP response with
+        // its certificate by sending an empty "status_request" extension in
+        // its CertificateRequest message." A non-empty body has no defined
+        // structure there and is not decoded as a CertificateStatusRequest.
+        let mut req = vec![0x01];
+        req.extend_from_slice(&vec_n(2, &[]));
+        req.extend_from_slice(&vec_n(2, &[]));
+        let mut body = vec_n(1, &[]);
+        body.extend_from_slice(&vec_n(2, &build_extension(5, &req)));
+        let data = handshake_record(13, &body);
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        let exts = extension_objects(&buf, &obj);
+        assert_eq!(
+            child(&buf, &exts[0], "data").unwrap().value,
+            FieldValue::Bytes(&req)
+        );
+        assert!(child(&buf, &exts[0], "status_type").is_none());
+    }
+
+    #[test]
     fn parse_new_session_ticket_forms() {
         // RFC 5077, Section 3.3 — https://www.rfc-editor.org/rfc/rfc5077#section-3.3
         let mut body = 7200u32.to_be_bytes().to_vec();
@@ -3099,6 +3124,42 @@ mod tests {
             array_values(&buf, &exts[0], "protocol_names"),
             vec![FieldValue::Bytes(b"h3")]
         );
+    }
+
+    #[test]
+    fn parse_encrypted_extensions_ech_retry_configs() {
+        // RFC 9849, Section 5 — https://www.rfc-editor.org/rfc/rfc9849#section-5
+        // struct { ECHConfigList retry_configs; } ECHEncryptedExtensions;
+        // RFC 9849, Section 4 — https://www.rfc-editor.org/rfc/rfc9849#section-4
+        // ECHConfig ECHConfigList<4..2^16-1>;
+        let list = vec_n(2, &[0xfe, 0x0d, 0x00, 0x00]);
+        let data = handshake_record(8, &vec_n(2, &build_extension(0xfe0d, &list)));
+        let buf = dissect(&data);
+        let obj = first_handshake(&buf);
+        let exts = extension_objects(&buf, &obj);
+        assert_eq!(
+            child(&buf, &exts[0], "retry_configs").unwrap().value,
+            FieldValue::Bytes(&list)
+        );
+
+        // A body that is not an ECHConfigList keeps only its raw data.
+        for body in [
+            &[0xff][..],
+            &[0x00, 0x10, 0x01],
+            &[0x00, 0x02, 0xaa, 0xbb],
+            &[0x00, 0x04, 0xfe, 0x0d, 0x00, 0x00, 0x00],
+            // The ECHConfig's length runs past the list.
+            &[0x00, 0x04, 0xfe, 0x0d, 0x00, 0xff],
+        ] {
+            let data = handshake_record(8, &vec_n(2, &build_extension(0xfe0d, body)));
+            let buf = dissect(&data);
+            let obj = first_handshake(&buf);
+            let exts = extension_objects(&buf, &obj);
+            assert!(
+                child(&buf, &exts[0], "retry_configs").is_none(),
+                "body {body:02x?}"
+            );
+        }
     }
 
     #[test]

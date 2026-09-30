@@ -761,7 +761,10 @@ fn decode_pre_shared_key<'pkt>(
 ///
 /// In a TLS 1.3 CertificateEntry the extension carries a
 /// `CertificateStatus` instead (RFC 9846, Section 4.5.1.1 —
-/// <https://www.rfc-editor.org/rfc/rfc9846#section-4.5.1.1>).
+/// <https://www.rfc-editor.org/rfc/rfc9846#section-4.5.1.1>). In a TLS 1.3
+/// CertificateRequest it is empty (same section: "sending an empty
+/// "status_request" extension in its CertificateRequest message"), so it is
+/// not decoded there.
 fn decode_status_request<'pkt>(
     data: &'pkt [u8],
     offset: usize,
@@ -769,7 +772,7 @@ fn decode_status_request<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
 ) {
     match ctx {
-        ExtContext::ClientHello | ExtContext::CertificateRequest => {
+        ExtContext::ClientHello => {
             let mut r = Reader::new(data, offset);
             let (Some(STATUS_TYPE_OCSP), Some(ids), Some(exts)) =
                 (r.u8(), r.vector(2), r.vector(2))
@@ -947,6 +950,10 @@ fn decode_quic_transport_parameters<'pkt>(
 ///
 /// struct { ECHConfigList retry_configs; } ECHEncryptedExtensions;
 /// struct { opaque confirmation[8]; } ECHHelloRetryRequest;
+///
+/// RFC 9849, Section 4 — https://www.rfc-editor.org/rfc/rfc9849#section-4
+///
+/// ECHConfig ECHConfigList<4..2^16-1>;
 /// ```
 fn decode_encrypted_client_hello<'pkt>(
     data: &'pkt [u8],
@@ -992,7 +999,7 @@ fn decode_encrypted_client_hello<'pkt>(
                 offset..offset + 8,
             );
         }
-        ExtContext::EncryptedExtensions if !data.is_empty() => {
+        ExtContext::EncryptedExtensions if is_ech_config_list(data) => {
             buf.push_field(
                 efd(EFD_RETRY_CONFIGS),
                 FieldValue::Bytes(data),
@@ -1001,6 +1008,38 @@ fn decode_encrypted_client_hello<'pkt>(
         }
         _ => {}
     }
+}
+
+/// Whether `data` is exactly one `ECHConfigList` whose `ECHConfig` entries
+/// fill it.
+///
+/// ```text
+/// RFC 9849, Section 4 — https://www.rfc-editor.org/rfc/rfc9849#section-4
+///
+/// struct {
+///     uint16 version;
+///     uint16 length;
+///     select (ECHConfig.version) {
+///       case 0xfe0d: ECHConfigContents contents;
+///     }
+/// } ECHConfig;
+///
+/// ECHConfig ECHConfigList<4..2^16-1>;
+/// ```
+fn is_ech_config_list(data: &[u8]) -> bool {
+    let Some((list, _)) = whole_vector(data, 0, 2) else {
+        return false;
+    };
+    if list.len() < 4 {
+        return false;
+    }
+    let mut r = Reader::new(list, 0);
+    while !r.is_empty() {
+        if r.u16().is_none() || r.vector(2).is_none() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Decode the body of one extension. Returns the `supported_versions`
