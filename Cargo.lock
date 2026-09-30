@@ -750,6 +750,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-e1ap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-aper",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-esp"
 version = "0.5.0"
 dependencies = [
@@ -770,6 +780,16 @@ name = "packet-dissector-ethernet"
 version = "0.5.0"
 dependencies = [
  "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-f1ap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-aper",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]
@@ -1207,6 +1227,16 @@ name = "packet-dissector-vxlan"
 version = "0.5.0"
 dependencies = [
  "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-xnap"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-aper",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]

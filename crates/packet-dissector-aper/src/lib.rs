@@ -4,6 +4,7 @@
 //! - [`AperReader`]: a bit cursor over an APER encoding.
 //! - [`helpers`]: open types, extensible SEQUENCEs and the protocol
 //!   extension containers common to every 3GPP application protocol.
+//! - [`ies`]: decoders for IE types common to XnAP, F1AP and E1AP.
 //! - [`ap`]: the PDU and ProtocolIE-Container framing of XnAP, F1AP and
 //!   E1AP.
 //!
@@ -18,6 +19,7 @@
 
 pub mod ap;
 pub mod helpers;
+pub mod ies;
 mod reader;
 
 pub use reader::{AperReader, Extent, read_extent};
