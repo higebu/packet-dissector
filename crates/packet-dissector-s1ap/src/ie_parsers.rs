@@ -21,9 +21,7 @@ use packet_dissector_aper::helpers::{
     skip_sequence_tail,
 };
 use packet_dissector_core::error::PacketError;
-use packet_dissector_core::field::{
-    FieldDescriptor, FieldType, FieldValue, FormatContext, format_utf8_lossy,
-};
+use packet_dissector_core::field::{FieldDescriptor, FieldType, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
 
 use crate::container::{self, IeContext};
@@ -400,7 +398,7 @@ pub(crate) static VALUE_FIELDS: &[FieldDescriptor] = &[
     ),
     plain!("mme_code", "MME Code", U8),
     plain!("m_tmsi", "M-TMSI", U32),
-    plain!("name", "Name", Bytes).with_format_fn(format_utf8_lossy),
+    plain!("name", "Name", Str),
     named!("rrc_establishment_cause", "RRC Establishment Cause", |v| {
         RRC_ESTABLISHMENT_CAUSE.name(v)
     }),
@@ -705,7 +703,10 @@ fn push_name<'pkt>(out: &mut Out<'_, 'pkt>, r: &mut AperReader<'pkt>) -> Result<
         r.read_length(1, Some(150))?
     };
     let (name, range) = read_aligned_octets(r, len as usize)?;
-    out.push(FD_NAME, FieldValue::Bytes(name), range);
+    // PrintableString characters are ASCII (ITU-T Rec. X.680, Section 41.4).
+    let name = core::str::from_utf8(name)
+        .map_err(|_| PacketError::InvalidHeader("name is not a PrintableString"))?;
+    out.push(FD_NAME, FieldValue::Str(name), range);
     Ok(())
 }
 

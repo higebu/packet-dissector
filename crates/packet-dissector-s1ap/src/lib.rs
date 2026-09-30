@@ -40,6 +40,9 @@ const MIN_HEADER_SIZE: usize = 3;
 /// 3GPP TS 36.413, Section 9.3.3; ITU-T Rec. X.691, Section 19.1.
 const SEQUENCE_PREAMBLE_SIZE: usize = 1;
 
+/// `id-PrivateMessage` (3GPP TS 36.413, Section 9.3.6).
+const PRIVATE_MESSAGE_CODE: u8 = 39;
+
 const FD_PDU_TYPE: usize = 0;
 const FD_PROCEDURE_CODE: usize = 1;
 const FD_CRITICALITY: usize = 2;
@@ -69,6 +72,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         .with_children(container::IE_CHILD_FIELDS),
     container::FD_IE_CONTAINER_ERROR,
     container::FD_UNDECODED_IES,
+    packet_dissector_aper::ap::PRIVATE_IES,
 ];
 
 /// Returns the name of an S1AP-PDU CHOICE alternative.
@@ -221,6 +225,15 @@ impl Dissector for S1apDissector {
                 &container::FD_UNDECODED_IES,
                 FieldValue::Bytes(&data[pos..total]),
                 r,
+            );
+        } else if procedure_code == PRIVATE_MESSAGE_CODE {
+            // 3GPP TS 36.413, Section 9.3.3: a Private Message carries a
+            // `PrivateIE-Container`, whose IE ids are not integers, so it is
+            // kept raw.
+            buf.push_field(
+                &packet_dissector_aper::ap::PRIVATE_IES,
+                FieldValue::Bytes(&data[value_start..total]),
+                offset + value_start..offset + total,
             );
         } else {
             let value = &data[value_start..total];

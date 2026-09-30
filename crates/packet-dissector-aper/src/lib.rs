@@ -10,6 +10,7 @@
 //!
 //! ## References
 //! - ITU-T Rec. X.691 (02/2021): <https://www.itu.int/rec/T-REC-X.691>
+//! - 3GPP TS 36.413 (S1AP): <https://www.3gpp.org/ftp/Specs/archive/36_series/36.413/>
 //! - 3GPP TS 38.413 (NGAP): <https://www.3gpp.org/ftp/Specs/archive/38_series/38.413/>
 //! - 3GPP TS 38.423 (XnAP): <https://www.3gpp.org/ftp/Specs/archive/38_series/38.423/>
 //! - 3GPP TS 38.473 (F1AP): <https://www.3gpp.org/ftp/Specs/archive/38_series/38.473/>

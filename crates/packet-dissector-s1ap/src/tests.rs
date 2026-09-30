@@ -6,6 +6,7 @@
 //! | 9.3.2   | Extension / invalid PDU type rejected             | header_errors                         |
 //! | 9.3.2   | Truncated header / value                          | header_errors                         |
 //! | 9.3.2   | Fragmented value kept undecoded                   | fragmented_value                      |
+//! | 9.3.3   | PrivateMessage kept raw                           | private_message_kept_raw              |
 //! | 9.3.7   | ProtocolIE-Container (IE count, fields)           | initial_ue_message                    |
 //! | 9.3.7   | Malformed container                               | container_errors                      |
 //! | 9.3.7   | Message extension additions skipped               | container_errors                      |
@@ -320,6 +321,24 @@ fn fragmented_value() {
 }
 
 #[test]
+fn private_message_kept_raw() {
+    // PrivateMessage: the SEQUENCE preamble, a SIZE(1..) count of 0 (= 1 IE),
+    // a local PrivateIE-ID (CHOICE index 0, value 5), criticality and value
+    // (3GPP TS 36.413, Section 9.3.7).
+    let value = [0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x40, 0x01, 0xAB];
+    let mut data = vec![0x00, 39, 0x40, value.len() as u8];
+    data.extend_from_slice(&value);
+    let buf = dissect(&data);
+    let layer = &buf.layers()[0];
+    assert_eq!(
+        buf.field_by_name(layer, "private_ies").unwrap().value,
+        FieldValue::Bytes(&value)
+    );
+    assert!(buf.field_by_name(layer, "ies").is_none());
+    assert!(buf.field_by_name(layer, "ie_container_error").is_none());
+}
+
+#[test]
 fn container_errors() {
     // IE count larger than the IEs present.
     let mut data = pdu(0, 17, 0, &[ie(59, 0, &[0x00])]);
@@ -542,10 +561,7 @@ fn s1_setup_request() {
     assert_eq!(get(ids[1], "enb_id"), &FieldValue::U32(0x1234567));
     assert_eq!(get(ids[2], "enb_id_type"), &FieldValue::U8(3));
     assert_eq!(get(ids[2], "enb_id"), &FieldValue::U32(0x1ABCDE));
-    assert_eq!(
-        get(ie_fields(&buf, 60), "name"),
-        &FieldValue::Bytes(b"enb1")
-    );
+    assert_eq!(get(ie_fields(&buf, 60), "name"), &FieldValue::Str("enb1"));
     assert_eq!(
         get(ie_fields(&buf, 137), "default_paging_drx"),
         &FieldValue::U8(2)
@@ -820,6 +836,13 @@ fn malformed_values_kept_raw() {
             60,
             b().put(0, 1).put(9, 8).octets(b"ab").done(),
         ),
+        // ENBname that is not a PrintableString.
+        (
+            60,
+            b().put(0, 1).put(0, 8).octets(&[0xFF]).done(),
+            60,
+            b().put(0, 1).put(0, 8).octets(&[0xFF]).done(),
+        ),
     ];
     for (id, value, check_id, raw) in cases {
         let data = pdu(0, 17, 0, &[ie(id, 0, &value)]);
@@ -891,10 +914,7 @@ fn independent_encoder_vectors() {
             FieldValue::U32(0x1ABCDE)
         ]
     );
-    assert_eq!(
-        get(ie_fields(&buf, 60), "name"),
-        &FieldValue::Bytes(b"enb1")
-    );
+    assert_eq!(get(ie_fields(&buf, 60), "name"), &FieldValue::Str("enb1"));
 
     // UplinkNASTransport with 4-octet MME-UE-S1AP-ID and 3-octet eNB ID.
     let unt = hex(
