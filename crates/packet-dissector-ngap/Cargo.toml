@@ -11,6 +11,7 @@ categories = ["network-programming", "parser-implementations"]
 description = "NGAP (NG Application Protocol) dissector for packet-dissector"
 
 [dependencies]
+packet-dissector-aper = { workspace = true }
 packet-dissector-core = { workspace = true }
 packet-dissector-nas5g = { workspace = true }
 
