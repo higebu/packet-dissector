@@ -85,6 +85,8 @@ default = [
   "ip-reassembly",
   "m3ua",
   "sccp",
+  "tcap",
+  "map",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
 # SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
@@ -181,6 +183,9 @@ stun = ["dep:packet-dissector-stun"]
 ip-reassembly = ["dep:packet-dissector-reassembly"]
 m3ua = ["dep:packet-dissector-m3ua"]
 sccp = ["dep:packet-dissector-sccp"]
+tcap = ["dep:packet-dissector-tcap"]
+# MAP emits the TCAP layer itself (it decodes TCAP components).
+map = ["dep:packet-dissector-map", "tcap"]
 
 ## Convenience feature groups
 layer2 = [
@@ -245,7 +250,7 @@ ipsec = ["ah", "esp", "ike"]
   "e1ap",
   "sgsap",
 ]
-sigtran = ["m3ua", "sccp"]
+sigtran = ["m3ua", "sccp", "tcap", "map"]
 
 [dependencies]
 packet-dissector-core = { workspace = true }
@@ -320,6 +325,8 @@ packet-dissector-quic = { workspace = true, optional = true }
 packet-dissector-stun = { workspace = true, optional = true }
 packet-dissector-m3ua = { workspace = true, optional = true }
 packet-dissector-sccp = { workspace = true, optional = true }
+packet-dissector-tcap = { workspace = true, optional = true }
+packet-dissector-map = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

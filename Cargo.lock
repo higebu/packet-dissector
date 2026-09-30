@@ -644,6 +644,7 @@ dependencies = [
  "packet-dissector-linux-sll2",
  "packet-dissector-lldp",
  "packet-dissector-m3ua",
+ "packet-dissector-map",
  "packet-dissector-mdns",
  "packet-dissector-mpls",
  "packet-dissector-nas-eps",
@@ -671,6 +672,7 @@ dependencies = [
  "packet-dissector-srv6",
  "packet-dissector-stp",
  "packet-dissector-stun",
+ "packet-dissector-tcap",
  "packet-dissector-tcp",
  "packet-dissector-test-alloc",
  "packet-dissector-tls",
@@ -1054,6 +1056,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-map"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-tcap",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-mdns"
 version = "0.5.0"
 dependencies = [
@@ -1158,6 +1170,7 @@ dependencies = [
  "packet-dissector-ipv6",
  "packet-dissector-isis",
  "packet-dissector-m3ua",
+ "packet-dissector-map",
  "packet-dissector-mdns",
  "packet-dissector-nas-eps",
  "packet-dissector-nsh",
@@ -1170,6 +1183,7 @@ dependencies = [
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
  "packet-dissector-snmp",
+ "packet-dissector-tcap",
  "packet-dissector-tcp",
  "packet-dissector-xnap",
  "proptest",
@@ -1341,6 +1355,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-stun"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-tcap"
 version = "0.5.0"
 dependencies = [
  "criterion",

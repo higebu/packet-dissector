@@ -59,6 +59,8 @@ packet-dissector-bfd = { version = "0.5.0", path = "crates/packet-dissector-bfd"
 packet-dissector-snmp = { version = "0.5.0", path = "crates/packet-dissector-snmp" }
 packet-dissector-m3ua = { version = "0.5.0", path = "crates/packet-dissector-m3ua" }
 packet-dissector-sccp = { version = "0.5.0", path = "crates/packet-dissector-sccp" }
+packet-dissector-tcap = { version = "0.5.0", path = "crates/packet-dissector-tcap" }
+packet-dissector-map = { version = "0.5.0", path = "crates/packet-dissector-map" }
 packet-dissector-isis = { version = "0.5.0", path = "crates/packet-dissector-isis" }
 packet-dissector-bgp = { version = "0.5.0", path = "crates/packet-dissector-bgp" }
 packet-dissector-bmp = { version = "0.5.0", path = "crates/packet-dissector-bmp" }

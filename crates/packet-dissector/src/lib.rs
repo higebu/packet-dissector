@@ -226,6 +226,12 @@ pub mod dissectors {
     #[cfg(feature = "sccp")]
     pub use packet_dissector_sccp as sccp;
 
+    #[cfg(feature = "tcap")]
+    pub use packet_dissector_tcap as tcap;
+
+    #[cfg(feature = "map")]
+    pub use packet_dissector_map as map;
+
     #[cfg(feature = "isis")]
     pub use packet_dissector_isis as isis;
 

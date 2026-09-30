@@ -3479,6 +3479,36 @@ impl Default for DissectorRegistry {
             Box::new(packet_dissector_nas_eps::NasEpsDissector)
         });
 
+        // TCAP is the SCCP user for the MAP subsystems — ITU-T Q.713, clause
+        // 3.4.2.2 (5 = MAP) and 3GPP TS 23.003, clauses 8.1 (6 HLR, 7 VLR,
+        // 8 MSC, 9 EIR) and 8.2 (145 GMLC, 147 gsmSCF, 148 SIWF, 149 SGSN,
+        // 150 GGSN, 248 CSS). The MAP dissector decodes TCAP itself, so it
+        // takes these SSNs when enabled. CAP (146) is TCAP-based as well.
+        // https://www.itu.int/rec/T-REC-Q.713
+        // https://www.3gpp.org/ftp/Specs/archive/23_series/23.003/
+        #[cfg(feature = "tcap")]
+        {
+            const MAP_SSNS: [u8; 11] = [5, 6, 7, 8, 9, 145, 147, 148, 149, 150, 248];
+            for ssn in MAP_SSNS {
+                #[cfg(feature = "map")]
+                assert_builtin(
+                    reg.register_by_sccp_ssn(ssn, Box::new(packet_dissector_map::MapDissector)),
+                );
+                #[cfg(not(feature = "map"))]
+                assert_builtin(
+                    reg.register_by_sccp_ssn(ssn, Box::new(packet_dissector_tcap::TcapDissector)),
+                );
+            }
+            assert_builtin(
+                reg.register_by_sccp_ssn(146, Box::new(packet_dissector_tcap::TcapDissector)),
+            );
+            reg.register_dissector_factory("tcap", || {
+                Box::new(packet_dissector_tcap::TcapDissector)
+            });
+            #[cfg(feature = "map")]
+            reg.register_dissector_factory("map", || Box::new(packet_dissector_map::MapDissector));
+        }
+
         // BGP runs over TCP on port 179 (RFC 4271)
         #[cfg(feature = "bgp")]
         {
@@ -5516,6 +5546,25 @@ mod tests {
             );
             assert!(reg.create_dissector_by_name("sccp").is_some());
         }
+
+        #[cfg(feature = "tcap")]
+        {
+            let map_ssn = if cfg!(feature = "map") { "MAP" } else { "TCAP" };
+            for ssn in [5, 6, 7, 8, 9, 145, 147, 148, 149, 150, 248] {
+                assert_eq!(
+                    reg.get_by_sccp_ssn(ssn).map(|d| d.short_name()),
+                    Some(map_ssn),
+                    "SSN {ssn}"
+                );
+            }
+            assert_eq!(
+                reg.get_by_sccp_ssn(146).map(|d| d.short_name()),
+                Some("TCAP")
+            );
+            assert!(reg.create_dissector_by_name("tcap").is_some());
+        }
+        #[cfg(feature = "map")]
+        assert!(reg.create_dissector_by_name("map").is_some());
     }
 
     #[test]

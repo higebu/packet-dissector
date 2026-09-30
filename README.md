@@ -35,7 +35,7 @@ protocols include:
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE, NSH |
 | Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, BMP, TLS, PPP, RADIUS, RTP, QUIC, STUN, SNMP |
 | 3GPP | GTPv1-U, GTPv1-C, GTPv2-C, PFCP, NAS5G, NAS-EPS, NGAP, XnAP, F1AP, E1AP, SGsAP |
-| SIGTRAN / SS7 | M3UA, SCCP |
+| SIGTRAN / SS7 | M3UA, SCCP, TCAP, MAP |
 
 See `crates/packet-dissector/Cargo.toml` and `crates/packet-dissector/src/lib.rs`
 for the current feature-gated protocol list.
@@ -63,7 +63,7 @@ Representative feature flags:
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`, `nsh`
 - Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `bmp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`, `snmp`
 - 3GPP: `gtpv1u`, `gtpv1c`, `gtpv2c`, `pfcp`, `nas5g`, `nas-eps`, `ngap`, `xnap`, `f1ap`, `e1ap`, `sgsap`
-- SIGTRAN / SS7: `m3ua`, `sccp`
+- SIGTRAN / SS7: `m3ua`, `sccp`, `tcap`, `map`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
 - `ip-reassembly` enables IPv4 / IPv6 fragment reassembly in the registry (without it, non-initial fragments still end the chain after the IP layer)
@@ -78,7 +78,7 @@ Convenience groups:
 - `routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp"]`
 - `ipsec = ["ah", "esp", "ike"]`
 - `3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "xnap", "f1ap", "e1ap", "sgsap"]`
-- `sigtran = ["m3ua", "sccp"]`
+- `sigtran = ["m3ua", "sccp", "tcap", "map"]`
 
 For the authoritative, exhaustive list, see
 `crates/packet-dissector/Cargo.toml`.
