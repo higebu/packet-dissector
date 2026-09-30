@@ -26,6 +26,7 @@ fn ethernet(ethertype: u16) -> Vec<u8> {
 }
 
 /// Ethernet + IPv4 (RFC 791, Section 3.1) with UDP as the protocol.
+/// <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
 fn ipv4(mf: bool, offset: usize, data: &[u8]) -> Vec<u8> {
     let mut p = ethernet(0x0800);
     p.extend_from_slice(&[0x45, 0]);
@@ -39,6 +40,7 @@ fn ipv4(mf: bool, offset: usize, data: &[u8]) -> Vec<u8> {
 
 /// Ethernet + IPv6 (RFC 8200, Section 3), with a Fragment header
 /// (Section 4.5) when `fragment` is `Some((m, offset))`.
+/// <https://www.rfc-editor.org/rfc/rfc8200#section-3>
 fn ipv6(fragment: Option<(bool, usize)>, data: &[u8]) -> Vec<u8> {
     let mut ext = Vec::new();
     let next = match fragment {

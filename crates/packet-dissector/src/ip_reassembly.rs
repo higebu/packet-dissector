@@ -23,7 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Mutex;
 
-use packet_dissector_core::dissector::{DispatchHint, IpFragmentContext};
+use packet_dissector_core::dissector::{DispatchHint, DissectResult, IpFragmentContext};
 use packet_dissector_core::error::PacketError;
 use packet_dissector_core::field::{Field, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
@@ -196,8 +196,14 @@ impl IpReassemblyService {
         }
         let too_many = position.is_err() && group.fragments.len() >= MAX_FRAGMENTS_PER_DATAGRAM;
         if too_many || Self::length_conflict(group, ctx.more_fragments, end) {
+            // The buffered fragments cannot form one datagram with this one:
+            // without a reassembly timer they are most likely left over from
+            // an earlier datagram that reused the key (RFC 4963, Section 2 —
+            // https://www.rfc-editor.org/rfc/rfc4963#section-2). Drop them
+            // and start afresh with this fragment, which an empty group
+            // always accepts.
             self.remove(&key);
-            return None;
+            return self.add_fragment(ctx, data);
         }
 
         let before = group.bytes();
@@ -223,6 +229,7 @@ impl IpReassemblyService {
         // of the first fragment: "TL <- TDL+(IHL*4)", which must fit the
         // 16-bit Total Length (RFC 791, Section 3.1).
         // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.1
         if headers.saturating_add(total) > MAX_DATAGRAM_LEN {
             return None;
         }
@@ -351,6 +358,32 @@ fn lock_poisoned(_: impl Sized) -> PacketError {
 }
 
 impl DissectorRegistry {
+    /// Feed the fragment a dissector reported in `result` (whose header ends
+    /// at absolute offset `offset`; its input ends at `end`) to the
+    /// reassembly and dissect the reassembled datagram if it completes.
+    ///
+    /// Returns `None` when the dispatch chain should go on with the
+    /// dissector's own hint instead: `result` carries no fragment, the
+    /// dissection is shallow (`full` is `false`), or the fragment's data was
+    /// not captured in full (snaplen truncation), so it cannot be
+    /// reassembled.
+    pub(crate) fn reassemble_reported_fragment(
+        &self,
+        result: &DissectResult,
+        data: &[u8],
+        buf: &mut DissectBuffer<'_>,
+        offset: usize,
+        end: usize,
+        full: bool,
+    ) -> Option<Result<(), PacketError>> {
+        let ctx = result.ip_fragment_context.as_ref()?;
+        if !full || end.saturating_sub(offset) < ctx.payload_len {
+            return None;
+        }
+        let payload = &data[offset..offset + ctx.payload_len];
+        Some(self.handle_ip_fragment(ctx, payload, buf, offset))
+    }
+
     /// Buffer one IP fragment and, when it completes its datagram, dissect
     /// the upper layers of the reassembled datagram into `buf`.
     ///
@@ -404,14 +437,14 @@ impl DissectorRegistry {
         // For IPv4 every fragment carries the same Protocol (it is part of
         // the key). `no_stop` keeps the recursive instantiation independent
         // of the caller's predicate; only full dissection gets here.
-        let mut full = no_stop;
+        let mut inner_stop = no_stop;
         let result = self.dispatch_loop(
             &padded,
             &mut tmp_buf,
             offset,
             padded.len(),
             DispatchHint::ByIpProtocol(protocol),
-            &mut full,
+            &mut inner_stop,
             true,
         );
         // Layers dissected before an error are kept, as on the main path.
@@ -496,6 +529,7 @@ mod tests {
         assert!(service.groups[&v6(1)].abandoned);
         assert_eq!(service.total_bytes, 0);
         // RFC 5722, Section 4 — fragments not yet received are discarded too.
+        // https://www.rfc-editor.org/rfc/rfc5722#section-4
         assert_eq!(service.add_fragment(&ctx(v6(1), 0, true, 8), &[0; 8]), None);
         assert_eq!(
             service.add_fragment(&ctx(v6(1), 8, false, 8), &[0; 8]),
@@ -516,6 +550,7 @@ mod tests {
     fn reassembled_header_must_fit_total_length() {
         // RFC 791, Section 3.2 — TL <- TDL+(IHL*4) with the first fragment's
         // header: 60 + 65,480 > 65,535.
+        // https://www.rfc-editor.org/rfc/rfc791#section-3.2
         let mut service = IpReassemblyService::new();
         let first = ctx(v4(1), 0, true, 8).with_unfragmentable_len(60);
         service.add_fragment(&first, &[0; 8]);
@@ -600,9 +635,12 @@ mod tests {
     fn remove_compacts_order() {
         let mut service = IpReassemblyService::new();
         for id in 0..200 {
-            // A second last fragment with another end: removed.
-            service.add_fragment(&ctx(v4(id), 8, false, 8), &[0; 8]);
-            service.add_fragment(&ctx(v4(id), 8, false, 16), &[0; 16]);
+            service.add_fragment(&ctx(v4(id), 0, true, 8), &[0; 8]);
+            assert!(
+                service
+                    .add_fragment(&ctx(v4(id), 8, false, 1), &[0])
+                    .is_some()
+            );
         }
         assert!(service.groups.is_empty());
         assert!(service.order.len() <= 64);
@@ -634,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn too_many_distinct_fragments_abandon_the_datagram() {
+    fn too_many_distinct_fragments_restart_the_datagram() {
         let mut service = IpReassemblyService::new();
         // Overlapping IPv4 variants: 16- and 24-byte fragments at every
         // 8-octet offset of the first 32 KiB, all distinct.
@@ -647,17 +685,28 @@ mod tests {
             service.groups[&v4(1)].fragments.len(),
             MAX_FRAGMENTS_PER_DATAGRAM
         );
+        // One more distinct fragment: the datagram restarts with it.
         service.add_fragment(&ctx(v4(1), 8, true, 32), &[0; 32]);
-        assert!(service.groups.is_empty());
-        assert_eq!(service.total_bytes, 0);
+        assert_eq!(service.groups[&v4(1)].fragments, vec![8..40_usize]);
+        assert_eq!(service.total_bytes, service.groups[&v4(1)].bytes());
     }
 
     #[test]
-    fn last_fragment_before_received_data_abandons() {
+    fn conflicting_fragment_restarts_the_datagram() {
+        // A last fragment ending before data already received cannot belong
+        // to the buffered datagram: it starts a new one (key reuse).
         let mut service = IpReassemblyService::new();
         service.add_fragment(&ctx(v4(1), 16, true, 8), &[0; 8]);
-        service.add_fragment(&ctx(v4(1), 0, false, 8), &[0; 8]);
-        assert!(service.groups.is_empty());
+        assert_eq!(
+            service.add_fragment(&ctx(v4(1), 8, false, 8), &[1; 8]),
+            None
+        );
+        assert_eq!(service.groups[&v4(1)].fragments, vec![8..16_usize]);
+        let done = service
+            .add_fragment(&ctx(v4(1), 0, true, 8), &[2; 8])
+            .unwrap();
+        assert_eq!(done.data, [[2; 8], [1; 8]].concat());
+        assert_eq!(service.total_bytes, 0);
     }
 
     #[test]

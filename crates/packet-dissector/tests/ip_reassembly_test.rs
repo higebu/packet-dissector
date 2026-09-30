@@ -11,6 +11,8 @@
 //! | RFC 791 3.2          | Non-last fragment not on an 8-octet boundary is dropped  | ipv4_fragment_not_multiple_of_8_is_discarded            |
 //! | RFC 791 3.1          | Reassembled Total Length above 65,535 is dropped         | ipv4_oversized_fragment_is_discarded                    |
 //! | —                    | Conflicting last fragments abandon the datagram          | ipv4_conflicting_last_fragment_abandons_datagram        |
+//! | RFC 4963 2           | Conflicting fragment restarts the datagram (ID reuse)    | ipv4_conflicting_last_fragment_restarts_datagram        |
+//! | RFC 791 3.2          | IPv4 entry dissector fragments reassemble                | ipv4_entry_dissector_fragments_reassemble               |
 //! | —                    | Snaplen-truncated fragment is dissected, not buffered    | ipv4_truncated_fragment_is_not_buffered                 |
 //! | RFC 9293 3.1         | TCP segment in a fragmented datagram keeps its length    | ipv4_fragmented_tcp_segment_reassembles                 |
 //! | RFC 9293 3.10        | Fragmented segment completes a buffered TCP stream       | ipv4_fragmented_segment_completes_buffered_tcp_stream   |
@@ -47,6 +49,7 @@ const DST6: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 
 /// A DNS response for `example.com` A with `answers` A records
 /// (192.0.2.1, 192.0.2.2, ...), RFC 1035, Section 4.1.
+/// <https://www.rfc-editor.org/rfc/rfc1035#section-4.1.>
 fn dns_response(answers: u8) -> Vec<u8> {
     let mut m = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, answers, 0, 0, 0, 0];
     m.extend_from_slice(b"\x07example\x03com\x00");
@@ -91,6 +94,7 @@ fn ethernet(ethertype: u16) -> Vec<u8> {
 
 /// Ethernet + IPv4 packet carrying `data` with the given fragmentation
 /// fields (RFC 791, Section 3.1). `offset` is in 8-octet units.
+/// <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
 fn ipv4(id: u16, protocol: u8, mf: bool, offset: u16, data: &[u8]) -> Vec<u8> {
     let mut p = ethernet(0x0800);
     p.extend_from_slice(&[0x45, 0x00]);
@@ -119,6 +123,7 @@ fn ipv6_raw(first_nh: u8, ext: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 /// IPv6 Fragment header (RFC 8200, Section 4.5). `offset` is in 8-octet units.
+/// <https://www.rfc-editor.org/rfc/rfc8200#section-4.5>
 fn fragment_header(next_header: u8, id: u32, m: bool, offset: u16) -> [u8; 8] {
     let off_m = (offset << 3) | u16::from(m);
     let mut h = [next_header, 0, 0, 0, 0, 0, 0, 0];
@@ -272,6 +277,44 @@ fn ipv4_fragments_in_order_reassemble() {
 }
 
 #[test]
+fn ipv4_entry_dissector_fragments_reassemble() {
+    // IPv4 as the entry dissector (raw IPv4 input without a link layer).
+    use packet_dissector::dissectors::ipv4::Ipv4Dissector;
+
+    let datagram = udp(&dns_response(10));
+    let mut reg = DissectorRegistry::default();
+    reg.set_entry_dissector(Box::new(Ipv4Dissector));
+    let frags: Vec<Vec<u8>> = ipv4_fragments(30, &datagram, &[64])
+        .into_iter()
+        .map(|p| p[14..].to_vec())
+        .collect();
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&frags[0], &mut buf).unwrap();
+    assert_eq!(names(&buf), ["IPv4"]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&frags[1], &mut buf).unwrap();
+    assert_eq!(names(&buf), ["IPv4", "UDP", "DNS"]);
+    assert_eq!(a_records(&buf).len(), 10);
+}
+
+#[test]
+fn ipv4_conflicting_last_fragment_restarts_datagram() {
+    // A fragment that cannot belong to the buffered datagram (here a last
+    // fragment ending before data already received) replaces the stale
+    // fragments: with no reassembly timer they most likely belong to an
+    // earlier datagram that reused the Identification (RFC 4963, Section 2).
+    // https://www.rfc-editor.org/rfc/rfc4963#section-2
+    let old = udp(&dns_response(10));
+    let datagram = udp(&dns_response(2));
+    let reg = DissectorRegistry::default();
+    feed(&reg, &[ipv4(31, 17, true, 16, &old[128..136])]);
+    let frags = ipv4_fragments(31, &datagram, &[32]);
+    feed(&reg, &frags[1..]);
+    assert_matches_unfragmented(&reg, &frags[0], &ipv4(31, 17, false, 0, &datagram));
+}
+
+#[test]
 fn ipv4_fragments_in_reverse_order_reassemble() {
     let datagram = udp(&dns_response(10));
     let mut frags = ipv4_fragments(7, &datagram, &[48, 72]);
@@ -308,6 +351,7 @@ fn ipv4_overlap_uses_more_recent_copy() {
     // the same data either identically or through a partial overlap, this
     // procedure will use the more recently arrived copy in the data buffer
     // and datagram delivered."
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
     let datagram = udp(&dns_response(4));
     let mut bogus = datagram[..16].to_vec();
     bogus[8..].fill(0xff);
@@ -355,6 +399,7 @@ fn ipv4_incomplete_datagram_ends_after_ip() {
 fn ipv4_fragment_not_multiple_of_8_is_discarded() {
     // RFC 791, Section 3.2 — "If an internet datagram is fragmented, its data
     // portion must be broken on 8 octet boundaries."
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
     let datagram = udp(&dns_response(4));
     let reg = DissectorRegistry::default();
     feed(&reg, &[ipv4(3, 17, true, 0, &datagram[..12])]);
@@ -366,6 +411,7 @@ fn ipv4_fragment_not_multiple_of_8_is_discarded() {
 fn ipv4_oversized_fragment_is_discarded() {
     // RFC 791, Section 3.1 — Total Length is a 16-bit field, so a datagram
     // whose fragments end past 65,535 octets cannot be reassembled.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
     let reg = DissectorRegistry::default();
     let datagram = udp(&dns_response(1));
     feed(&reg, &[ipv4(4, 17, true, 0, &datagram[..8])]);
@@ -542,6 +588,7 @@ fn ipv6_next_header_from_first_fragment() {
     // of different fragments of the same original packet may differ. Only
     // the value from the Offset zero fragment packet is used for
     // reassembly."
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
     let datagram = udp(&dns_response(4));
     let reg = DissectorRegistry::default();
     feed(&reg, &[ipv6(2, 17, true, 0, &datagram[..32])]);
@@ -587,6 +634,7 @@ fn ipv6_overlap_abandons_datagram() {
     // packet, reassembly of that packet must be abandoned and all the
     // fragments that have been received for that packet must be
     // discarded".
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
     let datagram = udp(&dns_response(4));
     let reg = DissectorRegistry::default();
     feed(
@@ -615,6 +663,7 @@ fn ipv6_exact_duplicate_is_dropped() {
     // RFC 8200, Section 4.5 — "an implementation may choose to detect this
     // case and drop exact duplicate fragments while keeping the other
     // fragments belonging to the same packet."
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
     let datagram = udp(&dns_response(10));
     let frags = ipv6_fragments(5, &datagram, &[64, 64]);
     let reg = DissectorRegistry::default();
@@ -631,6 +680,7 @@ fn ipv6_fragment_not_multiple_of_8_is_discarded() {
     // the fragment packet's Payload Length field, is not a multiple of 8
     // octets and the M flag of that fragment is 1, then that fragment must
     // be discarded".
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
     let datagram = udp(&dns_response(4));
     let reg = DissectorRegistry::default();
     feed(&reg, &[ipv6(6, 17, true, 0, &datagram[..20])]);
@@ -644,6 +694,7 @@ fn ipv6_oversized_fragment_is_discarded() {
     // such that the Payload Length of the packet reassembled from that
     // fragment would exceed 65,535 octets, then that fragment must be
     // discarded".
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
     let reg = DissectorRegistry::default();
     let datagram = udp(&dns_response(1));
     feed(&reg, &[ipv6(7, 17, true, 0, &datagram[..8])]);
@@ -657,6 +708,7 @@ fn ipv6_atomic_fragment_is_not_buffered() {
     // RFC 8200, Section 4.5 — a whole datagram "should be processed as a
     // fully reassembled packet ... Any other fragments that match this
     // packet ... should be processed independently."
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
     let datagram = udp(&dns_response(4));
     let reg = DissectorRegistry::default();
     feed(&reg, &[ipv6(8, 17, true, 0, &datagram[..32])]);

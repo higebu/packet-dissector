@@ -940,6 +940,14 @@ impl DissectorRegistry {
             );
         }
         let end = bound_payload_end(data.len(), result.bytes_consumed, result.payload_len);
+        // An IP entry dissector (e.g. set with `set_entry_dissector`) may
+        // report a fragment itself.
+        #[cfg(feature = "ip-reassembly")]
+        if let Some(result) =
+            self.reassemble_reported_fragment(&result, data, buf, result.bytes_consumed, end, full)
+        {
+            return result;
+        }
         self.dispatch_loop(
             data,
             buf,
@@ -1168,6 +1176,17 @@ impl DissectorRegistry {
                         let upper_result = upper.dissect(&data[start..range_end], buf, start)?;
                         offset = start + upper_result.bytes_consumed;
                         end = bound_payload_end(end, offset, upper_result.payload_len);
+                        #[cfg(feature = "ip-reassembly")]
+                        if let Some(result) = self.reassemble_reported_fragment(
+                            &upper_result,
+                            data,
+                            buf,
+                            offset,
+                            end,
+                            full,
+                        ) {
+                            return result;
+                        }
                         next = upper_result.next;
                         continue;
                     }
@@ -1196,21 +1215,22 @@ impl DissectorRegistry {
                 padded.extend_from_slice(&decrypted.data);
 
                 // Dissect into a temporary buffer. Fields borrow from `padded`.
-                // Decrypted inner data is always dissected fully: shallow
+                // Decrypted inner data is always dissected to the end: shallow
                 // callers stop on the outer chain before reaching this point.
                 // `no_stop` is a free fn (not a closure) so this recursive
                 // instantiation does not depend on `F` and monomorphization
-                // terminates.
+                // terminates. `full` is passed on so a shallow caller never
+                // feeds inner IP fragments to the reassembly state.
                 let mut tmp_buf = DissectBuffer::new();
-                let mut full = no_stop;
+                let mut inner_stop = no_stop;
                 self.dispatch_loop(
                     &padded,
                     &mut tmp_buf,
                     virtual_start,
                     padded.len(),
                     decrypted.next,
-                    &mut full,
-                    true,
+                    &mut inner_stop,
+                    full,
                 )?;
 
                 // Merge tmp_buf into the main buf. Layers are cheap to copy.
@@ -1235,11 +1255,10 @@ impl DissectorRegistry {
             // RFC 8200, Section 4.5 —
             // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
             #[cfg(feature = "ip-reassembly")]
-            if let Some(ref ctx) = result.ip_fragment_context {
-                if full && end.saturating_sub(offset) >= ctx.payload_len {
-                    let payload = &data[offset..offset + ctx.payload_len];
-                    return self.handle_ip_fragment(ctx, payload, buf, offset);
-                }
+            if let Some(result) =
+                self.reassemble_reported_fragment(&result, data, buf, offset, end, full)
+            {
+                return result;
             }
 
             // TCP reassembly middleware: if the dissector provided TCP stream

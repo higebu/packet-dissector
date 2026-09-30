@@ -79,6 +79,7 @@ fn zero_alloc_dissect_ipv6_fragment() {
     // IPv6 header (Payload Length 16, Next Header 44) + Fragment header
     // (Fragment Offset 1, M=1) + 8 bytes (RFC 8200, Section 4.5). Building
     // the reassembly context must not allocate.
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
     let mut raw = vec![0x60, 0, 0, 0, 0x00, 0x10, 44, 64];
     raw.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     raw.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);

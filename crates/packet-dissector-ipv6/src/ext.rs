@@ -1708,6 +1708,7 @@ mod tests {
         // subtracting from the packet's Payload Length the length of the
         // headers between the IPv6 header and fragment itself". Here an
         // 8-byte Hop-by-Hop header precedes the Fragment header.
+        // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
         let mut header = [0u8; 40];
         let mut buf = DissectBuffer::new();
         push_ipv6_layer(&mut buf, &mut header, 8 + 8 + 24, 0);

@@ -1276,6 +1276,7 @@ fn tcp_payload_len_of_reassembled_datagram() {
     // A segment dissected from a reassembled IP datagram is longer than the
     // Total Length of the IPv4 header of the fragment that completed it
     // (RFC 791, Section 3.2); the reassembled bytes all belong to it.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
     let mut tcp_data = build_tcp_packet(12345, 80, 0, 0, 0x18);
     tcp_data.extend_from_slice(&[0u8; 100]);
     let mut buf = DissectBuffer::new();

@@ -279,6 +279,7 @@ fn parse_ipv4_non_initial_fragment_ends_chain() {
     // location, relative to the beginning of the original unfragmented
     // datagram", so a fragment with a non-zero offset carries no upper-layer
     // header and must not be dispatched.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
     let mut data = build_ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], 28);
     data[4..6].copy_from_slice(&0x002au16.to_be_bytes());
     data[6..8].copy_from_slice(&0x0001u16.to_be_bytes()); // MF=0, offset=1
@@ -292,6 +293,7 @@ fn parse_ipv4_non_initial_fragment_ends_chain() {
         ctx.frag_key,
         (
             // IPv4-mapped IPv6 addresses (RFC 4291, Section 2.5.5.2).
+            // https://www.rfc-editor.org/rfc/rfc4291#section-2.5.5.2
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 1],
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 2],
             17,
@@ -309,6 +311,7 @@ fn parse_ipv4_non_initial_fragment_ends_chain() {
 fn parse_ipv4_first_fragment_context() {
     // RFC 791, Section 3.2 — MF=1 with offset 0 is the first fragment: it
     // starts with the upper-layer header, so it is still dispatched.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
     let mut data = build_ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], 36);
     data[6..8].copy_from_slice(&0x2000u16.to_be_bytes()); // MF=1, offset=0
     let mut buf = DissectBuffer::new();
@@ -326,6 +329,8 @@ fn parse_ipv4_whole_datagram_no_fragment_context() {
     // RFC 791, Section 3.2 — "a whole datagram (that is both the fragment
     // offset and the more fragments fields are zero)"; DF does not matter
     // (RFC 6864, Section 4 — atomic datagrams).
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.2
+    // https://www.rfc-editor.org/rfc/rfc6864#section-4
     for flags_frag in [0x0000u16, 0x4000] {
         let mut data = build_ipv4_packet(6, [0; 4], [0; 4], 40);
         data[6..8].copy_from_slice(&flags_frag.to_be_bytes());

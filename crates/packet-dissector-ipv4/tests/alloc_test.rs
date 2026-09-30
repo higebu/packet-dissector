@@ -75,6 +75,7 @@ fn zero_alloc_dissect_ipv4_with_options() {
 fn zero_alloc_dissect_ipv4_fragment() {
     // Non-initial fragment: MF=1, Fragment Offset=1 (RFC 791, Section 3.1).
     // Building the reassembly context must not allocate.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
     let raw: &[u8] = &[
         0x45, 0x00, 0x00, 0x1c, 0x00, 0x2a, 0x20, 0x01, 0x40, 0x11, 0x00, 0x00, //
         0x0a, 0x00, 0x00, 0x01, 0x0a, 0x00, 0x00, 0x02, //
