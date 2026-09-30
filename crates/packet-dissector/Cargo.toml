@@ -68,6 +68,7 @@ default = [
   "quic",
   "quic-decrypt",
   "stun",
+  "ip-reassembly",
 ]
 ethernet = ["dep:packet-dissector-ethernet"]
 # SLL/SLL2 reach SNAP (in the Ethernet crate) through LLC protocol type 0x0004.
@@ -131,6 +132,9 @@ rtp = ["dep:packet-dissector-rtp"]
 quic = ["dep:packet-dissector-quic"]
 quic-decrypt = ["quic", "packet-dissector-quic/decrypt"]
 stun = ["dep:packet-dissector-stun"]
+# IPv4 / IPv6 fragment reassembly in the registry. Without it, non-initial
+# fragments still end the dissection chain after the IP layer.
+ip-reassembly = ["dep:packet-dissector-reassembly"]
 
 ## Convenience feature groups
 layer2 = [

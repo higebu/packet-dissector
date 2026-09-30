@@ -230,6 +230,8 @@ pub mod dissectors {
     pub use packet_dissector_stun as stun;
 }
 
+#[cfg(feature = "ip-reassembly")]
+mod ip_reassembly;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 
