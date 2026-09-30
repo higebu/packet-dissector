@@ -1851,9 +1851,9 @@ mod tests {
             let (_, buf) = dissect(&data).unwrap();
             let avps = get_avps_range(&buf).unwrap();
             assert!(avp_field_at(&buf, avps, 0, "value").is_some());
-            let Some(FieldValue::Object(eap)) = avp_field_at(&buf, avps, 0, "eap") else {
-                panic!("AVP {code}: eap must be an Object");
-            };
+            let eap = avp_field_at(&buf, avps, 0, "eap").unwrap();
+            assert!(matches!(eap, FieldValue::Object(_)), "AVP {code}");
+            let eap = eap.as_container_range().unwrap();
             assert_eq!(
                 buf.resolve_nested_display_name(eap, "code_name"),
                 Some("Request")

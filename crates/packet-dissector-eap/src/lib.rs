@@ -1313,9 +1313,8 @@ mod tests {
         let obj = &buf.fields()[0];
         assert_eq!(obj.name(), "eap");
         assert_eq!(obj.range, 10..15);
-        let FieldValue::Object(r) = &obj.value else {
-            panic!("eap must be an Object");
-        };
+        assert!(matches!(obj.value, FieldValue::Object(_)));
+        let r = obj.value.as_container_range().unwrap();
         assert_eq!(
             buf.resolve_nested_display_name(r, "type_name"),
             Some("Identity")

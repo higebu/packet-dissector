@@ -1647,9 +1647,9 @@ mod tests {
         let data = message(2, &[(48, vec![0x01, 0x05, 0x00, 0x05, 0x01])]);
         let buf = dissect(&data);
         let p = payload(&buf, 0);
-        let FieldValue::Object(eap) = get(&buf, &p, "eap") else {
-            panic!("eap must be an Object");
-        };
+        let eap = get(&buf, &p, "eap");
+        assert!(matches!(eap, FieldValue::Object(_)));
+        let eap = eap.as_container_range().unwrap();
         assert_eq!(
             buf.resolve_nested_display_name(eap, "code_name"),
             Some("Request")

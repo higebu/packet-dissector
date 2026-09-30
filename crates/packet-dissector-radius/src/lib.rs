@@ -1652,9 +1652,9 @@ mod tests {
         let obj = first_attr(&buf);
         // The raw value stays for filtering.
         assert!(has_field(&buf, &obj, "value"));
-        let FieldValue::Object(eap) = obj_field_value(&buf, &obj, "eap") else {
-            panic!("eap must be an Object");
-        };
+        let eap = obj_field_value(&buf, &obj, "eap");
+        assert!(matches!(eap, FieldValue::Object(_)));
+        let eap = eap.as_container_range().unwrap();
         assert_eq!(
             buf.resolve_nested_display_name(eap, "code_name"),
             Some("Response")
