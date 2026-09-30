@@ -57,6 +57,7 @@ packet-dissector-vrrp = { version = "0.5.0", path = "crates/packet-dissector-vrr
 packet-dissector-bfd = { version = "0.5.0", path = "crates/packet-dissector-bfd" }
 packet-dissector-isis = { version = "0.5.0", path = "crates/packet-dissector-isis" }
 packet-dissector-bgp = { version = "0.5.0", path = "crates/packet-dissector-bgp" }
+packet-dissector-bmp = { version = "0.5.0", path = "crates/packet-dissector-bmp" }
 packet-dissector-l2tp = { version = "0.5.0", path = "crates/packet-dissector-l2tp" }
 packet-dissector-l2tpv3 = { version = "0.5.0", path = "crates/packet-dissector-l2tpv3" }
 packet-dissector-tls = { version = "0.5.0", path = "crates/packet-dissector-tls" }

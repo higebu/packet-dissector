@@ -64,6 +64,7 @@ default = [
   "bfd",
   "isis",
   "bgp",
+  "bmp",
   "l2tp",
   "l2tpv3",
   "tls",
@@ -126,8 +127,15 @@ geneve = ["dep:packet-dissector-geneve"]
 gre = ["dep:packet-dissector-gre"]
 vxlan = ["dep:packet-dissector-vxlan"]
 lldp = ["dep:packet-dissector-lldp"]
-# EAP is also decoded inside PPP (Protocol 0xC227) when both are enabled.
-eap = ["dep:packet-dissector-eap", "packet-dissector-ppp?/eap"]
+# EAP is also decoded inside the carriers that are enabled: PPP (0xC227),
+# RADIUS EAP-Message, Diameter EAP-Payload and the IKEv2 EAP payload.
+eap = [
+  "dep:packet-dissector-eap",
+  "packet-dissector-ppp?/eap",
+  "packet-dissector-radius?/eap",
+  "packet-dissector-diameter?/eap",
+  "packet-dissector-ike?/eap",
+]
 stp = ["dep:packet-dissector-stp"]
 # CDP is reached through SNAP (OUI 00-00-0C, PID 0x2000), which the
 # Ethernet crate decodes.
@@ -141,6 +149,8 @@ rsvp = ["dep:packet-dissector-rsvp"]
 bfd = ["dep:packet-dissector-bfd"]
 isis = ["dep:packet-dissector-isis"]
 bgp = ["dep:packet-dissector-bgp"]
+# BMP carries BGP messages, which are dissected as BGP layers.
+bmp = ["dep:packet-dissector-bmp", "bgp"]
 l2tp = ["dep:packet-dissector-l2tp"]
 l2tpv3 = ["dep:packet-dissector-l2tpv3"]
 tls = ["dep:packet-dissector-tls"]
@@ -196,7 +206,7 @@ application = [
   "stun",
 ]
 tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]
-routing = ["ospf", "isis", "bgp", "bfd", "vrrp", "rsvp"]
+routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "rsvp"]
 ipsec = ["ah", "esp", "ike"]
 3gpp = [
   "gtpv1u",
@@ -267,6 +277,7 @@ packet-dissector-rsvp = { workspace = true, optional = true }
 packet-dissector-bfd = { workspace = true, optional = true }
 packet-dissector-isis = { workspace = true, optional = true }
 packet-dissector-bgp = { workspace = true, optional = true }
+packet-dissector-bmp = { workspace = true, optional = true }
 packet-dissector-l2tp = { workspace = true, optional = true }
 packet-dissector-l2tpv3 = { workspace = true, optional = true }
 packet-dissector-tls = { workspace = true, optional = true }

@@ -71,3 +71,35 @@ fn zero_alloc_dissect_ikev2_payload_bodies() {
         "IKEv2 payload body dissect allocated {allocs} times"
     );
 }
+
+#[cfg(feature = "eap")]
+#[test]
+fn zero_alloc_dissect_ike_eap_payload() {
+    // IKEv2 IKE_AUTH header with one EAP payload (48) carrying an EAP
+    // Request/Identity (RFC 7296, Section 3.16 —
+    // https://www.rfc-editor.org/rfc/rfc7296#section-3.16).
+    let raw: &[u8] = &[
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // Initiator SPI
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // Responder SPI
+        0x30, // Next Payload = 48 (EAP)
+        0x20, // Version 2.0
+        0x23, // Exchange Type = 35 (IKE_AUTH)
+        0x20, // Flags: Response
+        0x00, 0x00, 0x00, 0x01, // Message ID
+        0x00, 0x00, 0x00, 0x25, // Length = 37
+        0x00, 0x00, 0x00, 0x09, // EAP payload header, length 9
+        0x01, 0x05, 0x00, 0x05, 0x01, // EAP Request/Identity
+    ];
+    let mut buf = DissectBuffer::new();
+    IkeDissector.dissect(raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        IkeDissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "IKE EAP payload dissect allocated {allocs} times"
+    );
+    assert!(buf.fields().iter().any(|f| f.name() == "eap"));
+}
