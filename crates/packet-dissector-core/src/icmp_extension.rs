@@ -7,6 +7,7 @@
 //! - RFC 5837 (Interface Information Object, Class-Num 2): <https://www.rfc-editor.org/rfc/rfc5837>
 //! - RFC 8335 (Interface Identification Object, Class-Num 3): <https://www.rfc-editor.org/rfc/rfc8335>
 
+use crate::checksum::{ChecksumStatus, checksum_status_descriptor, verify_ip_payload_checksum};
 use crate::field::{FieldDescriptor, FieldType, FieldValue};
 use crate::packet::DissectBuffer;
 use crate::util::{read_be_u16, read_be_u32};
@@ -26,6 +27,7 @@ const EXT_VERSION: usize = 0;
 const EXT_RESERVED: usize = 1;
 const EXT_CHECKSUM: usize = 2;
 const EXT_OBJECTS: usize = 3;
+const EXT_CHECKSUM_STATUS: usize = 4;
 
 // EXTENSION_OBJECT_CHILDREN indices
 const EOBJ_LENGTH: usize = 0;
@@ -89,6 +91,7 @@ pub static EXTENSION_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("checksum", "Checksum", FieldType::U16),
     FieldDescriptor::new("objects", "Objects", FieldType::Array)
         .with_children(EXTENSION_OBJECT_CHILDREN),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// Parse an ICMP Extension Structure (RFC 4884, Section 7) starting at `data[0..]`.
@@ -140,6 +143,25 @@ pub fn push_extension_structure<'pkt>(
         FieldValue::U16(checksum),
         offset + 2..offset + 4,
     );
+    if buf.verify_checksums() {
+        // RFC 4884, Section 7 — "The one's complement of the one's complement
+        // sum of the data structure, with the checksum field replaced by zero
+        // for the purpose of computing the checksum.  An all-zero value means
+        // that no checksum was transmitted." The structure runs to the end
+        // of the ICMP message, so it is only checked when the whole IP
+        // payload was captured.
+        // <https://www.rfc-editor.org/rfc/rfc4884#section-7>
+        let status = if checksum == 0 {
+            ChecksumStatus::NotPresent
+        } else {
+            verify_ip_payload_checksum(buf, offset, data)
+        };
+        buf.push_field(
+            &EXTENSION_CHILDREN[EXT_CHECKSUM_STATUS],
+            status.to_field_value(),
+            offset + 2..offset + 4,
+        );
+    }
 
     let objects_idx = buf.begin_container(
         &EXTENSION_CHILDREN[EXT_OBJECTS],
@@ -493,6 +515,7 @@ mod tests {
     //! | 5837 §4        | Truncated Interface Information sub-objects | interface_information_truncated_sub_objects |
     //! | 5837 §4.2      | Unknown AFI stops parsing                 | interface_information_unknown_afi      |
     //! | 8335 §2.1      | Interface Identification edge cases       | interface_identification_edge_cases    |
+    //! | 4884 §7        | Extension checksum good/bad/absent/truncated | extension_checksum_status           |
 
     use super::*;
 
@@ -587,5 +610,73 @@ mod tests {
         assert_eq!(extension_structure_start(8, 160, 300), Some(168));
         assert_eq!(extension_structure_start(8, 0, 200), None);
         assert_eq!(extension_structure_start(8, 128, 100), None);
+    }
+
+    static IPV4_FIELDS: &[FieldDescriptor] = &[
+        FieldDescriptor::new("total_length", "Total Length", FieldType::U16),
+        FieldDescriptor::new("flags", "Flags", FieldType::U8),
+        FieldDescriptor::new("fragment_offset", "Fragment Offset", FieldType::U16),
+        FieldDescriptor::new("src", "Source Address", FieldType::Ipv4Addr),
+        FieldDescriptor::new("dst", "Destination Address", FieldType::Ipv4Addr),
+    ];
+
+    /// Extension structure with one MPLS object and a correct checksum.
+    fn checksummed_structure() -> Vec<u8> {
+        let mut data = vec![0x20, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x01];
+        data.extend_from_slice(&[0x00, 0x01, 0x01, 0x40]);
+        let c = crate::checksum::internet_checksum(&[&data]);
+        data[2..4].copy_from_slice(&c.to_be_bytes());
+        data
+    }
+
+    /// Push `data` as an extension structure at offset 20 behind an IPv4
+    /// header that declares `ip_payload` bytes, and return the status.
+    fn structure_status(data: &[u8], ip_payload: u16, verify: bool) -> Option<u8> {
+        let mut buf = DissectBuffer::new();
+        buf.set_verify_checksums(verify);
+        buf.begin_layer("IPv4", None, IPV4_FIELDS, 0..20);
+        buf.push_field(&IPV4_FIELDS[0], FieldValue::U16(20 + ip_payload), 2..4);
+        buf.push_field(&IPV4_FIELDS[1], FieldValue::U8(0), 6..7);
+        buf.push_field(&IPV4_FIELDS[2], FieldValue::U16(0), 6..8);
+        buf.push_field(
+            &IPV4_FIELDS[3],
+            FieldValue::Ipv4Addr([192, 0, 2, 1]),
+            12..16,
+        );
+        buf.push_field(
+            &IPV4_FIELDS[4],
+            FieldValue::Ipv4Addr([192, 0, 2, 2]),
+            16..20,
+        );
+        buf.end_layer();
+        push_extension_structure(&mut buf, &FD_TEST_EXTENSIONS, data, 20);
+        let status = buf
+            .fields()
+            .iter()
+            .find(|f| f.name() == "checksum_status")?;
+        assert_eq!(status.range, 22..24);
+        status.value.as_u8()
+    }
+
+    #[test]
+    fn extension_checksum_status() {
+        // RFC 4884, Section 7 — the checksum covers the Extension Structure.
+        // <https://www.rfc-editor.org/rfc/rfc4884#section-7>
+        let data = checksummed_structure();
+        let len = data.len() as u16;
+        assert_eq!(structure_status(&data, len, false), None);
+        assert_eq!(structure_status(&data, len, true), Some(1)); // good
+
+        let mut bad = data.clone();
+        bad[11] ^= 0x01;
+        assert_eq!(structure_status(&bad, len, true), Some(0)); // bad
+
+        // "An all-zero value means that no checksum was transmitted."
+        let mut zero = data.clone();
+        zero[2..4].copy_from_slice(&[0, 0]);
+        assert_eq!(structure_status(&zero, len, true), Some(3)); // not present
+
+        // The capture ends before the ICMP message does.
+        assert_eq!(structure_status(&data, len + 4, true), Some(2)); // unverified
     }
 }

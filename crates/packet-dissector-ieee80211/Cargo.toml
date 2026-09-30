@@ -1,23 +1,18 @@
 [package]
-name = "packet-dissector-radius"
+name = "packet-dissector-ieee80211"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-keywords = ["packet", "network", "dissector", "parser", "radius"]
+keywords = ["packet", "network", "dissector", "parser", "wifi"]
 categories = ["network-programming", "parser-implementations"]
-description = "RADIUS (RFC 2865 / RFC 2866) dissector for packet-dissector"
-
-[features]
-# Decode EAP-Message values as EAP (RFC 3579, Section 3.1 —
-# https://www.rfc-editor.org/rfc/rfc3579#section-3.1).
-eap = ["dep:packet-dissector-eap"]
+description = "IEEE 802.11 (Wi-Fi) MAC frame dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }
-packet-dissector-eap = { workspace = true, optional = true }
+packet-dissector-ethernet = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
