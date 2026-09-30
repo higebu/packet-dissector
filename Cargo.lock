@@ -643,6 +643,7 @@ dependencies = [
  "packet-dissector-null",
  "packet-dissector-ospf",
  "packet-dissector-pfcp",
+ "packet-dissector-pim",
  "packet-dissector-ppp",
  "packet-dissector-quic",
  "packet-dissector-radius",
@@ -1019,6 +1020,7 @@ dependencies = [
  "packet-dissector-mdns",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
+ "packet-dissector-pim",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-tcp",
@@ -1034,6 +1036,15 @@ dependencies = [
 
 [[package]]
 name = "packet-dissector-pfcp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-pim"
 version = "0.5.0"
 dependencies = [
  "criterion",

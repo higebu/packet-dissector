@@ -2241,6 +2241,13 @@ impl Default for DissectorRegistry {
             reg.register_by_ip_protocol(112, Box::new(packet_dissector_vrrp::VrrpDissector)),
         );
 
+        // "All PIM control messages have IP protocol number 103." (RFC 7761,
+        // Section 4.9 — https://www.rfc-editor.org/rfc/rfc7761#section-4.9)
+        #[cfg(feature = "pim")]
+        assert_builtin(
+            reg.register_by_ip_protocol(103, Box::new(packet_dissector_pim::PimDissector)),
+        );
+
         // NTP runs over UDP on port 123 (RFC 5905)
         #[cfg(feature = "ntp")]
         {
@@ -4103,6 +4110,9 @@ mod tests {
 
         #[cfg(feature = "vrrp")]
         assert!(reg.get_by_ip_protocol(112).is_some());
+
+        #[cfg(feature = "pim")]
+        assert!(reg.get_by_ip_protocol(103).is_some());
 
         #[cfg(feature = "ah")]
         assert!(reg.get_by_ip_protocol(51).is_some());
