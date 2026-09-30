@@ -64,6 +64,9 @@
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Create Session) | integration_ethernet_ipv4_udp_gtpv2c_create_session |
 //! | Ethernet → IPv4 → UDP → GTPv2-C (Echo Request)   | integration_ethernet_ipv4_udp_gtpv2c_echo_request   |
 //! | Ethernet → IPv4 → UDP → GTPv2-C + piggyback      | integration_ethernet_ipv4_udp_gtpv2c_piggyback      |
+//! | Ethernet → IPv4 → UDP → GTPv1-C (Create PDP Ctx) | integration_ethernet_ipv4_udp_gtpv1c_create_pdp_context |
+//! | UDP 2123: GTPv1-C / GTPv2-C by version            | integration_udp_2123_mixed_gtp_versions             |
+//! | UDP 2123: unsupported GTP version                 | integration_udp_2123_unsupported_gtp_version        |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
@@ -113,6 +116,10 @@
 //! | Ethernet → MPLS → PW-ACH → IPv4 → UDP                | integration_ethernet_mpls_pw_ach_ipv4                |
 //! | Ethernet → MPLS → PW-CW → Ethernet → IPv4 → UDP      | integration_ethernet_mpls_pw_control_word_ethernet   |
 //! | Ethernet → MPLS → Ethernet PW without CW (DA 00:..)  | integration_ethernet_mpls_pw_without_control_word_does_not_fail |
+//! | Ethernet → MPLS (rule pw-eth) → Ethernet → IPv4 → UDP | integration_ethernet_mpls_pw_decode_as_ethernet |
+//! | Ethernet → MPLS (rule pw-eth-cw) → PW-CW → Ethernet  | integration_ethernet_mpls_pw_decode_as_ethernet_cw |
+//! | Ethernet → MPLS (rule on another label) → heuristic  | integration_ethernet_mpls_pw_decode_as_other_label |
+//! | Ethernet → MPLS 0x8848 (rule not applied) → heuristic | integration_ethernet_mpls_upstream_label_ignores_rule |
 //! | Ethernet → IPv4 → UDP → NTP (Client)                 | integration_ethernet_ipv4_udp_ntp_client             |
 //! | Ethernet → IPv4 → UDP → NTP (Control, mode 6)        | integration_ethernet_ipv4_udp_ntp_control_request    |
 //! | Ethernet → IPv4 → UDP → BFD (Up)                     | integration_ethernet_ipv4_udp_bfd_up                 |
@@ -121,6 +128,11 @@
 //! | Ethernet → IPv4 → UDP → S-BFD / Micro-BFD            | integration_ethernet_ipv4_udp_sbfd_and_micro_bfd     |
 //! | PPP (HDLC) → IPv4 → UDP                               | integration_ppp_ipv4_udp                              |
 //! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
+//! | Ethernet → PPPoE Discovery (PADI)                      | integration_ethernet_pppoe_discovery_padi             |
+//! | Ethernet → PPPoE Session → PPP → IPv4 → UDP            | integration_ethernet_pppoe_session_ppp_ipv4_udp       |
+//! | Ethernet → PPPoE Session → PPP → LCP (padded frame)    | integration_ethernet_pppoe_session_lcp_padding        |
+//! | Ethernet → 802.1Q → PPPoE Session → PPP → IPv4 → UDP   | integration_ethernet_vlan_pppoe_session_ipv4          |
+//! | PPPoE (link type 51) → PPP → IPv4 → UDP / PADI         | integration_link_type_ppp_ether                       |
 //! | Ethernet → IPv4 → UDP → GENEVE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_geneve_ipv4        |
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
 //! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ipv4      |
@@ -3689,6 +3701,111 @@ fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
 }
 
 // ---------------------------------------------------------------------------
+// GTPv1-C integration tests
+// ---------------------------------------------------------------------------
+
+/// GTPv1-C header with S=1 (12 bytes) followed by `ies`.
+fn push_gtpv1c(pkt: &mut Vec<u8>, msg_type: u8, teid: u32, seq: u16, ies: &[u8]) {
+    // Octet 1: Version=1, PT=1, E=0, S=1, PN=0 (3GPP TS 29.060, Section 8.2)
+    pkt.push(0x32);
+    pkt.push(msg_type);
+    pkt.extend_from_slice(&((4 + ies.len()) as u16).to_be_bytes());
+    pkt.extend_from_slice(&teid.to_be_bytes());
+    pkt.extend_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(&[0, 0]); // N-PDU Number, Next Extension Header Type
+    pkt.extend_from_slice(ies);
+}
+
+/// Build Ethernet → IPv4 → UDP (2123) around one GTP-C message.
+fn gtpc_packet(build: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xAA; 6], [0xBB; 6], 0x0800);
+    let ipv4_start = push_ipv4(&mut pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(&mut pkt, 40000, 2123);
+    build(&mut pkt);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    pkt
+}
+
+/// Ethernet → IPv4 → UDP → GTPv1-C (Create PDP Context Request)
+#[test]
+fn integration_ethernet_ipv4_udp_gtpv1c_create_pdp_context() {
+    let reg = DissectorRegistry::default();
+    let ies: &[u8] = &[
+        2, 0x21, 0x43, 0x65, 0x87, 0x09, 0x21, 0x43, 0xF5, // IMSI
+        14, 0x01, // Recovery
+        16, 0x00, 0x00, 0x00, 0x01, // TEID Data I
+        17, 0x00, 0x00, 0x00, 0x02, // TEID Control Plane
+        20, 0x05, // NSAPI
+        128, 0x00, 0x02, 0xF1, 0x21, // End User Address
+        131, 0x00, 0x04, 3, b'a', b'p', b'n', // APN
+        133, 0x00, 0x04, 10, 0, 0, 1, // GSN Address
+        135, 0x00, 0x04, 0x02, 0x23, 0x92, 0x1F, // QoS Profile
+    ];
+    let pkt = gtpc_packet(|p| push_gtpv1c(p, 16, 0, 7, ies));
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    assert_eq!(buf.layers().len(), 4);
+    assert_eq!(buf.layers()[3].name, "GTPv1-C");
+    assert_layers_contiguous(&buf);
+    assert_eq!(buf.layers()[3].range.end, pkt.len());
+
+    let gtp = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(gtp, "version").unwrap().value,
+        FieldValue::U8(1)
+    );
+    assert_eq!(
+        display_name_for(&buf, gtp, "message_type"),
+        Some("Create PDP Context Request")
+    );
+    assert_eq!(
+        buf.field_by_name(gtp, "sequence_number").unwrap().value,
+        FieldValue::U16(7)
+    );
+    assert!(buf.field_by_name(gtp, "ies").is_some());
+}
+
+/// GTPv1-C and GTPv2-C share UDP port 2123 (3GPP TS 29.060, Section
+/// 10.1.1.1; TS 29.274, Section 4.2): the version field selects the
+/// dissector.
+#[test]
+fn integration_udp_2123_mixed_gtp_versions() {
+    let reg = DissectorRegistry::default();
+    let v1 = gtpc_packet(|p| push_gtpv1c(p, 1, 0, 1, &[]));
+    let v2 = gtpc_packet(|p| {
+        push_gtpv2c_without_teid(p, 1, 1, &[3, 0, 1, 0, 5]);
+    });
+    let v1_again = gtpc_packet(|p| push_gtpv1c(p, 2, 0, 1, &[14, 0x05]));
+
+    for (pkt, name) in [(&v1, "GTPv1-C"), (&v2, "GTPv2-C"), (&v1_again, "GTPv1-C")] {
+        let mut buf = DissectBuffer::new();
+        reg.dissect(pkt, &mut buf).unwrap();
+        assert_eq!(buf.layers().len(), 4, "{name}");
+        assert_eq!(buf.layers()[3].name, name);
+        assert_layers_contiguous(&buf);
+    }
+}
+
+/// A GTP' or GTPv0 header on UDP port 2123 is not decoded as GTP-C.
+#[test]
+fn integration_udp_2123_unsupported_gtp_version() {
+    let reg = DissectorRegistry::default();
+    let pkt = gtpc_packet(|p| {
+        push_gtpv1c(p, 1, 0, 1, &[]);
+        let gtp = p.len() - 12;
+        p[gtp] = 0x12; // version 0
+    });
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_eq!(buf.layers().len(), 3);
+    assert_eq!(buf.layers()[2].name, "UDP");
+}
+
+// ---------------------------------------------------------------------------
 // SLL / SLL2 integration tests
 // ---------------------------------------------------------------------------
 
@@ -4958,6 +5075,110 @@ fn integration_ethernet_mpls_pw_without_control_word_does_not_fail() {
     reg.dissect(&pkt, &mut buf).unwrap();
     assert_layers_contiguous(&buf);
     assert_eq!(buf.layers()[1].name, "MPLS");
+}
+
+/// Ethernet PW without a control word whose inner destination MAC starts
+/// with nibble 4 (RFC 4928 §3 — <https://www.rfc-editor.org/rfc/rfc4928#section-3>).
+fn build_mpls_pw_nibble4_packet(label: u32) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, label, 0, 1, 64);
+    push_ethernet(
+        &mut pkt,
+        [0x40, 0x11, 0x22, 0x33, 0x44, 0x55],
+        [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb],
+        0x0800,
+    );
+    let ipv4_start = push_ipv4(&mut pkt, 17, [192, 168, 1, 1], [192, 168, 1, 2]);
+    let udp_start = push_udp(&mut pkt, 12345, 80);
+    fixup_udp_length(&mut pkt, udp_start);
+    fixup_ipv4_length(&mut pkt, ipv4_start);
+    pkt
+}
+
+/// Binding label 16 to `pw-eth` decodes an Ethernet PW without a control
+/// word even though the first nibble is 4 (RFC 4448 §4.6 —
+/// <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>). Without the rule
+/// the payload is taken for IPv4 (RFC 4928 §3).
+#[test]
+fn integration_ethernet_mpls_pw_decode_as_ethernet() {
+    let pkt = build_mpls_pw_nibble4_packet(16);
+
+    let mut reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_ne!(
+        buf.layers().get(2).map(|l| l.name),
+        Some("Ethernet"),
+        "without a rule the nibble heuristic applies"
+    );
+
+    let pw_eth = reg.create_dissector_by_name("pw-eth").unwrap();
+    reg.register_by_mpls_label(16, pw_eth).unwrap();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "Ethernet", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+/// Binding label 16 to `pw-eth-cw` decodes the control word and then
+/// Ethernet even when the inner EtherType is one the heuristic rejects
+/// (RFC 4448 §4.6 — <https://www.rfc-editor.org/rfc/rfc4448#section-4.6>).
+#[test]
+fn integration_ethernet_mpls_pw_decode_as_ethernet_cw() {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x00; 6], 0x8847);
+    push_mpls(&mut pkt, 16, 0, 1, 64);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x07]); // control word, sequence 7
+    // Inner Ethernet with local experimental EtherType 0x88B5 (IEEE 802)
+    push_ethernet(&mut pkt, [0x02; 6], [0x04; 6], 0x88B5);
+    pkt.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    let mut reg = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "PW-CW"]);
+
+    let pw_eth_cw = reg.create_dissector_by_name("pw-eth-cw").unwrap();
+    reg.register_by_mpls_label(16, pw_eth_cw).unwrap();
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "MPLS", "PW-CW", "Ethernet"]);
+    assert_layers_contiguous(&buf);
+    let cw = buf.layer_by_name("PW-CW").unwrap();
+    assert_eq!(buf.field_u16(cw, "sequence_number"), Some(7));
+    assert!(buf.field_by_name(cw, "payload_heuristic").is_none());
+}
+
+/// Upstream-assigned labels (EtherType 0x8848) come from a context-specific
+/// label space (RFC 5331 §3 — <https://www.rfc-editor.org/rfc/rfc5331#section-3>),
+/// so a rule for a downstream-assigned label does not apply to them.
+#[test]
+fn integration_ethernet_mpls_upstream_label_ignores_rule() {
+    let mut pkt = build_mpls_pw_nibble4_packet(16);
+    pkt[12..14].copy_from_slice(&0x8848u16.to_be_bytes());
+    let mut reg = DissectorRegistry::default();
+    let pw_eth = reg.create_dissector_by_name("pw-eth").unwrap();
+    reg.register_by_mpls_label(16, pw_eth).unwrap();
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_eq!(buf.layers()[1].name, "MPLS");
+    assert_ne!(buf.layers().get(2).map(|l| l.name), Some("Ethernet"));
+}
+
+/// A rule for one label leaves other labels to the heuristic.
+#[test]
+fn integration_ethernet_mpls_pw_decode_as_other_label() {
+    let pkt = build_mpls_pw_nibble4_packet(17);
+    let mut reg = DissectorRegistry::default();
+    let pw_eth = reg.create_dissector_by_name("pw-eth").unwrap();
+    reg.register_by_mpls_label(16, pw_eth).unwrap();
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    assert_ne!(buf.layers().get(2).map(|l| l.name), Some("Ethernet"));
 }
 
 /// Ethernet → MPLS → PW control word → Ethernet → IPv4 → UDP (RFC 4385 §3 —
@@ -6998,6 +7219,163 @@ fn integration_ppp_lcp_inline() {
         buf.field_by_name(ppp, "payload").unwrap().value,
         FieldValue::Object(_)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// PPPoE (RFC 2516) — https://www.rfc-editor.org/rfc/rfc2516
+// ---------------------------------------------------------------------------
+
+/// PPPoE header (RFC 2516, Section 4): VER=1, TYPE=1, CODE, SESSION_ID, LENGTH.
+fn push_pppoe(pkt: &mut Vec<u8>, code: u8, session_id: u16, length: u16) {
+    pkt.push(0x11);
+    pkt.push(code);
+    pkt.extend_from_slice(&session_id.to_be_bytes());
+    pkt.extend_from_slice(&length.to_be_bytes());
+}
+
+/// PPPoE Session payload: PPP Protocol 0x0021 followed by IPv4 → UDP.
+/// Returns the PPPoE payload length.
+fn push_pppoe_ppp_ipv4_udp(pkt: &mut Vec<u8>) -> u16 {
+    let ppp_start = pkt.len();
+    pkt.extend_from_slice(&[0x00, 0x21]);
+    let ipv4_start = push_ipv4(pkt, 17, [10, 0, 0, 1], [10, 0, 0, 2]);
+    let udp_start = push_udp(pkt, 12345, 53);
+    fixup_udp_length(pkt, udp_start);
+    fixup_ipv4_length(pkt, ipv4_start);
+    (pkt.len() - ppp_start) as u16
+}
+
+#[test]
+fn integration_ethernet_pppoe_discovery_padi() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xFF; 6], [0x02, 0, 0, 0, 0, 1], 0x8863);
+    // RFC 2516, Appendix B PADI with a Host-Uniq TAG —
+    // https://www.rfc-editor.org/rfc/rfc2516#appendix-B
+    push_pppoe(&mut pkt, 0x09, 0x0000, 12);
+    pkt.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0x01, 0x03, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF]);
+    pkt.resize(60, 0); // Ethernet minimum frame padding
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 2);
+    assert_eq!(buf.layers()[1].name, "PPPoE");
+    assert_eq!(buf.layers()[1].range, 14..14 + 6 + 12);
+    assert_layers_contiguous(&buf);
+    let pppoe = buf.layer_by_name("PPPoE").unwrap();
+    assert_eq!(buf.resolve_display_name(pppoe, "code_name"), Some("PADI"));
+    assert!(matches!(
+        buf.field_by_name(pppoe, "tags").unwrap().value,
+        FieldValue::Array(_)
+    ));
+}
+
+#[test]
+fn integration_ethernet_pppoe_session_ppp_ipv4_udp() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x8864,
+    );
+    let pppoe_start = pkt.len();
+    push_pppoe(&mut pkt, 0x00, 0x0011, 0);
+    let len = push_pppoe_ppp_ipv4_udp(&mut pkt);
+    pkt[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&len.to_be_bytes());
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "PPPoE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let pppoe = buf.layer_by_name("PPPoE").unwrap();
+    assert_eq!(buf.field_u16(pppoe, "session_id"), Some(0x0011));
+    assert_eq!(buf.field_u16(pppoe, "length"), Some(len));
+}
+
+#[test]
+fn integration_ethernet_pppoe_session_lcp_padding() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x8864,
+    );
+    // LCP Echo-Request (RFC 1661, Section 5.8 —
+    // https://www.rfc-editor.org/rfc/rfc1661#section-5.8), 10 octets with the Protocol.
+    push_pppoe(&mut pkt, 0x00, 0x0011, 10);
+    pkt.extend_from_slice(&[0xC0, 0x21, 0x09, 0x02, 0x00, 0x08, 0x12, 0x34, 0x56, 0x78]);
+    pkt.resize(60, 0); // Ethernet padding must not reach PPP
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "PPPoE", "PPP"]);
+    assert_layers_contiguous(&buf);
+    let ppp = buf.layer_by_name("PPP").unwrap();
+    assert!(
+        ppp.range.end <= 14 + 6 + 10,
+        "PPP layer {:?} must not cover Ethernet padding",
+        ppp.range
+    );
+    let payload = buf.field_by_name(ppp, "payload").unwrap();
+    assert_eq!(payload.range, 14 + 6 + 2..14 + 6 + 10);
+}
+
+#[test]
+fn integration_ethernet_vlan_pppoe_session_ipv4() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(
+        &mut pkt,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x8100,
+    );
+    push_vlan_tag(&mut pkt, 100, 0x8864);
+    let pppoe_start = pkt.len();
+    push_pppoe(&mut pkt, 0x00, 0x0022, 0);
+    let len = push_pppoe_ppp_ipv4_udp(&mut pkt);
+    pkt[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&len.to_be_bytes());
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "PPPoE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+}
+
+#[test]
+fn integration_link_type_ppp_ether() {
+    let registry = DissectorRegistry::default();
+
+    // LINKTYPE_PPP_ETHER (51): the packet begins with the PPPoE header.
+    // https://www.tcpdump.org/linktypes.html
+    let mut pkt = Vec::new();
+    push_pppoe(&mut pkt, 0x00, 0x0011, 0);
+    let len = push_pppoe_ppp_ipv4_udp(&mut pkt);
+    pkt[4..6].copy_from_slice(&len.to_be_bytes());
+    let mut buf = DissectBuffer::new();
+    registry.dissect_with_link_type(&pkt, 51, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["PPPoE", "PPP", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+
+    let mut padi = Vec::new();
+    push_pppoe(&mut padi, 0x09, 0x0000, 4);
+    padi.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+    let mut buf = DissectBuffer::new();
+    registry
+        .dissect_with_link_type(&padi, 51, &mut buf)
+        .unwrap();
+    assert_eq!(buf.layers().len(), 1);
+    let pppoe = buf.layer_by_name("PPPoE").unwrap();
+    assert_eq!(buf.resolve_display_name(pppoe, "code_name"), Some("PADI"));
 }
 
 // ===========================================================================
