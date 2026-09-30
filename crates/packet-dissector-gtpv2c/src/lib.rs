@@ -10,7 +10,7 @@ mod ie_decoders;
 pub mod ie_parsers;
 pub mod message_type;
 pub mod pco;
-mod tft;
+pub mod tft;
 
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference,
