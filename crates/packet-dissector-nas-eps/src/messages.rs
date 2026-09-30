@@ -103,7 +103,12 @@ static ATTACH_ACCEPT: MessageIes = MessageIes {
     ],
     optional: &[
         tlv!(0x50, "GUTI", V::EpsMobileIdentity),
-        tv!(0x13, "Location area identification", 6, V::LocationAreaIdentification),
+        tv!(
+            0x13,
+            "Location area identification",
+            6,
+            V::LocationAreaIdentification
+        ),
         tlv!(0x23, "MS identity", V::MobileIdentity),
         tv!(0x53, "EMM cause", 2, V::EmmCause),
         tv!(0x17, "T3402 value", 2, V::GprsTimer),
@@ -128,38 +133,54 @@ static ATTACH_ACCEPT: MessageIes = MessageIes {
         tlv!(0x35, "Negotiated WUS assistance information", V::Raw),
         tlv!(0x36, "Negotiated DRX parameter in NB-S1 mode", V::Raw),
         tlv!(0x38, "Negotiated IMSI offset", V::Raw),
-        tlv!(0x1d, "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"", V::TrackingAreaIdentityList),
-        tlv!(0x1e, "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"", V::TrackingAreaIdentityList),
+        tlv!(
+            0x1d,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"",
+            V::TrackingAreaIdentityList
+        ),
+        tlv!(
+            0x1e,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"",
+            V::TrackingAreaIdentityList
+        ),
         tlv!(0x1f, "Unavailability configuration", V::Raw),
         tlv!(0x20, "Access technology utilization control", V::Raw),
         tlv!(0x21, "S&F satellite operation parameters", V::Raw),
         tlv!(0x22, "Disaster roaming wait range", V::Raw),
         tlv!(0x24, "Disaster return wait range", V::Raw),
-        tlv!(0x25, "List of PLMNs to be used in disaster condition", V::Raw),
+        tlv!(
+            0x25,
+            "List of PLMNs to be used in disaster condition",
+            V::Raw
+        ),
     ],
 };
 
 /// Attach complete (8.2.2).
 static ATTACH_COMPLETE: MessageIes = MessageIes {
-    mandatory: &[
-        lve!("ESM message container", V::EsmMessageContainer),
-    ],
+    mandatory: &[lve!("ESM message container", V::EsmMessageContainer)],
     optional: &[],
 };
 
 /// Attach reject (8.2.3).
 static ATTACH_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("EMM cause", MF::V(1), V::EmmCause),
-    ],
+    mandatory: &[m!("EMM cause", MF::V(1), V::EmmCause)],
     optional: &[
         tlve!(0x78, "ESM message container", V::EsmMessageContainer),
         tlv!(0x5f, "T3346 value", V::Raw),
         tlv!(0x16, "T3402 value", V::Raw),
         tv1!(0xA, "Extended EMM cause", V::Raw),
         tlv!(0x1c, "Lower bound timer value", V::Raw),
-        tlv!(0x1d, "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"", V::TrackingAreaIdentityList),
-        tlv!(0x1e, "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"", V::TrackingAreaIdentityList),
+        tlv!(
+            0x1d,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"",
+            V::TrackingAreaIdentityList
+        ),
+        tlv!(
+            0x1e,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"",
+            V::TrackingAreaIdentityList
+        ),
         tlv!(0x20, "Access technology utilization control", V::Raw),
         tlv!(0x21, "S&F satellite operation parameters", V::Raw),
     ],
@@ -177,16 +198,30 @@ static ATTACH_REQUEST: MessageIes = MessageIes {
     optional: &[
         tv!(0x19, "Old P-TMSI signature", 4, V::Raw),
         tlv!(0x50, "Additional GUTI", V::EpsMobileIdentity),
-        tv!(0x52, "Last visited registered TAI", 6, V::TrackingAreaIdentity),
+        tv!(
+            0x52,
+            "Last visited registered TAI",
+            6,
+            V::TrackingAreaIdentity
+        ),
         tv!(0x5c, "DRX parameter", 3, V::Raw),
         tlv!(0x31, "MS network capability", V::Raw),
-        tv!(0x13, "Old location area identification", 6, V::LocationAreaIdentification),
+        tv!(
+            0x13,
+            "Old location area identification",
+            6,
+            V::LocationAreaIdentification
+        ),
         tv1!(0x9, "TMSI status", V::Raw),
         tlv!(0x11, "Mobile station classmark 2", V::Raw),
         tlv!(0x20, "Mobile station classmark 3", V::Raw),
         tlv!(0x40, "Supported Codecs", V::Raw),
         tv1!(0xF, "Additional update type", V::Raw),
-        tlv!(0x5d, "Voice domain preference and UE's usage setting", V::Raw),
+        tlv!(
+            0x5d,
+            "Voice domain preference and UE's usage setting",
+            V::Raw
+        ),
         tv1!(0xD, "Device properties", V::Raw),
         tv1!(0xE, "Old GUTI type", V::Raw),
         tv1!(0xC, "MS network feature support", V::Raw),
@@ -208,12 +243,8 @@ static ATTACH_REQUEST: MessageIes = MessageIes {
 
 /// Authentication failure (8.2.5).
 static AUTHENTICATION_FAILURE: MessageIes = MessageIes {
-    mandatory: &[
-        m!("EMM cause", MF::V(1), V::EmmCause),
-    ],
-    optional: &[
-        tlv!(0x30, "Authentication failure parameter", V::Raw),
-    ],
+    mandatory: &[m!("EMM cause", MF::V(1), V::EmmCause)],
+    optional: &[tlv!(0x30, "Authentication failure parameter", V::Raw)],
 };
 
 /// Authentication reject (8.2.6).
@@ -227,7 +258,11 @@ static AUTHENTICATION_REQUEST: MessageIes = MessageIes {
     mandatory: &[
         half!("NAS key set identifierASME", V::NasKeySetIdentifier),
         SPARE,
-        m!("Authentication parameter RAND (EPS challenge)", MF::V(16), V::Raw),
+        m!(
+            "Authentication parameter RAND (EPS challenge)",
+            MF::V(16),
+            V::Raw
+        ),
         lv!("Authentication parameter AUTN (EPS challenge)", V::Raw),
     ],
     optional: &[],
@@ -235,17 +270,13 @@ static AUTHENTICATION_REQUEST: MessageIes = MessageIes {
 
 /// Authentication response (8.2.8).
 static AUTHENTICATION_RESPONSE: MessageIes = MessageIes {
-    mandatory: &[
-        lv!("Authentication response parameter", V::Raw),
-    ],
+    mandatory: &[lv!("Authentication response parameter", V::Raw)],
     optional: &[],
 };
 
 /// CS service notification (8.2.9).
 static CS_SERVICE_NOTIFICATION: MessageIes = MessageIes {
-    mandatory: &[
-        m!("Paging identity", MF::V(1), V::Raw),
-    ],
+    mandatory: &[m!("Paging identity", MF::V(1), V::Raw)],
     optional: &[
         tlv!(0x60, "CLI", V::Raw),
         tv!(0x61, "SS Code", 2, V::Raw),
@@ -272,15 +303,20 @@ static DETACH_REQUEST_UE_ORIGINATING: MessageIes = MessageIes {
 
 /// Detach request (UE terminated detach) (8.2.11.2).
 static DETACH_REQUEST_UE_TERMINATED: MessageIes = MessageIes {
-    mandatory: &[
-        half!("Detach type", V::DetachType),
-        SPARE,
-    ],
+    mandatory: &[half!("Detach type", V::DetachType), SPARE],
     optional: &[
         tv!(0x53, "EMM cause", 2, V::EmmCause),
         tlv!(0x1c, "Lower bound timer value", V::Raw),
-        tlv!(0x1d, "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"", V::TrackingAreaIdentityList),
-        tlv!(0x1e, "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"", V::TrackingAreaIdentityList),
+        tlv!(
+            0x1d,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"",
+            V::TrackingAreaIdentityList
+        ),
+        tlv!(
+            0x1e,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"",
+            V::TrackingAreaIdentityList
+        ),
         tlv!(0x20, "Access technology utilization control", V::Raw),
         tlv!(0x21, "S&F satellite operation parameters", V::Raw),
         tlv!(0x24, "Disaster return wait range", V::Raw),
@@ -289,9 +325,7 @@ static DETACH_REQUEST_UE_TERMINATED: MessageIes = MessageIes {
 
 /// Downlink NAS Transport (8.2.12).
 static DOWNLINK_NAS_TRANSPORT: MessageIes = MessageIes {
-    mandatory: &[
-        lv!("NAS message container", V::Raw),
-    ],
+    mandatory: &[lv!("NAS message container", V::Raw)],
     optional: &[],
 };
 
@@ -309,9 +343,7 @@ static EMM_INFORMATION: MessageIes = MessageIes {
 
 /// EMM status (8.2.14).
 static EMM_STATUS: MessageIes = MessageIes {
-    mandatory: &[
-        m!("EMM cause", MF::V(1), V::EmmCause),
-    ],
+    mandatory: &[m!("EMM cause", MF::V(1), V::EmmCause)],
     optional: &[],
 };
 
@@ -333,9 +365,7 @@ static EXTENDED_SERVICE_REQUEST: MessageIes = MessageIes {
 
 /// GUTI reallocation command (8.2.16).
 static GUTI_REALLOCATION_COMMAND: MessageIes = MessageIes {
-    mandatory: &[
-        lv!("GUTI", V::EpsMobileIdentity),
-    ],
+    mandatory: &[lv!("GUTI", V::EpsMobileIdentity)],
     optional: &[
         tlv!(0x54, "TAI list", V::TrackingAreaIdentityList),
         tlv!(0x65, "DCN-ID", V::Raw),
@@ -353,25 +383,24 @@ static GUTI_REALLOCATION_COMPLETE: MessageIes = MessageIes {
 
 /// Identity request (8.2.18).
 static IDENTITY_REQUEST: MessageIes = MessageIes {
-    mandatory: &[
-        half!("Identity type", V::IdentityType2),
-        SPARE,
-    ],
+    mandatory: &[half!("Identity type", V::IdentityType2), SPARE],
     optional: &[],
 };
 
 /// Identity response (8.2.19).
 static IDENTITY_RESPONSE: MessageIes = MessageIes {
-    mandatory: &[
-        lv!("Mobile identity", V::MobileIdentity),
-    ],
+    mandatory: &[lv!("Mobile identity", V::MobileIdentity)],
     optional: &[],
 };
 
 /// Security mode command (8.2.20).
 static SECURITY_MODE_COMMAND: MessageIes = MessageIes {
     mandatory: &[
-        m!("Selected NAS security algorithms", MF::V(1), V::NasSecurityAlgorithms),
+        m!(
+            "Selected NAS security algorithms",
+            MF::V(1),
+            V::NasSecurityAlgorithms
+        ),
         half!("NAS key set identifier", V::NasKeySetIdentifier),
         SPARE,
         lv!("Replayed UE security capabilities", V::UeSecurityCapability),
@@ -400,24 +429,28 @@ static SECURITY_MODE_COMPLETE: MessageIes = MessageIes {
 
 /// Security mode reject (8.2.22).
 static SECURITY_MODE_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("EMM cause", MF::V(1), V::EmmCause),
-    ],
+    mandatory: &[m!("EMM cause", MF::V(1), V::EmmCause)],
     optional: &[],
 };
 
 /// Service reject (8.2.24).
 static SERVICE_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("EMM cause", MF::V(1), V::EmmCause),
-    ],
+    mandatory: &[m!("EMM cause", MF::V(1), V::EmmCause)],
     optional: &[
         tv!(0x5b, "T3442 value", 2, V::GprsTimer),
         tlv!(0x5f, "T3346 value", V::Raw),
         tlv!(0x6b, "T3448 value", V::Raw),
         tlv!(0x1c, "Lower bound timer value", V::Raw),
-        tlv!(0x1d, "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"", V::TrackingAreaIdentityList),
-        tlv!(0x1e, "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"", V::TrackingAreaIdentityList),
+        tlv!(
+            0x1d,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"",
+            V::TrackingAreaIdentityList
+        ),
+        tlv!(
+            0x1e,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"",
+            V::TrackingAreaIdentityList
+        ),
         tlv!(0x20, "Access technology utilization control", V::Raw),
         tlv!(0x21, "S&F satellite operation parameters", V::Raw),
         tlv!(0x24, "Disaster return wait range", V::Raw),
@@ -426,16 +459,18 @@ static SERVICE_REJECT: MessageIes = MessageIes {
 
 /// Tracking area update accept (8.2.26).
 static TRACKING_AREA_UPDATE_ACCEPT: MessageIes = MessageIes {
-    mandatory: &[
-        half!("EPS update result", V::EpsUpdateResult),
-        SPARE,
-    ],
+    mandatory: &[half!("EPS update result", V::EpsUpdateResult), SPARE],
     optional: &[
         tv!(0x5a, "T3412 value", 2, V::GprsTimer),
         tlv!(0x50, "GUTI", V::EpsMobileIdentity),
         tlv!(0x54, "TAI list", V::TrackingAreaIdentityList),
         tlv!(0x57, "EPS bearer context status", V::Raw),
-        tv!(0x13, "Location area identification", 6, V::LocationAreaIdentification),
+        tv!(
+            0x13,
+            "Location area identification",
+            6,
+            V::LocationAreaIdentification
+        ),
         tlv!(0x23, "MS identity", V::MobileIdentity),
         tv!(0x53, "EMM cause", 2, V::EmmCause),
         tv!(0x17, "T3402 value", 2, V::GprsTimer),
@@ -462,15 +497,27 @@ static TRACKING_AREA_UPDATE_ACCEPT: MessageIes = MessageIes {
         tlv!(0x36, "Negotiated DRX parameter in NB-S1 mode", V::Raw),
         tlv!(0x38, "Negotiated IMSI offset", V::Raw),
         tlv!(0x37, "EPS additional request result", V::Raw),
-        tlv!(0x1d, "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"", V::TrackingAreaIdentityList),
-        tlv!(0x1e, "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"", V::TrackingAreaIdentityList),
+        tlv!(
+            0x1d,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"",
+            V::TrackingAreaIdentityList
+        ),
+        tlv!(
+            0x1e,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"",
+            V::TrackingAreaIdentityList
+        ),
         tlv!(0x39, "Maximum time offset", V::Raw),
         tlv!(0x1f, "Unavailability configuration", V::Raw),
         tlv!(0x20, "Access technology utilization control", V::Raw),
         tlv!(0x21, "S&F satellite operation parameters", V::Raw),
         tlv!(0x22, "Disaster roaming wait range", V::Raw),
         tlv!(0x24, "Disaster return wait range", V::Raw),
-        tlv!(0x25, "List of PLMNs to be used in disaster condition", V::Raw),
+        tlv!(
+            0x25,
+            "List of PLMNs to be used in disaster condition",
+            V::Raw
+        ),
     ],
 };
 
@@ -482,15 +529,21 @@ static TRACKING_AREA_UPDATE_COMPLETE: MessageIes = MessageIes {
 
 /// Tracking area update reject (8.2.28).
 static TRACKING_AREA_UPDATE_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("EMM cause", MF::V(1), V::EmmCause),
-    ],
+    mandatory: &[m!("EMM cause", MF::V(1), V::EmmCause)],
     optional: &[
         tlv!(0x5f, "T3346 value", V::Raw),
         tv1!(0xA, "Extended EMM cause", V::Raw),
         tlv!(0x1c, "Lower bound timer value", V::Raw),
-        tlv!(0x1d, "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"", V::TrackingAreaIdentityList),
-        tlv!(0x1e, "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"", V::TrackingAreaIdentityList),
+        tlv!(
+            0x1d,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"",
+            V::TrackingAreaIdentityList
+        ),
+        tlv!(
+            0x1e,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"",
+            V::TrackingAreaIdentityList
+        ),
         tlv!(0x20, "Access technology utilization control", V::Raw),
         tlv!(0x21, "S&F satellite operation parameters", V::Raw),
         tlv!(0x24, "Disaster return wait range", V::Raw),
@@ -505,24 +558,42 @@ static TRACKING_AREA_UPDATE_REQUEST: MessageIes = MessageIes {
         lv!("Old GUTI", V::EpsMobileIdentity),
     ],
     optional: &[
-        tv1!(0xB, "Non-current native NAS key set identifier", V::NasKeySetIdentifier),
+        tv1!(
+            0xB,
+            "Non-current native NAS key set identifier",
+            V::NasKeySetIdentifier
+        ),
         tv1!(0x8, "GPRS ciphering key sequence number", V::Raw),
         tv!(0x19, "Old P-TMSI signature", 4, V::Raw),
         tlv!(0x50, "Additional GUTI", V::EpsMobileIdentity),
         tv!(0x55, "NonceUE", 5, V::Raw),
         tlv!(0x58, "UE network capability", V::UeNetworkCapability),
-        tv!(0x52, "Last visited registered TAI", 6, V::TrackingAreaIdentity),
+        tv!(
+            0x52,
+            "Last visited registered TAI",
+            6,
+            V::TrackingAreaIdentity
+        ),
         tv!(0x5c, "DRX parameter", 3, V::Raw),
         tv1!(0xA, "UE radio capability information update needed", V::Raw),
         tlv!(0x57, "EPS bearer context status", V::Raw),
         tlv!(0x31, "MS network capability", V::Raw),
-        tv!(0x13, "Old location area identification", 6, V::LocationAreaIdentification),
+        tv!(
+            0x13,
+            "Old location area identification",
+            6,
+            V::LocationAreaIdentification
+        ),
         tv1!(0x9, "TMSI status", V::Raw),
         tlv!(0x11, "Mobile station classmark 2", V::Raw),
         tlv!(0x20, "Mobile station classmark 3", V::Raw),
         tlv!(0x40, "Supported Codecs", V::Raw),
         tv1!(0xF, "Additional update type", V::Raw),
-        tlv!(0x5d, "Voice domain preference and UE's usage setting", V::Raw),
+        tlv!(
+            0x5d,
+            "Voice domain preference and UE's usage setting",
+            V::Raw
+        ),
         tv1!(0xE, "Old GUTI type", V::Raw),
         tv1!(0xD, "Device properties", V::Raw),
         tv1!(0xC, "MS network feature support", V::Raw),
@@ -547,9 +618,7 @@ static TRACKING_AREA_UPDATE_REQUEST: MessageIes = MessageIes {
 
 /// Uplink NAS Transport (8.2.30).
 static UPLINK_NAS_TRANSPORT: MessageIes = MessageIes {
-    mandatory: &[
-        lv!("NAS message container", V::Raw),
-    ],
+    mandatory: &[lv!("NAS message container", V::Raw)],
     optional: &[],
 };
 
@@ -559,9 +628,7 @@ static DOWNLINK_GENERIC_NAS_TRANSPORT: MessageIes = MessageIes {
         m!("Generic message container type", MF::V(1), V::Raw),
         lve!("Generic message container", V::Raw),
     ],
-    optional: &[
-        tlv!(0x65, "Additional information", V::Raw),
-    ],
+    optional: &[tlv!(0x65, "Additional information", V::Raw)],
 };
 
 /// Uplink generic NAS transport (8.2.32).
@@ -570,9 +637,7 @@ static UPLINK_GENERIC_NAS_TRANSPORT: MessageIes = MessageIes {
         m!("Generic message container type", MF::V(1), V::Raw),
         lve!("Generic message container", V::Raw),
     ],
-    optional: &[
-        tlv!(0x65, "Additional information", V::Raw),
-    ],
+    optional: &[tlv!(0x65, "Additional information", V::Raw)],
 };
 
 /// Control plane service request (8.2.33).
@@ -598,8 +663,16 @@ static SERVICE_ACCEPT: MessageIes = MessageIes {
         tlv!(0x57, "EPS bearer context status", V::Raw),
         tlv!(0x6b, "T3448 value", V::Raw),
         tlv!(0x37, "EPS additional request result", V::Raw),
-        tlv!(0x1d, "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"", V::TrackingAreaIdentityList),
-        tlv!(0x1e, "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"", V::TrackingAreaIdentityList),
+        tlv!(
+            0x1d,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for roaming\"",
+            V::TrackingAreaIdentityList
+        ),
+        tlv!(
+            0x1e,
+            "Forbidden TAI(s) for the list of \"forbidden tracking areas for regional provision of service\"",
+            V::TrackingAreaIdentityList
+        ),
         tlv!(0x21, "S&F satellite operation parameters", V::Raw),
     ],
 };
@@ -616,9 +689,7 @@ static ACTIVATE_DEDICATED_EPS_BEARER_CONTEXT_ACCEPT: MessageIes = MessageIes {
 
 /// Activate dedicated EPS bearer context reject (8.3.2).
 static ACTIVATE_DEDICATED_EPS_BEARER_CONTEXT_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlv!(0x33, "NBIFOM container", V::Raw),
@@ -659,9 +730,7 @@ static ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_ACCEPT: MessageIes = MessageIes {
 
 /// Activate default EPS bearer context reject (8.3.5).
 static ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlve!(0x7b, "Extended protocol configuration options", V::Raw),
@@ -697,9 +766,7 @@ static ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REQUEST: MessageIes = MessageIes {
 
 /// Bearer resource allocation reject (8.3.7).
 static BEARER_RESOURCE_ALLOCATION_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlv!(0x37, "Back-off timer value", V::Raw),
@@ -728,9 +795,7 @@ static BEARER_RESOURCE_ALLOCATION_REQUEST: MessageIes = MessageIes {
 
 /// Bearer resource modification reject (8.3.9).
 static BEARER_RESOURCE_MODIFICATION_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlv!(0x37, "Back-off timer value", V::Raw),
@@ -743,7 +808,10 @@ static BEARER_RESOURCE_MODIFICATION_REJECT: MessageIes = MessageIes {
 /// Bearer resource modification request (8.3.10).
 static BEARER_RESOURCE_MODIFICATION_REQUEST: MessageIes = MessageIes {
     mandatory: &[
-        half!("EPS bearer identity for packet filter", V::EpsBearerIdentity),
+        half!(
+            "EPS bearer identity for packet filter",
+            V::EpsBearerIdentity
+        ),
         SPARE,
         lv!("Traffic flow aggregate", V::Raw),
     ],
@@ -770,9 +838,7 @@ static DEACTIVATE_EPS_BEARER_CONTEXT_ACCEPT: MessageIes = MessageIes {
 
 /// Deactivate EPS bearer context request (8.3.12).
 static DEACTIVATE_EPS_BEARER_CONTEXT_REQUEST: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlv!(0x37, "T3396 value", V::Raw),
@@ -800,9 +866,7 @@ static ESM_INFORMATION_RESPONSE: MessageIes = MessageIes {
 
 /// ESM status (8.3.15).
 static ESM_STATUS: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[],
 };
 
@@ -818,9 +882,7 @@ static MODIFY_EPS_BEARER_CONTEXT_ACCEPT: MessageIes = MessageIes {
 
 /// Modify EPS bearer context reject (8.3.17).
 static MODIFY_EPS_BEARER_CONTEXT_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlv!(0x33, "NBIFOM container", V::Raw),
@@ -851,9 +913,7 @@ static MODIFY_EPS_BEARER_CONTEXT_REQUEST: MessageIes = MessageIes {
 
 /// PDN connectivity reject (8.3.19).
 static PDN_CONNECTIVITY_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlv!(0x37, "Back-off timer value", V::Raw),
@@ -882,9 +942,7 @@ static PDN_CONNECTIVITY_REQUEST: MessageIes = MessageIes {
 
 /// PDN disconnect reject (8.3.21).
 static PDN_DISCONNECT_REJECT: MessageIes = MessageIes {
-    mandatory: &[
-        m!("ESM cause", MF::V(1), V::EsmCause),
-    ],
+    mandatory: &[m!("ESM cause", MF::V(1), V::EsmCause)],
     optional: &[
         tlv!(0x27, "Protocol configuration options", V::Raw),
         tlve!(0x7b, "Extended protocol configuration options", V::Raw),
@@ -921,12 +979,8 @@ static REMOTE_UE_REPORT_RESPONSE: MessageIes = MessageIes {
 
 /// ESM DATA TRANSPORT (8.3.25).
 static ESM_DATA_TRANSPORT: MessageIes = MessageIes {
-    mandatory: &[
-        lve!("User data container", V::Raw),
-    ],
-    optional: &[
-        tv1!(0xF, "Release assistance indication", V::Raw),
-    ],
+    mandatory: &[lve!("User data container", V::Raw)],
+    optional: &[tv1!(0xF, "Release assistance indication", V::Raw)],
 };
 
 /// ESM dummy message (8.3.12A).
@@ -937,9 +991,7 @@ static ESM_DUMMY_MESSAGE: MessageIes = MessageIes {
 
 /// Notification (8.3.18A).
 static NOTIFICATION: MessageIes = MessageIes {
-    mandatory: &[
-        lv!("Notification indicator", V::Raw),
-    ],
+    mandatory: &[lv!("Notification indicator", V::Raw)],
     optional: &[],
 };
 
@@ -1077,8 +1129,18 @@ mod tests {
 
     #[test]
     fn table_counts() {
-        assert_eq!((0..=255u8).filter(|t| emm_message_ies(*t, &[]).is_some()).count(), 32);
-        assert_eq!((0..=255u8).filter(|t| esm_message_ies(*t).is_some()).count(), 27);
+        assert_eq!(
+            (0..=255u8)
+                .filter(|t| emm_message_ies(*t, &[]).is_some())
+                .count(),
+            32
+        );
+        assert_eq!(
+            (0..=255u8)
+                .filter(|t| esm_message_ies(*t).is_some())
+                .count(),
+            27
+        );
     }
 
     #[test]

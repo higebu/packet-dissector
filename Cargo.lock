@@ -1027,6 +1027,7 @@ dependencies = [
  "packet-dissector-ipv6",
  "packet-dissector-isis",
  "packet-dissector-mdns",
+ "packet-dissector-nas-eps",
  "packet-dissector-ntp",
  "packet-dissector-ospf",
  "packet-dissector-sctp",

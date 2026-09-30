@@ -471,7 +471,12 @@ plain!(FD_TMSI, "tmsi", "TMSI/P-TMSI", U32);
 
 // Half-octet IEs.
 named_u8!(FD_TSC, "tsc", "Type of Security Context", tsc_name);
-plain!(FD_KSI, "nas_key_set_identifier", "NAS Key Set Identifier", U8);
+plain!(
+    FD_KSI,
+    "nas_key_set_identifier",
+    "NAS Key Set Identifier",
+    U8
+);
 named_u8!(
     FD_EPS_ATTACH_TYPE,
     "eps_attach_type",
@@ -583,7 +588,12 @@ plain!(FD_EIA, "eia", "EPS Integrity Algorithms", U8);
 plain!(FD_UEA, "uea", "UMTS Encryption Algorithms", U8);
 plain!(FD_UIA, "uia", "UMTS Integrity Algorithms", U8);
 plain!(FD_GEA, "gea", "GPRS Encryption Algorithms", U8);
-plain!(FD_ADDITIONAL_OCTETS, "additional_octets", "Additional Octets", Bytes);
+plain!(
+    FD_ADDITIONAL_OCTETS,
+    "additional_octets",
+    "Additional Octets",
+    Bytes
+);
 
 // ESM message container (9.9.3.15): a nested plain ESM message.
 static FD_ESM_MESSAGE: FieldDescriptor =
@@ -870,15 +880,21 @@ fn push_optional<'pkt>(
                 Some(iei),
                 range.clone(),
             );
-            push_half_value(buf, known.map_or(Value::Raw, |ie| ie.value), octet & 0x0f, range);
+            push_half_value(
+                buf,
+                known.map_or(Value::Raw, |ie| ie.value),
+                octet & 0x0f,
+                range,
+            );
             buf.end_container(idx);
             pos += 1;
             continue;
         }
 
-        let known = ies.optional.iter().find(|ie| {
-            !matches!(ie.format, OptionalFormat::Tv1) && ie.iei == octet
-        });
+        let known = ies
+            .optional
+            .iter()
+            .find(|ie| !matches!(ie.format, OptionalFormat::Tv1) && ie.iei == octet);
         let (len_size, value_len) = match known.map(|ie| ie.format) {
             // A known type 3 IE has a fixed length and no length octet.
             Some(OptionalFormat::Tv(n)) => (0, n),
@@ -1027,7 +1043,11 @@ fn push_value<'pkt>(
         Value::UeSecurityCapability => push_security_capability(buf, data, offset, true),
         Value::EsmMessageContainer => allow_esm && push_esm_message_container(buf, data, offset),
         Value::AccessPointName => {
-            buf.push_field(&FD_APN, FieldValue::Bytes(data), offset..offset + data.len());
+            buf.push_field(
+                &FD_APN,
+                FieldValue::Bytes(data),
+                offset..offset + data.len(),
+            );
             true
         }
         Value::PdnAddress => push_pdn_address(buf, data, offset),
@@ -1221,8 +1241,16 @@ fn push_tai<'pkt>(
     tac_at: usize,
 ) {
     let tai = buf.begin_container(&FD_TAI, FieldValue::Object(0..0), plmn_at..tac_at + 2);
-    buf.push_field(&TAI_CHILDREN[0], FieldValue::Bytes(plmn), plmn_at..plmn_at + 3);
-    buf.push_field(&TAI_CHILDREN[1], FieldValue::Bytes(plmn), plmn_at..plmn_at + 3);
+    buf.push_field(
+        &TAI_CHILDREN[0],
+        FieldValue::Bytes(plmn),
+        plmn_at..plmn_at + 3,
+    );
+    buf.push_field(
+        &TAI_CHILDREN[1],
+        FieldValue::Bytes(plmn),
+        plmn_at..plmn_at + 3,
+    );
     buf.push_field(
         &TAI_CHILDREN[2],
         FieldValue::U16(u16::from_be_bytes([tac[0], tac[1]])),
@@ -1344,7 +1372,7 @@ fn push_security_capability<'pkt>(
     if data.len() < 2 {
         return false;
     }
-    let mut fields: [(&'static FieldDescriptor, u8); 5] = [
+    let fields: [(&'static FieldDescriptor, u8); 5] = [
         (&FD_EEA, 0xff),
         (&FD_EIA, 0xff),
         (&FD_UEA, 0xff),
@@ -1352,10 +1380,10 @@ fn push_security_capability<'pkt>(
         (&FD_GEA, 0x7f),
     ];
     let known = if ue_security_capability { 5 } else { 4 };
-    for (i, (desc, mask)) in fields.iter_mut().enumerate().take(known.min(data.len())) {
+    for (i, &(desc, mask)) in fields.iter().enumerate().take(known.min(data.len())) {
         buf.push_field(
-            *desc,
-            FieldValue::U8(data[i] & *mask),
+            desc,
+            FieldValue::U8(data[i] & mask),
             offset + i..offset + i + 1,
         );
     }
@@ -1461,4 +1489,88 @@ fn push_gprs_timer(buf: &mut DissectBuffer<'_>, data: &[u8], offset: usize) -> b
     buf.push_field(&FD_TIMER_UNIT, FieldValue::U8(v >> 5), r.clone());
     buf.push_field(&FD_TIMER_VALUE, FieldValue::U8(v & 0x1f), r);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn count(f: fn(u8) -> Option<&'static str>) -> usize {
+        (0..=255u8).filter(|v| f(*v).is_some()).count()
+    }
+
+    #[test]
+    fn name_tables() {
+        assert_eq!(count(eps_identity_type_name), 3);
+        assert_eq!(count(mobile_identity_type_name), 6);
+        assert_eq!(count(tsc_name), 2);
+        assert_eq!(count(eps_attach_type_name), 5);
+        assert_eq!(count(eps_attach_result_name), 2);
+        assert_eq!(count(eps_update_type_name), 5);
+        assert_eq!(count(eps_update_result_name), 4);
+        assert_eq!(count(service_type_name), 4);
+        assert_eq!(count(identity_type_2_name), 4);
+        assert_eq!(count(pdn_type_name), 5);
+        assert_eq!(count(request_type_name), 5);
+        assert_eq!(count(type_of_list_name), 3);
+        assert_eq!(count(ciphering_algorithm_name), 8);
+        assert_eq!(count(integrity_algorithm_name), 8);
+        assert_eq!(count(gprs_timer_unit_name), 4);
+        assert_eq!(emm_cause_name(3), Some("Illegal UE"));
+        assert_eq!(esm_cause_name(8), Some("Operator Determined Barring"));
+    }
+
+    #[test]
+    fn display_fns() {
+        let cases: &[(&FieldDescriptor, u8, &str)] = &[
+            (&FD_EPS_IDENTITY_TYPE, 6, "GUTI"),
+            (&FD_MOBILE_IDENTITY_TYPE, 4, "TMSI/P-TMSI/M-TMSI"),
+            (&FD_TSC, 1, "mapped security context"),
+            (&FD_EPS_ATTACH_TYPE, 2, "combined EPS/IMSI attach"),
+            (&FD_EPS_ATTACH_RESULT, 1, "EPS only"),
+            (&FD_EPS_UPDATE_TYPE, 3, "periodic updating"),
+            (&FD_EPS_UPDATE_RESULT, 1, "combined TA/LA updated"),
+            (
+                &FD_SERVICE_TYPE,
+                1,
+                "mobile terminating CS fallback or 1xCS fallback",
+            ),
+            (&FD_IDENTITY_TYPE_2, 1, "IMSI"),
+            (&FD_PDN_TYPE, 6, "Ethernet"),
+            (&FD_REQUEST_TYPE, 4, "emergency"),
+            (&FD_EMM_CAUSE, 22, "Congestion"),
+            (&FD_ESM_CAUSE, 36, "Regular deactivation"),
+            (
+                &FD_TYPE_OF_LIST,
+                2,
+                "list of TAIs belonging to different PLMNs",
+            ),
+            (&FD_CIPHERING_ALGORITHM, 2, "128-EEA2"),
+            (&FD_INTEGRITY_ALGORITHM, 3, "128-EIA3"),
+            (&FD_TIMER_UNIT, 2, "decihours"),
+        ];
+        for (d, v, name) in cases {
+            let f = d.display_fn.unwrap();
+            assert_eq!(f(&FieldValue::U8(*v), &[]), Some(*name), "{}", d.name);
+            assert_eq!(f(&FieldValue::U16(0), &[]), None);
+        }
+    }
+
+    #[test]
+    fn format_fns_reject_other_values() {
+        let ctx = FormatContext {
+            packet_data: &[],
+            scratch: &[],
+            layer_range: 0..0,
+            field_range: 0..0,
+        };
+        for f in [format_identity_digits, format_mcc, format_mnc] {
+            let mut out = Vec::new();
+            f(&FieldValue::U8(0), &ctx, &mut out).unwrap();
+            assert_eq!(out, b"\"\"");
+        }
+        let mut out = Vec::new();
+        format_identity_digits(&FieldValue::Bytes(&[0x19, 0xBA]), &ctx, &mut out).unwrap();
+        assert_eq!(out, b"\"1ab\"");
+    }
 }

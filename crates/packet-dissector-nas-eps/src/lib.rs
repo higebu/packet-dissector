@@ -120,12 +120,7 @@ static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldValue::U8(p) => protocol_discriminator_name(*p),
         _ => None,
     }),
-    FieldDescriptor::new(
-        "eps_bearer_identity",
-        "EPS Bearer Identity",
-        FieldType::U8,
-    )
-    .optional(),
+    FieldDescriptor::new("eps_bearer_identity", "EPS Bearer Identity", FieldType::U8).optional(),
     FieldDescriptor::new(
         "procedure_transaction_identity",
         "Procedure Transaction Identity",
@@ -236,10 +231,25 @@ pub(crate) fn is_esm_message(data: &[u8]) -> bool {
 /// in octet 2 (Section 9.4), message type in octet 3.
 pub(crate) fn push_esm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
     let o1 = offset..offset + 1;
-    push(buf, FD_PROTOCOL_DISCRIMINATOR, FieldValue::U8(PD_ESM), o1.clone());
-    push(buf, FD_EPS_BEARER_IDENTITY, FieldValue::U8(data[0] >> 4), o1);
+    push(
+        buf,
+        FD_PROTOCOL_DISCRIMINATOR,
+        FieldValue::U8(PD_ESM),
+        o1.clone(),
+    );
+    push(
+        buf,
+        FD_EPS_BEARER_IDENTITY,
+        FieldValue::U8(data[0] >> 4),
+        o1,
+    );
     push(buf, FD_PTI, FieldValue::U8(data[1]), offset + 1..offset + 2);
-    push(buf, FD_MESSAGE_TYPE, FieldValue::U8(data[2]), offset + 2..offset + 3);
+    push(
+        buf,
+        FD_MESSAGE_TYPE,
+        FieldValue::U8(data[2]),
+        offset + 2..offset + 3,
+    );
     let body = &data[ESM_HEADER_SIZE..];
     let body_offset = offset + ESM_HEADER_SIZE;
     match messages::esm_message_ies(data[2]) {
@@ -255,7 +265,12 @@ pub(crate) fn push_esm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], of
 fn push_emm<'pkt>(buf: &mut DissectBuffer<'pkt>, data: &'pkt [u8], offset: usize) {
     let sht = data[0] >> 4;
     let o1 = offset..offset + 1;
-    push(buf, FD_SECURITY_HEADER_TYPE, FieldValue::U8(sht), o1.clone());
+    push(
+        buf,
+        FD_SECURITY_HEADER_TYPE,
+        FieldValue::U8(sht),
+        o1.clone(),
+    );
     push(buf, FD_PROTOCOL_DISCRIMINATOR, FieldValue::U8(PD_EMM), o1);
     match sht {
         SHT_PLAIN => push_emm_plain_body(buf, data, offset, true),
@@ -403,7 +418,12 @@ fn push_plain_nas_message<'pkt>(
     match data {
         [first, _, ..] if *first == (SHT_PLAIN << 4) | PD_EMM => {
             let o1 = offset..offset + 1;
-            push(buf, FD_SECURITY_HEADER_TYPE, FieldValue::U8(SHT_PLAIN), o1.clone());
+            push(
+                buf,
+                FD_SECURITY_HEADER_TYPE,
+                FieldValue::U8(SHT_PLAIN),
+                o1.clone(),
+            );
             push(buf, FD_PROTOCOL_DISCRIMINATOR, FieldValue::U8(PD_EMM), o1);
             push_emm_plain_body(buf, data, offset, allow_esm);
             true
@@ -513,3 +533,6 @@ impl Dissector for NasEpsDissector {
         Ok(DissectResult::new(data.len(), DispatchHint::End))
     }
 }
+
+#[cfg(test)]
+mod tests;

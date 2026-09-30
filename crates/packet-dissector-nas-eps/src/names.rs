@@ -149,7 +149,9 @@ pub fn emm_cause_name(cause: u8) -> Option<&'static str> {
         42 => "Severe network failure",
         78 => "PLMN not allowed to operate at the present UE location",
         80 => "Disaster roaming for the determined PLMN with disaster condition not allowed",
-        83 => "Procedure cannot be completed due to unavailable feeder link while MME is operating in S&F mode",
+        83 => {
+            "Procedure cannot be completed due to unavailable feeder link while MME is operating in S&F mode"
+        }
         95 => "Semantically incorrect message",
         96 => "Invalid mandatory information",
         97 => "Message type non-existent or not implemented",
@@ -239,7 +241,10 @@ mod tests {
     #[test]
     fn sample_names() {
         assert_eq!(emm_message_type_name(0x41), Some("Attach request"));
-        assert_eq!(esm_message_type_name(0xd0), Some("PDN connectivity request"));
+        assert_eq!(
+            esm_message_type_name(0xd0),
+            Some("PDN connectivity request")
+        );
         assert_eq!(emm_cause_name(7), Some("EPS services not allowed"));
         assert_eq!(esm_cause_name(27), Some("Missing or unknown APN"));
         assert_eq!(esm_cause_name(46), None);
