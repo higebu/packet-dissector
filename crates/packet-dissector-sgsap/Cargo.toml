@@ -1,22 +1,17 @@
 [package]
-name = "packet-dissector-ppp"
+name = "packet-dissector-sgsap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-keywords = ["packet", "network", "dissector", "parser", "ppp"]
+keywords = ["packet", "network", "dissector", "parser", "lte"]
 categories = ["network-programming", "parser-implementations"]
-description = "PPP frame dissector and sub-protocol parsers (IPCP, LCP, PAP, CHAP, optional EAP) for packet-dissector"
-
-[features]
-# Decode EAP (PPP Protocol 0xC227, RFC 3748) inline.
-eap = ["dep:packet-dissector-eap"]
+description = "SGsAP (SGs Application Part, 3GPP TS 29.118) dissector for packet-dissector"
 
 [dependencies]
 packet-dissector-core = { workspace = true }
-packet-dissector-eap = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
