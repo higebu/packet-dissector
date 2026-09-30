@@ -14,6 +14,7 @@
 #![deny(missing_docs)]
 
 pub mod ber;
+pub mod checksum;
 pub mod dissector;
 pub mod error;
 pub mod field;
