@@ -58,8 +58,14 @@
 //! | RFC 9768 §3.2.3    | AccECN0 / AccECN1, short and odd lengths | parse_tcp_option_accecn               |
 //! | RFC 6994 §3        | Experimental option ExID                 | parse_tcp_option_experimental_exid    |
 //! | RFC 9768 §3.1.1    | AE flag (former NS bit)                  | parse_tcp_ae_flag, parse_tcp_nonzero_reserved_ignored |
+//! | 3.1                | Checksum over pseudo-header (good)       | tcp_checksum_status_good              |
+//! | 3.1                | Checksum over pseudo-header (bad)        | tcp_checksum_status_bad               |
+//! | 3.1                | Truncated segment is unverified          | tcp_checksum_status_unverified        |
+//! | —                  | No status unless verification on         | tcp_checksum_status_absent_by_default |
 
+use packet_dissector::checksum::{ChecksumStatus, internet_checksum};
 use packet_dissector::dissector::{DispatchHint, Dissector};
+use packet_dissector::dissectors::ipv4::Ipv4Dissector;
 use packet_dissector::field::{Field, FieldValue};
 use packet_dissector::packet::DissectBuffer;
 
@@ -1231,4 +1237,114 @@ fn tcp_stream_id_table_evicts_oldest() {
         d.dissect(&tcp_data, &mut buf, 20).unwrap();
     }
     assert_ne!(stream_id_of(&d, false, 2, 0x10), first);
+}
+
+/// The `checksum_status` of `layer`, if the dissector added one.
+fn checksum_status(buf: &DissectBuffer<'_>, layer_name: &str) -> Option<ChecksumStatus> {
+    let layer = buf.layer_by_name(layer_name).unwrap();
+    buf.field_by_name(layer, "checksum_status")
+        .map(|f| ChecksumStatus::from_u8(f.value.as_u8().unwrap()).unwrap())
+}
+
+/// IPv4 header (20 bytes, no fragmentation) for `payload_len` bytes of `protocol`.
+fn ipv4_header(protocol: u8, payload_len: usize) -> Vec<u8> {
+    let mut h = vec![0x45, 0x00];
+    h.extend_from_slice(&((20 + payload_len) as u16).to_be_bytes());
+    h.extend_from_slice(&[0x00, 0x01, 0x40, 0x00, 64, protocol, 0x00, 0x00]);
+    h.extend_from_slice(&V4_SRC);
+    h.extend_from_slice(&V4_DST);
+    h
+}
+
+const V4_SRC: [u8; 4] = [192, 0, 2, 1];
+const V4_DST: [u8; 4] = [198, 51, 100, 2];
+
+/// Store the Internet checksum over `pseudo` + `message` at `at`.
+fn fill_checksum(pseudo: &[u8], message: &mut [u8], at: usize) {
+    message[at..at + 2].copy_from_slice(&[0, 0]);
+    let c = internet_checksum(&[pseudo, message]);
+    message[at..at + 2].copy_from_slice(&c.to_be_bytes());
+}
+
+/// IPv4 pseudo-header (RFC 9293, Section 3.1 — <https://www.rfc-editor.org/rfc/rfc9293#section-3.1>;
+/// RFC 768 — <https://www.rfc-editor.org/rfc/rfc768>).
+fn v4_pseudo(protocol: u8, len: usize) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&V4_SRC);
+    p.extend_from_slice(&V4_DST);
+    p.extend_from_slice(&[0, protocol]);
+    p.extend_from_slice(&(len as u16).to_be_bytes());
+    p
+}
+
+/// Dissect `ip_header` + `message` with verification on: IPv4 first, then
+/// `dissector` at the message offset.
+fn dissect_over_ipv4<'a>(dissector: &dyn Dissector, packet: &'a [u8], buf: &mut DissectBuffer<'a>) {
+    buf.set_verify_checksums(true);
+    Ipv4Dissector.dissect(packet, buf, 0).unwrap();
+    dissector.dissect(&packet[20..], buf, 20).unwrap();
+}
+
+/// IPv4 + TCP segment with correct checksums.
+fn ipv4_tcp(payload: &[u8]) -> Vec<u8> {
+    let mut tcp = vec![
+        0xC0, 0x00, 0x00, 0x50, // ports
+        0x00, 0x00, 0x00, 0x01, // seq
+        0x00, 0x00, 0x00, 0x00, // ack
+        0x50, 0x18, 0xFF, 0xFF, // data offset 5, PSH|ACK, window
+        0x00, 0x00, 0x00, 0x00, // checksum, urgent pointer
+    ];
+    tcp.extend_from_slice(payload);
+    let len = tcp.len();
+    fill_checksum(&v4_pseudo(6, len), &mut tcp, 16);
+    let mut pkt = ipv4_header(6, len);
+    pkt.extend_from_slice(&tcp);
+    pkt
+}
+
+#[test]
+fn tcp_checksum_status_absent_by_default() {
+    let pkt = ipv4_tcp(b"GET");
+    let mut buf = DissectBuffer::new();
+    Ipv4Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+    TcpDissector::new()
+        .dissect(&pkt[20..], &mut buf, 20)
+        .unwrap();
+    assert_eq!(checksum_status(&buf, "TCP"), None);
+}
+
+#[test]
+fn tcp_checksum_status_good() {
+    // Odd payload length exercises the zero pad of RFC 9293, Section 3.1.
+    // https://www.rfc-editor.org/rfc/rfc9293#section-3.1
+    let pkt = ipv4_tcp(b"GET");
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv4(&TcpDissector::new(), &pkt, &mut buf);
+    assert_eq!(checksum_status(&buf, "TCP"), Some(ChecksumStatus::Good));
+    let layer = buf.layer_by_name("TCP").unwrap();
+    assert_eq!(
+        buf.field_by_name(layer, "checksum_status").unwrap().range,
+        36..38
+    );
+}
+
+#[test]
+fn tcp_checksum_status_bad() {
+    let mut pkt = ipv4_tcp(b"GET");
+    pkt[20 + 4] ^= 0x80; // sequence number
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv4(&TcpDissector::new(), &pkt, &mut buf);
+    assert_eq!(checksum_status(&buf, "TCP"), Some(ChecksumStatus::Bad));
+}
+
+#[test]
+fn tcp_checksum_status_unverified() {
+    let pkt = ipv4_tcp(b"GET /");
+    let truncated = &pkt[..pkt.len() - 1];
+    let mut buf = DissectBuffer::new();
+    dissect_over_ipv4(&TcpDissector::new(), truncated, &mut buf);
+    assert_eq!(
+        checksum_status(&buf, "TCP"),
+        Some(ChecksumStatus::Unverified)
+    );
 }

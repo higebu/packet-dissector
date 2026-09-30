@@ -81,6 +81,9 @@ pub struct DissectorRegistry {
     /// Shared ESP Security Association database for decryption.
     #[cfg(feature = "esp-decrypt")]
     esp_sa_db: packet_dissector_esp::EspSaDb,
+    /// Whether dissectors verify checksums; see
+    /// [`set_verify_checksums`](Self::set_verify_checksums).
+    verify_checksums: bool,
 }
 
 impl DissectorRegistry {
@@ -105,7 +108,29 @@ impl DissectorRegistry {
             tcp_reassembly: super::tcp_reassembly::new_tcp_reassembly(),
             #[cfg(feature = "esp-decrypt")]
             esp_sa_db: std::sync::Arc::new(packet_dissector_esp::SharedEspSaDb::new()),
+            verify_checksums: false,
         }
+    }
+
+    /// Enable or disable checksum verification (off by default).
+    ///
+    /// When enabled, dissectors that carry a checksum compute it and add an
+    /// informational `checksum_status` field holding a
+    /// [`ChecksumStatus`](packet_dissector_core::checksum::ChecksumStatus)
+    /// (`good`, `bad`, `unverified` or `not_present`). A bad checksum is never
+    /// a dissection error.
+    ///
+    /// Verification is off by default because captures taken on the sending
+    /// host often carry checksums that the NIC fills in after the capture
+    /// point (TX checksum offload), which would be reported as `bad`.
+    pub fn set_verify_checksums(&mut self, verify: bool) {
+        self.verify_checksums = verify;
+    }
+
+    /// Whether checksum verification is enabled; see
+    /// [`set_verify_checksums`](Self::set_verify_checksums).
+    pub fn verify_checksums(&self) -> bool {
+        self.verify_checksums
     }
 
     /// Add an ESP Security Association for decryption.
@@ -882,6 +907,7 @@ impl DissectorRegistry {
     where
         F: FnMut(&DissectBuffer<'pkt>, &DispatchHint) -> bool,
     {
+        buf.set_verify_checksums(self.verify_checksums);
         let payloads_base = buf.embedded_payloads().len();
         let result = match entry.dissect(data, buf, 0) {
             Ok(result) => result,
@@ -1133,6 +1159,7 @@ impl DissectorRegistry {
                 // instantiation does not depend on `F` and monomorphization
                 // terminates.
                 let mut tmp_buf = DissectBuffer::new();
+                tmp_buf.set_verify_checksums(buf.verify_checksums());
                 let mut full = no_stop;
                 self.dispatch_loop(
                     &padded,

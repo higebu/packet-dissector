@@ -143,6 +143,20 @@ default registry handles these
 Any other link type returns `PacketError::UnsupportedLinkType`; register a
 dissector with `register_by_link_type()` to handle it.
 
+## Checksum Verification
+
+Checksums are not verified by default. Enable verification with
+`registry.set_verify_checksums(true)`: the IPv4, ICMP, ICMPv6, TCP and UDP
+dissectors then add an optional `checksum_status` field next to the checksum
+(`good`, `bad`, `unverified` or `not_present`; see
+`packet_dissector::checksum::ChecksumStatus`). A bad checksum is never a
+dissection error. `unverified` means the checksum could not be computed, e.g.
+the capture is cut by the snaplen or the datagram is a fragment.
+
+Captures taken on the sending host often carry wrong TCP/UDP/IPv4 checksums
+because the NIC computes them after the capture point (checksum offload), so
+`bad` on locally sent packets does not necessarily mean corruption.
+
 ## Adding a Custom Dissector
 
 Implement the `Dissector` trait and register it. For external crates, depend on

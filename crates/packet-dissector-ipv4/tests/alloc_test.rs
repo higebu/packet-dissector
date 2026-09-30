@@ -70,3 +70,30 @@ fn zero_alloc_dissect_ipv4_with_options() {
     );
     assert_eq!(buf.layers().len(), 1);
 }
+
+#[test]
+fn zero_alloc_dissect_ipv4_verify_checksums() {
+    // RFC 791, Section 3.1 — header with a correct Header Checksum (0x66de).
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
+    let raw: &[u8] = &[
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x40, 0x01, 0x66, 0xde, 0x0a, 0x00, 0x00,
+        0x01, 0x0a, 0x00, 0x00, 0x02,
+    ];
+    let mut buf = DissectBuffer::new();
+    buf.set_verify_checksums(true);
+    Ipv4Dissector.dissect(raw, &mut buf, 0).unwrap();
+
+    let allocs = count_allocs(|| {
+        buf.clear();
+        Ipv4Dissector.dissect(raw, &mut buf, 0).unwrap();
+    });
+    assert_eq!(
+        allocs, 0,
+        "IPv4 dissect with checksum verification allocated {allocs} times"
+    );
+    let layer = &buf.layers()[0];
+    assert_eq!(
+        buf.field_by_name(layer, "checksum_status").unwrap().value,
+        FieldValue::U8(1) // good
+    );
+}

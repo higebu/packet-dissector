@@ -56,7 +56,12 @@
 //! | 791 §3.1       | Payload length excludes options | parse_ipv4_payload_len_with_options |
 //! | —              | Offset handling                 | parse_ipv4_with_offset              |
 //! | —              | Dissector metadata              | ipv4_dissector_metadata             |
+//! | 791 §3.1       | Header Checksum verified (good) | ipv4_checksum_status_good           |
+//! | 791 §3.1       | Header Checksum verified (bad)  | ipv4_checksum_status_bad            |
+//! | 791 §3.1       | Checksum covers options         | ipv4_checksum_status_covers_options |
+//! | —              | No status unless verification on | ipv4_checksum_status_absent_by_default |
 
+use packet_dissector::checksum::{ChecksumStatus, internet_checksum};
 use packet_dissector::dissector::{DispatchHint, Dissector};
 use packet_dissector::field::{Field, FieldValue};
 use packet_dissector::packet::DissectBuffer;
@@ -924,4 +929,81 @@ fn parse_ipv4_option_names() {
         .position(|f| f.name() == "option")
         .unwrap() as u32;
     assert_eq!(buf.resolve_container_display_name(idx), None);
+}
+
+/// The `checksum_status` of `layer`, if the dissector added one.
+fn checksum_status(buf: &DissectBuffer<'_>, layer_name: &str) -> Option<ChecksumStatus> {
+    let layer = buf.layer_by_name(layer_name).unwrap();
+    buf.field_by_name(layer, "checksum_status")
+        .map(|f| ChecksumStatus::from_u8(f.value.as_u8().unwrap()).unwrap())
+}
+
+/// IPv4 header with a correct Header Checksum (RFC 791, Section 3.1 —
+/// <https://www.rfc-editor.org/rfc/rfc791#section-3.1>).
+fn build_ipv4_with_checksum() -> Vec<u8> {
+    let mut pkt = build_ipv4_packet(17, [10, 0, 0, 1], [10, 0, 0, 2], 20);
+    let c = internet_checksum(&[&pkt[..20]]);
+    pkt[10..12].copy_from_slice(&c.to_be_bytes());
+    pkt
+}
+
+#[test]
+fn ipv4_checksum_status_absent_by_default() {
+    let data = build_ipv4_with_checksum();
+    let mut buf = DissectBuffer::new();
+    Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(checksum_status(&buf, "IPv4"), None);
+}
+
+#[test]
+fn ipv4_checksum_status_good() {
+    let data = build_ipv4_with_checksum();
+    let mut buf = DissectBuffer::new();
+    buf.set_verify_checksums(true);
+    Ipv4Dissector.dissect(&data, &mut buf, 14).unwrap();
+    assert_eq!(checksum_status(&buf, "IPv4"), Some(ChecksumStatus::Good));
+    let layer = buf.layer_by_name("IPv4").unwrap();
+    let status = buf.field_by_name(layer, "checksum_status").unwrap();
+    // The status highlights the checksum bytes.
+    assert_eq!(status.range, 24..26);
+    // It follows the checksum field.
+    let names: Vec<&str> = buf.layer_fields(layer).iter().map(|f| f.name()).collect();
+    let pos = names.iter().position(|n| *n == "checksum").unwrap();
+    assert_eq!(names[pos + 1], "checksum_status");
+}
+
+#[test]
+fn ipv4_checksum_status_bad() {
+    // The header from the issue: Header Checksum 0x0000 instead of the
+    // correct value. A bad checksum is not a dissection error.
+    let data = [
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x00,
+        0x01, 0x0a, 0x00, 0x00, 0x02,
+    ];
+    let mut buf = DissectBuffer::new();
+    buf.set_verify_checksums(true);
+    Ipv4Dissector.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(checksum_status(&buf, "IPv4"), Some(ChecksumStatus::Bad));
+}
+
+#[test]
+fn ipv4_checksum_status_covers_options() {
+    // RFC 791, Section 3.1 — "The checksum field is the 16 bit one's
+    // complement of the one's complement sum of all 16 bit words in the
+    // header." Options are part of the header.
+    // https://www.rfc-editor.org/rfc/rfc791#section-3.1
+    let mut pkt = build_ipv4_with_options(&[0x01, 0x01, 0x01, 0x00]);
+    pkt[10..12].copy_from_slice(&[0, 0]);
+    let c = internet_checksum(&[&pkt[..24]]);
+    pkt[10..12].copy_from_slice(&c.to_be_bytes());
+    let mut buf = DissectBuffer::new();
+    buf.set_verify_checksums(true);
+    Ipv4Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+    assert_eq!(checksum_status(&buf, "IPv4"), Some(ChecksumStatus::Good));
+
+    pkt[22] = 0x07; // change an option byte
+    let mut buf = DissectBuffer::new();
+    buf.set_verify_checksums(true);
+    Ipv4Dissector.dissect(&pkt, &mut buf, 0).unwrap();
+    assert_eq!(checksum_status(&buf, "IPv4"), Some(ChecksumStatus::Bad));
 }
