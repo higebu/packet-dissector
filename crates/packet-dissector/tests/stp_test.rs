@@ -599,6 +599,7 @@ fn parse_mst_bpdu_truncated_msti() {
             actual: 102
         }
     ));
+    assert!(buf.layers().is_empty());
 }
 
 #[test]
