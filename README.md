@@ -60,7 +60,7 @@ Representative feature flags:
 - Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `arp`, `lacp`, `lldp`, `eap`, `stp`, `cdp`, `pppoe`
 - Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`, `nsh`
-- Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
+- Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `bmp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`
 - 3GPP: `gtpv1u`, `gtpv1c`, `gtpv2c`, `pfcp`, `nas5g`, `nas-eps`, `ngap`, `xnap`, `f1ap`, `e1ap`, `sgsap`
 - `esp-decrypt` enables ESP payload decryption support
 - `quic-decrypt` enables QUIC client Initial decryption and frame decoding
@@ -73,7 +73,7 @@ Convenience groups:
 - `layer4 = ["tcp", "udp", "sctp"]`
 - `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun"]`
 - `tunneling = ["gre", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]`
-- `routing = ["ospf", "isis", "bgp", "bfd", "vrrp"]`
+- `routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp"]`
 - `ipsec = ["ah", "esp", "ike"]`
 - `3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "xnap", "f1ap", "e1ap", "sgsap"]`
 
