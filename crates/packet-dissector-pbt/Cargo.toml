@@ -17,7 +17,10 @@ proptest = "1"
 [dev-dependencies]
 # Registry-level properties (IP fragment reassembly).
 packet-dissector = { path = "../packet-dissector" }
+packet-dissector-cdp = { workspace = true }
 packet-dissector-dns = { workspace = true }
+packet-dissector-e1ap = { workspace = true }
+packet-dissector-f1ap = { workspace = true }
 packet-dissector-eap = { workspace = true }
 packet-dissector-erspan = { workspace = true }
 packet-dissector-gtpv1c = { workspace = true }
@@ -28,6 +31,7 @@ packet-dissector-ipv6 = { workspace = true }
 packet-dissector-isis = { workspace = true }
 packet-dissector-mdns = { workspace = true }
 packet-dissector-nas-eps = { workspace = true }
+packet-dissector-nsh = { workspace = true }
 packet-dissector-ntp = { workspace = true }
 packet-dissector-ospf = { workspace = true }
 packet-dissector-pppoe = { workspace = true }
@@ -35,3 +39,4 @@ packet-dissector-sctp = { workspace = true }
 packet-dissector-sdp = { workspace = true }
 packet-dissector-sgsap = { workspace = true }
 packet-dissector-tcp = { workspace = true }
+packet-dissector-xnap = { workspace = true }

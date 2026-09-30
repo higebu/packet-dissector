@@ -58,6 +58,7 @@
 #![deny(missing_docs)]
 
 // Re-export core types so users can `use packet_dissector::dissector::Dissector` etc.
+pub use packet_dissector_core::checksum;
 pub use packet_dissector_core::dissector;
 pub use packet_dissector_core::error;
 pub use packet_dissector_core::field;
@@ -155,6 +156,10 @@ pub mod dissectors {
     #[cfg(feature = "diameter")]
     pub use packet_dissector_diameter as diameter;
 
+    #[cfg(feature = "e1ap")]
+    pub use packet_dissector_e1ap as e1ap;
+    #[cfg(feature = "f1ap")]
+    pub use packet_dissector_f1ap as f1ap;
     #[cfg(feature = "nas-eps")]
     pub use packet_dissector_nas_eps as nas_eps;
     #[cfg(feature = "nas5g")]
@@ -163,6 +168,8 @@ pub mod dissectors {
     pub use packet_dissector_ngap as ngap;
     #[cfg(feature = "sgsap")]
     pub use packet_dissector_sgsap as sgsap;
+    #[cfg(feature = "xnap")]
+    pub use packet_dissector_xnap as xnap;
 
     #[cfg(feature = "geneve")]
     pub use packet_dissector_geneve as geneve;
@@ -176,6 +183,9 @@ pub mod dissectors {
     #[cfg(feature = "mpls")]
     pub use packet_dissector_mpls as mpls;
 
+    #[cfg(feature = "nsh")]
+    pub use packet_dissector_nsh as nsh;
+
     #[cfg(feature = "vxlan")]
     pub use packet_dissector_vxlan as vxlan;
 
@@ -184,6 +194,8 @@ pub mod dissectors {
     #[cfg(feature = "lldp")]
     pub use packet_dissector_lldp as lldp;
 
+    #[cfg(feature = "cdp")]
+    pub use packet_dissector_cdp as cdp;
     #[cfg(feature = "stp")]
     pub use packet_dissector_stp as stp;
 
