@@ -199,20 +199,39 @@ done
 # stall because crates.io hasn't finished propagating a just-published
 # dependency to its index yet, so tolerate a few stalled passes with a
 # backoff before giving up, instead of failing on the first one.
+#
+# crates.io allows only a few new crates per user in a burst and then one
+# per 10 minutes. Waiting that out would burn Actions minutes, so once it
+# answers 429 for a new crate, the remaining new crates are deferred to the
+# next run of this workflow (the next push to main) instead of retried here.
 stalls=0
 max_stalls=5
+deferred=()
+new_crate_limited=0
 while [ "${#remaining[@]}" -gt 0 ]; do
   next_remaining=()
   progressed=0
   for name in "${remaining[@]}"; do
+    if [ -n "${is_new[$name]:-}" ] && [ "$new_crate_limited" -eq 1 ]; then
+      deferred+=("$name")
+      continue
+    fi
     echo "::group::cargo publish -p ${name}"
     token="$CARGO_REGISTRY_TOKEN"
     if [ -n "${is_new[$name]:-}" ]; then
       token="$NEW_CRATE_TOKEN"
     fi
     published=0
-    if CARGO_REGISTRY_TOKEN="$token" cargo publish -p "$name" --no-verify; then
+    publish_log=$(mktemp)
+    if CARGO_REGISTRY_TOKEN="$token" cargo publish -p "$name" --no-verify 2>&1 | tee "$publish_log"; then
       published=1
+    elif [ -n "${is_new[$name]:-}" ] && grep -q "published too many new crates" "$publish_log"; then
+      new_crate_limited=1
+      echo "::warning::$(gh_escape "crates.io rate-limited new crates: $(sed -n 's/.*\(Please try again after [^G]*GMT\).*/\1/p' "$publish_log" | head -n 1). Deferring the remaining new crates to the next run.")"
+      deferred+=("$name")
+      rm -f "$publish_log"
+      echo "::endgroup::"
+      continue
     elif [ -n "${is_new[$name]:-}" ]; then
       # The upload may have reached crates.io even though cargo failed
       # afterwards; retrying would then only hit "already exists" and the
@@ -232,6 +251,7 @@ while [ "${#remaining[@]}" -gt 0 ]; do
       echo "::warning::${name} did not publish this pass, will retry"
       next_remaining+=("$name")
     fi
+    rm -f "$publish_log"
     echo "::endgroup::"
   done
   remaining=("${next_remaining[@]}")
@@ -251,6 +271,10 @@ while [ "${#remaining[@]}" -gt 0 ]; do
     stalls=0
   fi
 done
+
+if [ "${#deferred[@]}" -gt 0 ]; then
+  echo "::warning::$(gh_escape "Deferred by the crates.io new-crate rate limit, retried on the next push to main (or re-run this workflow later): ${deferred[*]}")"
+fi
 
 if [ "${#failed[@]}" -gt 0 ]; then
   echo "::error::Not published or missing a Trusted Publishing config: ${failed[*]}"
