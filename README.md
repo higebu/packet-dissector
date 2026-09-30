@@ -31,9 +31,9 @@ protocols include:
 | Category | Protocols |
 |----------|-----------|
 | L2 | Ethernet II (with IEEE 802.2 LLC and SNAP), Linux SLL, Linux SLL2, BSD loopback (NULL / LOOP), raw IP link types (RAW / IPV4 / IPV6), IEEE 802.11 (MAC header, management elements, LLC/SNAP, A-MSDU), radiotap, 802.1Q VLAN, 802.1ad QinQ (stacked tags; also standalone tags after SLL, SLL2 or GRE), ARP, Slow Protocols (LACP, Marker, OAM, OSSP/ESMC), LLDP, STP, CDP, PPPoE, EAPOL / EAP (802.1X) |
-| L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, PIM, IS-IS, AH, ESP, SRv6, GRE, ERSPAN, MPLS |
+| L3 / routing | IPv4, IPv6, IPv6 extension headers (Hop-by-Hop, Routing, Fragment, Destination Options, Mobility), ICMP, ICMPv6, IGMP, OSPF, VRRP, PIM, RSVP / RSVP-TE, IS-IS, AH, ESP, SRv6, GRE, ERSPAN, MPLS |
 | L4 / tunneling | TCP, UDP, SCTP, L2TP, L2TPv3, GENEVE, VXLAN, VXLAN-GPE, NSH |
-| Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, BMP, LDP, TLS, PPP, RADIUS, RTP, QUIC, STUN, IPFIX, NetFlow v5/v9 |
+| Application / control | DNS, mDNS, DHCP, DHCPv6, HTTP/1.1, HTTP/2, SIP, SDP, Diameter, NTP, BFD, BGP, BMP, LDP, TLS, PPP, RADIUS, RTP, QUIC, STUN, IPFIX, NetFlow v5/v9, SNMP |
 | 3GPP | GTPv1-U, GTPv1-C, GTPv2-C, PFCP, NAS5G, NAS-EPS, NGAP, XnAP, F1AP, E1AP, SGsAP |
 | SIGTRAN / SS7 | M3UA, SCCP, TCAP, MAP |
 
@@ -59,9 +59,9 @@ packet-dissector = { version = "0.3", default-features = false, features = ["lay
 Representative feature flags:
 
 - Link layer: `ethernet`, `linux_sll`, `linux_sll2`, `null`, `raw_ip`, `ieee80211`, `radiotap`, `arp`, `lacp`, `lldp`, `eap`, `stp`, `cdp`, `pppoe`
-- Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `pim`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `erspan`, `mpls`
+- Network / routing: `ipv4`, `ipv6`, `icmp`, `icmpv6`, `igmp`, `ospf`, `vrrp`, `pim`, `rsvp`, `isis`, `ah`, `esp`, `ike`, `srv6`, `gre`, `erspan`, `mpls`
 - Transport / tunneling: `tcp`, `udp`, `sctp`, `l2tp`, `l2tpv3`, `geneve`, `vxlan`, `nsh`
-- Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `bmp`, `ldp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`, `ipfix`
+- Application / control: `dns`, `mdns`, `dhcp`, `dhcpv6`, `http`, `http2`, `sip`, `sdp`, `diameter`, `ntp`, `bfd`, `bgp`, `bmp`, `ldp`, `tls`, `ppp`, `radius`, `rtp`, `quic`, `stun`, `ipfix`, `snmp`
 - 3GPP: `gtpv1u`, `gtpv1c`, `gtpv2c`, `pfcp`, `nas5g`, `nas-eps`, `ngap`, `xnap`, `f1ap`, `e1ap`, `sgsap`
 - SIGTRAN / SS7: `m3ua`, `sccp`, `tcap`, `map`
 - `esp-decrypt` enables ESP payload decryption support
@@ -73,9 +73,9 @@ Convenience groups:
 - `layer2 = ["ethernet", "linux_sll", "linux_sll2", "null", "raw_ip", "ieee80211", "radiotap", "arp", "lacp", "lldp", "eap", "stp", "cdp", "ppp", "pppoe"]`
 - `layer3 = ["ipv4", "ipv6", "icmp", "icmpv6", "igmp", "srv6"]`
 - `layer4 = ["tcp", "udp", "sctp"]`
-- `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun", "ipfix"]`
+- `application = ["dns", "mdns", "dhcp", "dhcpv6", "http", "http2", "sip", "sdp", "diameter", "ntp", "radius", "rtp", "tls", "quic", "stun", "ipfix", "snmp"]`
 - `tunneling = ["gre", "erspan", "geneve", "vxlan", "l2tp", "l2tpv3", "mpls", "nsh"]`
-- `routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "pim", "ldp"]`
+- `routing = ["ospf", "isis", "bgp", "bmp", "bfd", "vrrp", "pim", "rsvp", "ldp"]`
 - `ipsec = ["ah", "esp", "ike"]`
 - `3gpp = ["gtpv1u", "gtpv1c", "gtpv2c", "pfcp", "nas5g", "nas-eps", "ngap", "xnap", "f1ap", "e1ap", "sgsap"]`
 - `sigtran = ["m3ua", "sccp", "tcap", "map"]`

@@ -3032,6 +3032,13 @@ impl Default for DissectorRegistry {
             reg.register_by_ip_protocol(112, Box::new(packet_dissector_vrrp::VrrpDissector)),
         );
 
+        // RSVP is IP protocol number 46 (RFC 2205, Section 3.1 —
+        // https://www.rfc-editor.org/rfc/rfc2205#section-3.1)
+        #[cfg(feature = "rsvp")]
+        assert_builtin(
+            reg.register_by_ip_protocol(46, Box::new(packet_dissector_rsvp::RsvpDissector)),
+        );
+
         // "All PIM control messages have IP protocol number 103." (RFC 7761,
         // Section 4.9 — https://www.rfc-editor.org/rfc/rfc7761#section-4.9)
         #[cfg(feature = "pim")]
@@ -3131,6 +3138,24 @@ impl Default for DissectorRegistry {
             });
             reg.register_dissector_factory("netflow", || {
                 Box::new(packet_dissector_ipfix::NetflowDissector::new())
+            });
+        }
+
+        // SNMP runs over UDP on ports 161 (agent) and 162 (notifications).
+        // RFC 3417, Section 3.2 — https://www.rfc-editor.org/rfc/rfc3417#section-3.2
+        #[cfg(feature = "snmp")]
+        {
+            #[cfg(feature = "udp")]
+            for port in [
+                packet_dissector_snmp::SNMP_PORT,
+                packet_dissector_snmp::SNMP_TRAP_PORT,
+            ] {
+                assert_builtin(
+                    reg.register_by_udp_port(port, Box::new(packet_dissector_snmp::SnmpDissector)),
+                );
+            }
+            reg.register_dissector_factory("snmp", || {
+                Box::new(packet_dissector_snmp::SnmpDissector)
             });
         }
 
@@ -5501,6 +5526,9 @@ mod tests {
         #[cfg(feature = "vrrp")]
         assert!(reg.get_by_ip_protocol(112).is_some());
 
+        #[cfg(feature = "rsvp")]
+        assert!(reg.get_by_ip_protocol(46).is_some());
+
         #[cfg(feature = "pim")]
         assert!(reg.get_by_ip_protocol(103).is_some());
 
@@ -5696,6 +5724,14 @@ mod tests {
         assert!(reg.get_by_tcp_port(4739).is_some());
         #[cfg(all(feature = "ipfix", feature = "sctp"))]
         assert!(reg.get_by_sctp_port(4739).is_some());
+
+        // SNMP: RFC 3417, Section 3.2 —
+        // https://www.rfc-editor.org/rfc/rfc3417#section-3.2
+        #[cfg(all(feature = "snmp", feature = "udp"))]
+        {
+            assert!(reg.get_by_udp_port(161).is_some());
+            assert!(reg.get_by_udp_port(162).is_some());
+        }
 
         #[cfg(all(feature = "mdns", feature = "udp"))]
         assert!(reg.get_by_udp_port(5353).is_some());
@@ -5901,6 +5937,9 @@ mod tests {
             assert!(reg.create_dissector_by_name("bfd").is_some());
             assert!(reg.create_dissector_by_name("bfd.echo").is_some());
         }
+
+        #[cfg(feature = "snmp")]
+        assert!(reg.create_dissector_by_name("snmp").is_some());
 
         #[cfg(feature = "dhcp")]
         assert!(reg.create_dissector_by_name("dhcp").is_some());

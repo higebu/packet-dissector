@@ -79,6 +79,9 @@
 //! | Ethernet → IPv6 → PIM Hello                   | ethernet_ipv6_pim_hello                             |
 //! | Ethernet → IPv4 → PIM Register → IPv4 → UDP   | ethernet_ipv4_pim_register_ipv4_udp                 |
 //! | Ethernet → IPv6 → PIM Null-Register → IPv6 → PIM | ethernet_ipv6_pim_null_register                  |
+//! | Ethernet → IPv4 → RSVP Hello                  | ethernet_ipv4_rsvp_hello                            |
+//! | Ethernet → IPv6 → RSVP Hello                  | ethernet_ipv6_rsvp_hello                            |
+//! | Ethernet → IPv4 → RSVP Bundle → RSVP ×2       | ethernet_ipv4_rsvp_bundle                           |
 //! | Ethernet → IPv4 → UDP → LDP Hello             | ethernet_ipv4_udp_ldp_hello                         |
 //! | Ethernet → IPv4 → TCP → LDP ×2 (KeepAlive)    | ethernet_ipv4_tcp_ldp_keepalives                    |
 //! | Ethernet → IPv4 → TCP → BMP ×2 → BGP (decode-as) | ethernet_ipv4_tcp_bmp_decode_as                |
@@ -163,6 +166,8 @@
 //! | Ethernet → IPv4 → UDP(4739) → IPFIX (Template, then Data) | integration_ethernet_ipv4_udp_ipfix_template_then_data |
 //! | Ethernet → IPv4 → TCP(4739) → IPFIX                  | integration_ethernet_ipv4_tcp_ipfix                  |
 //! | Ethernet → IPv4 → UDP (decode-as netflow) → v5 / v9  | integration_ethernet_ipv4_udp_netflow_decode_as      |
+//! | Ethernet → IPv4 → UDP(161) → SNMPv2c GetResponse     | integration_ethernet_ipv4_udp_snmp_v2c_response      |
+//! | Ethernet → IPv4 → UDP(162) → SNMPv1 Trap             | integration_ethernet_ipv4_udp_snmp_v1_trap           |
 //! | PPP (HDLC) → IPv4 → UDP                               | integration_ppp_ipv4_udp                              |
 //! | PPP (HDLC, link type 50) → LCP (inline)                | integration_ppp_lcp_inline                            |
 //! | Ethernet → PPPoE Discovery (PADI)                      | integration_ethernet_pppoe_discovery_padi             |
@@ -6289,6 +6294,74 @@ fn integration_ethernet_ipv4_udp_netflow_decode_as() {
 }
 
 // ---------------------------------------------------------------------------
+// SNMP
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_ethernet_ipv4_udp_snmp_v2c_response() {
+    // RFC 3417, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc3417#section-3.2>:
+    // agents listen on UDP 161; RFC 3416, Section 3 —
+    // <https://www.rfc-editor.org/rfc/rfc3416#section-3>:
+    // — Response-PDU with sysDescr.0 = "Linux" and sysUpTime.0.
+    let snmp = [
+        0x30, 0x3a, 0x02, 0x01, 0x01, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa2, 0x2d,
+        0x02, 0x01, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x22, 0x30, 0x11, 0x06, 0x08,
+        0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00, 0x04, 0x05, b'L', b'i', b'n', b'u', b'x',
+        0x30, 0x0d, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x03, 0x00, 0x43, 0x01, 0x10,
+    ];
+    let pkt = build_eth_ipv4_udp_payload(161, 50000, &snmp);
+    let registry = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 4);
+    assert_layers_contiguous(&buf);
+    let layer = &buf.layers()[3];
+    assert_eq!(layer.name, "SNMP");
+    assert_eq!(
+        buf.field_by_name(layer, "version").unwrap().value,
+        FieldValue::I32(1)
+    );
+    assert_eq!(
+        buf.field_by_name(layer, "community").unwrap().value,
+        FieldValue::Bytes(b"public")
+    );
+    let pdu = buf.field_by_name(layer, "pdu").unwrap();
+    let pdu_fields = buf.nested_fields(pdu.value.as_container_range().unwrap());
+    assert!(
+        pdu_fields
+            .iter()
+            .any(|f| f.value == FieldValue::Bytes(b"Linux"))
+    );
+    assert!(pdu_fields.iter().any(|f| f.value == FieldValue::U32(16)));
+}
+
+#[test]
+fn integration_ethernet_ipv4_udp_snmp_v1_trap() {
+    // RFC 3417, Section 3.2 — <https://www.rfc-editor.org/rfc/rfc3417#section-3.2>:
+    // notification receivers listen on UDP 162; RFC 1157, Section 4.1.6 —
+    // <https://www.rfc-editor.org/rfc/rfc1157#section-4.1.6>: Trap-PDU (coldStart).
+    let snmp = [
+        0x30, 0x26, 0x02, 0x01, 0x00, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa4, 0x19,
+        0x06, 0x06, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x09, 0x40, 0x04, 0x0a, 0x00, 0x00, 0x01, 0x02,
+        0x01, 0x00, 0x02, 0x01, 0x00, 0x43, 0x01, 0x05, 0x30, 0x00,
+    ];
+    let pkt = build_eth_ipv4_udp_payload(50000, 162, &snmp);
+    let registry = DissectorRegistry::default();
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    assert_layers_contiguous(&buf);
+    let layer = &buf.layers()[3];
+    assert_eq!(layer.name, "SNMP");
+    let pdu = buf.field_by_name(layer, "pdu").unwrap();
+    let pdu_fields = buf.nested_fields(pdu.value.as_container_range().unwrap());
+    assert!(
+        pdu_fields
+            .iter()
+            .any(|f| f.name() == "agent_addr" && f.value == FieldValue::Ipv4Addr([10, 0, 0, 1]))
+    );
+}
+
+// ---------------------------------------------------------------------------
 // GENEVE helpers
 // ---------------------------------------------------------------------------
 
@@ -10593,6 +10666,86 @@ fn ethernet_ipv4_tcp_ldp_keepalives() {
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "IPv4", "TCP", "LDP", "LDP"]);
     assert_layers_contiguous(&buf);
+}
+
+// ---------------------------------------------------------------------------
+// RSVP
+// ---------------------------------------------------------------------------
+
+/// Push an RSVP Hello message with a HELLO REQUEST object (RFC 3209,
+/// Section 5.1).
+fn push_rsvp_hello(pkt: &mut Vec<u8>) {
+    pkt.extend_from_slice(&[0x10, 20, 0, 0, 1, 0, 0, 20]); // Hello, length 20
+    pkt.extend_from_slice(&[0, 12, 22, 1, 0, 0, 0, 1, 0, 0, 0, 0]); // HELLO REQUEST
+}
+
+#[test]
+fn ethernet_ipv4_rsvp_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 46, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_rsvp_hello(&mut pkt);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "RSVP"]);
+    assert_layers_contiguous(&buf);
+    let rsvp = buf.layer_by_name("RSVP").unwrap();
+    assert_eq!(display_name_for(&buf, rsvp, "message_type"), Some("Hello"));
+}
+
+#[test]
+fn ethernet_ipv6_rsvp_hello() {
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x86DD);
+    let ip_start = push_ipv6(&mut pkt, 46, [0x20; 16], [0x30; 16]);
+    push_rsvp_hello(&mut pkt);
+    fixup_ipv6_payload_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv6", "RSVP"]);
+    assert_layers_contiguous(&buf);
+}
+
+#[test]
+fn ethernet_ipv4_rsvp_bundle() {
+    // A Bundle message carries complete RSVP messages (RFC 2961,
+    // Section 3.2); each is dissected as its own RSVP layer.
+    let registry = DissectorRegistry::default();
+
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0x00; 6], [0x02; 6], 0x0800);
+    let ip_start = pkt.len();
+    push_ipv4(&mut pkt, 46, [10, 0, 0, 1], [10, 0, 0, 2]);
+    pkt.extend_from_slice(&[0x11, 12, 0, 0, 1, 0, 0, 48]); // Bundle, length 48
+    push_rsvp_hello(&mut pkt);
+    push_rsvp_hello(&mut pkt);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "RSVP", "RSVP", "RSVP"]);
+    let layers = buf.layers();
+    assert_eq!(
+        display_name_for(&buf, &layers[2], "message_type"),
+        Some("Bundle")
+    );
+    assert_eq!(
+        display_name_for(&buf, &layers[3], "message_type"),
+        Some("Hello")
+    );
+    assert_eq!(layers[3].range, 42..62);
+    assert_eq!(layers[4].range, 62..82);
 }
 
 // ---------------------------------------------------------------------------

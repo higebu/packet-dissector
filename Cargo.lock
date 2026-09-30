@@ -665,12 +665,14 @@ dependencies = [
  "packet-dissector-radius",
  "packet-dissector-raw-ip",
  "packet-dissector-reassembly",
+ "packet-dissector-rsvp",
  "packet-dissector-rtp",
  "packet-dissector-sccp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
  "packet-dissector-sip",
+ "packet-dissector-snmp",
  "packet-dissector-srv6",
  "packet-dissector-stp",
  "packet-dissector-stun",
@@ -1201,10 +1203,12 @@ dependencies = [
  "packet-dissector-pim",
  "packet-dissector-pppoe",
  "packet-dissector-radiotap",
+ "packet-dissector-rsvp",
  "packet-dissector-sccp",
  "packet-dissector-sctp",
  "packet-dissector-sdp",
  "packet-dissector-sgsap",
+ "packet-dissector-snmp",
  "packet-dissector-tcap",
  "packet-dissector-tcp",
  "packet-dissector-xnap",
@@ -1303,6 +1307,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-dissector-rsvp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
 name = "packet-dissector-rtp"
 version = "0.5.0"
 dependencies = [
@@ -1353,6 +1366,15 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "httparse",
+ "packet-dissector-core",
+ "packet-dissector-test-alloc",
+]
+
+[[package]]
+name = "packet-dissector-snmp"
+version = "0.5.0"
+dependencies = [
+ "criterion",
  "packet-dissector-core",
  "packet-dissector-test-alloc",
 ]
