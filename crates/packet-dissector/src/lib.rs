@@ -227,8 +227,6 @@ pub mod dissectors {
     pub use packet_dissector_stun as stun;
 }
 
-#[cfg(feature = "http2")]
-mod stream_set;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 
