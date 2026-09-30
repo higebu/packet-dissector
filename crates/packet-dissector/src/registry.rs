@@ -1881,11 +1881,81 @@ impl Dissector for OspfDispatcher {
 
 // ---------------------------------------------------------------------------
 // HTTP version dispatcher — delegates to HTTP/2 when the connection preface
-// ("PRI * HTTP/2.0") is detected, otherwise falls back to HTTP/1.1.
+// ("PRI * HTTP/2.0") or an HTTP/2 frame header is detected, and keeps
+// delegating for the rest of the connection; otherwise falls back to
+// HTTP/1.1.
 // ---------------------------------------------------------------------------
 
+/// Maximum number of TCP stream directions remembered as HTTP/2 (two per
+/// connection). The oldest ones are forgotten first.
+#[cfg(feature = "http2")]
+const MAX_HTTP2_DIRECTIONS: usize = 65_536;
+
 #[cfg(any(feature = "http", feature = "http2"))]
-struct HttpDispatcher;
+struct HttpDispatcher {
+    /// TCP stream directions known to carry HTTP/2.
+    ///
+    /// RFC 9113, Section 3.4 — the client connection preface is sent once,
+    /// as "the first application data octets of a connection"
+    /// (<https://www.rfc-editor.org/rfc/rfc9113#section-3.4>), so later
+    /// segments of either direction are recognised by this memory.
+    #[cfg(feature = "http2")]
+    http2_streams: std::sync::Mutex<crate::stream_set::StreamSet>,
+}
+
+#[cfg(any(feature = "http", feature = "http2"))]
+impl HttpDispatcher {
+    fn new() -> Self {
+        Self {
+            #[cfg(feature = "http2")]
+            http2_streams: std::sync::Mutex::new(crate::stream_set::StreamSet::new(
+                MAX_HTTP2_DIRECTIONS,
+            )),
+        }
+    }
+
+    /// Whether `data` of the direction `stream` is HTTP/2.
+    ///
+    /// Only the client connection preface marks the connection (both
+    /// directions) as HTTP/2 for the following segments. A frame header
+    /// recognised by [`is_http2_start`] alone is dissected as HTTP/2 but not
+    /// remembered: an HTTP/1.1 body can start with octets that form a valid
+    /// frame header, and remembering it would send the connection's later
+    /// HTTP/1.1 messages to the HTTP/2 dissector.
+    #[cfg(feature = "http2")]
+    fn is_http2_stream(
+        &self,
+        data: &[u8],
+        stream: &packet_dissector_core::dissector::TcpStreamContext,
+    ) -> bool {
+        // A poisoned lock only means a panic elsewhere; the set itself is
+        // always consistent, so keep using it.
+        let mut streams = self
+            .http2_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if streams.contains(&stream.stream_key) {
+            return true;
+        }
+        if data.starts_with(packet_dissector_http2::CONNECTION_PREFACE) {
+            streams.insert(stream.stream_key);
+            streams.insert(stream.reverse_key());
+            return true;
+        }
+        drop(streams);
+        is_http2_start(data)
+    }
+}
+
+/// Whether `data` starts like HTTP/2 without any knowledge of the connection:
+/// with the client connection preface (RFC 9113, Section 3.4 —
+/// <https://www.rfc-editor.org/rfc/rfc9113#section-3.4>) or with a frame
+/// header (RFC 9113, Section 4.1 —
+/// <https://www.rfc-editor.org/rfc/rfc9113#section-4.1>).
+#[cfg(feature = "http2")]
+fn is_http2_start(data: &[u8]) -> bool {
+    data.starts_with(b"PRI * HTTP/2.0") || packet_dissector_http2::looks_like_frame_header(data)
+}
 
 /// Specifications behind both versions the HTTP dispatcher routes to.
 #[cfg(all(feature = "http", feature = "http2"))]
@@ -1951,16 +2021,54 @@ impl Dissector for HttpDispatcher {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
-        // RFC 9113, Section 3.4 — HTTP/2 connection preface detection
         #[cfg(feature = "http2")]
-        if data.starts_with(b"PRI * HTTP/2.0") {
+        if is_http2_start(data) {
             return packet_dissector_http2::Http2Dissector.dissect(data, buf, offset);
         }
-        #[cfg(feature = "http")]
-        {
-            packet_dissector_http::HttpDissector.dissect(data, buf, offset)
+        dissect_http1(data, buf, offset)
+    }
+
+    fn dissect_tcp_stream<'pkt>(
+        &self,
+        data: &'pkt [u8],
+        buf: &mut DissectBuffer<'pkt>,
+        offset: usize,
+        stream: &packet_dissector_core::dissector::TcpStreamContext,
+    ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        #[cfg(feature = "http2")]
+        if self.is_http2_stream(data, stream) {
+            return packet_dissector_http2::Http2Dissector.dissect(data, buf, offset);
         }
-        #[cfg(not(feature = "http"))]
+        #[cfg(not(feature = "http2"))]
+        let _ = stream;
+        dissect_http1(data, buf, offset)
+    }
+
+    fn release_tcp_stream(&self, stream_key: &packet_dissector_core::dissector::TcpStreamKey) {
+        #[cfg(feature = "http2")]
+        self.http2_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(stream_key);
+        #[cfg(not(feature = "http2"))]
+        let _ = stream_key;
+    }
+}
+
+/// Dissect `data` as HTTP/1.1, or fail when that dissector is disabled.
+#[cfg(any(feature = "http", feature = "http2"))]
+fn dissect_http1<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+    #[cfg(feature = "http")]
+    {
+        packet_dissector_http::HttpDissector.dissect(data, buf, offset)
+    }
+    #[cfg(not(feature = "http"))]
+    {
+        let _ = (data, buf, offset);
         Err(PacketError::InvalidHeader("HTTP/1.1 dissector not enabled"))
     }
 }
@@ -2374,6 +2482,17 @@ impl Default for DissectorRegistry {
             Box::new(packet_dissector_ethernet::EthernetDissector),
         ));
 
+        // IEEE 802.1Q C-Tag (0x8100) and IEEE 802.1ad S-Tag (0x88A8) reached
+        // by EtherType dispatch (e.g. SLL/SLL2 protocol type, GRE protocol
+        // type); tags right after an Ethernet header are parsed inline by
+        // the Ethernet dissector.
+        // IEEE 802.1Q-2022, clause 9.6 — https://standards.ieee.org/ieee/802.1Q/10323/
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_builtin(
+                reg.register_by_ethertype(tpid, Box::new(packet_dissector_ethernet::VlanDissector)),
+            );
+        }
         // IP protocol 143 (Ethernet) — carries an Ethernet frame directly,
         // e.g. SRv6 L2 services (End.DX2 / End.DT2U / End.DT2M).
         // RFC 8986, Section 10.1 — https://www.rfc-editor.org/rfc/rfc8986#section-10.1
@@ -2797,11 +2916,11 @@ impl Default for DissectorRegistry {
         }
 
         // HTTP runs over TCP on port 80 (RFC 9112, RFC 9113)
-        // Uses HttpDispatcher to auto-detect HTTP/2 connection preface.
+        // Uses HttpDispatcher to auto-detect HTTP/2 connections.
         #[cfg(any(feature = "http", feature = "http2"))]
         {
             #[cfg(feature = "tcp")]
-            assert_builtin(reg.register_by_tcp_port(80, Box::new(HttpDispatcher)));
+            assert_builtin(reg.register_by_tcp_port(80, Box::new(HttpDispatcher::new())));
         }
         #[cfg(feature = "http")]
         reg.register_dissector_factory("http", || Box::new(packet_dissector_http::HttpDissector));
@@ -2997,6 +3116,13 @@ impl Default for DissectorRegistry {
                 Box::new(packet_dissector_nas5g::Nas5gDissector)
             });
         }
+
+        // EPS NAS is carried inside S1AP; register as a factory for
+        // standalone use (e.g., `bask read --dissector nas-eps`).
+        #[cfg(feature = "nas-eps")]
+        reg.register_dissector_factory("nas-eps", || {
+            Box::new(packet_dissector_nas_eps::NasEpsDissector)
+        });
 
         // BGP runs over TCP on port 179 (RFC 4271)
         #[cfg(feature = "bgp")]
@@ -4554,6 +4680,15 @@ mod tests {
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_ethertype(0x6558).is_some());
 
+        // IEEE 802.1Q-2022, clause 9.6 — standalone C-Tag / S-Tag.
+        #[cfg(any(feature = "ethernet", feature = "linux_sll", feature = "linux_sll2"))]
+        for tpid in [0x8100, 0x88A8] {
+            assert_eq!(
+                reg.get_by_ethertype(tpid).map(|d| d.short_name()),
+                Some("VLAN")
+            );
+        }
+
         #[cfg(feature = "ipv4")]
         {
             assert!(reg.get_by_ethertype(0x0800).is_some());
@@ -4937,6 +5072,9 @@ mod tests {
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());
+
+        #[cfg(feature = "nas-eps")]
+        assert!(reg.create_dissector_by_name("nas-eps").is_some());
 
         #[cfg(any(feature = "l2tp", feature = "l2tpv3"))]
         assert!(reg.create_dissector_by_name("l2tp").is_some());

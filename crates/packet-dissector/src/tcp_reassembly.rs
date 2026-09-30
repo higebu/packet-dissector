@@ -346,6 +346,8 @@ impl DissectorRegistry {
             if !service.streams.is_empty() || !service.delivered.is_empty() {
                 service.forget(&ctx.stream_key);
             }
+            drop(service);
+            upper.release_tcp_stream(&ctx.stream_key);
         }
 
         let result = if payload.is_empty() {
@@ -353,13 +355,17 @@ impl DissectorRegistry {
         } else if captured_all {
             self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)
         } else {
-            self.dissect_stream_messages(upper, payload, buf, offset).1
+            self.dissect_stream_messages(upper, ctx, payload, buf, offset)
+                .1
         };
 
         if ctx.is_rst() {
             let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
             service.forget(&ctx.stream_key);
             service.forget(&ctx.reverse_key());
+            drop(service);
+            upper.release_tcp_stream(&ctx.stream_key);
+            upper.release_tcp_stream(&ctx.reverse_key());
         } else if ctx.is_fin() {
             // A FIN that arrives before missing data (reordering) leaves a
             // gap in the buffer; keep the state so the missing segments can
@@ -371,6 +377,8 @@ impl DissectorRegistry {
                 .is_some_and(|state| state.buffer.bytes_received() > state.buffer.contiguous_len());
             if !has_gap {
                 service.forget(&ctx.stream_key);
+                drop(service);
+                upper.release_tcp_stream(&ctx.stream_key);
             }
         }
         result
@@ -386,13 +394,14 @@ impl DissectorRegistry {
     fn dissect_stream_messages<'a>(
         &self,
         upper: &dyn Dissector,
+        ctx: &TcpStreamContext,
         data: &'a [u8],
         buf: &mut DissectBuffer<'a>,
         offset: usize,
     ) -> (usize, Result<(), PacketError>) {
         let mut pos = 0;
         while pos < data.len() {
-            match self.dissect_stream_message(upper, &data[pos..], buf, offset + pos) {
+            match self.dissect_stream_message(upper, ctx, &data[pos..], buf, offset + pos) {
                 Ok(n) => pos += n,
                 Err(e) => return (pos, Err(e)),
             }
@@ -414,11 +423,12 @@ impl DissectorRegistry {
     fn dissect_stream_message<'a>(
         &self,
         upper: &dyn Dissector,
+        ctx: &TcpStreamContext,
         data: &'a [u8],
         buf: &mut DissectBuffer<'a>,
         offset: usize,
     ) -> Result<usize, PacketError> {
-        let result = upper.dissect(data, buf, offset)?;
+        let result = upper.dissect_tcp_stream(data, buf, offset, ctx)?;
         let header_len = result.bytes_consumed.min(data.len());
         if header_len == 0 {
             // A dissector that reports success but consumes zero bytes
@@ -505,7 +515,7 @@ impl DissectorRegistry {
             Self::add_eviction_field(buf, offset, payload.len(), evicted);
         }
         if no_buffered_data {
-            let (consumed, result) = self.dissect_stream_messages(upper, payload, buf, offset);
+            let (consumed, result) = self.dissect_stream_messages(upper, ctx, payload, buf, offset);
             if consumed > 0 {
                 let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
                 service.record_delivered(key, seq.wrapping_add(consumed as u32));
@@ -663,6 +673,7 @@ impl DissectorRegistry {
             let mut tmp_buf = DissectBuffer::new();
             match self.dissect_stream_message(
                 upper,
+                ctx,
                 &contiguous_data[pos..],
                 &mut tmp_buf,
                 upper_offset + pos,
