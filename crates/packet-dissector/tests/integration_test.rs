@@ -71,6 +71,7 @@
 //! | UDP 2123: unsupported GTP version                 | integration_udp_2123_unsupported_gtp_version        |
 //! | Ethernet → IPv4 → UDP → PFCP (Heartbeat)          | integration_ethernet_ipv4_udp_pfcp_heartbeat        |
 //! | Ethernet → IPv4 → UDP → PFCP (Session Est.)       | integration_ethernet_ipv4_udp_pfcp_session_establishment |
+//! | EPS NAS via registry factory                      | integration_nas_eps_factory                         |
 //! | SLL2 → IPv4 → UDP                                 | integration_sll2_ipv4_udp                           |
 //! | SLL → IPv4 → UDP                                  | integration_sll_ipv4_udp                            |
 //! | SLL2 → IPv6 → TCP (SYN)                           | integration_sll2_ipv6_tcp_syn                       |
@@ -3694,6 +3695,36 @@ fn integration_ethernet_ipv4_udp_gtpv2c_echo_request() {
     assert_eq!(
         buf.field_by_name(gtpv2c, "sequence_number").unwrap().value,
         FieldValue::U32(0x42)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// EPS NAS (registry factory) integration test
+// ---------------------------------------------------------------------------
+
+/// EPS NAS is carried inside S1AP; the registry exposes it as a factory for
+/// standalone decoding (3GPP TS 24.301).
+#[test]
+fn integration_nas_eps_factory() {
+    let reg = DissectorRegistry::default();
+    let nas = reg.create_dissector_by_name("nas-eps").unwrap();
+    // Integrity protected Attach complete carrying an Activate default EPS
+    // bearer context accept.
+    let data = [
+        0x27, 0x01, 0x02, 0x03, 0x04, 0x05, // security header (ciphered)
+        0x07, 0x43, 0x00, 0x03, 0x52, 0x01, 0xC2,
+    ];
+    let mut buf = DissectBuffer::new();
+    let res = nas.dissect(&data, &mut buf, 0).unwrap();
+    assert_eq!(res.bytes_consumed, data.len());
+    assert_eq!(buf.layers()[0].name, "NAS-EPS");
+    assert_layers_contiguous(&buf);
+    let layer = &buf.layers()[0];
+    assert_eq!(
+        buf.field_by_name(layer, "ciphered_nas_message")
+            .unwrap()
+            .value,
+        FieldValue::Bytes(&data[6..])
     );
 }
 
