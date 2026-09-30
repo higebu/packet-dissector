@@ -407,6 +407,7 @@ mod tests {
     //! | IEEE 802.3 clause 3.2.6 (Length)    | Payload bounded after 2-octet control    | llc_i_frame_has_two_octet_control      |
     //! | Novell raw 802.3                    | 0xFFFF payload: no LLC header, End       | novell_raw_802_3                       |
     //! | IEEE 802.3 clause 3.2.6 (Length)    | Length < LLC header; Novell within Length | llc_header_longer_than_length         |
+    //! | IANA EtherType registry             | EtherType display names                  | ethertype_display_names                |
 
     use super::*;
 
@@ -546,5 +547,27 @@ mod tests {
         let r = EthernetDissector.dissect(&data, &mut buf, 0).unwrap();
         assert!(eth_field(&buf, "novell_raw").is_none());
         assert_eq!(r.payload_len, Some(0));
+    }
+
+    #[test]
+    fn ethertype_display_names() {
+        for (value, name) in [
+            (0x0800, "IPv4"),
+            (0x0806, "ARP"),
+            (0x8100, "802.1Q"),
+            (0x88A8, "802.1ad"),
+            (0x86DD, "IPv6"),
+            (0x8847, "MPLS"),
+            (0x8848, "MPLS_MC"),
+            (0x8809, "Slow Protocols"),
+            (0x88CC, "LLDP"),
+        ] {
+            assert_eq!(ethertype_name(value), Some(name));
+        }
+        assert_eq!(ethertype_name(0x9999), None);
+
+        let display = FIELD_DESCRIPTORS[FD_ETHERTYPE].display_fn.unwrap();
+        assert_eq!(display(&FieldValue::U16(0x86DD), &[]), Some("IPv6"));
+        assert_eq!(display(&FieldValue::U8(0), &[]), None);
     }
 }

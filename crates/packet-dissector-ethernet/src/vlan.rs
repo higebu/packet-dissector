@@ -221,6 +221,8 @@ mod tests {
             buf.resolve_display_name(layer, "ethertype_name"),
             Some("IPv4")
         );
+        let display = FIELD_DESCRIPTORS[FD_ETHERTYPE].display_fn.unwrap();
+        assert_eq!(display(&FieldValue::U8(0), &[]), None);
     }
 
     #[test]
