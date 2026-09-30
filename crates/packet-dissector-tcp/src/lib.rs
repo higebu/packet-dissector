@@ -13,6 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use packet_dissector_core::checksum::{checksum_status_descriptor, verify_pseudo_header_checksum};
 use packet_dissector_core::dissector::{
     DispatchHint, DissectResult, Dissector, ProtocolLayer, SpecReference, TcpStreamContext,
 };
@@ -54,6 +55,10 @@ pub const FD_SEGMENT_COUNT: usize = 14;
 /// a segment whose processing evicted buffered streams to stay within its
 /// memory limits. The value is the number of streams evicted.
 pub const FD_REASSEMBLY_EVICTED: usize = 15;
+const FD_CHECKSUM_STATUS: usize = 16;
+
+/// IP protocol number of TCP, used in the checksum pseudo-header.
+const IP_PROTO_TCP: u8 = 6;
 
 /// Field descriptors for the TCP dissector.
 ///
@@ -112,6 +117,7 @@ pub static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
         FieldType::U32,
     )
     .optional(),
+    checksum_status_descriptor("checksum_status", "Checksum Status"),
 ];
 
 /// Bit-to-name table for TCP control bits.
@@ -515,6 +521,19 @@ impl Dissector for TcpDissector {
             FieldValue::U16(checksum),
             offset + 16..offset + 18,
         );
+        if buf.verify_checksums() {
+            // RFC 9293, Section 3.1 — "The checksum field is the 16-bit ones'
+            // complement of the ones' complement sum of all 16-bit words in
+            // the header and text." It also covers a pseudo-header whose TCP
+            // Length is derived from the IP header.
+            // https://www.rfc-editor.org/rfc/rfc9293#section-3.1
+            let status = verify_pseudo_header_checksum(buf, offset, IP_PROTO_TCP, data, None);
+            buf.push_field(
+                &FIELD_DESCRIPTORS[FD_CHECKSUM_STATUS],
+                status.to_field_value(),
+                offset + 16..offset + 18,
+            );
+        }
         buf.push_field(
             &FIELD_DESCRIPTORS[FD_URGENT_POINTER],
             FieldValue::U16(urgent_pointer),
