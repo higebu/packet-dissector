@@ -54,6 +54,7 @@ const TAG_SIZE: usize = 4;
 
 /// Split a Tag Control Information value into (PCP, DEI, VID).
 /// IEEE 802.1Q-2022, clause 9.6 — bit layout (MSB first): PCP[3] | DEI[1] | VID[12].
+#[inline]
 fn split_tci(tci: u16) -> (u8, u8, u16) {
     (
         ((tci >> 13) & 0x07) as u8,
@@ -167,6 +168,9 @@ pub(crate) struct TypeLengthFields {
 /// IEEE 802.2 LLC header (or a Novell raw IPX packet) that is decoded here.
 /// Returns the header length including any LLC header, the dispatch hint,
 /// and the payload bound set by a Length value.
+// Forced inline: without it the Ethernet fast path (`dissect/ethernet`
+// benchmark) regresses by ~25% because the call is not inlined.
+#[inline(always)]
 pub(crate) fn dissect_type_or_length<'pkt>(
     data: &'pkt [u8],
     buf: &mut DissectBuffer<'pkt>,
