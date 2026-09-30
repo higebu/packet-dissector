@@ -602,9 +602,9 @@ const EVS_MIN_LEN: usize = 6;
 /// <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
 #[derive(Default)]
 struct LongExtendedFragments {
-    /// `(Type, Extended-Type)` of a pending fragmented value, one slot per
-    /// Long Extended Type attribute.
-    pending: [Option<(u8, u8)>; 2],
+    /// One bit per Extended-Type for each Long Extended Type attribute
+    /// (index 0 for 246, 1 for 245), set while a value is pending.
+    pending: [[u128; 2]; 2],
 }
 
 impl LongExtendedFragments {
@@ -612,11 +612,15 @@ impl LongExtendedFragments {
     /// at least the Extended-Type and flags octets) and return whether it
     /// continues a value whose previous fragment had the More flag set.
     fn update(&mut self, code: u8, data: &[u8]) -> bool {
-        let slot = &mut self.pending[usize::from(code & 1)];
-        let key = (code, data[0]);
-        let continuation = *slot == Some(key);
-        let more = data[1] & 0x80 != 0;
-        *slot = more.then_some(key);
+        let ext_type = data[0];
+        let word = &mut self.pending[usize::from(code & 1)][usize::from(ext_type >> 7)];
+        let bit = 1u128 << (ext_type & 0x7F);
+        let continuation = *word & bit != 0;
+        if data[1] & 0x80 != 0 {
+            *word |= bit;
+        } else {
+            *word &= !bit;
+        }
         continuation
     }
 }
@@ -1097,6 +1101,7 @@ mod tests {
     // | 6929 § 2.4    | Extended-Vendor-Specific             | test_extended_vendor_specific          |
     // | 6929 § 2.2    | Last fragment (M clear) stays raw    | test_long_extended_last_fragment_not_interpreted |
     // | 6929 § 2.2    | Non-contiguous fragments             | test_long_extended_non_contiguous_fragments |
+    // | 6929 § 2.2    | Fragments tracked per Extended-Type  | test_long_extended_fragments_tracked_per_extended_type |
     // | 6929 § 2.4    | EVS continuation fragment not split  | test_long_extended_evs_continuation_not_split |
     // | 6929 § 2.4    | EVS with empty EVS-Value: raw        | test_extended_vendor_specific_empty_value_is_raw |
     // | 6929 § 2.1    | Extended-Type too short: raw         | test_extended_type_too_short           |
@@ -1629,11 +1634,7 @@ mod tests {
 
     /// Dissect a packet carrying a single attribute and return the buffer.
     fn dissect_single_attr(attr_type: u8, value: &[u8]) -> DissectBuffer<'static> {
-        let data = build_radius(4, 1, &auth(), &build_attr(attr_type, value));
-        let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
-        let mut buf = DissectBuffer::new();
-        RadiusDissector.dissect(leaked, &mut buf, 0).unwrap();
-        buf
+        dissect_attrs(&[build_attr(attr_type, value)])
     }
 
     /// Return the first attribute Object range of `buf`.
@@ -2282,6 +2283,29 @@ mod tests {
             *obj_field_value(&buf, &complete, "value"),
             FieldValue::Str("<b>")
         );
+    }
+
+    /// RFC 6929, Section 2.2 — fragments of one Type.Extended-Type are
+    /// tracked separately from other Extended-Types of the same Type, for
+    /// both Long Extended Type attributes (245 and 246).
+    /// <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
+    #[test]
+    fn test_long_extended_fragments_tracked_per_extended_type() {
+        for code in [245, 246] {
+            let buf = dissect_attrs(&[
+                build_attr(code, &[0x01, 0x80, b'<', b'a']),
+                build_attr(code, &[0x02, 0x80, 0xaa]),
+                build_attr(code, &[0x02, 0x00, 0xbb]),
+                build_attr(code, &[0x01, 0x00, b'/', b'>']),
+            ]);
+            let array = attrs_array_range(&buf);
+            let last = nth_object_range(&buf, &array, 3);
+            assert_eq!(
+                *obj_field_value(&buf, &last, "value"),
+                FieldValue::Bytes(b"/>"),
+                "type {code}"
+            );
+        }
     }
 
     /// RFC 6929, Section 2.4 — the Vendor-Id and EVS-Type are only in the
