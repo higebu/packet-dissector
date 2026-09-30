@@ -13,6 +13,9 @@
 //! | Ethernet → ARP                           | integration_ethernet_arp                      |
 //! | Ethernet → LLDP                          | integration_ethernet_lldp                     |
 //! | Ethernet → LLDP (IEEE 802.1 Port VLAN ID TLV)   | integration_ethernet_lldp_org_port_vlan_id    |
+//! | Ethernet → EAPOL → EAP (Identity, padded frame) | integration_ethernet_eapol_eap_identity      |
+//! | Ethernet → EAPOL-Start / EAPOL-Key             | integration_ethernet_eapol_start_and_key      |
+//! | PPP (HDLC) → EAP (inline, 0xC227)               | integration_ppp_eap_inline                    |
 //! | Ethernet → IPv4 → ICMP Echo             | integration_ethernet_ipv4_icmp_echo           |
 //! | Ethernet → IPv4 → IGMPv2 Report         | integration_ethernet_ipv4_igmp_v2_report      |
 //! | Ethernet → IPv4 → IGMPv3 Report         | integration_ethernet_ipv4_igmp_v3_report      |
@@ -32,6 +35,13 @@
 //! | Ethernet → IPv4 → SCTP(unknown PPID and ports) → no upper layer | integration_ethernet_ipv4_sctp_unknown_ppid_and_port |
 //! | Ethernet → IPv4 → SCTP(unknown PPID, then PPID 46) summary names Diameter | integration_ethernet_ipv4_sctp_summary_uses_first_resolvable_chunk |
 //! | Ethernet → IPv4 → SCTP(9487→40001, PPID 60) → NGAP | integration_ethernet_ipv4_sctp_ppid_ngap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 38422, PPID 0) → XnAP | integration_ethernet_ipv4_sctp_xnap |
+//! | Ethernet → IPv4 → SCTP(40000→40001, PPID 61) → XnAP | integration_ethernet_ipv4_sctp_ppid_xnap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 38472, PPID 0) → F1AP | integration_ethernet_ipv4_sctp_f1ap |
+//! | Ethernet → IPv4 → SCTP(40000→40001, PPID 62) → F1AP | integration_ethernet_ipv4_sctp_ppid_f1ap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 38462, PPID 0) → E1AP | integration_ethernet_ipv4_sctp_e1ap |
+//! | Ethernet → IPv4 → SCTP(40000→40001, PPID 64) → E1AP | integration_ethernet_ipv4_sctp_ppid_e1ap_nondefault_port |
+//! | Ethernet → IPv4 → SCTP(port 29118, PPID 0) → SGsAP | integration_ethernet_ipv4_sctp_sgsap_paging_request |
 //! | Ethernet → IPv6 → HBH → Fragment → TCP  | integration_ethernet_ipv6_ext_headers         |
 //! | 802.1Q → IPv4 → UDP                      | integration_vlan_ipv4_udp                     |
 //! | 802.1ad QinQ → IPv4 → UDP                | integration_qinq_ipv4_udp                     |
@@ -108,7 +118,8 @@
 //! | Ethernet → LLC → RST BPDU                           | integration_ethernet_llc_rstp                        |
 //! | Ethernet → LLC → MST BPDU with an MSTI message      | integration_ethernet_llc_mstp                        |
 //! | Ethernet → LLC → SNAP (RFC 1042) → IPv4 → ICMP      | integration_ethernet_llc_snap_ipv4_icmp              |
-//! | Ethernet → LLC → SNAP (non-zero OUI) ends the chain | integration_ethernet_llc_snap_other_oui              |
+//! | Ethernet → LLC → SNAP (unregistered OUI/PID) ends   | integration_ethernet_llc_snap_other_oui              |
+//! | Ethernet → LLC → SNAP (00-00-0C / 0x2000) → CDP     | integration_ethernet_llc_snap_cdp                    |
 //! | SLL (protocol 0x0004) → LLC → STP                   | integration_sll_llc_stp                              |
 //! | SLL2 (protocol 0x0004) → LLC → SNAP → IPv4          | integration_sll2_llc_snap_ipv4                       |
 //! | Ethernet → MPLS → IPv4 → UDP                         | integration_ethernet_mpls_ipv4_udp                   |
@@ -138,6 +149,10 @@
 //! | Ethernet → IPv4 → UDP → GENEVE (opts) → Ethernet → IPv4 | integration_ethernet_ipv4_udp_geneve_with_options |
 //! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ipv4      |
 //! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_ethernet |
+//! | Ethernet → NSH (MD Type 1) → IPv4 → UDP | integration_ethernet_nsh_md1_ipv4 |
+//! | Ethernet → IPv4 → GRE → NSH (MD Type 2) → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_gre_nsh_ethernet |
+//! | Ethernet → IPv4 → UDP(4790) → VXLAN-GPE → NSH → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gpe_nsh |
+//! | Ethernet → NSH (Next Protocol NSH) → NSH → MPLS → IPv4 → UDP | integration_ethernet_nsh_nsh_mpls |
 //! | Ethernet → IPv4 → UDP → VXLAN-GBP → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_gbp      |
 //! | Ethernet → IPv4 → UDP → VXLAN (I=0) → Ethernet → IPv4 → UDP | integration_ethernet_ipv4_udp_vxlan_i_flag_clear |
 //! | Ethernet → IPv4 → UDP → L2TP → PPP → IPv4 → UDP          | ethernet_ipv4_udp_l2tp_ppp_ipv4_udp              |
@@ -4984,6 +4999,109 @@ fn integration_ethernet_lldp() {
 }
 
 // ---------------------------------------------------------------------------
+// EAPOL (IEEE 802.1X-2020, 11.3) and EAP (RFC 3748)
+// https://www.rfc-editor.org/rfc/rfc3748
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integration_ethernet_eapol_eap_identity() {
+    let registry = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    // PAE group address 01-80-C2-00-00-03 (IEEE 802.1X-2020, 11.1.1).
+    push_ethernet(
+        &mut pkt,
+        [0x01, 0x80, 0xC2, 0, 0, 0x03],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    // EAPOL v2, EAPOL-EAP, body 10: EAP Response/Identity "alice".
+    pkt.extend_from_slice(&[0x02, 0x00, 0x00, 0x0A]);
+    pkt.extend_from_slice(&[0x02, 0x01, 0x00, 0x0A, 0x01]);
+    pkt.extend_from_slice(b"alice");
+    pkt.resize(60, 0); // Ethernet padding
+
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "EAPOL", "EAP"]);
+    assert_layers_contiguous(&buf);
+    let eap = buf.layer_by_name("EAP").unwrap();
+    assert_eq!(eap.range, 18..28);
+    assert_eq!(buf.resolve_display_name(eap, "code_name"), Some("Response"));
+    assert_eq!(buf.resolve_display_name(eap, "type_name"), Some("Identity"));
+    assert_eq!(
+        buf.field_by_name(eap, "identity").unwrap().value,
+        FieldValue::Bytes(b"alice")
+    );
+}
+
+#[test]
+fn integration_ethernet_eapol_start_and_key() {
+    let registry = DissectorRegistry::default();
+
+    let mut start = Vec::new();
+    push_ethernet(
+        &mut start,
+        [0x01, 0x80, 0xC2, 0, 0, 0x03],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    start.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+    start.resize(60, 0);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&start, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "EAPOL"]);
+    let eapol = buf.layer_by_name("EAPOL").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(eapol, "packet_type_name"),
+        Some("EAPOL-Start")
+    );
+
+    let mut key = Vec::new();
+    push_ethernet(
+        &mut key,
+        [0x02, 0, 0, 0, 0, 2],
+        [0x02, 0, 0, 0, 0, 1],
+        0x888E,
+    );
+    key.extend_from_slice(&[0x02, 0x03, 0x00, 0x05, 0x02, 0x00, 0x8A, 0x00, 0x10]);
+    let mut buf = DissectBuffer::new();
+    registry.dissect(&key, &mut buf).unwrap();
+    let eapol = buf.layer_by_name("EAPOL").unwrap();
+    assert_eq!(
+        buf.resolve_display_name(eapol, "key_descriptor_type_name"),
+        Some("IEEE 802.11")
+    );
+    assert_eq!(
+        buf.field_by_name(eapol, "body").unwrap().value,
+        FieldValue::Bytes(&[0x00, 0x8A, 0x00, 0x10])
+    );
+}
+
+#[test]
+fn integration_ppp_eap_inline() {
+    let registry = DissectorRegistry::default();
+    // PPP (HDLC framing) Protocol 0xC227 (RFC 3748, Section 3.2.1 —
+    // https://www.rfc-editor.org/rfc/rfc3748#section-3.2.1): EAP Success.
+    let pkt = [0xFF, 0x03, 0xC2, 0x27, 0x03, 0x05, 0x00, 0x04];
+    let mut buf = DissectBuffer::new();
+    registry.dissect_with_link_type(&pkt, 9, &mut buf).unwrap();
+    assert_eq!(buf.layers().len(), 1);
+    let ppp = buf.layer_by_name("PPP").unwrap();
+    let FieldValue::Object(r) = &buf.field_by_name(ppp, "payload").unwrap().value else {
+        panic!("payload must be an Object");
+    };
+    let eap = buf.nested_fields(r);
+    assert_eq!(eap[0].name(), "code");
+    assert_eq!(eap[0].value, FieldValue::U8(3));
+    assert_eq!(
+        buf.resolve_nested_display_name(r, "code_name"),
+        Some("Success")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // MPLS helpers
 // ---------------------------------------------------------------------------
 
@@ -8221,6 +8339,271 @@ fn integration_ethernet_ipv4_sctp_ngap() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SCTP → XnAP (Xn Setup Failure)
+// ---------------------------------------------------------------------------
+
+/// XnAP Xn Setup Failure (APER, pycrate): Cause and Time To Wait IEs.
+#[cfg(all(feature = "sctp", feature = "xnap"))]
+const XNAP_SETUP_FAILURE: &[u8] = &[
+    0x40, 0x11, 0x00, 0x0e, 0x00, 0x00, 0x02, 0x00, 0x07, 0x40, 0x02, 0x10, 0x00, 0x00, 0x4c, 0x40,
+    0x01, 0x10,
+];
+
+/// XnAP is found by its IANA SCTP port 38422 with an unspecified PPID
+/// (IANA "Service Name and Transport Protocol Port Number Registry" —
+/// <https://www.iana.org/assignments/service-names-port-numbers/>).
+#[cfg(all(feature = "sctp", feature = "xnap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_xnap() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 38422);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, XNAP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "XnAP"]);
+    // The SCTP layer spans its chunks, so the XnAP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + XNAP_SETUP_FAILURE.len());
+    let layer = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(layer, "pdu_type").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert_eq!(
+        display_name_for(&buf, layer, "procedure_code"),
+        Some("xnSetup")
+    );
+    let ies = buf.field_by_name(layer, "ies").unwrap();
+    let FieldValue::Array(ref arr) = ies.value else {
+        panic!("expected ies to be Array");
+    };
+    assert!(!direct_children(&buf, arr).is_empty());
+    assert!(buf.field_by_name(layer, "ie_container_error").is_none());
+}
+
+/// XnAP on a non-default port is found by PPID 61 (IANA "SCTP Payload
+/// Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>).
+#[cfg(all(feature = "sctp", feature = "xnap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_xnap_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 61, XNAP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "XnAP"]);
+    // The SCTP layer spans its chunks, so the XnAP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + XNAP_SETUP_FAILURE.len());
+}
+
+// ---------------------------------------------------------------------------
+// SCTP → F1AP (F1 Setup Failure)
+// ---------------------------------------------------------------------------
+
+/// F1AP F1 Setup Failure (APER, pycrate): Cause and Time To Wait IEs.
+#[cfg(all(feature = "sctp", feature = "f1ap"))]
+const F1AP_SETUP_FAILURE: &[u8] = &[
+    0x80, 0x01, 0x00, 0x13, 0x00, 0x00, 0x03, 0x00, 0x4e, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x40,
+    0x01, 0x66, 0x00, 0x4d, 0x40, 0x01, 0x30,
+];
+
+/// F1AP is found by its IANA SCTP port 38472 with an unspecified PPID
+/// (IANA "Service Name and Transport Protocol Port Number Registry" —
+/// <https://www.iana.org/assignments/service-names-port-numbers/>).
+#[cfg(all(feature = "sctp", feature = "f1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_f1ap() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 38472);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, F1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "F1AP"]);
+    // The SCTP layer spans its chunks, so the F1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + F1AP_SETUP_FAILURE.len());
+    let layer = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(layer, "pdu_type").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert_eq!(
+        display_name_for(&buf, layer, "procedure_code"),
+        Some("F1Setup")
+    );
+    let ies = buf.field_by_name(layer, "ies").unwrap();
+    let FieldValue::Array(ref arr) = ies.value else {
+        panic!("expected ies to be Array");
+    };
+    assert!(!direct_children(&buf, arr).is_empty());
+    assert!(buf.field_by_name(layer, "ie_container_error").is_none());
+}
+
+/// F1AP on a non-default port is found by PPID 62 (IANA "SCTP Payload
+/// Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>).
+#[cfg(all(feature = "sctp", feature = "f1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_f1ap_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 62, F1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "F1AP"]);
+    // The SCTP layer spans its chunks, so the F1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + F1AP_SETUP_FAILURE.len());
+}
+
+// ---------------------------------------------------------------------------
+// SCTP → E1AP (gNB-CU-UP E1 Setup Failure)
+// ---------------------------------------------------------------------------
+
+/// E1AP gNB-CU-UP E1 Setup Failure (APER, pycrate): Cause and Time To Wait IEs.
+#[cfg(all(feature = "sctp", feature = "e1ap"))]
+const E1AP_SETUP_FAILURE: &[u8] = &[
+    0x40, 0x03, 0x00, 0x13, 0x00, 0x00, 0x03, 0x00, 0x39, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x40,
+    0x01, 0x48, 0x00, 0x0c, 0x40, 0x01, 0x50,
+];
+
+/// E1AP is found by its IANA SCTP port 38462 with an unspecified PPID
+/// (IANA "Service Name and Transport Protocol Port Number Registry" —
+/// <https://www.iana.org/assignments/service-names-port-numbers/>).
+#[cfg(all(feature = "sctp", feature = "e1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_e1ap() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 38462);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, E1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "E1AP"]);
+    // The SCTP layer spans its chunks, so the E1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + E1AP_SETUP_FAILURE.len());
+    let layer = &buf.layers()[3];
+    assert_eq!(
+        buf.field_by_name(layer, "pdu_type").unwrap().value,
+        FieldValue::U8(2)
+    );
+    assert_eq!(
+        display_name_for(&buf, layer, "procedure_code"),
+        Some("gNB-CU-UP-E1Setup")
+    );
+    let ies = buf.field_by_name(layer, "ies").unwrap();
+    let FieldValue::Array(ref arr) = ies.value else {
+        panic!("expected ies to be Array");
+    };
+    assert!(!direct_children(&buf, arr).is_empty());
+    assert!(buf.field_by_name(layer, "ie_container_error").is_none());
+}
+
+/// E1AP on a non-default port is found by PPID 64 (IANA "SCTP Payload
+/// Protocol Identifiers" — <https://www.iana.org/assignments/sctp-parameters/>).
+#[cfg(all(feature = "sctp", feature = "e1ap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_ppid_e1ap_nondefault_port() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+    let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+    push_sctp(&mut pkt, 40000, 40001);
+    push_sctp_data_chunk(&mut pkt, 0x03, 1, 64, E1AP_SETUP_FAILURE);
+    fixup_ipv4_length(&mut pkt, ip_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "IPv4", "SCTP", "E1AP"]);
+    // The SCTP layer spans its chunks, so the E1AP layer is the DATA
+    // chunk's user data: after Ethernet (14), IPv4 (20), the SCTP common
+    // header (12) and the DATA chunk header (16).
+    assert_eq!(buf.layers()[3].range, 62..62 + E1AP_SETUP_FAILURE.len());
+}
+
+// ---------------------------------------------------------------------------
+// SCTP → SGsAP (SGsAP-PAGING-REQUEST)
+// ---------------------------------------------------------------------------
+
+/// SGsAP-PAGING-REQUEST: IMSI, VLR name and service indicator "CS call
+/// indicator" (3GPP TS 29.118, Section 8.14).
+#[cfg(all(feature = "sctp", feature = "sgsap"))]
+const SGSAP_PAGING_REQUEST: &[u8] = &[
+    0x01, 0x01, 0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98, 0x02, 0x04, 0x03, b'v', b'l',
+    b'r', 0x20, 0x01, 0x01,
+];
+
+/// SGsAP is found by its registered SCTP port 29118; its payload protocol
+/// identifier 0 is "unspecified" and does not select it on another port
+/// (3GPP TS 29.118, Section 6.3).
+#[cfg(all(feature = "sctp", feature = "sgsap"))]
+#[test]
+fn integration_ethernet_ipv4_sctp_sgsap_paging_request() {
+    let reg = DissectorRegistry::default();
+    for (dst_port, expected) in [(29118, Some("SGsAP")), (40000, None)] {
+        let mut pkt = Vec::new();
+        push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x0800);
+        let ip_start = push_ipv4(&mut pkt, 132, IPV4_SRC, IPV4_DST);
+        push_sctp(&mut pkt, 9487, dst_port);
+        push_sctp_data_chunk(&mut pkt, 0x03, 1, 0, SGSAP_PAGING_REQUEST);
+        fixup_ipv4_length(&mut pkt, ip_start);
+
+        let mut buf = DissectBuffer::new();
+        reg.dissect(&pkt, &mut buf).unwrap();
+        assert_eq!(buf.layers().get(3).map(|l| l.name), expected, "{dst_port}");
+        if expected.is_none() {
+            continue;
+        }
+        let sgsap = &buf.layers()[3];
+        assert_eq!(
+            display_name_for(&buf, sgsap, "message_type"),
+            Some("SGsAP-PAGING-REQUEST")
+        );
+        let ies = buf.field_by_name(sgsap, "ies").unwrap();
+        let FieldValue::Array(ref arr) = ies.value else {
+            panic!("expected ies to be Array");
+        };
+        assert_eq!(direct_children(&buf, arr).len(), 3);
+    }
+}
+
 /// NGAP InitialUEMessage with parsed IE values: RAN-UE-NGAP-ID, NAS-PDU
 /// with plain 5GMM Registration Request, UEContextRequest and
 /// RRCEstablishmentCause, all APER-encoded (3GPP TS 38.413, Section 9.5).
@@ -9420,15 +9803,15 @@ fn integration_ethernet_llc_snap_ipv4_icmp() {
     assert_eq!(buf.field_u16(snap, "pid"), Some(0x0800));
 }
 
-/// Ethernet → LLC → SNAP with Cisco OUI 00-00-0C (CDP): the SNAP layer is
-/// shown and the chain ends.
+/// Ethernet → LLC → SNAP with Cisco OUI 00-00-0C and a PID without a
+/// dissector (0x2004, DTP): the SNAP layer is shown and the chain ends.
 #[test]
 fn integration_ethernet_llc_snap_other_oui() {
     let reg = DissectorRegistry::default();
     let mut pkt = vec![
         0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
     ];
-    let llc = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x00, 0x02, 0xB4];
+    let llc = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x04, 0x01, 0x00];
     pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
     pkt.extend_from_slice(&llc);
 
@@ -9436,6 +9819,40 @@ fn integration_ethernet_llc_snap_other_oui() {
     reg.dissect(&pkt, &mut buf).unwrap();
     let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
     assert_eq!(names, ["Ethernet", "SNAP"]);
+}
+
+/// Ethernet (802.3 Length) → LLC → SNAP (OUI 00-00-0C, PID 0x2000) → CDP,
+/// in a frame padded to the Ethernet minimum.
+#[test]
+fn integration_ethernet_llc_snap_cdp() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = vec![
+        0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+    let mut llc = vec![0xAA, 0xAA, 0x03, 0x00, 0x00, 0x0C, 0x20, 0x00];
+    // CDPv2, TTL 180; Device ID "sw1"; Addresses with one IPv4 address.
+    llc.extend_from_slice(&[0x02, 0xB4, 0x00, 0x00]);
+    llc.extend_from_slice(&[0x00, 0x01, 0x00, 0x07, b's', b'w', b'1']);
+    llc.extend_from_slice(&[
+        0x00, 0x02, 0x00, 0x11, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0xCC,
+    ]);
+    llc.extend_from_slice(&[0x00, 0x04, 192, 0, 2, 1]);
+    pkt.extend_from_slice(&(llc.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(&llc);
+    pad_ethernet_frame(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "SNAP", "CDP"]);
+    assert_layers_contiguous(&buf);
+    let cdp = buf.layer_by_name("CDP").unwrap();
+    assert_eq!(cdp.range, 22..14 + llc.len());
+    assert_eq!(buf.field_u8(cdp, "version"), Some(2));
+    assert!(matches!(
+        buf.field_by_name(cdp, "tlvs").unwrap().value,
+        FieldValue::Array(_)
+    ));
 }
 
 /// SLL header (LINKTYPE_LINUX_SLL) with the given protocol type.
@@ -10604,4 +11021,112 @@ fn integration_ethernet_ipv6_srv6_ethernet_ipv4_udp() {
         names,
         ["Ethernet", "IPv6", "SRv6", "Ethernet", "IPv4", "UDP"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// NSH tests (RFC 8300 — https://www.rfc-editor.org/rfc/rfc8300)
+// ---------------------------------------------------------------------------
+
+/// NSH Base Header + Service Path Header (RFC 8300, Sections 2.2-2.3 —
+/// <https://www.rfc-editor.org/rfc/rfc8300#section-2.2>): Ver 0, TTL 63,
+/// SPI 0x000001, SI 255.
+fn push_nsh(pkt: &mut Vec<u8>, length: u8, md_type: u8, next_protocol: u8) {
+    let w0: u32 = (63 << 22)
+        | (u32::from(length) << 16)
+        | (u32::from(md_type) << 8)
+        | u32::from(next_protocol);
+    pkt.extend_from_slice(&w0.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00, 0x01, 0xFF]);
+}
+
+/// Ethernet (0x894F) → NSH MD Type 1 → IPv4 → UDP (RFC 8300, Sections 2.4
+/// and 10.1 — <https://www.rfc-editor.org/rfc/rfc8300#section-10.1>).
+#[test]
+fn integration_ethernet_nsh_md1_ipv4() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x894F);
+    push_nsh(&mut pkt, 6, 1, 1);
+    pkt.extend_from_slice(&[0u8; 16]);
+    push_inner_ipv4_udp(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "NSH", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
+    let nsh = buf.layer_by_name("NSH").unwrap();
+    assert_eq!(buf.field_u32(nsh, "spi"), Some(1));
+    assert_eq!(buf.field_u8(nsh, "si"), Some(255));
+}
+
+/// Ethernet → IPv4 → GRE (Protocol Type 0x894F) → NSH MD Type 2 with one
+/// Context Header → Ethernet → IPv4 → UDP (RFC 8300, Section 2.5.1 —
+/// <https://www.rfc-editor.org/rfc/rfc8300#section-2.5.1>).
+#[test]
+fn integration_ethernet_ipv4_gre_nsh_ethernet() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x0800);
+    let outer_ipv4_start = push_ipv4(&mut pkt, 47, [10, 0, 0, 1], [10, 0, 0, 2]);
+    push_gre(&mut pkt, 0x894F);
+    push_nsh(&mut pkt, 4, 2, 3);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x00, 0x64]);
+    push_ethernet(&mut pkt, [0xaa; 6], [0xbb; 6], 0x0800);
+    push_inner_ipv4_udp(&mut pkt);
+    fixup_ipv4_length(&mut pkt, outer_ipv4_start);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv4", "GRE", "NSH", "Ethernet", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+    let nsh = buf.layer_by_name("NSH").unwrap();
+    assert!(buf.field_by_name(nsh, "context_headers").is_some());
+}
+
+/// Ethernet → IPv4 → UDP(4790) → VXLAN-GPE (Next Protocol 0x04) → NSH →
+/// IPv4 → UDP (draft-ietf-nvo3-vxlan-gpe-13 §3.2 —
+/// <https://datatracker.ietf.org/doc/html/draft-ietf-nvo3-vxlan-gpe-13#section-3.2>)
+#[test]
+fn integration_ethernet_ipv4_udp_vxlan_gpe_nsh() {
+    let reg = DissectorRegistry::default();
+    // Ver 0, I=1, P=1; Next Protocol 0x04 (NSH); VNI 100
+    let gpe = [0x0C, 0x00, 0x00, 0x04, 0x00, 0x00, 0x64, 0x00];
+    let pkt = build_udp_tunnel_packet(4790, &gpe, |pkt| {
+        push_nsh(pkt, 2, 2, 1);
+        push_inner_ipv4_udp(pkt);
+    });
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(
+        names,
+        ["Ethernet", "IPv4", "UDP", "VXLAN-GPE", "NSH", "IPv4", "UDP"]
+    );
+    assert_layers_contiguous(&buf);
+}
+
+/// Ethernet → NSH (Next Protocol 0x4, NSH) → NSH (Next Protocol 0x5, MPLS)
+/// → MPLS → IPv4 → UDP (RFC 8300, Section 2.2 —
+/// <https://www.rfc-editor.org/rfc/rfc8300#section-2.2>).
+#[test]
+fn integration_ethernet_nsh_nsh_mpls() {
+    let reg = DissectorRegistry::default();
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, [0xff; 6], [0x11; 6], 0x894F);
+    push_nsh(&mut pkt, 2, 2, 4);
+    push_nsh(&mut pkt, 2, 2, 5);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x01, 0x40]); // label 16, S=1, TTL 64
+    push_inner_ipv4_udp(&mut pkt);
+
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let names: Vec<_> = buf.layers().iter().map(|l| l.name).collect();
+    assert_eq!(names, ["Ethernet", "NSH", "NSH", "MPLS", "IPv4", "UDP"]);
+    assert_layers_contiguous(&buf);
 }

@@ -83,6 +83,9 @@ pub struct DissectorRegistry {
     /// MPLS G-ACh Channel Type table — dispatches the message after an
     /// Associated Channel Header (RFC 5586, Section 2.1).
     by_ach_channel_type: HashMap<u16, Box<dyn Dissector>>,
+    /// SNAP (Organization Code, Protocol Identifier) table — dispatches SNAP
+    /// payloads whose PID is not an EtherType (IEEE Std 802-2014, Clause 10).
+    by_snap: HashMap<(u32, u16), Box<dyn Dissector>>,
     /// Factory functions for creating fresh dissector instances by decode-as name.
     /// Keys are lowercase protocol names (e.g., "http", "dns", "dns.tcp").
     dissector_factories: HashMap<String, fn() -> Box<dyn Dissector>>,
@@ -121,6 +124,7 @@ impl DissectorRegistry {
             by_llc_sap: HashMap::new(),
             by_link_type: HashMap::new(),
             by_ach_channel_type: HashMap::new(),
+            by_snap: HashMap::new(),
             dissector_factories: HashMap::new(),
             #[cfg(feature = "ip-reassembly")]
             ip_reassembly: super::ip_reassembly::new_ip_reassembly(),
@@ -656,6 +660,53 @@ impl DissectorRegistry {
         self.mpls_labels.lock().get(&label).map(|d| d.short_name())
     }
 
+    /// Register a dissector for a SNAP Organization Code (OUI) and Protocol
+    /// Identifier.
+    ///
+    /// The SNAP dissector looks this table up only for Organization Codes
+    /// whose Protocol Identifier is not an EtherType, so registering OUI
+    /// 00-00-00 or 00-00-F8 has no effect. `oui` holds the 24-bit code in
+    /// its low three octets.
+    ///
+    /// Returns an error if a dissector is already registered for this pair.
+    /// Use [`register_by_snap_or_replace`](Self::register_by_snap_or_replace)
+    /// to intentionally override an existing registration.
+    pub fn register_by_snap(
+        &mut self,
+        oui: u32,
+        pid: u16,
+        dissector: Box<dyn Dissector>,
+    ) -> Result<(), RegistrationError> {
+        if let Some(existing) = self.by_snap.get(&(oui, pid)) {
+            return Err(RegistrationError::DuplicateDispatchKey {
+                table: "snap",
+                key: (u64::from(oui) << 16) | u64::from(pid),
+                existing: existing.short_name(),
+                new: dissector.short_name(),
+            });
+        }
+        self.by_snap.insert((oui, pid), dissector);
+        Ok(())
+    }
+
+    /// Register a dissector for a SNAP OUI and Protocol Identifier,
+    /// replacing any existing one.
+    ///
+    /// Returns the previously registered dissector, if any.
+    pub fn register_by_snap_or_replace(
+        &mut self,
+        oui: u32,
+        pid: u16,
+        dissector: Box<dyn Dissector>,
+    ) -> Option<Box<dyn Dissector>> {
+        self.by_snap.insert((oui, pid), dissector)
+    }
+
+    /// Look up a dissector by SNAP Organization Code and Protocol Identifier.
+    pub fn get_by_snap(&self, oui: u32, pid: u16) -> Option<&dyn Dissector> {
+        self.by_snap.get(&(oui, pid)).map(|d| d.as_ref())
+    }
+
     /// Look up a dissector by pcap link-layer header type.
     pub fn get_by_link_type(&self, link_type: u32) -> Option<&dyn Dissector> {
         self.by_link_type.get(&link_type).map(|d| d.as_ref())
@@ -1145,6 +1196,7 @@ impl DissectorRegistry {
             DispatchHint::ByIpv6RoutingType(rt) => self.get_by_ipv6_routing_type(*rt),
             DispatchHint::ByLlcSap(sap) => self.get_by_llc_sap(*sap),
             DispatchHint::ByAchChannelType(ct) => self.get_by_ach_channel_type(*ct),
+            DispatchHint::BySnap { oui, pid } => self.get_by_snap(*oui, *pid),
         }
     }
 
@@ -1656,6 +1708,9 @@ impl DissectorRegistry {
         for d in self.by_ach_channel_type.values() {
             push(d.as_ref());
         }
+        for d in self.by_snap.values() {
+            push(d.as_ref());
+        }
         if let Some(ref d) = self.ipv6_routing_fallback {
             push(d.as_ref());
         }
@@ -1693,6 +1748,10 @@ impl DissectorRegistry {
             push(&packet_dissector_lacp::OsspDissector);
             push(&packet_dissector_lacp::EsmcDissector);
         }
+        // The EAPOL dissector emits EAP layers itself (RFC 3748 —
+        // https://www.rfc-editor.org/rfc/rfc3748).
+        #[cfg(feature = "eap")]
+        push(&packet_dissector_eap::EapDissector);
         // GtpcDispatcher delegates by version; expose both GTP-C schemas.
         #[cfg(feature = "gtpv1c")]
         push(&packet_dissector_gtpv1c::Gtpv1cDissector);
@@ -1777,6 +1836,7 @@ impl DissectorRegistry {
             }
             DissectorTable::LinkType(lt) => self.register_by_link_type(lt, dissector),
             DissectorTable::AchChannelType(ct) => self.register_by_ach_channel_type(ct, dissector),
+            DissectorTable::Snap { oui, pid } => self.register_by_snap(oui, pid, dissector),
         }
     }
 
@@ -1818,6 +1878,9 @@ impl DissectorRegistry {
             DissectorTable::LinkType(lt) => self.register_by_link_type_or_replace(lt, dissector),
             DissectorTable::AchChannelType(ct) => {
                 self.register_by_ach_channel_type_or_replace(ct, dissector)
+            }
+            DissectorTable::Snap { oui, pid } => {
+                self.register_by_snap_or_replace(oui, pid, dissector)
             }
         }
     }
@@ -2657,6 +2720,14 @@ impl Default for DissectorRegistry {
             Box::new(packet_dissector_ethernet::SnapDissector),
         ));
 
+        // CDP runs over SNAP with the Cisco OUI 00-00-0C and PID 0x2000.
+        #[cfg(feature = "cdp")]
+        assert_builtin(reg.register_by_snap(
+            packet_dissector_cdp::SNAP_OUI_CISCO,
+            packet_dissector_cdp::SNAP_PID_CDP,
+            Box::new(packet_dissector_cdp::CdpDissector),
+        ));
+
         // IS-IS runs over IEEE 802.2 LLC with SAP 0xFE (ISO 10589)
         #[cfg(feature = "isis")]
         assert_builtin(
@@ -2689,6 +2760,13 @@ impl Default for DissectorRegistry {
             reg.register_by_ethertype(0x88CC, Box::new(packet_dissector_lldp::LldpDissector)),
         );
 
+        // EAPOL uses EtherType 0x888E (IEEE 802.1X-2020, 11.3); the EAPOL
+        // dissector hands an EAPOL-EAP body to EAP (RFC 3748) itself.
+        #[cfg(feature = "eap")]
+        assert_builtin(
+            reg.register_by_ethertype(0x888E, Box::new(packet_dissector_eap::EapolDissector)),
+        );
+
         // MPLS uses EtherType 0x8847 (unicast) and 0x8848 (upstream-assigned) (RFC 3032, RFC 5332).
         // The 0x8847 dispatcher applies the MPLS label decode-as rules.
         // Upstream-assigned labels come from a context-specific label space
@@ -2718,6 +2796,14 @@ impl Default for DissectorRegistry {
                 });
             }
         }
+
+        // NSH uses EtherType 0x894F (RFC 8300, Section 10.1 —
+        // https://www.rfc-editor.org/rfc/rfc8300#section-10.1), which also
+        // covers GRE Protocol Type 0x894F and VXLAN-GPE Next Protocol 0x04.
+        #[cfg(feature = "nsh")]
+        assert_builtin(
+            reg.register_by_ethertype(0x894F, Box::new(packet_dissector_nsh::NshDissector)),
+        );
 
         // MPLS G-ACh / PW Associated Channel Types (IANA "MPLS Generalized
         // Associated Channel (G-ACh) Types" registry):
@@ -3124,6 +3210,86 @@ impl Default for DissectorRegistry {
             );
             reg.register_dissector_factory("ngap", || {
                 Box::new(packet_dissector_ngap::NgapDissector)
+            });
+        }
+
+        // XnAP runs over SCTP (3GPP TS 38.423). IANA "Service Name and Transport
+        // Protocol Port Number Registry": 38422 `xn-control`; IANA "SCTP Payload
+        // Protocol Identifiers": 61 = XnAP —
+        // https://www.iana.org/assignments/service-names-port-numbers/
+        // https://www.iana.org/assignments/sctp-parameters/
+        #[cfg(feature = "xnap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_xnap::SCTP_PORT,
+                Box::new(packet_dissector_xnap::XnapDissector),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_ppid(
+                packet_dissector_xnap::SCTP_PPID,
+                Box::new(packet_dissector_xnap::XnapDissector),
+            ));
+            reg.register_dissector_factory("xnap", || {
+                Box::new(packet_dissector_xnap::XnapDissector)
+            });
+        }
+
+        // F1AP runs over SCTP (3GPP TS 38.473). IANA "Service Name and Transport
+        // Protocol Port Number Registry": 38472 `f1-control`; IANA "SCTP Payload
+        // Protocol Identifiers": 62 = F1AP —
+        // https://www.iana.org/assignments/service-names-port-numbers/
+        // https://www.iana.org/assignments/sctp-parameters/
+        #[cfg(feature = "f1ap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_f1ap::SCTP_PORT,
+                Box::new(packet_dissector_f1ap::F1apDissector),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_ppid(
+                packet_dissector_f1ap::SCTP_PPID,
+                Box::new(packet_dissector_f1ap::F1apDissector),
+            ));
+            reg.register_dissector_factory("f1ap", || {
+                Box::new(packet_dissector_f1ap::F1apDissector)
+            });
+        }
+
+        // E1AP runs over SCTP (3GPP TS 37.483). IANA "Service Name and Transport
+        // Protocol Port Number Registry": 38462 `e1-interface`; IANA "SCTP Payload
+        // Protocol Identifiers": 64 = E1AP —
+        // https://www.iana.org/assignments/service-names-port-numbers/
+        // https://www.iana.org/assignments/sctp-parameters/
+        #[cfg(feature = "e1ap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_port(
+                packet_dissector_e1ap::SCTP_PORT,
+                Box::new(packet_dissector_e1ap::E1apDissector),
+            ));
+            #[cfg(feature = "sctp")]
+            assert_builtin(reg.register_by_sctp_ppid(
+                packet_dissector_e1ap::SCTP_PPID,
+                Box::new(packet_dissector_e1ap::E1apDissector),
+            ));
+            reg.register_dissector_factory("e1ap", || {
+                Box::new(packet_dissector_e1ap::E1apDissector)
+            });
+        }
+
+        // SGsAP runs over SCTP on the registered port 29118 (3GPP TS 29.118,
+        // Section 6.3). Its payload protocol identifier is 0 ("unspecified"),
+        // which cannot identify it, so only the port is registered.
+        #[cfg(feature = "sgsap")]
+        {
+            #[cfg(feature = "sctp")]
+            assert_builtin(
+                reg.register_by_sctp_port(29118, Box::new(packet_dissector_sgsap::SgsapDissector)),
+            );
+            reg.register_dissector_factory("sgsap", || {
+                Box::new(packet_dissector_sgsap::SgsapDissector)
             });
         }
 
@@ -3895,6 +4061,94 @@ mod tests {
         assert!(
             reg.lookup_dissector(&DispatchHint::ByAchChannelType(0x0008))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn get_by_snap_returns_none_for_unknown() {
+        let reg = DissectorRegistry::new();
+        assert!(reg.get_by_snap(0x00_000C, 0x2000).is_none());
+    }
+
+    #[test]
+    fn duplicate_snap_registration_returns_error() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_snap(0x00_000C, 0x2000, Box::new(StubDissector("cdp")))
+            .unwrap();
+        let result = reg.register_by_snap(0x00_000C, 0x2000, Box::new(StubDissector("cdp-dup")));
+        assert!(matches!(
+            result,
+            Err(RegistrationError::DuplicateDispatchKey {
+                table: "snap",
+                key: 0x0000_000C_2000,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn register_by_snap_or_replace_returns_previous() {
+        let mut reg = DissectorRegistry::new();
+        assert!(
+            reg.register_by_snap_or_replace(0x00_000C, 0x2004, Box::new(StubDissector("a")))
+                .is_none()
+        );
+        let prev = reg.register_by_snap_or_replace(0x00_000C, 0x2004, Box::new(StubDissector("b")));
+        assert_eq!(prev.map(|d| d.short_name()), Some("a"));
+        assert_eq!(
+            reg.get_by_snap(0x00_000C, 0x2004).map(|d| d.short_name()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn register_dissector_dispatches_to_snap() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_dissector(
+            DissectorTable::Snap {
+                oui: 0x00_000C,
+                pid: 0x2000,
+            },
+            Box::new(StubDissector("cdp")),
+        )
+        .unwrap();
+        assert!(reg.get_by_snap(0x00_000C, 0x2000).is_some());
+        assert!(
+            reg.register_dissector_or_replace(
+                DissectorTable::Snap {
+                    oui: 0x00_000C,
+                    pid: 0x2000,
+                },
+                Box::new(StubDissector("cdp2")),
+            )
+            .is_some()
+        );
+        assert!(
+            reg.all_field_schemas()
+                .iter()
+                .any(|schema| schema.short_name == "cdp2")
+        );
+    }
+
+    #[test]
+    fn lookup_dissector_by_snap_hint() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_snap(0x00_000C, 0x2000, Box::new(StubDissector("cdp")))
+            .unwrap();
+        assert_eq!(
+            reg.lookup_dissector(&DispatchHint::BySnap {
+                oui: 0x00_000C,
+                pid: 0x2000
+            })
+            .map(|d| d.short_name()),
+            Some("cdp")
+        );
+        assert!(
+            reg.lookup_dissector(&DispatchHint::BySnap {
+                oui: 0x00_000C,
+                pid: 0x2004
+            })
+            .is_none()
         );
     }
 
@@ -4767,11 +5021,17 @@ mod tests {
         #[cfg(feature = "lldp")]
         assert!(reg.get_by_ethertype(0x88CC).is_some());
 
+        #[cfg(feature = "eap")]
+        assert!(reg.get_by_ethertype(0x888E).is_some());
+
         #[cfg(feature = "mpls")]
         {
             assert!(reg.get_by_ethertype(0x8847).is_some());
             assert!(reg.get_by_ethertype(0x8848).is_some());
         }
+
+        #[cfg(feature = "nsh")]
+        assert!(reg.get_by_ethertype(0x894F).is_some());
 
         #[cfg(feature = "ethernet")]
         assert!(reg.get_by_link_type(1).is_some());
@@ -4814,6 +5074,9 @@ mod tests {
 
         #[cfg(feature = "isis")]
         assert!(reg.get_by_llc_sap(0xFE).is_some());
+
+        #[cfg(feature = "cdp")]
+        assert!(reg.get_by_snap(0x00_000C, 0x2000).is_some());
     }
 
     #[test]
@@ -4924,11 +5187,33 @@ mod tests {
         #[cfg(all(feature = "ngap", feature = "sctp"))]
         assert!(reg.get_by_sctp_port(38412).is_some());
 
+        #[cfg(all(feature = "sgsap", feature = "sctp"))]
+        assert_eq!(reg.get_by_sctp_port(29118).unwrap().short_name(), "SGsAP");
+        #[cfg(all(feature = "sgsap", feature = "sctp"))]
+        assert!(reg.get_by_sctp_ppid(0).is_none());
+
         // IANA "SCTP Payload Protocol Identifiers": 46 Diameter, 60 NGAP.
         #[cfg(all(feature = "diameter", feature = "sctp"))]
         assert_eq!(reg.get_by_sctp_ppid(46).unwrap().short_name(), "Diameter");
         #[cfg(all(feature = "ngap", feature = "sctp"))]
         assert_eq!(reg.get_by_sctp_ppid(60).unwrap().short_name(), "NGAP");
+
+        // IANA: XnAP port 38422 / PPID 61, F1AP 38472 / 62, E1AP 38462 / 64.
+        #[cfg(all(feature = "xnap", feature = "sctp"))]
+        {
+            assert_eq!(reg.get_by_sctp_port(38422).unwrap().short_name(), "XnAP");
+            assert_eq!(reg.get_by_sctp_ppid(61).unwrap().short_name(), "XnAP");
+        }
+        #[cfg(all(feature = "f1ap", feature = "sctp"))]
+        {
+            assert_eq!(reg.get_by_sctp_port(38472).unwrap().short_name(), "F1AP");
+            assert_eq!(reg.get_by_sctp_ppid(62).unwrap().short_name(), "F1AP");
+        }
+        #[cfg(all(feature = "e1ap", feature = "sctp"))]
+        {
+            assert_eq!(reg.get_by_sctp_port(38462).unwrap().short_name(), "E1AP");
+            assert_eq!(reg.get_by_sctp_ppid(64).unwrap().short_name(), "E1AP");
+        }
 
         #[cfg(all(any(feature = "l2tp", feature = "l2tpv3"), feature = "udp"))]
         assert!(reg.get_by_udp_port(1701).is_some());
@@ -5085,6 +5370,18 @@ mod tests {
 
         #[cfg(feature = "ngap")]
         assert!(reg.create_dissector_by_name("ngap").is_some());
+
+        #[cfg(feature = "xnap")]
+        assert!(reg.create_dissector_by_name("xnap").is_some());
+
+        #[cfg(feature = "f1ap")]
+        assert!(reg.create_dissector_by_name("f1ap").is_some());
+
+        #[cfg(feature = "e1ap")]
+        assert!(reg.create_dissector_by_name("e1ap").is_some());
+
+        #[cfg(feature = "sgsap")]
+        assert!(reg.create_dissector_by_name("sgsap").is_some());
 
         #[cfg(feature = "nas5g")]
         assert!(reg.create_dissector_by_name("nas5g").is_some());

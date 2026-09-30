@@ -59,16 +59,21 @@ git_tag_enable = true
 git_release_enable = true
 changelog_include = [
   "packet-dissector-ah",
+  "packet-dissector-aper",
   "packet-dissector-arp",
   "packet-dissector-bfd",
   "packet-dissector-bgp",
+  "packet-dissector-cdp",
   "packet-dissector-core",
   "packet-dissector-dhcp",
   "packet-dissector-dhcpv6",
   "packet-dissector-diameter",
   "packet-dissector-dns",
+  "packet-dissector-e1ap",
+  "packet-dissector-eap",
   "packet-dissector-esp",
   "packet-dissector-ethernet",
+  "packet-dissector-f1ap",
   "packet-dissector-geneve",
   "packet-dissector-gre",
   "packet-dissector-gtpv1c",
@@ -94,6 +99,7 @@ changelog_include = [
   "packet-dissector-nas-eps",
   "packet-dissector-nas5g",
   "packet-dissector-ngap",
+  "packet-dissector-nsh",
   "packet-dissector-ntp",
   "packet-dissector-null",
   "packet-dissector-ospf",
@@ -109,6 +115,7 @@ changelog_include = [
   "packet-dissector-rtp",
   "packet-dissector-sctp",
   "packet-dissector-sdp",
+  "packet-dissector-sgsap",
   "packet-dissector-sip",
   "packet-dissector-srv6",
   "packet-dissector-stp",
@@ -119,10 +126,15 @@ changelog_include = [
   "packet-dissector-udp",
   "packet-dissector-vrrp",
   "packet-dissector-vxlan",
+  "packet-dissector-xnap",
 ]
 
 [[package]]
 name = "packet-dissector-ah"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-aper"
 version_group = "workspace"
 
 [[package]]
@@ -135,6 +147,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-bgp"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-cdp"
 version_group = "workspace"
 
 [[package]]
@@ -158,11 +174,23 @@ name = "packet-dissector-dns"
 version_group = "workspace"
 
 [[package]]
+name = "packet-dissector-e1ap"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-eap"
+version_group = "workspace"
+
+[[package]]
 name = "packet-dissector-esp"
 version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-ethernet"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-f1ap"
 version_group = "workspace"
 
 [[package]]
@@ -266,6 +294,10 @@ name = "packet-dissector-ngap"
 version_group = "workspace"
 
 [[package]]
+name = "packet-dissector-nsh"
+version_group = "workspace"
+
+[[package]]
 name = "packet-dissector-ntp"
 version_group = "workspace"
 
@@ -326,6 +358,10 @@ name = "packet-dissector-sdp"
 version_group = "workspace"
 
 [[package]]
+name = "packet-dissector-sgsap"
+version_group = "workspace"
+
+[[package]]
 name = "packet-dissector-sip"
 version_group = "workspace"
 
@@ -363,6 +399,10 @@ version_group = "workspace"
 
 [[package]]
 name = "packet-dissector-vxlan"
+version_group = "workspace"
+
+[[package]]
+name = "packet-dissector-xnap"
 version_group = "workspace"
 
 # -----------------------------------------------------------------------------
