@@ -3345,13 +3345,14 @@ mod tests {
     // | RFC 9460 §7.2/§7.3, App. D.2 | SvcParams: port, ipv6hint   | svcb_params_rfc9460_figure4_port_and_figure7_ipv6hint |
     // | RFC 9460 §7.1          | HTTPS alpn=h2 (issue reproduction)  | svcb_params_issue_repro_https_alpn_h2 |
     // | RFC 9848 §3 / RFC 9461 §5 / RFC 9460 §7.1 | ech, dohpath, no-default-alpn, unknown key | svcb_params_ech_dohpath_no_default_alpn_and_unknown_key |
+    // | RFC 9848 §3 / RFC 9849 §4 | Malformed ech -> raw value     | svcb_params_malformed_ech_falls_back_to_raw_value |
     // | RFC 9460 §7            | Malformed SvcParamValues kept raw   | svcb_params_malformed_values_fall_back_to_raw_value |
     // | RFC 9460 §2.2          | RDATA ends inside a SvcParam        | svcb_params_truncated_list_keeps_only_raw_params |
     // | RFC 6891 §6.1.3        | Combined 12-bit RCODE (BADVERS)     | opt_combined_rcode_badvers        |
     // | IANA DNS Parameters    | RCODE / opcode / TYPE / option names | rcode_opcode_and_type_names_follow_iana |
     // | RFC 5001 §2.3          | EDNS NSID                           | edns_nsid_exposes_text_when_printable |
     // | RFC 6975 §3            | EDNS DAU / DHU / N3U                | edns_dau_dhu_n3u_algorithm_lists  |
-    // | RFC 7871 §6            | EDNS Client Subnet                  | edns_client_subnet_ipv4_and_ipv6  |
+    // | RFC 7871 §6            | EDNS Client Subnet (typed address)  | edns_client_subnet_ipv4_and_ipv6  |
     // | RFC 7873 §4            | EDNS COOKIE                         | edns_cookie_client_and_server     |
     // | RFC 7830 §3 / RFC 7314 §3 / RFC 8145 §4.1 | Padding, EXPIRE, edns-key-tag | edns_padding_expire_key_tag |
     // | RFC 8914 §2            | Extended DNS Error                  | edns_extended_dns_error           |
@@ -5119,7 +5120,8 @@ mod tests {
     fn svcb_params_ech_dohpath_no_default_alpn_and_unknown_key() {
         let mut rdata = vec![0x00, 0x01, 0x00];
         rdata.extend_from_slice(&[0x00, 0x02, 0x00, 0x00]); // no-default-alpn
-        rdata.extend_from_slice(&[0x00, 0x05, 0x00, 0x04, 0x00, 0x02, 0xfe, 0x0d]); // ech
+        // ech: an ECHConfigList of one ECHConfig (version 0xfe0d, length 0).
+        rdata.extend_from_slice(&[0x00, 0x05, 0x00, 0x06, 0x00, 0x04, 0xfe, 0x0d, 0x00, 0x00]);
         rdata.extend_from_slice(&[0x00, 0x07, 0x00, 0x0b]); // dohpath
         rdata.extend_from_slice(b"/q{?dns}xyz");
         rdata.extend_from_slice(&[0x02, 0x9b, 0x00, 0x05]); // key667 (Figure 5)
@@ -5133,7 +5135,7 @@ mod tests {
         assert_eq!(direct_children(&b, entries[0]).len(), 2);
         assert_eq!(
             child(&b, entries[1], "ech").value,
-            FieldValue::Bytes(&[0x00, 0x02, 0xfe, 0x0d])
+            FieldValue::Bytes(&[0x00, 0x04, 0xfe, 0x0d, 0x00, 0x00])
         );
         assert_eq!(
             child(&b, entries[2], "dohpath").value,
@@ -5144,6 +5146,28 @@ mod tests {
             child(&b, entries[3], "value").value,
             FieldValue::Bytes(b"hello")
         );
+    }
+
+    /// RFC 9848, Section 3 — the "ech" value "is an ECHConfigList (Section 4
+    /// of [ECH]), including the redundant length prefix", and RFC 9849,
+    /// Section 4 — "ECHConfig ECHConfigList<4..2^16-1>;". An empty value, a
+    /// length prefix that does not match the value, or a list shorter than 4
+    /// octets is kept as the raw `value`.
+    #[test]
+    fn svcb_params_malformed_ech_falls_back_to_raw_value() {
+        let mut rdata = vec![0x00, 0x01, 0x00];
+        rdata.extend_from_slice(&[0x00, 0x05, 0x00, 0x00]); // empty
+        rdata.extend_from_slice(&[0x00, 0x05, 0x00, 0x03, 0x00, 0x05, 0xaa]); // prefix 5, 1 octet
+        rdata.extend_from_slice(&[0x00, 0x05, 0x00, 0x04, 0x00, 0x02, 0xfe, 0x0d]); // list of 2
+        let data = single_answer(TYPE_SVCB, &rdata);
+        let b = dissect(&data);
+        let rr = first_rr(&b, "answers");
+        let entries = direct_children(&b, child(&b, rr, "rdata_svc_params"));
+        assert_eq!(entries.len(), 3);
+        for e in entries {
+            let names: Vec<_> = direct_children(&b, e).iter().map(|f| f.name()).collect();
+            assert_eq!(names, vec!["key", "length", "value"], "{names:?}");
+        }
     }
 
     #[test]
@@ -5334,6 +5358,8 @@ mod tests {
         let addr = child(&b, opt, "address");
         assert_eq!(addr.value, FieldValue::Ipv4Addr([192, 0, 2, 0]));
         assert_eq!(addr.range, opt_abs + 4..opt_abs + 7);
+        // The value's type depends on FAMILY, so the descriptor is `Any`.
+        assert_eq!(addr.descriptor.field_type, FieldType::Any);
 
         // FAMILY 2, /56 source → 7 octets.
         let data = single_opt(
@@ -5350,6 +5376,10 @@ mod tests {
             FieldValue::Ipv6Addr(expected)
         );
         assert_eq!(
+            child(&b, opt, "address").descriptor.field_type,
+            FieldType::Any
+        );
+        assert_eq!(
             child(&b, opt, "scope_prefix_length").value,
             FieldValue::U8(48)
         );
@@ -5359,6 +5389,10 @@ mod tests {
         let b = dissect(&data);
         let opt = first_edns_option(&b);
         assert_eq!(child(&b, opt, "address").value, FieldValue::Bytes(&[0xaa]));
+        assert_eq!(
+            child(&b, opt, "address").descriptor.field_type,
+            FieldType::Any
+        );
 
         // Too short for FAMILY + prefix lengths: raw data.
         let data = single_opt(0, 0, &edns_opt(8, &[0, 1, 24]));

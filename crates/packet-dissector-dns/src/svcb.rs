@@ -5,6 +5,7 @@
 //! - RFC 9460, Section 7 (initial SvcParamKeys): <https://www.rfc-editor.org/rfc/rfc9460#section-7>
 //! - RFC 9460, Section 8 ("mandatory"): <https://www.rfc-editor.org/rfc/rfc9460#section-8>
 //! - RFC 9848, Section 3 ("ech"): <https://www.rfc-editor.org/rfc/rfc9848#section-3>
+//! - RFC 9849, Section 4 (ECHConfigList): <https://www.rfc-editor.org/rfc/rfc9849#section-4>
 //! - RFC 9461, Section 5 ("dohpath"): <https://www.rfc-editor.org/rfc/rfc9461#section-5>
 //! - IANA Service Parameter Keys (SvcParamKeys): <https://www.iana.org/assignments/dns-svcb/dns-svcb.xhtml>
 
@@ -241,6 +242,19 @@ pub(crate) fn push_svc_params<'pkt>(
     buf.end_container(arr);
 }
 
+/// Whether `value` is a 2-octet length prefix followed by that many octets,
+/// at least 4 (RFC 9849, Section 4 —
+/// <https://www.rfc-editor.org/rfc/rfc9849#section-4>).
+fn is_ech_config_list(value: &[u8]) -> bool {
+    match value {
+        [hi, lo, list @ ..] => {
+            let len = u16::from_be_bytes([*hi, *lo]) as usize;
+            len >= 4 && len == list.len()
+        }
+        _ => false,
+    }
+}
+
 /// Push a list of fixed-size elements as an Array.
 fn push_list<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
@@ -356,8 +370,10 @@ fn push_value<'pkt>(
         // RFC 9848, Section 3 — <https://www.rfc-editor.org/rfc/rfc9848#section-3>:
         // "In wire format, the value of the parameter is an ECHConfigList
         // (Section 4 of [ECH]), including the redundant length prefix."
-        // The ECHConfigList is kept opaque.
-        KEY_ECH => {
+        // RFC 9849, Section 4 — <https://www.rfc-editor.org/rfc/rfc9849#section-4>:
+        // "ECHConfig ECHConfigList<4..2^16-1>;". The ECHConfigList is kept
+        // opaque once its length prefix matches the value.
+        KEY_ECH if is_ech_config_list(value) => {
             buf.push_field(
                 &SVC_PARAM_CHILD_FIELDS[SPFD_ECH],
                 FieldValue::Bytes(value),
