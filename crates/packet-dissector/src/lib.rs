@@ -238,6 +238,8 @@ pub mod dissectors {
 
 #[cfg(feature = "ip-reassembly")]
 mod ip_reassembly;
+#[cfg(feature = "http2")]
+mod stream_set;
 #[cfg(feature = "tcp")]
 mod tcp_reassembly;
 
