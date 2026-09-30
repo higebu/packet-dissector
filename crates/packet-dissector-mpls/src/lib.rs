@@ -307,6 +307,11 @@ static REFERENCES: &[SpecReference] = &[
         "https://www.rfc-editor.org/rfc/rfc3032",
     ),
     SpecReference::new(
+        "RFC 3429",
+        "Assignment of the 'OAM Alert Label' for MPLS OAM Functions",
+        "https://www.rfc-editor.org/rfc/rfc3429",
+    ),
+    SpecReference::new(
         "RFC 4182",
         "Removing a Restriction on the use of MPLS Explicit NULL",
         "https://www.rfc-editor.org/rfc/rfc4182",
@@ -959,7 +964,7 @@ impl MplsDissector {
         // RFC 3032, Section 2.1 — the label stack contains no explicit
         // network-layer protocol identifier; the payload type must be
         // inferable from the bottom label.  Reserved label semantics are
-        // fixed by RFC 3032 / RFC 5586; all other bottom labels are told
+        // fixed by RFC 3032 / RFC 3429 / RFC 5586; all other bottom labels are told
         // apart by the first nibble of the payload (RFC 4928, Section 3;
         // RFC 4385, Sections 3 and 5). A bottom-of-stack entropy label or
         // extended special-purpose label carries an arbitrary value, not a
@@ -1036,7 +1041,7 @@ impl MplsDissector {
 mod tests {
     use super::*;
 
-    // # RFC 3032 / RFC 4928 / RFC 5462 / RFC 5586 (MPLS) Coverage
+    // # RFC 3032 / RFC 3429 / RFC 4928 / RFC 5462 / RFC 5586 (MPLS) Coverage
     //
     // | RFC Section | Description                        | Test                                |
     // |-------------|------------------------------------|-------------------------------------|
