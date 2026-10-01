@@ -1236,7 +1236,6 @@ fn parse_extended_is_reach_fields<'pkt>(
 /// TLV 135: Extended IP Reachability — RFC 5305, Section 4 —
 /// <https://www.rfc-editor.org/rfc/rfc5305#section-4>.
 ///
-/// RFC 5305, Section 4.1 — <https://www.rfc-editor.org/rfc/rfc5305#section-4.1>
 /// Control octet: "1 bit of up/down information", "1 bit indicating the
 /// presence of sub-TLVs", "6 bits of prefix length".
 fn parse_extended_ip_reach_fields<'pkt>(
@@ -2587,6 +2586,7 @@ mod tests {
     // | RFC 9352 §7.1              | Loc-Size range, trailing bits  | parse_tlv_27_loc_size_rules            |
     // | RFC 5305 §4                | Trailing prefix bits ignored   | parse_tlv_135_masks_trailing_prefix_bits |
     // | RFC 1195 §5, ISO 10589     | TLV 128 / 9 shorter than entry | short_entry_tlvs_are_raw_only          |
+    // | RFC 9352 §7.2, §8          | SRv6 SID leftovers in one raw  | sub_tlv::tests::srv6_sid_leftovers_are_one_raw_field |
 
     /// Helper: build a minimal L1 LAN IIH PDU (27 bytes header + TLVs).
     fn build_l1_lan_iih(tlvs: &[u8]) -> Vec<u8> {
