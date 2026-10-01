@@ -59,6 +59,40 @@ struct TmpRemapContext {
 
 /// A registry that manages protocol dissectors and dispatches packet
 /// dissection through a chain of dissectors.
+///
+/// # Cross-packet state
+///
+/// Some dissections depend on packets dissected earlier with the same
+/// registry: TCP stream IDs and TCP reassembly, the HTTP/2 HPACK dynamic
+/// table, the NetFlow v9 / IPFIX Template caches, and IP fragment
+/// reassembly (feature `ip-reassembly`, full dissection only).
+/// [`DissectBuffer::used_cross_packet_state`] reports whether a `dissect*`
+/// call into the buffer read or updated such state, also when it returned
+/// an error. The flag is reset only by [`DissectBuffer::clear`] (or
+/// [`clear_into`](DissectBuffer::clear_into)), so clear the buffer before
+/// each packet to read it per packet.
+///
+/// A caller that splits one capture across threads (one registry each) can
+/// dissect optimistically and keep every result whose flag is clear; from
+/// the first flagged packet on, the packets must be dissected in order with
+/// a single registry to get the same results as a sequential run.
+///
+/// ```
+/// use packet_dissector::packet::DissectBuffer;
+/// use packet_dissector::registry::DissectorRegistry;
+///
+/// let registry = DissectorRegistry::default();
+/// let mut buf = DissectBuffer::new();
+/// let arp: &[u8] = &[
+///     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+///     0x08, 0x06, // EtherType ARP
+///     0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01,
+///     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0xc0, 0x00, 0x02, 0x01,
+///     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x02, 0x02,
+/// ];
+/// registry.dissect(arp, &mut buf).unwrap();
+/// assert!(!buf.used_cross_packet_state());
+/// ```
 pub struct DissectorRegistry {
     entry: Option<Box<dyn Dissector>>,
     by_ethertype: HashMap<u16, Box<dyn Dissector>>,
@@ -1469,7 +1503,7 @@ impl DissectorRegistry {
                 let mut tmp_buf = DissectBuffer::new();
                 tmp_buf.set_verify_checksums(buf.verify_checksums());
                 let mut inner_stop = no_stop;
-                self.dispatch_loop(
+                let inner = self.dispatch_loop(
                     &padded,
                     &mut tmp_buf,
                     virtual_start,
@@ -1477,7 +1511,15 @@ impl DissectorRegistry {
                     decrypted.next,
                     &mut inner_stop,
                     full,
-                )?;
+                );
+                // Reported whether or not the inner chain failed (its layers
+                // are then dropped). The IP and TCP reassembly middleware
+                // mark `buf` themselves before dissecting into a temporary
+                // buffer.
+                if tmp_buf.used_cross_packet_state() {
+                    buf.mark_cross_packet_state();
+                }
+                inner?;
 
                 // Merge tmp_buf into the main buf. Layers are cheap to copy.
                 // Fields may borrow from `padded`, so we remap Bytes/Str
@@ -2238,6 +2280,12 @@ impl Dissector for HttpDispatcher {
         offset: usize,
         stream: &packet_dissector_core::dissector::TcpStreamContext,
     ) -> Result<packet_dissector_core::dissector::DissectResult, PacketError> {
+        #[cfg(feature = "http2")]
+        {
+            // The version depends on whether earlier segments opened an
+            // HTTP/2 connection.
+            buf.mark_cross_packet_state();
+        }
         #[cfg(feature = "http2")]
         if self.is_http2_stream(data, stream) {
             return self.http2.dissect_tcp_stream(data, buf, offset, stream);
@@ -6273,5 +6321,31 @@ mod tests {
             reg.get_by_content_type("text/html").map(|d| d.short_name()),
             Some("html")
         );
+    }
+
+    // --- cross-packet state ---
+
+    /// The HTTP dispatcher picks HTTP/1.1 or HTTP/2 for a stream message by
+    /// whether the HTTP/2 dissector tracks the connection, so even an
+    /// HTTP/1.1 message reports that it used cross-packet state.
+    #[cfg(all(feature = "http", feature = "http2"))]
+    #[test]
+    fn http_dispatcher_stream_messages_mark_cross_packet_state() {
+        use packet_dissector_core::dissector::TcpStreamContext;
+
+        let dispatcher = HttpDispatcher::new();
+        let ctx = TcpStreamContext::new(([1; 16], [2; 16], 50000, 80), 0, 0, 0);
+        let request = b"GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        let mut buf = DissectBuffer::new();
+        dispatcher
+            .dissect_tcp_stream(request, &mut buf, 0, &ctx)
+            .unwrap();
+        assert_eq!(buf.layers()[0].name, "HTTP");
+        assert!(buf.used_cross_packet_state());
+
+        // Without a stream context the dispatcher only looks at the bytes.
+        let mut buf = DissectBuffer::new();
+        dispatcher.dissect(request, &mut buf, 0).unwrap();
+        assert!(!buf.used_cross_packet_state());
     }
 }

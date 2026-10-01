@@ -339,6 +339,8 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'pkt>,
         offset: usize,
     ) -> Result<(), PacketError> {
+        // Every segment reads or updates the per-direction stream state.
+        buf.mark_cross_packet_state();
         if ctx.is_syn() {
             // Everything known about the direction belongs to an earlier
             // connection. The emptiness checks skip hashing the key in the

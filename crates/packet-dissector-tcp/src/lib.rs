@@ -319,6 +319,10 @@ struct StreamIdState {
 /// when a 4-tuple is first seen and reused for subsequent packets on the
 /// same connection. A SYN (without ACK) carrying a different ISN than the
 /// connection's recorded SYN starts a new connection and a new stream ID.
+///
+/// Every segment whose 4-tuple is known (an IPv4 or IPv6 layer precedes it
+/// in the buffer) reads or updates this mapping, so dissecting it calls
+/// [`DissectBuffer::mark_cross_packet_state`].
 pub struct TcpDissector {
     /// Mapping from 4-tuple to assigned stream ID with eviction order.
     streams: Mutex<StreamIdState>,
@@ -575,6 +579,8 @@ impl Dissector for TcpDissector {
                 (flags & (FLAG_SYN | FLAG_ACK) == FLAG_SYN).then_some((canonical == key, seq));
             let from_first = usize::from(canonical == key);
             let is_syn = flags & FLAG_SYN != 0;
+            // The ID depends on the connections seen in earlier segments.
+            buf.mark_cross_packet_state();
             let mut state = self.streams.lock().unwrap_or_else(|e| e.into_inner());
 
             let (sid, isn) = match state.map.get_mut(&canonical) {
