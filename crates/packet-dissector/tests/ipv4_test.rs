@@ -45,6 +45,8 @@
 //! | 4782 §3.1      | Quick-Start Report of Approved Rate | parse_ipv4_option_quick_start_report |
 //! | 791 §3.1       | Unknown option keeps raw value  | parse_ipv4_option_unknown           |
 //! | 791 §3.1       | Timestamp with undefined flag   | parse_ipv4_option_timestamp_undefined_flag |
+//! | 791 §3.1       | Route data with a partial address (RR/LSRR/SSRR) | parse_ipv4_option_record_route_partial_address |
+//! | 791 §3.1       | Timestamp area with a partial entry (flag 0/1/3) | parse_ipv4_option_timestamp_partial_entry |
 //! | IANA registry  | Option names                    | parse_ipv4_option_names             |
 //! | 791 §3.1       | Option length past header       | parse_ipv4_option_length_past_end   |
 //! | 791 §3.1       | Option length < 2               | parse_ipv4_option_length_too_small  |
@@ -955,6 +957,79 @@ fn parse_ipv4_option_timestamp_undefined_flag() {
     assert_eq!(child(opt, "flag"), Some(&FieldValue::U8(2)));
     assert_eq!(child(opt, "entries"), None);
     assert_eq!(child(opt, "value"), Some(&FieldValue::Bytes(&[1, 2, 3, 4])));
+}
+
+#[test]
+fn parse_ipv4_option_record_route_partial_address() {
+    // RFC 791, Section 3.1 — "A route data is composed of a series of
+    // internet addresses. Each internet address is 32 bits or 4 octets."
+    // <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
+    // Length 8 leaves 5 octets of route data: the whole address is decoded
+    // and the fifth octet is reported as malformed instead of dropped.
+    for opt_type in [0x07u8, 0x83, 0x89] {
+        let pkt = build_ipv4_with_options(&[opt_type, 0x08, 0x04, 10, 0, 0, 1, 0xAA]);
+        let (buf, options) = dissect_options(&pkt);
+        let opts = option_objects(&buf, &options);
+        let (range, opt) = &opts[0];
+        assert_eq!(*range, 20..28);
+        assert_eq!(child(opt, "pointer"), Some(&FieldValue::U8(4)));
+        assert_eq!(
+            array_values(&buf, opt, "route"),
+            vec![&FieldValue::Ipv4Addr([10, 0, 0, 1])]
+        );
+        let malformed = opt.iter().find(|f| f.name() == "malformed").unwrap();
+        assert_eq!(malformed.value, FieldValue::Bytes(&[0xAA]));
+        assert_eq!(malformed.range, 27..28);
+    }
+
+    // Length 5 leaves 2 octets: no whole address, both octets malformed.
+    let pkt = build_ipv4_with_options(&[0x07, 0x05, 0x04, 0xAB, 0xCD]);
+    let (buf, options) = dissect_options(&pkt);
+    let opts = option_objects(&buf, &options);
+    let (_, opt) = &opts[0];
+    assert!(array_values(&buf, opt, "route").is_empty());
+    let malformed = opt.iter().find(|f| f.name() == "malformed").unwrap();
+    assert_eq!(malformed.value, FieldValue::Bytes(&[0xAB, 0xCD]));
+    assert_eq!(malformed.range, 23..25);
+}
+
+#[test]
+fn parse_ipv4_option_timestamp_partial_entry() {
+    // RFC 791, Section 3.1 — with flags 1 and 3 each timestamp is preceded
+    // by an internet address, so entries are 8 octets, and "The Option
+    // Length is the number of octets in the option counting the type,
+    // length, pointer, and overflow/flag octets (maximum length 40)".
+    // <https://www.rfc-editor.org/rfc/rfc791#section-3.1>
+    // Length 40 leaves a 36-octet area: four whole entries are decoded and
+    // the last 4 octets are kept as `value` instead of being dropped.
+    for flag in [0x01u8, 0x03] {
+        let mut opt = vec![0x44, 0x28, 0x05, flag];
+        for i in 1..=4u8 {
+            opt.extend_from_slice(&[192, 0, 2, i, 0, 0, 0, i]);
+        }
+        opt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let pkt = build_ipv4_with_options(&opt);
+        let (buf, options) = dissect_options(&pkt);
+        let opts = option_objects(&buf, &options);
+        let (_, fields) = &opts[0];
+        assert_eq!(child(fields, "flag"), Some(&FieldValue::U8(flag)));
+        assert_eq!(array_values(&buf, fields, "entries").len(), 4);
+        let value = fields.iter().find(|f| f.name() == "value").unwrap();
+        assert_eq!(value.value, FieldValue::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(value.range, 56..60);
+    }
+
+    // Flag 0 (4-octet entries): the longest area holds exactly nine entries,
+    // so the 2 octets after the entry in a 6-octet area are malformed.
+    let pkt = build_ipv4_with_options(&[0x44, 0x0A, 0x05, 0x00, 0, 0, 0, 1, 0xAB, 0xCD]);
+    let (buf, options) = dissect_options(&pkt);
+    let opts = option_objects(&buf, &options);
+    let (_, fields) = &opts[0];
+    assert_eq!(array_values(&buf, fields, "entries").len(), 1);
+    assert_eq!(child(fields, "value"), None);
+    let malformed = fields.iter().find(|f| f.name() == "malformed").unwrap();
+    assert_eq!(malformed.value, FieldValue::Bytes(&[0xAB, 0xCD]));
+    assert_eq!(malformed.range, 28..30);
 }
 
 #[test]
