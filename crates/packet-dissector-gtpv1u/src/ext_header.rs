@@ -559,8 +559,22 @@ fn push_ul_pdu_session_information(w: &mut Writer<'_, '_>) {
     } else {
         0
     };
+    // TS 38.415, Annex A.1.1 — "The last bit position of the New IE Flags
+    // IE is used as the Extension Flag to allow the extension of the New IE
+    // Flags IE in the future. Extension octets of the New IE Flags IE shall
+    // follow directly after the first octet of the New IE Flags IE."
+    let mut ext_octets = 0;
+    let mut e = new_ie_flags >> 7;
+    while e == 1 {
+        match c.get(flags_at + 1 + ext_octets) {
+            Some(&f) => e = f >> 7,
+            None => return,
+        }
+        ext_octets += 1;
+    }
     let need = flags_at
         + usize::from(new_ie_flag)
+        + ext_octets
         + usize::from(new_ie_flags & 1)
         + usize::from((new_ie_flags >> 1) & 1) * 2
         + usize::from((new_ie_flags >> 2) & 1) * 2
@@ -614,6 +628,9 @@ fn push_ul_pdu_session_information(w: &mut Writer<'_, '_>) {
     }
     if new_ie_flag == 1 {
         w.u8(&EXT_HEADER_FIELD_DESCRIPTORS[FX_NEW_IE_FLAGS]);
+        // Flags of the extension octets name no IE this decoder knows; they
+        // stay in the raw content.
+        w.pos += ext_octets;
         // Bit 0: D1 UL PDCP Delay Result Ind octet
         if new_ie_flags & 0x01 != 0 {
             let at = w.pos;

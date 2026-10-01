@@ -424,10 +424,14 @@ pub(crate) fn outer_header_creation<'pkt>(
         return FieldValue::Bytes(data);
     };
     let bit = |b: u8| o5 & (1 << (b - 1)) != 0;
-    let teid = bit(1) || bit(2);
-    let ipv4 = bit(1) || bit(3) || bit(5);
-    let ipv6 = bit(2) || bit(4) || bit(6);
-    let port = bit(3) || bit(4);
+    // Table 8.2.56-1, NOTE 7 — "When the "Low Layer SSM and C-TEID" bit in
+    // the Outer Header Creation Description field is set to "1", ... the
+    // TEID, IPv4/IPv6 address and Port Number fields shall not be present."
+    let addressed = data.get(1).is_none_or(|o6| o6 & 0x04 == 0);
+    let teid = addressed && (bit(1) || bit(2));
+    let ipv4 = addressed && (bit(1) || bit(3) || bit(5));
+    let ipv6 = addressed && (bit(2) || bit(4) || bit(6));
+    let port = addressed && (bit(3) || bit(4));
     let need = 2
         + usize::from(teid) * 4
         + usize::from(ipv4) * 4
@@ -1243,6 +1247,7 @@ mod tests {
     // | 8.2.45   | Duration Measurement                      | time_threshold_and_duration           |
     // | 8.2.56   | Outer Header Creation (GTP-U/UDP/IPv4)    | outer_header_creation_gtpu_ipv4       |
     // | 8.2.56   | Outer Header Creation (other headers)     | outer_header_creation_other_headers   |
+    // | 8.2.56   | Outer Header Creation (NOTE 7, C-TEID)    | outer_header_creation_low_layer_ssm   |
     // | 8.2.58   | CP Function Features                      | cp_function_features_flags            |
     // | 8.2.79   | PDN Type                                  | pdn_type_and_interface_type           |
     // | 8.2.89   | QFI                                       | qfi                                   |
@@ -1345,6 +1350,21 @@ mod tests {
             *val(&buf, "ipv4_address"),
             FieldValue::Ipv4Addr([10, 0, 0, 1])
         );
+    }
+
+    #[test]
+    fn outer_header_creation_low_layer_ssm() {
+        // Table 8.2.56-1, NOTE 7 — with "Low Layer SSM and C-TEID" set, "the
+        // TEID, IPv4/IPv6 address and Port Number fields shall not be
+        // present". GTP-U/UDP/IPv4 + 6/3, then a C-TAG (VID 0x123).
+        let data = [0x41, 0x04, 0x04, 0x10, 0x23];
+        let (_, buf) = parse(84, &data);
+        assert_eq!(*val(&buf, "gtpu_udp_ipv4"), FieldValue::U8(1));
+        assert_eq!(*val(&buf, "low_layer_ssm_c_teid"), FieldValue::U8(1));
+        assert!(!has(&buf, "teid"));
+        assert!(!has(&buf, "ipv4_address"));
+        assert_eq!(*val(&buf, "c_tag_vid"), FieldValue::U16(0x123));
+        assert!(!has(&buf, "additional_octets"));
     }
 
     #[test]
