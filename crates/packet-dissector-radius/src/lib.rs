@@ -505,7 +505,9 @@ const fn extended_header_len(attr_type: Option<RadiusAttrType>) -> Option<usize>
 /// (245-246) attribute value. `header` comes from [`extended_header_len`]
 /// and the caller guarantees `data.len() > header`, i.e. RFC 6929,
 /// Section 2.1 — "Permitted values are between 4 and 255" and Section 2.2
-/// — "Permitted values are between 5 and 255".
+/// — "Permitted values are between 5 and 255". `continuation` is set when
+/// the attribute is a later fragment of a Long Extended Type value (see
+/// [`LongExtendedFragments`]).
 ///
 /// RFC 6929, Sections 2.1, 2.2 and 2.4 —
 /// <https://www.rfc-editor.org/rfc/rfc6929#section-2>
@@ -515,6 +517,7 @@ fn push_extended<'pkt>(
     header: usize,
     data: &'pkt [u8],
     start: usize,
+    continuation: bool,
 ) {
     let ext_type = data[0];
     buf.push_field(
@@ -539,9 +542,11 @@ fn push_extended<'pkt>(
     let value_start = start + header;
 
     // RFC 6929, Section 2.4 — Extended-Vendor-Specific: Vendor-Id (4) +
-    // Vendor-Type (1) + Value.
+    // Vendor-Type (1) + Value. "The EVS-Value field is one or more
+    // octets." Only the first fragment of a Long Extended Type value
+    // carries the Vendor-Id and EVS-Type.
     // <https://www.rfc-editor.org/rfc/rfc6929#section-2.4>
-    if ext_type == EXTENDED_TYPE_EVS && value.len() >= 5 {
+    if ext_type == EXTENDED_TYPE_EVS && !continuation && value.len() >= EVS_MIN_LEN {
         buf.push_field(
             &ATTR_CHILD_FIELDS[AFD_VENDOR_ID],
             FieldValue::U32(read_be_u32(value, 0).unwrap_or_default()),
@@ -562,9 +567,9 @@ fn push_extended<'pkt>(
 
     // RFC 6929, Section 2.2 — "Any interpretation of the resulting data
     // MUST occur after the fragments have been reassembled." A fragment
-    // (M set) is therefore left raw.
+    // (M set, or a later fragment of a value) is therefore left raw.
     // <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
-    let attr_type = if more {
+    let attr_type = if more || continuation {
         None
     } else {
         lookup_extended_attr(code, ext_type).map(|d| d.attr_type)
@@ -576,6 +581,48 @@ fn push_extended<'pkt>(
         value,
         value_start,
     );
+}
+
+/// Minimum EVS data length: Vendor-Id (4) + EVS-Type (1) + at least one
+/// EVS-Value octet.
+///
+/// RFC 6929, Section 2.4 — "The EVS-Value field is one or more octets."
+/// <https://www.rfc-editor.org/rfc/rfc6929#section-2.4>
+const EVS_MIN_LEN: usize = 6;
+
+/// Tracks Long Extended Type (245, 246) values whose previous fragment had
+/// the More flag set, so that later fragments are recognised.
+///
+/// RFC 6929, Section 2.2 — "When the More field is set (1), the Attribute
+/// MUST have a Length field of value 255, there MUST be an attribute
+/// following this one, and the next attribute MUST have both the same Type
+/// and "Extended Type"." and "Implementations MUST be able to process
+/// non-contiguous fragments -- that is, fragments that are mixed together
+/// with other attributes of a different Type."
+/// <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
+#[derive(Default)]
+struct LongExtendedFragments {
+    /// One bit per Extended-Type for each Long Extended Type attribute
+    /// (index 0 for 246, 1 for 245), set while a value is pending.
+    pending: [[u128; 2]; 2],
+}
+
+impl LongExtendedFragments {
+    /// Record a Long Extended Type attribute (`data` is its Value, holding
+    /// at least the Extended-Type and flags octets) and return whether it
+    /// continues a value whose previous fragment had the More flag set.
+    fn update(&mut self, code: u8, data: &[u8]) -> bool {
+        let ext_type = data[0];
+        let word = &mut self.pending[usize::from(code & 1)][usize::from(ext_type >> 7)];
+        let bit = 1u128 << (ext_type & 0x7F);
+        let continuation = *word & bit != 0;
+        if data[1] & 0x80 != 0 {
+            *word |= bit;
+        } else {
+            *word &= !bit;
+        }
+        continuation
+    }
 }
 
 /// Returns `true` when `data` is a non-empty sequence of RFC 2865
@@ -674,6 +721,7 @@ fn push_vendor_attributes<'pkt>(
 fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_offset: usize) {
     #[cfg(feature = "eap")]
     let single_eap_message = count_attrs(attr_data, ATTR_EAP_MESSAGE) == 1;
+    let mut fragments = LongExtendedFragments::default();
     let mut pos = 0;
 
     while pos + MIN_ATTR_SIZE <= attr_data.len() {
@@ -743,7 +791,15 @@ fn parse_attrs<'pkt>(buf: &mut DissectBuffer<'pkt>, attr_data: &'pkt [u8], buf_o
             );
             push_vendor_attributes(buf, vendor_id, vdata, abs + 6);
         } else if let Some(header) = ext_header {
-            push_extended(buf, attr_type_code, header, value_data, value_start);
+            let continuation = header == 2 && fragments.update(attr_type_code, value_data);
+            push_extended(
+                buf,
+                attr_type_code,
+                header,
+                value_data,
+                value_start,
+                continuation,
+            );
         } else if !attr_type.is_some_and(|t| push_structured(buf, t, value_data, value_start)) {
             push_value(
                 buf,
@@ -1043,6 +1099,11 @@ mod tests {
     // | 6929 § 2.1    | Extended-Type (241.1 Frag-Status)    | test_extended_type_attribute           |
     // | 6929 § 2.2    | Long-Extended-Type with M flag       | test_long_extended_type_more_flag      |
     // | 6929 § 2.4    | Extended-Vendor-Specific             | test_extended_vendor_specific          |
+    // | 6929 § 2.2    | Last fragment (M clear) stays raw    | test_long_extended_last_fragment_not_interpreted |
+    // | 6929 § 2.2    | Non-contiguous fragments             | test_long_extended_non_contiguous_fragments |
+    // | 6929 § 2.2    | Fragments tracked per Extended-Type  | test_long_extended_fragments_tracked_per_extended_type |
+    // | 6929 § 2.4    | EVS continuation fragment not split  | test_long_extended_evs_continuation_not_split |
+    // | 6929 § 2.4    | EVS with empty EVS-Value: raw        | test_extended_vendor_specific_empty_value_is_raw |
     // | 6929 § 2.1    | Extended-Type too short: raw         | test_extended_type_too_short           |
     // | 6929 § 2.1    | Unknown Extended-Type                | test_extended_type_unknown             |
     // | 7930 § 4      | Protocol-Error / Original-Packet-Code | test_extended_original_packet_code    |
@@ -1573,11 +1634,7 @@ mod tests {
 
     /// Dissect a packet carrying a single attribute and return the buffer.
     fn dissect_single_attr(attr_type: u8, value: &[u8]) -> DissectBuffer<'static> {
-        let data = build_radius(4, 1, &auth(), &build_attr(attr_type, value));
-        let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
-        let mut buf = DissectBuffer::new();
-        RadiusDissector.dissect(leaked, &mut buf, 0).unwrap();
-        buf
+        dissect_attrs(&[build_attr(attr_type, value)])
     }
 
     /// Return the first attribute Object range of `buf`.
@@ -2171,6 +2228,124 @@ mod tests {
         let buf = dissect_single_attr(241, &[26, 0, 0, 0x28]);
         let obj = first_attr(&buf);
         assert!(!has_field(&buf, &obj, "vendor_id"));
+    }
+
+    /// Dissect a packet carrying the given raw attributes.
+    fn dissect_attrs(attrs: &[Vec<u8>]) -> DissectBuffer<'static> {
+        let data = build_radius(4, 1, &auth(), &attrs.concat());
+        let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+        let mut buf = DissectBuffer::new();
+        RadiusDissector.dissect(leaked, &mut buf, 0).unwrap();
+        buf
+    }
+
+    /// RFC 6929, Section 2.2 — "Any interpretation of the resulting data
+    /// MUST occur after the fragments have been reassembled." The last
+    /// fragment (M clear) of a fragmented value is not a complete value.
+    /// <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
+    #[test]
+    fn test_long_extended_last_fragment_not_interpreted() {
+        let buf = dissect_attrs(&[
+            build_attr(245, &[0x01, 0x80, b'<', b'a']),
+            build_attr(245, &[0x01, 0x00, b'/', b'>']),
+        ]);
+        let array = attrs_array_range(&buf);
+        let last = nth_object_range(&buf, &array, 1);
+        assert_eq!(*obj_field_value(&buf, &last, "more"), FieldValue::U8(0));
+        assert_eq!(
+            *obj_field_value(&buf, &last, "value"),
+            FieldValue::Bytes(b"/>")
+        );
+    }
+
+    /// RFC 6929, Section 2.2 — fragments may be "mixed together with other
+    /// attributes of a different Type", so a fragment is recognised even
+    /// when another attribute sits between it and the previous fragment.
+    /// A later attribute of the same Type.Extended-Type after the last
+    /// fragment is a new, complete value.
+    /// <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
+    #[test]
+    fn test_long_extended_non_contiguous_fragments() {
+        let buf = dissect_attrs(&[
+            build_attr(245, &[0x01, 0x80, b'<', b'a']),
+            build_attr(1, b"bob"),
+            build_attr(245, &[0x01, 0x00, b'/', b'>']),
+            build_attr(245, &[0x01, 0x00, b'<', b'b', b'>']),
+        ]);
+        let array = attrs_array_range(&buf);
+        let last_fragment = nth_object_range(&buf, &array, 2);
+        assert_eq!(
+            *obj_field_value(&buf, &last_fragment, "value"),
+            FieldValue::Bytes(b"/>")
+        );
+        let complete = nth_object_range(&buf, &array, 3);
+        assert_eq!(
+            *obj_field_value(&buf, &complete, "value"),
+            FieldValue::Str("<b>")
+        );
+    }
+
+    /// RFC 6929, Section 2.2 — fragments of one Type.Extended-Type are
+    /// tracked separately from other Extended-Types of the same Type, for
+    /// both Long Extended Type attributes (245 and 246).
+    /// <https://www.rfc-editor.org/rfc/rfc6929#section-2.2>
+    #[test]
+    fn test_long_extended_fragments_tracked_per_extended_type() {
+        for code in [245, 246] {
+            let buf = dissect_attrs(&[
+                build_attr(code, &[0x01, 0x80, b'<', b'a']),
+                build_attr(code, &[0x02, 0x80, 0xaa]),
+                build_attr(code, &[0x02, 0x00, 0xbb]),
+                build_attr(code, &[0x01, 0x00, b'/', b'>']),
+            ]);
+            let array = attrs_array_range(&buf);
+            let last = nth_object_range(&buf, &array, 3);
+            assert_eq!(
+                *obj_field_value(&buf, &last, "value"),
+                FieldValue::Bytes(b"/>"),
+                "type {code}"
+            );
+        }
+    }
+
+    /// RFC 6929, Section 2.4 — the Vendor-Id and EVS-Type are only in the
+    /// first fragment; later fragments carry data only and must not be
+    /// split into Vendor-Id / Vendor-Type.
+    /// <https://www.rfc-editor.org/rfc/rfc6929#section-2.4>
+    #[test]
+    fn test_long_extended_evs_continuation_not_split() {
+        let buf = dissect_attrs(&[
+            build_attr(245, &[26, 0x80, 0, 0, 0x28, 0xaf, 0x05, 0xde]),
+            build_attr(245, &[26, 0x00, 0, 0, 0x01, 0x37, 0x09, 0x01]),
+        ]);
+        let array = attrs_array_range(&buf);
+        let first = nth_object_range(&buf, &array, 0);
+        assert_eq!(
+            *obj_field_value(&buf, &first, "vendor_id"),
+            FieldValue::U32(10415)
+        );
+        let last = nth_object_range(&buf, &array, 1);
+        assert!(!has_field(&buf, &last, "vendor_id"));
+        assert!(!has_field(&buf, &last, "vendor_type"));
+        assert_eq!(
+            *obj_field_value(&buf, &last, "value"),
+            FieldValue::Bytes(&[0, 0, 0x01, 0x37, 0x09, 0x01])
+        );
+    }
+
+    /// RFC 6929, Section 2.4 — "The EVS-Value field is one or more octets."
+    /// An EVS with Vendor-Id and EVS-Type but no EVS-Value is invalid and
+    /// stays raw.
+    /// <https://www.rfc-editor.org/rfc/rfc6929#section-2.4>
+    #[test]
+    fn test_extended_vendor_specific_empty_value_is_raw() {
+        let buf = dissect_single_attr(241, &[26, 0, 0, 0x28, 0xaf, 0x05]);
+        let obj = first_attr(&buf);
+        assert!(!has_field(&buf, &obj, "vendor_id"));
+        assert_eq!(
+            *obj_field_value(&buf, &obj, "value"),
+            FieldValue::Bytes(&[0, 0, 0x28, 0xaf, 0x05])
+        );
     }
 
     /// Return the `vendor_attributes` Array range of the first attribute.
