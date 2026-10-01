@@ -1321,6 +1321,11 @@ impl Dissector for BmpDissector {
         Some(ProtocolLayer::Application)
     }
 
+    /// BGP: encapsulated BGP messages are appended as `BGP` layers.
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&BgpDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -2328,5 +2333,12 @@ mod tests {
         assert_eq!(BmpDissector.layer(), Some(ProtocolLayer::Application));
         assert_eq!(BmpDissector.references()[0].id, "RFC 7854");
         assert_eq!(BmpDissector.field_descriptors().len(), FD_DATA + 1);
+    }
+
+    #[test]
+    fn visit_sub_dissectors_lists_embedded_layers() {
+        let mut names = Vec::new();
+        BmpDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+        assert_eq!(names, ["BGP"]);
     }
 }

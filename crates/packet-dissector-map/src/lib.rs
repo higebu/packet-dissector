@@ -902,6 +902,12 @@ impl Dissector for MapDissector {
         Some(ProtocolLayer::Application)
     }
 
+    /// TCAP: the TCAP message carrying the MAP components is pushed as its
+    /// own layer.
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&TcapDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],

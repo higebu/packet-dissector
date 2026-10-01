@@ -256,6 +256,8 @@
 //! | Ethernet → IPv4 → UDP (853) → DTLS reject → QUIC fallback    | integration_ethernet_ipv4_udp_853_dtls_reject_falls_back_to_quic |
 //! | Ethernet → IPv4 → UDP (3478) → DTLS reject → STUN fallback   | integration_ethernet_ipv4_udp_stun_port_dtls_reject_falls_back_to_stun |
 
+mod common;
+
 use packet_dissector::checksum::{ChecksumStatus, crc32c, internet_checksum};
 use packet_dissector::dissector::{
     DispatchHint, DissectResult, Dissector, DissectorPlugin, DissectorTable,
@@ -320,8 +322,10 @@ fn direct_children<'a, 'pkt>(
     result
 }
 
-/// Assert that all layers in the packet have contiguous, non-empty byte ranges.
+/// Assert that all layers in the packet have contiguous, non-empty byte ranges,
+/// and that each is listed with fields by `all_field_schemas()`.
 fn assert_layers_contiguous(buf: &DissectBuffer<'_>) {
+    common::assert_layers_have_schema(buf);
     let mut expected_start = 0;
     for layer in buf.layers() {
         assert_eq!(

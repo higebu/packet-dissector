@@ -144,6 +144,12 @@ impl Dissector for S1apDissector {
         Some(ProtocolLayer::Application)
     }
 
+    /// NAS-EPS: a NAS-PDU IE is pushed as a `NAS-EPS` layer (3GPP TS
+    /// 36.413, Section 9.2.3.5).
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&packet_dissector_nas_eps::NasEpsDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],

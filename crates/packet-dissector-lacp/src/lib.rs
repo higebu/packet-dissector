@@ -776,6 +776,15 @@ impl Dissector for SlowProtocolsDissector {
         Some(ProtocolLayer::Link)
     }
 
+    /// The subtype-specific dissectors this dispatcher delegates to.
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&LacpDissector);
+        visit(&MarkerDissector);
+        visit(&OamDissector);
+        visit(&OsspDissector);
+        visit(&EsmcDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -1628,5 +1637,12 @@ mod tests {
             assert!(r.url.starts_with("https://"));
         }
         assert_eq!(dissector.layer(), Some(ProtocolLayer::Link));
+    }
+
+    #[test]
+    fn visit_sub_dissectors_lists_embedded_layers() {
+        let mut names = Vec::new();
+        SlowProtocolsDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+        assert_eq!(names, ["LACP", "Marker", "OAM", "OSSP", "ESMC"]);
     }
 }

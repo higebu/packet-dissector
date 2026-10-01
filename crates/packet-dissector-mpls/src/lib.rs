@@ -782,6 +782,14 @@ impl Dissector for MplsDissector {
         Some(ProtocolLayer::Network)
     }
 
+    /// ACH and PW control word, which follow the label stack (RFC 5586,
+    /// Section 2.1 — <https://www.rfc-editor.org/rfc/rfc5586#section-2.1>;
+    /// RFC 4385, Section 3 — <https://www.rfc-editor.org/rfc/rfc4385#section-3>).
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&AchDissector);
+        visit(&PwControlWordDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -2115,5 +2123,12 @@ mod tests {
         assert_eq!(AchDissector.field_descriptors().len(), 3);
         assert_eq!(PwControlWordDissector.short_name(), "PW-CW");
         assert_eq!(PwControlWordDissector.field_descriptors().len(), 5);
+    }
+
+    #[test]
+    fn visit_sub_dissectors_lists_embedded_layers() {
+        let mut names = Vec::new();
+        MplsDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+        assert_eq!(names, ["ACH", "PW-CW"]);
     }
 }

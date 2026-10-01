@@ -1031,3 +1031,10 @@ fn metadata() {
     assert_eq!(d.references().len(), 2);
     assert!(d.field_descriptors().iter().any(|f| f.name == "ies"));
 }
+
+#[test]
+fn visit_sub_dissectors_lists_embedded_layers() {
+    let mut names = Vec::new();
+    S1apDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+    assert_eq!(names, ["NAS-EPS"]);
+}

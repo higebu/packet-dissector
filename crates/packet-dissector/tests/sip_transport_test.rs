@@ -8,6 +8,8 @@
 //! | RFC 5626 4.4.1   | TCP: single-CRLF pong                                  | sip_tcp_crlf_pong                           |
 //! | RFC 3261 7.3     | UDP: more than 64 header fields                        | sip_udp_many_headers                        |
 
+mod common;
+
 use packet_dissector::field::FieldValue;
 use packet_dissector::packet::DissectBuffer;
 use packet_dissector::registry::DissectorRegistry;
@@ -49,8 +51,10 @@ fn tcp_to_5060(seq: u32, payload: &[u8]) -> Vec<u8> {
     pkt
 }
 
-/// Assert that all layers have contiguous, non-empty byte ranges.
+/// Assert that all layers have contiguous, non-empty byte ranges,
+/// and that each is listed with fields by `all_field_schemas()`.
 fn assert_layers_contiguous(buf: &DissectBuffer<'_>) {
+    common::assert_layers_have_schema(buf);
     let mut expected_start = 0;
     for layer in buf.layers() {
         assert_eq!(layer.range.start, expected_start, "layer {}", layer.name);

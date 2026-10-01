@@ -12,6 +12,8 @@
 //! | 9112 7.1      | Chunked body reassembled across segments           | http_chunked_across_segments           |
 //! | 9112 6.3 r1   | 204 followed by a pipelined response               | http_204_then_pipelined_response       |
 
+mod common;
+
 use packet_dissector::packet::DissectBuffer;
 use packet_dissector::registry::DissectorRegistry;
 
@@ -35,8 +37,10 @@ fn from_server(seq: u32, payload: &[u8]) -> Vec<u8> {
     pkt
 }
 
-/// Assert that all layers have contiguous, non-empty byte ranges.
+/// Assert that all layers have contiguous, non-empty byte ranges,
+/// and that each is listed with fields by `all_field_schemas()`.
 fn assert_layers_contiguous(buf: &DissectBuffer<'_>) {
+    common::assert_layers_have_schema(buf);
     let mut expected_start = 0;
     for layer in buf.layers() {
         assert_eq!(layer.range.start, expected_start, "layer {}", layer.name);

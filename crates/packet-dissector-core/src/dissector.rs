@@ -724,6 +724,22 @@ pub trait Dissector: Send {
     fn release_tcp_stream(&self, stream_key: &TcpStreamKey) {
         let _ = stream_key;
     }
+
+    /// Visit the dissectors whose layers this dissector can produce besides
+    /// its own.
+    ///
+    /// A dissector that delegates to other dissectors (a version
+    /// dispatcher, for example) or that pushes the layers of another
+    /// protocol itself (an embedded message, for example) calls `visit` once
+    /// for each of them, so that metadata listings such as
+    /// `DissectorRegistry::all_field_schemas` cover layers that no dispatch
+    /// table names. The visited dissectors are walked in turn.
+    ///
+    /// Metadata only: dissection never calls this method. The default
+    /// implementation visits nothing.
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        let _ = visit;
+    }
 }
 
 #[cfg(test)]
@@ -827,6 +843,13 @@ mod tests {
         assert_eq!(result, Ok(DissectResult::new(0, DispatchHint::End)));
         // The default release hook has nothing to release.
         dissector.release_tcp_stream(&ctx.stream_key);
+    }
+
+    #[test]
+    fn dissector_defaults_visit_no_sub_dissectors() {
+        let mut visited = 0;
+        DefaultsDissector.visit_sub_dissectors(&mut |_| visited += 1);
+        assert_eq!(visited, 0);
     }
 
     #[test]
