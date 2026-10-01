@@ -1377,16 +1377,16 @@ mod tests {
         // (obs-text) form of a header field value.
         let data = b"HTTP/1.1 200 OK\r\nX-Name: caf\xe9\r\nContent-Length: 0\r\n\r\n";
         let buf = dissect(data).unwrap();
-        for field in buf.fields() {
-            let declared = field.descriptor.field_type;
-            assert!(
-                declared == FieldType::Any || declared == field.value.field_type(),
-                "{} declared {:?}, got {:?}",
-                field.name(),
-                declared,
-                field.value.field_type()
-            );
-        }
+        let mismatched: Vec<_> = buf
+            .fields()
+            .iter()
+            .filter(|f| {
+                let declared = f.descriptor.field_type;
+                declared != FieldType::Any && declared != f.value.field_type()
+            })
+            .map(|f| f.name())
+            .collect();
+        assert!(mismatched.is_empty(), "{mismatched:?}");
     }
 
     fn response_with_headers(n: usize) -> Vec<u8> {
