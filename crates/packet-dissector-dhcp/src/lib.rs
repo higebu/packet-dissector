@@ -729,14 +729,31 @@ static CLIENT_FQDN_CHILDREN: &[FieldDescriptor] = &[
     FieldDescriptor::new("flags", "Flags", FieldType::U8),
     FieldDescriptor::new("rcode1", "RCODE1", FieldType::U8),
     FieldDescriptor::new("rcode2", "RCODE2", FieldType::U8),
-    // RFC 4702, Section 2.3 — canonical wire format (E = 1) or the deprecated
-    // ASCII encoding (E = 0); `format_fqdn_labels` falls back to UTF-8 text
-    // when the bytes are not length-prefixed labels.
+    // RFC 4702, Section 2.3 — canonical wire format (E = 1); a name in the
+    // deprecated ASCII encoding (E = 0) uses [`FD_FQDN_ASCII_DOMAIN_NAME`].
+    // `format_fqdn_labels` falls back to UTF-8 text when the bytes are not
+    // length-prefixed labels.
     // <https://www.rfc-editor.org/rfc/rfc4702#section-2.3>
     FieldDescriptor::new("domain_name", "Domain Name", FieldType::Bytes)
         .optional()
         .with_format_fn(format_fqdn),
 ];
+
+/// The Client FQDN `domain_name` in the deprecated ASCII encoding (E = 0),
+/// formatted as text.
+///
+/// RFC 4702, Section 2.3.1 — "clients that send the Client FQDN option with
+/// the "E" bit set to 0 are using an ASCII encoding of the Domain Name
+/// field."
+/// <https://www.rfc-editor.org/rfc/rfc4702#section-2.3.1>
+static FD_FQDN_ASCII_DOMAIN_NAME: FieldDescriptor =
+    FieldDescriptor::new("domain_name", "Domain Name", FieldType::Bytes)
+        .optional()
+        .with_format_fn(format_text);
+
+/// Client FQDN flag "E" (RFC 4702, Section 2.1 —
+/// <https://www.rfc-editor.org/rfc/rfc4702#section-2.1>).
+const FQDN_FLAG_E: u8 = 0x04;
 
 /// Child field descriptor indices for [`AUTHENTICATION_CHILDREN`].
 const CFD_AUTH_PROTOCOL: usize = 0;
@@ -1960,18 +1977,42 @@ impl<'pkt> SplitMap<'_, 'pkt> {
         }
     }
 
-    /// Absolute range covering virtual range `a..b`.
+    /// Absolute range covering virtual range `a..b`: from the lowest to the
+    /// highest message offset of its octets. A later portion can lie at a
+    /// lower offset (e.g. in `file` after the options field), so the octets
+    /// of every portion that `a..b` touches are considered. An empty range
+    /// is placed at the position of `a`.
     fn range(&self, a: usize, b: usize) -> core::ops::Range<usize> {
-        let start = self.position(a);
-        if b <= a {
+        let mut lo = usize::MAX;
+        let mut hi = 0;
+        let mut cover = |s: usize, e: usize| {
+            lo = lo.min(s);
+            hi = hi.max(e);
+        };
+        // The code and length octets, at virtual offsets 0 and 1.
+        if a < 2 {
+            let first = self.parts.first().map_or(0, |p| p.pos as usize);
+            cover(first + a, first + b.min(2));
+        }
+        // Value octets `a - 2..b - 2`, portion by portion. Only the portions
+        // starting before `vb` and not ending before `va` can overlap.
+        let (va, vb) = (a.saturating_sub(2), b.saturating_sub(2));
+        let first = self.starts.partition_point(|&s| s <= va).saturating_sub(1);
+        let last = self.starts.partition_point(|&s| s < vb);
+        let parts = self.parts.get(first..last).unwrap_or_default();
+        let starts = self.starts.get(first..last).unwrap_or_default();
+        for (part, &s) in parts.iter().zip(starts) {
+            let e = s + part.len as usize;
+            let (from, to) = (va.max(s), vb.min(e));
+            if from < to {
+                let data_pos = part.pos as usize + 2;
+                cover(data_pos + from - s, data_pos + to - s);
+            }
+        }
+        if lo >= hi {
+            let start = self.position(a);
             return self.offset + start..self.offset + start;
         }
-        let end = self.position(b - 1) + 1;
-        let (lo, hi) = if end > start {
-            (start, end)
-        } else {
-            (end - 1, start + 1)
-        };
         self.offset + lo..self.offset + hi
     }
 
@@ -2306,8 +2347,13 @@ fn decode_option<'pkt>(
             // name."
             // <https://www.rfc-editor.org/rfc/rfc4702#section-2.3>
             if len > 3 {
+                let fd = if opt_data[0] & FQDN_FLAG_E != 0 {
+                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_DOMAIN_NAME]
+                } else {
+                    &FD_FQDN_ASCII_DOMAIN_NAME
+                };
                 buf.push_field(
-                    &CLIENT_FQDN_CHILDREN[CFD_FQDN_DOMAIN_NAME],
+                    fd,
                     FieldValue::Bytes(&opt_data[3..]),
                     data_start + 3..data_start + len,
                 );
@@ -3046,6 +3092,8 @@ mod tests {
     // |-------------|-------------------------------------|---------------------------------------------|
     // | 7           | Split option concatenated, decoded once | rfc3396_split_classless_static_route_is_concatenated |
     // | 5, 7        | Aggregate order: options, then file | rfc3396_split_across_options_and_file_with_overload |
+    // | 5, 7        | Ranges spanning options and file    | rfc3396_split_ranges_cover_portions_in_lower_fields |
+    // | 7           | Empty ranges of a split value       | rfc3396_split_map_empty_ranges_sit_at_their_start |
     // | 7           | Value straddling portions (scratch) | rfc3396_split_string_straddling_fragments_uses_scratch |
     // | 4, 7        | Single instances unchanged          | rfc3396_single_instances_are_unchanged      |
     // | 4           | Value longer than 255 octets        | rfc3396_split_value_over_255_octets         |
@@ -3097,6 +3145,7 @@ mod tests {
     // | 3004 §4       | Malformed User Class -> raw       | parse_dhcp_user_class_malformed_raw         |
     // | 4039 §4       | Rapid Commit (80)                 | parse_dhcp_rapid_commit                     |
     // | 4702 §2       | Client FQDN (81)                  | parse_dhcp_client_fqdn                      |
+    // | 4702 §2.3.1   | ASCII-encoded name (E = 0) as text | parse_dhcp_client_fqdn_ascii_encoding_is_text |
     // | 4702 §2       | Client FQDN below 3 octets -> raw | parse_dhcp_client_fqdn_too_short_raw        |
     // | 3118 §2       | Authentication (90)               | parse_dhcp_authentication                   |
     // | 4578 §2.1     | Client System Architecture (93)   | parse_dhcp_client_system_architecture       |
@@ -5724,6 +5773,32 @@ mod tests {
         assert!(name.descriptor.format_fn.is_some());
     }
 
+    /// RFC 4702, Section 2.3.1 — clients "that send the Client FQDN option
+    /// with the "E" bit set to 0 are using an ASCII encoding of the Domain
+    /// Name field." The name is shown as text even when its first character
+    /// happens to be a valid label length ('!' = 33, followed by 33 octets).
+    #[test]
+    fn parse_dhcp_client_fqdn_ascii_encoding_is_text() {
+        let name = b"!abcdefghijklmnopqrstuvwxyz0123456";
+        let mut data = vec![0x01, 0, 0]; // S set, E clear
+        data.extend_from_slice(name);
+        let pkt = discover_with_options(&[(81, &data)]);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+        let fields = direct_children(&buf, top_field(&buf, "client_fqdn"));
+        let field = child(&fields, "domain_name");
+        assert_eq!(field.value, FieldValue::Bytes(name));
+        let ctx = FormatContext {
+            packet_data: &pkt,
+            scratch: buf.scratch(),
+            layer_range: 0..pkt.len() as u32,
+            field_range: field.range.start as u32..field.range.end as u32,
+        };
+        let mut out = Vec::new();
+        (field.descriptor.format_fn.unwrap())(&field.value, &ctx, &mut out).unwrap();
+        assert_eq!(out, b"\"!abcdefghijklmnopqrstuvwxyz0123456\"");
+    }
+
     /// RFC 4702, Section 2 — "the minimum value is 3 (octets)".
     #[test]
     fn parse_dhcp_client_fqdn_too_short_raw() {
@@ -6125,6 +6200,81 @@ mod tests {
         assert_eq!(remote[1].range, 110..114);
     }
 
+    /// Assert that every descendant of `parent` lies inside its range.
+    fn assert_children_within(buf: &DissectBuffer<'_>, parent: &Field<'_>) {
+        for child in direct_children_of(buf, parent) {
+            let inside =
+                parent.range.start <= child.range.start && child.range.end <= parent.range.end;
+            assert!(inside, "{} is outside {}", child.name(), parent.name());
+            if child.value.as_container_range().is_some() {
+                assert_children_within(buf, child);
+            }
+        }
+    }
+
+    #[test]
+    fn rfc3396_split_map_empty_ranges_sit_at_their_start() {
+        // Two portions: 3 octets at data offset 20 (code at 18), then 2
+        // octets at data offset 10 (code at 8).
+        let data = [0u8; 32];
+        let parts = [
+            OptionInstance {
+                code: 12,
+                pos: 18,
+                len: 3,
+            },
+            OptionInstance {
+                code: 12,
+                pos: 8,
+                len: 2,
+            },
+        ];
+        let map = SplitMap {
+            data: &data,
+            offset: 100,
+            parts: &parts,
+            starts: &[0, 3],
+        };
+        // Code octet only, and the whole option.
+        assert_eq!(map.range(0, 1), 118..119);
+        assert_eq!(map.range(0, 7), 110..123);
+        // Empty ranges on the header, inside a portion, and past the value.
+        assert_eq!(map.range(1, 1), 119..119);
+        assert_eq!(map.range(4, 4), 122..122);
+        assert_eq!(map.range(5, 3), 110..110);
+        assert_eq!(map.range(7, 7), 111..111);
+    }
+
+    #[test]
+    fn rfc3396_split_ranges_cover_portions_in_lower_fields() {
+        // The same layout as above: the value starts in `options` (option 82
+        // code at 243, data at 245..251) and ends in `file` (data at
+        // 110..114), which lies earlier in the message. A range that spans
+        // both portions covers everything from the lowest to the highest
+        // octet, so each field contains its children.
+        // RFC 3396, Section 5 — <https://www.rfc-editor.org/rfc/rfc3396#section-5>
+        let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
+        pkt[108] = 82;
+        pkt[109] = 4;
+        pkt[110..114].copy_from_slice(b"cdef");
+        pkt[114] = 255;
+        push_option(&mut pkt, 52, &[1]);
+        push_option(&mut pkt, 82, &[1, 2, b'a', b'b', 2, 4]);
+        pkt.push(255);
+        let mut buf = DissectBuffer::new();
+        DhcpDissector.dissect(&pkt, &mut buf, 0).unwrap();
+
+        let info = top_fields(&buf, "relay_agent_info");
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].range, 110..251);
+        let subs = direct_children_of(&buf, info[0]);
+        // Circuit-ID lies inside the options portion.
+        assert_eq!(subs[0].range, 245..249);
+        // Remote-ID starts in `options` (249..251) and ends in `file`.
+        assert_eq!(subs[1].range, 110..251);
+        assert_children_within(&buf, info[0]);
+    }
+
     #[test]
     fn rfc3396_split_string_straddling_fragments_uses_scratch() {
         // Host Name split as "exa" + "mple": the value straddles fragments,
@@ -6317,9 +6467,10 @@ mod tests {
 
     #[test]
     fn rfc3396_split_client_fqdn_formats_scratch_name() {
-        // Client FQDN (RFC 4702) whose name straddles the two portions.
+        // Client FQDN (RFC 4702) in canonical wire format (E = 1) whose name
+        // straddles the two portions.
         let mut pkt = build_dhcp_base(1, 1, [0; 6], [0; 4]);
-        push_option(&mut pkt, 81, &[0, 0, 0, 4, b'h', b'o']);
+        push_option(&mut pkt, 81, &[0x04, 0, 0, 4, b'h', b'o']);
         push_option(&mut pkt, 81, &[b's', b't', 0]);
         pkt.push(255);
         let mut b = DissectBuffer::new();

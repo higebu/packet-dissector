@@ -228,7 +228,8 @@ pub(crate) static EDNS_OPTION_CHILD_FIELDS: &[FieldDescriptor] = &[
     )
     .optional(),
     FieldDescriptor::new("scope_prefix_length", "Scope Prefix-Length", FieldType::U8).optional(),
-    FieldDescriptor::new("address", "Address", FieldType::Bytes).optional(),
+    // Ipv4Addr for FAMILY 1, Ipv6Addr for FAMILY 2, Bytes otherwise.
+    FieldDescriptor::new("address", "Address", FieldType::Any).optional(),
     // RFC 7314, Section 3 — EXPIRE: <https://www.rfc-editor.org/rfc/rfc7314#section-3>
     FieldDescriptor::new("expire", "Expire", FieldType::U32).optional(),
     // RFC 7873, Section 4 — COOKIE: <https://www.rfc-editor.org/rfc/rfc7873#section-4>

@@ -56,8 +56,11 @@
 //! The NTS extension fields of RFC 8915, Sections 5.3-5.6
 //! (<https://www.rfc-editor.org/rfc/rfc8915#section-5.3>) are decoded into
 //! typed children (`unique_id`, `cookie`, `nonce_length`,
-//! `ciphertext_length`, `nonce`, `ciphertext` and paddings). The ciphertext
-//! is kept opaque; nothing is decrypted.
+//! `ciphertext_length`, `nonce`, `ciphertext` and paddings). Field Type
+//! 0x0204 is shared with the Autokey Message Request (RFC 5906 —
+//! <https://www.rfc-editor.org/rfc/rfc5906>), so it is
+//! read as an NTS Cookie only in a client or server packet (modes 3 and 4)
+//! without a MAC. The ciphertext is kept opaque; nothing is decrypted.
 
 #![deny(missing_docs)]
 
@@ -111,6 +114,18 @@ const HEADER_SIZE: usize = 48;
 /// RFC 9327, Section 2 — <https://www.rfc-editor.org/rfc/rfc9327#section-2>,
 /// Figure 1: three 32-bit words precede the Data field.
 const CONTROL_HEADER_SIZE: usize = 12;
+
+/// Mode value for a client packet.
+///
+/// RFC 5905, Section 7.3, Figure 10 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
+const MODE_CLIENT: u8 = 3;
+
+/// Mode value for a server packet.
+///
+/// RFC 5905, Section 7.3, Figure 10 —
+/// <https://www.rfc-editor.org/rfc/rfc5905#section-7.3>.
+const MODE_SERVER: u8 = 4;
 
 /// Mode value for NTP control messages.
 ///
@@ -738,7 +753,7 @@ impl Dissector for NtpDissector {
             FieldValue::U64(transmit_ts),
             offset + 40..offset + 48,
         );
-        dissect_trailer(data, buf, offset, vn);
+        dissect_trailer(data, buf, offset, vn, mode);
         buf.end_layer();
 
         Ok(DissectResult::new(total, DispatchHint::End))
@@ -751,7 +766,13 @@ impl Dissector for NtpDissector {
 /// See the module documentation for how extension fields and the MAC are
 /// told apart (RFC 7822, Section 3 —
 /// <https://www.rfc-editor.org/rfc/rfc7822#section-3>).
-fn dissect_trailer<'pkt>(data: &'pkt [u8], buf: &mut DissectBuffer<'pkt>, offset: usize, vn: u8) {
+fn dissect_trailer<'pkt>(
+    data: &'pkt [u8],
+    buf: &mut DissectBuffer<'pkt>,
+    offset: usize,
+    vn: u8,
+    mode: u8,
+) {
     let total = data.len();
     let mut pos = HEADER_SIZE;
 
@@ -768,7 +789,7 @@ fn dissect_trailer<'pkt>(data: &'pkt [u8], buf: &mut DissectBuffer<'pkt>, offset
                 offset + pos..offset + ef_end,
             );
             while let Some(len) = extension_field_len(data, pos).filter(|_| pos < ef_end) {
-                push_extension_field(buf, &data[pos..pos + len], offset + pos, with_mac);
+                push_extension_field(buf, &data[pos..pos + len], offset + pos, mode, with_mac);
                 pos += len;
             }
             buf.end_container(arr_idx);
@@ -864,8 +885,8 @@ fn extension_fields_end(data: &[u8], start: usize) -> usize {
 /// Pushes one extension field as an Object inside `extension_fields`.
 ///
 /// `ef` is the whole field (header, Value and Padding) and `abs` is its
-/// absolute offset. `with_mac` tells whether a MAC follows the extension
-/// fields; it selects the meaning of Field Type 0x0204.
+/// absolute offset. `mode` (the packet's Mode) and `with_mac` (whether a MAC
+/// follows the extension fields) select the meaning of Field Type 0x0204.
 ///
 /// RFC 7822, Section 3, Figure 14 —
 /// <https://www.rfc-editor.org/rfc/rfc7822#section-3>.
@@ -873,6 +894,7 @@ fn push_extension_field<'pkt>(
     buf: &mut DissectBuffer<'pkt>,
     ef: &'pkt [u8],
     abs: usize,
+    mode: u8,
     with_mac: bool,
 ) {
     let field_type = read_be_u16(ef, 0).unwrap_or_default();
@@ -909,14 +931,19 @@ fn push_extension_field<'pkt>(
         ),
         // RFC 8915, Section 5.4 — "The contents of its body SHALL be
         // implementation-defined, and clients MUST NOT attempt to interpret
-        // them." With a MAC present, 0x0204 is an Autokey Message Request
-        // (RFC 5906) and its body is kept as `value`.
+        // them." Field Type 0x0204 is also the Autokey Message Request
+        // (RFC 5906 — <https://www.rfc-editor.org/rfc/rfc5906>), whose body
+        // is kept as `value`. It is an NTS Cookie only without a MAC and in
+        // a client or server packet: "The NTS Cookie extension field MUST
+        // NOT be included in NTP packets whose mode is other than 3
+        // (client) or 4 (server)."
         //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.4>
-        EF_TYPE_NTS_COOKIE if !with_mac => buf.push_field(
-            &EXTENSION_FIELD_CHILD_FIELDS[EFFD_COOKIE],
-            FieldValue::Bytes(body),
-            body_range,
-        ),
+        EF_TYPE_NTS_COOKIE if !with_mac && matches!(mode, MODE_CLIENT | MODE_SERVER) => buf
+            .push_field(
+                &EXTENSION_FIELD_CHILD_FIELDS[EFFD_COOKIE],
+                FieldValue::Bytes(body),
+                body_range,
+            ),
         // RFC 8915, Section 5.5 — "The contents of the NTS Cookie
         // Placeholder extension field's body SHOULD be all zeros".
         //   <https://www.rfc-editor.org/rfc/rfc8915#section-5.5>
@@ -1228,6 +1255,7 @@ mod tests {
     // | 5.6         | Nonce/Ciphertext padding, Additional Padding | test_parse_nts_authenticator_padding |
     // | 5.6         | Inconsistent Nonce/Ciphertext Length         | test_nts_authenticator_inconsistent_lengths |
     // | 5.7         | NTS client request layout                    | test_parse_nts_client_request       |
+    // | 5.4         | 0x0204 outside modes 3/4 is not NTS Cookie   | test_0x0204_outside_client_server_is_not_nts_cookie |
 
     /// Build a minimal NTP packet with the given parameters.
     #[allow(clippy::too_many_arguments)]
@@ -2030,6 +2058,31 @@ mod tests {
         assert!(buf.field_by_name(layer, "key_id").is_none());
         assert!(buf.field_by_name(layer, "digest").is_none());
         assert!(buf.field_by_name(layer, "trailing_data").is_none());
+    }
+
+    /// RFC 8915, Section 5.4 — "The NTS Cookie extension field MUST NOT be
+    /// included in NTP packets whose mode is other than 3 (client) or 4
+    /// (server)." In symmetric and broadcast packets, Field Type 0x0204 is
+    /// the Autokey Message Request (RFC 5906) even without a MAC, so its body
+    /// is kept as `value`.
+    ///   <https://www.rfc-editor.org/rfc/rfc8915#section-5.4>
+    #[test]
+    fn test_0x0204_outside_client_server_is_not_nts_cookie() {
+        for mode in [1u8, 2, 5] {
+            let mut data = build_ntp(0, 4, mode, 2, 0, 0, 0, 0, [0; 4], 0, 0, 0, 0);
+            data.extend_from_slice(&build_ef(0x0204, &[0x5A; 36]));
+            let mut buf = DissectBuffer::new();
+            NtpDissector.dissect(&data, &mut buf, 0).unwrap();
+            let layer = &buf.layers()[0];
+            let efs = extension_fields(&buf, layer);
+            assert_eq!(efs.len(), 1, "mode {mode}");
+            let names: Vec<_> = buf
+                .nested_fields(&efs[0].1)
+                .iter()
+                .map(|f| f.name())
+                .collect();
+            assert_eq!(names, ["field_type", "length", "value"], "mode {mode}");
+        }
     }
 
     #[test]
