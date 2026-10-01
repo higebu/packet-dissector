@@ -674,6 +674,11 @@ pub trait Dissector: Send {
     /// [`FieldValue::Bytes`](crate::field::FieldValue::Bytes) and
     /// [`FieldValue::Str`](crate::field::FieldValue::Str) to borrow
     /// directly from `data` without copying (zero-copy).
+    ///
+    /// A dissector whose output depends on, or changes, state kept across
+    /// packets (for example a stream table or a template cache) must call
+    /// [`DissectBuffer::mark_cross_packet_state`] whenever it reads or
+    /// updates that state.
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],

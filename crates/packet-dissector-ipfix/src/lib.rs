@@ -755,6 +755,10 @@ impl SetContext<'_> {
         end: usize,
         buf: &mut DissectBuffer<'pkt>,
     ) {
+        // Template Records and withdrawals update the Template cache for
+        // later messages (RFC 7011, Section 8 —
+        // <https://www.rfc-editor.org/rfc/rfc7011#section-8>).
+        buf.mark_cross_packet_state();
         let children = self.format.set_children();
         let arr = buf.begin_container(
             &children[SET_TEMPLATES],
@@ -1130,6 +1134,9 @@ impl SetContext<'_> {
         end: usize,
         buf: &mut DissectBuffer<'pkt>,
     ) {
+        // Decoded with a Template from an earlier message, or kept raw
+        // because none arrived: either way the result depends on them.
+        buf.mark_cross_packet_state();
         let children = self.format.set_children();
         let template = self.cache.get(&self.session, self.domain, set_id);
         let min_record_len = template.map_or(0, |t| {
@@ -1377,6 +1384,10 @@ fn push_header<'pkt>(
 // ---------------------------------------------------------------------------
 
 /// IPFIX (version 10) dissector with a per-session Template cache.
+///
+/// A message with a Template, Options Template or Data Set reads or
+/// updates the cache and calls
+/// [`DissectBuffer::mark_cross_packet_state`].
 #[derive(Debug, Default)]
 pub struct IpfixDissector {
     templates: Mutex<TemplateCache>,
@@ -1390,6 +1401,10 @@ impl IpfixDissector {
 }
 
 /// NetFlow v9 dissector with a per-session Template cache.
+///
+/// A message with a Template, Options Template or Data FlowSet reads or
+/// updates the cache and calls
+/// [`DissectBuffer::mark_cross_packet_state`].
 #[derive(Debug, Default)]
 pub struct NetflowV9Dissector {
     templates: Mutex<TemplateCache>,
@@ -1901,6 +1916,9 @@ mod tests {
     // | 8.1         | New TCP connection does not reuse Templates   | ipfix_template_scoped_by_tcp_connection      |
     // | 8.4         | Withdrawals ignored over UDP                  | ipfix_withdrawal_ignored_over_udp            |
     // | 8.4         | Template redefinition replaces old one        | ipfix_template_redefinition                  |
+    // | 8           | Template / Options Template Set uses state    | ipfix_template_sets_mark_cross_packet_state  |
+    // | 3.4.3       | Data Set uses state (with or without Template)| ipfix_data_set_marks_cross_packet_state      |
+    // | 3.3.2       | Header-only / reserved Set uses no state      | ipfix_other_sets_mark_no_cross_packet_state  |
     //
     // # RFC 3954 (NetFlow v9) Coverage
     //
@@ -1918,6 +1936,8 @@ mod tests {
     // | 5.2         | FlowSet Length beyond packet rejected         | v9_flowset_length_invalid                    |
     // | 5.2         | Template with zero Field Count                | v9_template_zero_field_count                 |
     // | 5.2 (7012 §4) | Field types above 127 not interpreted       | v9_field_types_above_127_not_named           |
+    // | 7           | Template / Options / Data FlowSet use state   | v9_flowsets_mark_cross_packet_state          |
+    // | 5.1         | Header-only packet uses no state              | v9_flowsets_mark_cross_packet_state          |
     //
     // # NetFlow v5 (Cisco NetFlow Export Datagram Format) Coverage
     //
@@ -1926,6 +1946,7 @@ mod tests {
     // | B-3   | Header, sampling mode / interval              | v5_two_records                               |
     // | B-4   | Flow records                                  | v5_two_records                               |
     // | B-3   | Count beyond captured data (Truncated)        | v5_truncated                                 |
+    // | B-3   | No Templates, so no cross-packet state        | v5_marks_no_cross_packet_state               |
     // | B-3   | Version != 5 / short header rejected          | v5_invalid_header                            |
     //
     // # Version dispatch
@@ -3301,6 +3322,80 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Version dispatch
     // ---------------------------------------------------------------------------
+
+    /// Whether dissecting `data` with `d` reports cross-packet state use.
+    fn marks_state(d: &dyn Dissector, data: &[u8]) -> bool {
+        let mut buf = DissectBuffer::new();
+        d.dissect(data, &mut buf, 0).unwrap();
+        buf.used_cross_packet_state()
+    }
+
+    #[test]
+    fn ipfix_template_sets_mark_cross_packet_state() {
+        let d = IpfixDissector::new();
+        assert!(marks_state(&d, &ipfix_message(0, &[flow_template()])));
+        let mut rec = Vec::new();
+        rec.extend_from_slice(&be16(259));
+        rec.extend_from_slice(&be16(1)); // Field Count
+        rec.extend_from_slice(&be16(1)); // Scope Field Count
+        rec.extend_from_slice(&ipfix_spec(149, 4, None));
+        assert!(marks_state(&d, &ipfix_message(0, &[set(3, &rec)])));
+        // Withdrawals change the cache too.
+        let withdrawal = set(2, &[&be16(256)[..], &be16(0)[..]].concat());
+        assert!(marks_state(&d, &ipfix_message(0, &[withdrawal])));
+    }
+
+    #[test]
+    fn ipfix_data_set_marks_cross_packet_state() {
+        let d = IpfixDissector::new();
+        let data = ipfix_message(0, &[set(256, &flow_record([1; 4], [2; 4], 3, 6))]);
+        // Decoded raw without a Template: the result still depends on the
+        // Templates that earlier messages did not carry.
+        assert!(marks_state(&d, &data));
+        assert!(marks_state(&d, &ipfix_message(0, &[flow_template()])));
+        assert!(marks_state(&d, &data));
+    }
+
+    #[test]
+    fn ipfix_other_sets_mark_no_cross_packet_state() {
+        let d = IpfixDissector::new();
+        assert!(!marks_state(&d, &ipfix_message(0, &[])));
+        assert!(!marks_state(
+            &d,
+            &ipfix_message(0, &[set(4, &[1, 2, 3, 4]), set(0, &[])])
+        ));
+    }
+
+    #[test]
+    fn v9_flowsets_mark_cross_packet_state() {
+        let d = NetflowV9Dissector::new();
+        assert!(!marks_state(&d, &v9_packet(0, &[])));
+        let tmpl = set(0, &v9_template(256, &[(8, 4)]));
+        assert!(marks_state(&d, &v9_packet(0, &[tmpl])));
+        let mut rec = Vec::new();
+        rec.extend_from_slice(&be16(257));
+        rec.extend_from_slice(&be16(4)); // Option Scope Length
+        rec.extend_from_slice(&be16(4)); // Option Length
+        rec.extend_from_slice(&be16(1));
+        rec.extend_from_slice(&be16(4));
+        rec.extend_from_slice(&be16(34));
+        rec.extend_from_slice(&be16(4));
+        assert!(marks_state(&d, &v9_packet(0, &[set(1, &rec)])));
+        assert!(marks_state(&d, &v9_packet(0, &[set(256, &[10, 0, 0, 1])])));
+    }
+
+    #[test]
+    fn v5_marks_no_cross_packet_state() {
+        assert!(!marks_state(&NetflowV5Dissector, &v5_packet(1, 1)));
+        let d = NetflowDissector::new();
+        assert!(!marks_state(&d, &v5_packet(1, 1)));
+        // The version dispatcher passes the flag through from v9 and IPFIX.
+        assert!(marks_state(&d, &ipfix_message(0, &[flow_template()])));
+        assert!(marks_state(
+            &d,
+            &v9_packet(0, &[set(0, &v9_template(256, &[(8, 4)]))])
+        ));
+    }
 
     #[test]
     fn netflow_dispatches_by_version() {

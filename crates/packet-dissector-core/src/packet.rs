@@ -125,6 +125,9 @@ pub struct DissectBuffer<'pkt> {
     /// Whether dissectors should verify checksums and report the result in
     /// a `checksum_status` field. Kept across [`clear`](Self::clear).
     verify_checksums: bool,
+    /// Whether a dissector read or updated state kept across packets since
+    /// the last [`clear`](Self::clear).
+    cross_packet_state: bool,
 }
 
 impl<'pkt> DissectBuffer<'pkt> {
@@ -138,6 +141,7 @@ impl<'pkt> DissectBuffer<'pkt> {
             aux_chunks: Vec::new(),
             embedded_payloads: Vec::new(),
             verify_checksums: false,
+            cross_packet_state: false,
         }
     }
 
@@ -151,6 +155,7 @@ impl<'pkt> DissectBuffer<'pkt> {
         self.aux_data_len = 0;
         self.aux_chunks.clear();
         self.embedded_payloads.clear();
+        self.cross_packet_state = false;
     }
 
     /// Clear all stored data and return the buffer with a fresh lifetime.
@@ -417,6 +422,38 @@ impl<'pkt> DissectBuffer<'pkt> {
     /// with its own setting at the start of every dissection.
     pub fn set_verify_checksums(&mut self, verify: bool) {
         self.verify_checksums = verify;
+    }
+
+    /// Whether the dissection into this buffer read or updated state kept
+    /// across packets (for example TCP stream tracking, the HTTP/2 HPACK
+    /// dynamic table, an IPFIX template cache, or IP fragment reassembly).
+    ///
+    /// When this is `false`, the layers and fields in the buffer depend only
+    /// on the dissected bytes and the registry's configuration, so the packet
+    /// gives the same result whatever was dissected before it, and dissecting
+    /// it left no trace for later packets. A caller that dissects packets of
+    /// one capture concurrently with separate registries can keep the result
+    /// of every packet without the flag and must dissect a flagged packet
+    /// (and every packet after it) in capture order with one registry.
+    ///
+    /// The flag is also set when the dissection returned an error after a
+    /// stateful dissector ran. It is reset by [`clear`](Self::clear) and
+    /// [`clear_into`](Self::clear_into); dissecting several packets into one
+    /// buffer without clearing it reports whether any of them used the state.
+    pub fn used_cross_packet_state(&self) -> bool {
+        self.cross_packet_state
+    }
+
+    /// Record that the current dissection read or updated state kept across
+    /// packets. See [`used_cross_packet_state`](Self::used_cross_packet_state).
+    ///
+    /// A dissector that keeps state across packets must call this every time
+    /// a packet reads or changes that state, including when the state is
+    /// consulted and found empty (the result then still depends on the
+    /// packets seen before). State that only comes from configuration (for
+    /// example ESP Security Associations or decode-as rules) does not count.
+    pub fn mark_cross_packet_state(&mut self) {
+        self.cross_packet_state = true;
     }
 
     /// Append fields to the last layer matching `layer_name` and extend its field range.
@@ -780,6 +817,30 @@ mod tests {
         FieldDescriptor::new("ethertype", "EtherType", FieldType::U16);
 
     static SRC_DESC: FieldDescriptor = FieldDescriptor::new("src", "Source", FieldType::MacAddr);
+
+    #[test]
+    fn cross_packet_state_flag_starts_clear() {
+        let buf = DissectBuffer::new();
+        assert!(!buf.used_cross_packet_state());
+        assert!(!DissectBuffer::default().used_cross_packet_state());
+    }
+
+    #[test]
+    fn cross_packet_state_flag_is_sticky_until_clear() {
+        let mut buf = DissectBuffer::new();
+        buf.mark_cross_packet_state();
+        assert!(buf.used_cross_packet_state());
+        // Marking again (another stateful layer) keeps it set.
+        buf.mark_cross_packet_state();
+        assert!(buf.used_cross_packet_state());
+
+        buf.clear();
+        assert!(!buf.used_cross_packet_state());
+
+        buf.mark_cross_packet_state();
+        let buf = buf.clear_into();
+        assert!(!buf.used_cross_packet_state());
+    }
 
     #[test]
     fn dissect_buffer_basic_usage() {

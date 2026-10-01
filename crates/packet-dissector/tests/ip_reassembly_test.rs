@@ -27,6 +27,10 @@
 //! | RFC 8200 4.5         | M=1 fragment length not a multiple of 8 is discarded     | ipv6_fragment_not_multiple_of_8_is_discarded            |
 //! | RFC 8200 4.5         | Reassembled Payload Length above 65,535 is discarded     | ipv6_oversized_fragment_is_discarded                    |
 //! | RFC 8200 4.5         | Atomic fragment is processed on its own                  | ipv6_atomic_fragment_is_not_buffered                    |
+//! | RFC 791 3.2          | Every IPv4 fragment marks cross-packet state             | ipv4_fragments_mark_cross_packet_state                  |
+//! | —                    | Unfragmented / shallow dissection marks no state         | ipv4_unfragmented_and_shallow_mark_no_cross_packet_state |
+//! | RFC 8200 4.5         | Every IPv6 fragment marks cross-packet state             | ipv6_fragments_mark_cross_packet_state                  |
+//! | RFC 8200 4.5         | Atomic fragment marks no cross-packet state              | ipv6_atomic_fragment_marks_no_cross_packet_state        |
 
 #![cfg(all(
     feature = "ip-reassembly",
@@ -720,4 +724,69 @@ fn ipv6_atomic_fragment_is_not_buffered() {
         ["Ethernet", "IPv6", "IPv6 Fragment", "UDP", "DNS"]
     );
     assert_eq!(u_field(&buf, "IPv6 Fragment", "fragment_count"), None);
+}
+
+/// Whether a full dissection of `packet` reports cross-packet state use.
+fn marks_state(reg: &DissectorRegistry, packet: &[u8]) -> bool {
+    let mut buf = DissectBuffer::new();
+    reg.dissect(packet, &mut buf).unwrap();
+    buf.used_cross_packet_state()
+}
+
+#[test]
+fn ipv4_fragments_mark_cross_packet_state() {
+    // Buffered fragments change the reassembly state; the last one reads it.
+    let datagram = udp(&dns_response(10));
+    let frags = ipv4_fragments(0x51, &datagram, &[64, 64]);
+    let reg = DissectorRegistry::default();
+    for frag in &frags {
+        assert!(marks_state(&reg, frag));
+    }
+    // A lone non-initial fragment is buffered too.
+    let lone = ipv4(0x52, 17, false, 1, &[0xde, 0xad, 0xbe, 0xef, 0, 0x10, 0, 0]);
+    assert!(marks_state(&reg, &lone));
+}
+
+#[test]
+fn ipv4_unfragmented_and_shallow_mark_no_cross_packet_state() {
+    use packet_dissector::summary::FieldProjection;
+
+    let datagram = udp(&dns_response(10));
+    let reg = DissectorRegistry::default();
+    assert!(!marks_state(&reg, &ipv4(0x53, 17, false, 0, &datagram)));
+
+    // Shallow dissection never feeds fragments to the reassembly.
+    let frags = ipv4_fragments(0x54, &datagram, &[64]);
+    for frag in &frags {
+        let mut buf = DissectBuffer::new();
+        reg.dissect_summary(frag, &mut buf).unwrap();
+        assert!(!buf.used_cross_packet_state());
+        let mut buf = DissectBuffer::new();
+        let mut projection = FieldProjection::new([("DNS", "id")]);
+        // The first fragment's DNS message is cut short (an error), which
+        // must not hide state use either.
+        let _ = reg.dissect_projected(frag, &mut buf, &mut projection);
+        assert!(!buf.used_cross_packet_state());
+    }
+}
+
+#[test]
+fn ipv6_fragments_mark_cross_packet_state() {
+    let datagram = udp(&dns_response(10));
+    let frags = ipv6_fragments(0x55, &datagram, &[64, 64]);
+    let reg = DissectorRegistry::default();
+    for frag in &frags {
+        assert!(marks_state(&reg, frag));
+    }
+    assert!(!marks_state(&reg, &ipv6_raw(17, &[], &datagram)));
+}
+
+#[test]
+fn ipv6_atomic_fragment_marks_no_cross_packet_state() {
+    // RFC 8200, Section 4.5 — an atomic fragment is a whole datagram and is
+    // processed without the reassembly state.
+    // https://www.rfc-editor.org/rfc/rfc8200#section-4.5
+    let datagram = udp(&dns_response(4));
+    let reg = DissectorRegistry::default();
+    assert!(!marks_state(&reg, &ipv6(0x56, 17, false, 0, &datagram)));
 }

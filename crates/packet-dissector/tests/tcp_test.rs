@@ -31,6 +31,8 @@
 //! | —           | Stream ID consistent for same 4-tuple          | tcp_stream_id_consistent                |
 //! | —           | Stream ID differs for different 4-tuples       | tcp_stream_id_different                 |
 //! | —           | Stream ID absent without IP layer              | tcp_stream_id_absent_without_ip         |
+//! | —           | Stream ID marks cross-packet state             | tcp_stream_id_marks_cross_packet_state  |
+//! | —           | No stream state used without IP layer          | tcp_without_ip_does_not_mark_cross_packet_state |
 //! | —           | Stream ID with IPv6                            | tcp_stream_id_present_ipv6              |
 //! | —           | Stream ID (bidirectional)                      | tcp_stream_id_bidirectional             |
 //! | —           | Stream ID is sequential                        | tcp_stream_id_sequential                |
@@ -1020,6 +1022,46 @@ fn tcp_stream_id_absent_without_ip() {
         buf.field_by_name(layer, "stream_id").is_none(),
         "stream_id should be absent without IP layer"
     );
+}
+
+/// The stream ID depends on the connections seen before, so every segment
+/// that gets one (new or existing connection, IPv4 or IPv6) reports that
+/// it used cross-packet state.
+#[test]
+fn tcp_stream_id_marks_cross_packet_state() {
+    let dissector = TcpDissector::new();
+
+    // New connection (inserts the 4-tuple).
+    let syn = build_tcp_packet(12345, 80, 0, 0, 0x02);
+    let mut buf = DissectBuffer::new();
+    add_ipv4_layer(&mut buf, [10, 0, 0, 1], [10, 0, 0, 2]);
+    dissector.dissect(&syn, &mut buf, 20).unwrap();
+    assert!(buf.used_cross_packet_state());
+
+    // Known connection (reads the 4-tuple's ID).
+    let ack = build_tcp_packet(12345, 80, 1, 1, 0x10);
+    let mut buf = DissectBuffer::new();
+    add_ipv4_layer(&mut buf, [10, 0, 0, 1], [10, 0, 0, 2]);
+    dissector.dissect(&ack, &mut buf, 20).unwrap();
+    assert!(buf.used_cross_packet_state());
+
+    let mut src_ip = [0u8; 16];
+    src_ip[15] = 1;
+    let mut dst_ip = [0u8; 16];
+    dst_ip[15] = 2;
+    let mut buf = DissectBuffer::new();
+    add_ipv6_layer(&mut buf, src_ip, dst_ip);
+    dissector.dissect(&syn, &mut buf, 40).unwrap();
+    assert!(buf.used_cross_packet_state());
+}
+
+/// Without an IP layer there is no 4-tuple, so no stream state is touched.
+#[test]
+fn tcp_without_ip_does_not_mark_cross_packet_state() {
+    let tcp_data = build_tcp_packet(12345, 80, 0, 0, 0x02);
+    let mut buf = DissectBuffer::new();
+    TcpDissector::new().dissect(&tcp_data, &mut buf, 0).unwrap();
+    assert!(!buf.used_cross_packet_state());
 }
 
 #[test]

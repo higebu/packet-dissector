@@ -1281,6 +1281,8 @@ mod tests {
     //! | 9113 §4.1, §6     | Frame header heuristic rejects      | looks_like_frame_header_rejects_invalid_headers       |
     //! | 9113 §3.4         | Heuristic rejects preface/HTTP/1.1  | looks_like_frame_header_rejects_text                  |
     //! | 7541 §2.2, 9113 §4.3 | Per-connection HPACK / CONTINUATION | connection::tests                                  |
+    //! | 7541 §2.3.2       | Stream messages mark cross-packet state | connection::tests::stream_messages_mark_cross_packet_state |
+    //! | 7541 §2.3.2       | Frame without stream marks no state | connection::tests::frame_without_stream_does_not_mark_cross_packet_state |
     //! | 7541 App. B       | Huffman code table                  | hpack::huffman::tests                                 |
     //! | 7541 App. C.3–C.6 | Request / response sequences        | hpack::tests::rfc7541_c3_… – rfc7541_c6_…             |
     //! | 7541 §2.3.3       | Unresolved dynamic index reported   | unresolved_dynamic_index_is_reported                  |

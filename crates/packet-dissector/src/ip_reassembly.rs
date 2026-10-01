@@ -402,6 +402,8 @@ impl DissectorRegistry {
         buf: &mut DissectBuffer<'_>,
         offset: usize,
     ) -> Result<(), PacketError> {
+        // Every fragment reads or updates the datagrams buffered so far.
+        buf.mark_cross_packet_state();
         let reassembled = self
             .ip_reassembly
             .lock()

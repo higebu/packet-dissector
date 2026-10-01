@@ -272,6 +272,10 @@ impl Directions {
 ///
 /// Connections whose preface was not seen, and [`Dissector::dissect`]
 /// calls, are decoded frame by frame like [`Http2Dissector`].
+///
+/// Every [`Dissector::dissect_tcp_stream`] call consults the tracked
+/// connections and calls [`DissectBuffer::mark_cross_packet_state`];
+/// [`Dissector::dissect`] does not.
 pub struct Http2ConnectionDissector {
     directions: Mutex<Directions>,
 }
@@ -343,6 +347,10 @@ impl Dissector for Http2ConnectionDissector {
         offset: usize,
         stream: &TcpStreamContext,
     ) -> Result<DissectResult, PacketError> {
+        // Whether the direction is tracked, and its dynamic table, come
+        // from earlier segments (RFC 7541, Section 2.3.2 —
+        // https://www.rfc-editor.org/rfc/rfc7541#section-2.3.2).
+        buf.mark_cross_packet_state();
         let mut directions = self.lock();
         let key = stream.stream_key;
         if !directions.contains(&key) {
@@ -465,6 +473,40 @@ mod tests {
         let mut data = CONNECTION_PREFACE.to_vec();
         data.extend(frame(HEADERS, END_HEADERS | 0x01, 1, block));
         headers(d, CLIENT, &data)
+    }
+
+    /// RFC 7541, Section 2.3.2 — the dynamic table is kept across header
+    /// blocks <https://www.rfc-editor.org/rfc/rfc7541#section-2.3.2>, so
+    /// every message of a TCP stream reports that it used cross-packet
+    /// state: opening a connection, continuing one, and finding that a
+    /// direction is not tracked (that too depends on earlier segments).
+    #[test]
+    fn stream_messages_mark_cross_packet_state() {
+        let d = Http2ConnectionDissector::new();
+        let stream = |key: TcpStreamKey, data: &[u8]| {
+            let mut buf = DissectBuffer::new();
+            d.dissect_tcp_stream(data, &mut buf, 0, &ctx(key)).unwrap();
+            buf.used_cross_packet_state()
+        };
+        let untracked = frame(HEADERS, END_HEADERS, 1, &hex(C3[0]));
+        assert!(stream(CLIENT, &untracked));
+
+        let mut preface = CONNECTION_PREFACE.to_vec();
+        preface.extend(frame(HEADERS, END_HEADERS | 0x01, 1, &hex(C3[0])));
+        assert!(stream(CLIENT, &preface));
+        let next = frame(HEADERS, END_HEADERS, 3, &hex(C3[1]));
+        assert!(stream(CLIENT, &next));
+    }
+
+    /// Without a stream context the connection dissector decodes each frame
+    /// on its own and touches no state.
+    #[test]
+    fn frame_without_stream_does_not_mark_cross_packet_state() {
+        let d = Http2ConnectionDissector::new();
+        let data = frame(HEADERS, END_HEADERS, 1, &[0x82]);
+        let mut buf = DissectBuffer::new();
+        d.dissect(&data, &mut buf, 0).unwrap();
+        assert!(!buf.used_cross_packet_state());
     }
 
     #[test]
