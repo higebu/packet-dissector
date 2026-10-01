@@ -1270,15 +1270,21 @@ fn parse_ndp_options<'pkt>(
             }
 
             // RFC 3122, Section 3.1 — Source / Target Address List:
-            // Reserved (48 bits), then IPv6 addresses.
+            // Reserved (48 bits), then IPv6 addresses. "The minimum value
+            // for Length is 3, for one IPv6 address", and an even Length
+            // leaves 8 octets after the last address, which are kept as
+            // `value`.
             // <https://www.rfc-editor.org/rfc/rfc3122#section-3.1>
-            9 | 10 if value_data.len() >= 6 => {
+            9 | 10 if value_data.len() >= 6 + 16 => {
+                let addrs = value_data[6..].chunks_exact(16);
+                let rest = addrs.remainder();
+                let addrs_end = opt_end - rest.len();
                 let array_idx = buf.begin_container(
                     &NDP_OPTION_CHILDREN[NOC_ADDRESSES],
                     FieldValue::Array(0..0),
-                    opt_start + 8..opt_end,
+                    opt_start + 8..addrs_end,
                 );
-                for (i, a) in value_data[6..].chunks_exact(16).enumerate() {
+                for (i, a) in addrs.enumerate() {
                     let start = opt_start + 8 + i * 16;
                     buf.push_field(
                         &NDP_OPTION_CHILDREN[NOC_ADDRESSES],
@@ -1287,6 +1293,13 @@ fn parse_ndp_options<'pkt>(
                     );
                 }
                 buf.end_container(array_idx);
+                if !rest.is_empty() {
+                    buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_VALUE],
+                        FieldValue::Bytes(rest),
+                        addrs_end..opt_end,
+                    );
+                }
             }
 
             // RFC 3971, Section 5.1 — CGA: Pad Length, Reserved, CGA
@@ -1300,13 +1313,21 @@ fn parse_ndp_options<'pkt>(
                     FieldValue::U8(pad_len),
                     opt_start + 2..opt_start + 3,
                 );
-                let params = &value_data[2..];
-                let params = &params[..params.len().saturating_sub(pad_len as usize)];
-                buf.push_field(
-                    &NDP_OPTION_CHILDREN[NOC_CGA_PARAMETERS],
-                    FieldValue::Bytes(params),
-                    opt_start + 4..opt_start + 4 + params.len(),
-                );
+                // A Pad Length past the option leaves the end of the CGA
+                // Parameters unknown, so the octets are kept as `value`.
+                let area = &value_data[2..];
+                match area.len().checked_sub(pad_len as usize) {
+                    Some(params_len) => buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_CGA_PARAMETERS],
+                        FieldValue::Bytes(&area[..params_len]),
+                        opt_start + 4..opt_start + 4 + params_len,
+                    ),
+                    None => buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_VALUE],
+                        FieldValue::Bytes(area),
+                        opt_start + 4..opt_end,
+                    ),
+                }
             }
 
             // RFC 3971, Section 5.2 — RSA Signature: Reserved (16), Key Hash
@@ -1367,13 +1388,25 @@ fn parse_ndp_options<'pkt>(
                     FieldValue::U8(pad_len),
                     opt_start + 3..opt_start + 4,
                 );
-                let name = &value_data[2..];
-                let name = &name[..name.len().saturating_sub(pad_len as usize)];
-                buf.push_field(
-                    &NDP_OPTION_CHILDREN[NOC_NAME],
-                    FieldValue::Bytes(name),
-                    opt_start + 4..opt_start + 4 + name.len(),
-                );
+                // RFC 3971, Section 6.4.3 — Pad Length is "The number of
+                // padding octets beyond the end of the Name field but
+                // within the length specified by the Length field"; a
+                // larger value leaves the Name boundary unknown, so the
+                // octets are kept as `value`.
+                // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.3>
+                let area = &value_data[2..];
+                match area.len().checked_sub(pad_len as usize) {
+                    Some(name_len) => buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_NAME],
+                        FieldValue::Bytes(&area[..name_len]),
+                        opt_start + 4..opt_start + 4 + name_len,
+                    ),
+                    None => buf.push_field(
+                        &NDP_OPTION_CHILDREN[NOC_VALUE],
+                        FieldValue::Bytes(area),
+                        opt_start + 4..opt_end,
+                    ),
+                }
             }
 
             // RFC 3971, Section 6.4.4 — Certificate: Cert Type, Reserved,

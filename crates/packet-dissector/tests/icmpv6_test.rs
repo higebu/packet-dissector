@@ -63,11 +63,14 @@
 //! | RFC 6275 §7.3     | Advertisement Interval (Type 7)      | parse_icmpv6_ndp_option_advertisement_interval     |
 //! | RFC 6275 §7.4     | Home Agent Information (Type 8)      | parse_icmpv6_ndp_option_home_agent_info            |
 //! | RFC 3122 §3.1     | Source / Target Address List (9/10)  | parse_icmpv6_ndp_option_address_list              |
+//! | RFC 3122 §3.1     | Address List with a bad Length       | parse_icmpv6_ndp_option_address_list_bad_length   |
 //! | RFC 3971 §5.1     | CGA (Type 11)                        | parse_icmpv6_ndp_option_cga                        |
+//! | RFC 3971 §5.1     | CGA Pad Length past the option       | parse_icmpv6_ndp_option_cga_bad_pad_length         |
 //! | RFC 3971 §5.2     | RSA Signature (Type 12)              | parse_icmpv6_ndp_option_rsa_signature              |
 //! | RFC 3971 §5.3.1   | Timestamp (Type 13)                  | parse_icmpv6_ndp_option_timestamp                  |
 //! | RFC 3971 §5.3.2   | Nonce (Type 14)                      | parse_icmpv6_ndp_option_nonce                      |
 //! | RFC 3971 §6.4.3   | Trust Anchor (Type 15)               | parse_icmpv6_ndp_option_trust_anchor               |
+//! | RFC 3971 §6.4.3   | Trust Anchor Pad Length past the option | parse_icmpv6_ndp_option_trust_anchor_bad_pad_length |
 //! | RFC 3971 §6.4.4   | Certificate (Type 16)                | parse_icmpv6_ndp_option_certificate                |
 //! | RFC 8801 §3.1     | PvD ID (Type 21)                     | parse_icmpv6_ndp_option_pvd_id                     |
 //! | RFC 8801 §3.1     | PvD ID with trailing RA options      | parse_icmpv6_ndp_option_pvd_id_with_options        |
@@ -2586,6 +2589,62 @@ fn parse_icmpv6_ndp_option_cga() {
 }
 
 #[test]
+fn parse_icmpv6_ndp_option_address_list_bad_length() {
+    // RFC 3122, Section 3.1 — "The minimum value for Length is 3, for one
+    // IPv6 address" and "n = (Length - 1)/2".
+    // <https://www.rfc-editor.org/rfc/rfc3122#section-3.1>
+    // Length 4 leaves 8 octets after the first address: they are kept as
+    // `value` instead of being dropped.
+    let a = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    for opt_type in [9u8, 10u8] {
+        let mut opt = vec![opt_type, 0x04, 0, 0, 0, 0, 0, 0];
+        opt.extend_from_slice(&a);
+        opt.extend_from_slice(&[0xAA; 8]);
+        let data = ns_with_options(&opt);
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+        let opt = first_option(&buf);
+        let addrs = opt.iter().find(|f| f.name() == "addresses").unwrap();
+        assert_eq!(addrs.range, 32..48);
+        let addrs = nested(&buf, addrs);
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].value, FieldValue::Ipv6Addr(a));
+        let value = opt.iter().find(|f| f.name() == "value").unwrap();
+        assert_eq!(value.value, FieldValue::Bytes(&[0xAA; 8]));
+        assert_eq!(value.range, 48..56);
+
+        // Length 1 holds no address: the option data is kept raw rather
+        // than decoded as an empty list.
+        let data = ns_with_options(&[opt_type, 0x01, 0, 0, 0, 0, 0, 0]);
+        let mut buf = DissectBuffer::new();
+        Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+        let opt = first_option(&buf);
+        assert_eq!(child(opt, "addresses"), None);
+        assert_eq!(child(opt, "value"), Some(&FieldValue::Bytes(&[0; 6])));
+    }
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_cga_bad_pad_length() {
+    // RFC 3971, Section 5.1 — Pad Length is "The number of padding octets
+    // beyond the end of the CGA Parameters field but within the length
+    // specified by the Length field".
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-5.1>
+    // A Pad Length larger than the option leaves the CGA Parameters
+    // boundary unknown, so the octets are kept as `value` instead of being
+    // reported as empty CGA Parameters.
+    let data = ns_with_options(&[0x0b, 0x01, 0xC8, 0x00, 1, 2, 3, 4]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "pad_length"), Some(&FieldValue::U8(200)));
+    assert_eq!(child(opt, "cga_parameters"), None);
+    let value = opt.iter().find(|f| f.name() == "value").unwrap();
+    assert_eq!(value.value, FieldValue::Bytes(&[1, 2, 3, 4]));
+    assert_eq!(value.range, 28..32);
+}
+
+#[test]
 fn parse_icmpv6_ndp_option_rsa_signature() {
     // RFC 3971, Section 5.2 — Reserved (16), Key Hash (128), Digital
     // Signature and Padding.
@@ -2630,6 +2689,26 @@ fn parse_icmpv6_ndp_option_trust_anchor() {
     assert_eq!(child(opt, "name_type"), Some(&FieldValue::U8(2)));
     assert_eq!(child(opt, "pad_length"), Some(&FieldValue::U8(2)));
     assert_eq!(child(opt, "name"), Some(&FieldValue::Bytes(b"ab")));
+}
+
+#[test]
+fn parse_icmpv6_ndp_option_trust_anchor_bad_pad_length() {
+    // RFC 3971, Section 6.4.3 — Pad Length is "The number of padding octets
+    // beyond the end of the Name field but within the length specified by
+    // the Length field".
+    // <https://www.rfc-editor.org/rfc/rfc3971#section-6.4.3>
+    // A Pad Length larger than the option leaves the Name boundary unknown,
+    // so the octets are kept as `value` instead of an empty Name.
+    let data = ns_with_options(&[0x0f, 0x01, 0x02, 0x09, b'a', b'b', 0, 0]);
+    let mut buf = DissectBuffer::new();
+    Icmpv6Dissector.dissect(&data, &mut buf, 0).unwrap();
+    let opt = first_option(&buf);
+    assert_eq!(child(opt, "name_type"), Some(&FieldValue::U8(2)));
+    assert_eq!(child(opt, "pad_length"), Some(&FieldValue::U8(9)));
+    assert_eq!(child(opt, "name"), None);
+    let value = opt.iter().find(|f| f.name() == "value").unwrap();
+    assert_eq!(value.value, FieldValue::Bytes(&[b'a', b'b', 0, 0]));
+    assert_eq!(value.range, 28..32);
 }
 
 #[test]
