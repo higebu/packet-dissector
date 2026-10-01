@@ -13,6 +13,8 @@
 //! | 9293 3.10.7.4 | RST forgets the HTTP/2 connection (both directions)        | rst_forgets_http2_connection                      |
 //! | 9293 3.6    | FIN forgets the sender's direction only                      | fin_forgets_sender_direction                      |
 
+mod common;
+
 use packet_dissector::packet::DissectBuffer;
 use packet_dissector::registry::DissectorRegistry;
 
@@ -67,8 +69,10 @@ fn s2c(seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
     segment(SERVER, CLIENT, 80, 50000, seq, flags, payload)
 }
 
-/// Layer names after Ethernet / IPv4 / TCP.
+/// Layer names after Ethernet / IPv4 / TCP, after asserting that every
+/// layer is listed with fields by `all_field_schemas()`.
 fn upper_layers(buf: &DissectBuffer<'_>) -> Vec<&'static str> {
+    common::assert_layers_have_schema(buf);
     buf.layers().iter().skip(3).map(|l| l.name).collect()
 }
 

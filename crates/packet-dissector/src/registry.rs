@@ -1,6 +1,6 @@
 //! Dissector registry for managing and dispatching protocol dissectors.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(feature = "mpls")]
 use std::sync::atomic::Ordering;
 
@@ -1798,153 +1798,76 @@ pub struct ProtocolInfo {
 }
 
 impl DissectorRegistry {
-    /// Visits every registered dissector exactly once, deduplicated by
-    /// `short_name`.
+    /// Collects the metadata of every dissector the registry can reach,
+    /// once per `short_name`.
     ///
-    /// The same dissector type may be registered under multiple dispatch keys
-    /// (e.g., DNS on both TCP port 53 and UDP port 53); only the first
-    /// occurrence is passed to `visit`. Shared by
+    /// Walks the dispatch tables (each in key order), then the decode-as
+    /// factories (in name order), following
+    /// [`Dissector::visit_sub_dissectors`] from each dissector, so the
+    /// result is the same on every call. The same dissector type may be
+    /// registered under multiple dispatch keys (e.g., DNS on both TCP port 53
+    /// and UDP port 53); only its first occurrence is kept. Shared by
     /// [`all_field_schemas`](Self::all_field_schemas) and
     /// [`all_protocol_info`](Self::all_protocol_info) so the two cannot drift
     /// in content or order.
-    fn for_each_unique_dissector(&self, mut visit: impl FnMut(&dyn Dissector)) {
-        let mut seen = HashSet::new();
-
-        let mut push = |d: &dyn Dissector| {
-            if seen.insert(d.short_name()) {
-                visit(d);
-            }
-        };
+    fn unique_protocol_info(&self) -> Vec<ProtocolInfo> {
+        let mut collector = ProtocolInfoCollector::default();
 
         if let Some(ref entry) = self.entry {
-            push(entry.as_ref());
+            collector.add(entry.as_ref());
         }
-        for d in self.by_ethertype.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_ip_protocol.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_udp_port.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_tcp_port.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_sctp_port.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_sctp_ppid.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_ipv6_routing_type.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_content_type.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_llc_sap.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_ach_channel_type.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_mtp3_service_indicator.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_sccp_ssn.values() {
-            push(d.as_ref());
-        }
-        for d in self.by_snap.values() {
-            push(d.as_ref());
-        }
+        collector.add_table(&self.by_ethertype);
+        collector.add_table(&self.by_ip_protocol);
+        collector.add_table(&self.by_udp_port);
+        collector.add_table(&self.by_tcp_port);
+        collector.add_table(&self.by_sctp_port);
+        collector.add_table(&self.by_sctp_ppid);
+        collector.add_table(&self.by_ipv6_routing_type);
+        collector.add_table(&self.by_content_type);
+        collector.add_table(&self.by_llc_sap);
+        collector.add_table(&self.by_ach_channel_type);
+        collector.add_table(&self.by_mtp3_service_indicator);
+        collector.add_table(&self.by_sccp_ssn);
+        collector.add_table(&self.by_snap);
         if let Some(ref d) = self.ipv6_routing_fallback {
-            push(d.as_ref());
+            collector.add(d.as_ref());
         }
         #[cfg(feature = "mpls")]
-        for d in self.mpls_labels.lock().values() {
-            push(d.as_ref());
-        }
-        for d in self.by_link_type.values() {
-            push(d.as_ref());
+        collector.add_table(&self.mpls_labels.lock());
+        collector.add_table(&self.by_link_type);
+
+        // Dissectors reachable only through decode-as (or a heuristic that
+        // the caller applies through it), such as RTP.
+        let mut factories: Vec<_> = self.dissector_factories.iter().collect();
+        factories.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (_, factory) in factories {
+            collector.add(factory().as_ref());
         }
 
-        // The OSPF dispatcher returns empty field_descriptors because it
-        // delegates to version-specific dissectors at runtime.  Expose the
-        // actual version-specific schemas so field discovery stays accurate.
-        #[cfg(feature = "ospf")]
-        push(&packet_dissector_ospf::Ospfv2Dissector);
-        #[cfg(feature = "ospf")]
-        push(&packet_dissector_ospf::Ospfv3Dissector);
-        #[cfg(feature = "bgp")]
-        push(&packet_dissector_bgp::BgpDissector);
-        // BMP is registered by decode-as name only.
-        #[cfg(feature = "bmp")]
-        push(&packet_dissector_bmp::BmpDissector);
-        // The MPLS dissector emits ACH and PW control word layers itself
-        // (RFC 5586, Section 2.1 — https://www.rfc-editor.org/rfc/rfc5586#section-2.1;
-        // RFC 4385, Section 3 — https://www.rfc-editor.org/rfc/rfc4385#section-3).
-        #[cfg(feature = "mpls")]
-        push(&packet_dissector_mpls::AchDissector);
-        #[cfg(feature = "mpls")]
-        push(&packet_dissector_mpls::PwControlWordDissector);
-        // The Slow Protocols dispatcher delegates by subtype; expose the
-        // schemas of the layers it produces.
-        #[cfg(feature = "lacp")]
-        {
-            push(&packet_dissector_lacp::LacpDissector);
-            push(&packet_dissector_lacp::MarkerDissector);
-            push(&packet_dissector_lacp::OamDissector);
-            push(&packet_dissector_lacp::OsspDissector);
-            push(&packet_dissector_lacp::EsmcDissector);
-        }
-        // The EAPOL dissector emits EAP layers itself (RFC 3748 —
-        // https://www.rfc-editor.org/rfc/rfc3748).
-        #[cfg(feature = "eap")]
-        push(&packet_dissector_eap::EapDissector);
-        // GtpcDispatcher delegates by version; expose both GTP-C schemas.
-        #[cfg(feature = "gtpv1c")]
-        push(&packet_dissector_gtpv1c::Gtpv1cDissector);
-        #[cfg(feature = "gtpv2c")]
-        push(&packet_dissector_gtpv2c::Gtpv2cDissector);
-        // StunDissector emits TURN ChannelData layers on the shared STUN port.
-        #[cfg(feature = "stun")]
-        push(&packet_dissector_stun::TurnChannelDataDissector);
-        // DTLS may be reachable only through `DtlsDemux`, which reports the
-        // schema of the protocol it shares a port with.
-        #[cfg(feature = "dtls")]
-        push(&packet_dissector_tls::DtlsDissector);
-        // RTCP has no dispatch key (decode-as only), yet its layers are also
-        // produced by the RTP dissector when RTP and RTCP share a port
-        // (RFC 5761, Section 4 — https://www.rfc-editor.org/rfc/rfc5761#section-4).
-        #[cfg(feature = "rtcp")]
-        push(&packet_dissector_rtcp::RtcpDissector);
-        // The "netflow" decode-as dissector emits NetFlow v5, v9 and IPFIX
-        // layers; IPFIX is also registered on port 4739 when a transport
-        // feature is enabled.
-        #[cfg(feature = "ipfix")]
-        {
-            push(&packet_dissector_ipfix::IpfixDissector::new());
-            push(&packet_dissector_ipfix::NetflowV9Dissector::new());
-            push(&packet_dissector_ipfix::NetflowV5Dissector);
-        }
+        collector.infos
     }
 
     /// Returns field metadata for all registered dissectors.
     ///
-    /// Each dissector is included at most once, deduplicated by `short_name`
-    /// (the same dissector type may be registered under multiple dispatch keys,
-    /// e.g., DNS on both TCP port 53 and UDP port 53).
+    /// Covers the dissectors of every dispatch table and decode-as factory
+    /// ([`register_dissector_factory`](Self::register_dissector_factory)),
+    /// and the dissectors they report through
+    /// [`Dissector::visit_sub_dissectors`], so every layer the registry can
+    /// produce is listed. Each `short_name` is included at most once (the
+    /// same dissector type may be registered under multiple dispatch keys,
+    /// e.g., DNS on both TCP port 53 and UDP port 53); a dispatcher's empty
+    /// schema gives way to a dissector with the same `short_name` that has
+    /// fields. The order is the dispatch tables' in key order, then the
+    /// factories' in name order, and does not change between calls.
     pub fn all_field_schemas(&self) -> Vec<ProtocolFieldSchema> {
-        let mut schemas = Vec::new();
-        self.for_each_unique_dissector(|d| {
-            schemas.push(ProtocolFieldSchema {
-                name: d.name(),
-                short_name: d.short_name(),
-                fields: d.field_descriptors(),
-            });
-        });
-        schemas
+        self.unique_protocol_info()
+            .into_iter()
+            .map(|info| ProtocolFieldSchema {
+                name: info.name,
+                short_name: info.short_name,
+                fields: info.fields,
+            })
+            .collect()
     }
 
     /// Returns protocol metadata for all registered dissectors.
@@ -1953,17 +1876,61 @@ impl DissectorRegistry {
     /// [`all_field_schemas`](Self::all_field_schemas), with the specification
     /// references and stack position each dissector declares.
     pub fn all_protocol_info(&self) -> Vec<ProtocolInfo> {
-        let mut infos = Vec::new();
-        self.for_each_unique_dissector(|d| {
-            infos.push(ProtocolInfo {
-                name: d.name(),
-                short_name: d.short_name(),
-                layer: d.layer(),
-                references: d.references(),
-                fields: d.field_descriptors(),
-            });
-        });
-        infos
+        self.unique_protocol_info()
+    }
+}
+
+/// How deep [`Dissector::visit_sub_dissectors`] is followed from a
+/// registered dissector. Sub-dissector relations are expected to be
+/// acyclic and shallow; the bound keeps a cycle from recursing without end.
+const MAX_SUB_DISSECTOR_DEPTH: usize = 8;
+
+/// Accumulates [`ProtocolInfo`] in visiting order, one per `short_name`.
+#[derive(Default)]
+struct ProtocolInfoCollector {
+    infos: Vec<ProtocolInfo>,
+    index: HashMap<&'static str, usize>,
+}
+
+impl ProtocolInfoCollector {
+    /// Add every dissector of a dispatch table, in key order.
+    fn add_table<K: Ord>(&mut self, table: &HashMap<K, Box<dyn Dissector>>) {
+        let mut entries: Vec<_> = table.iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (_, d) in entries {
+            self.add(d.as_ref());
+        }
+    }
+
+    /// Add `d` and the dissectors it visits as sub-dissectors.
+    fn add(&mut self, d: &dyn Dissector) {
+        self.add_at_depth(d, 0);
+    }
+
+    fn add_at_depth(&mut self, d: &dyn Dissector, depth: usize) {
+        let info = ProtocolInfo {
+            name: d.name(),
+            short_name: d.short_name(),
+            layer: d.layer(),
+            references: d.references(),
+            fields: d.field_descriptors(),
+        };
+        match self.index.get(info.short_name) {
+            None => {
+                self.index.insert(info.short_name, self.infos.len());
+                self.infos.push(info);
+            }
+            // A dispatcher that never emits a layer of its own reports an
+            // empty schema, possibly under the short name of a dissector it
+            // delegates to (HTTP, L2TP); that dissector's schema wins.
+            Some(&i) if self.infos[i].fields.is_empty() && !info.fields.is_empty() => {
+                self.infos[i] = info;
+            }
+            Some(_) => {}
+        }
+        if depth < MAX_SUB_DISSECTOR_DEPTH {
+            d.visit_sub_dissectors(&mut |sub| self.add_at_depth(sub, depth + 1));
+        }
     }
 }
 
@@ -2109,15 +2076,20 @@ impl Dissector for OspfDispatcher {
         "OSPF"
     }
 
+    /// Empty: this dispatcher never emits a layer of its own. The OSPFv2
+    /// and OSPFv3 schemas are exposed through
+    /// [`visit_sub_dissectors`](Dissector::visit_sub_dissectors).
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
-        // Delegate to the appropriate version dissector at runtime.
-        // Return the union of descriptors is impractical, so return an empty slice.
-        // The actual dissector's descriptors are authoritative.
         &[]
     }
 
     fn references(&self) -> &'static [SpecReference] {
         OSPF_REFERENCES
+    }
+
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&packet_dissector_ospf::Ospfv2Dissector);
+        visit(&packet_dissector_ospf::Ospfv3Dissector);
     }
 
     fn layer(&self) -> Option<ProtocolLayer> {
@@ -2237,8 +2209,18 @@ impl Dissector for HttpDispatcher {
         "HTTP"
     }
 
+    /// Empty: this dispatcher never emits a layer of its own. The HTTP/1.1
+    /// and HTTP/2 schemas are exposed through
+    /// [`visit_sub_dissectors`](Dissector::visit_sub_dissectors).
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         &[]
+    }
+
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        #[cfg(feature = "http")]
+        visit(&packet_dissector_http::HttpDissector);
+        #[cfg(feature = "http2")]
+        visit(&packet_dissector_http2::Http2Dissector);
     }
 
     fn references(&self) -> &'static [SpecReference] {
@@ -2364,8 +2346,18 @@ impl Dissector for L2tpDispatcher {
         "L2TP"
     }
 
+    /// Empty: this dispatcher never emits a layer of its own. The L2TPv2
+    /// and L2TPv3-over-UDP schemas are exposed through
+    /// [`visit_sub_dissectors`](Dissector::visit_sub_dissectors).
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         &[]
+    }
+
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        #[cfg(feature = "l2tp")]
+        visit(&packet_dissector_l2tp::L2tpDissector);
+        #[cfg(feature = "l2tpv3")]
+        visit(&packet_dissector_l2tpv3::L2tpv3UdpDissector);
     }
 
     fn references(&self) -> &'static [SpecReference] {
@@ -2470,6 +2462,12 @@ impl Dissector for MplsDispatcher {
         packet_dissector_mpls::MplsDissector.layer()
     }
 
+    /// The MPLS dissector's own sub-dissectors. The dissectors of the
+    /// decode-as rules are walked from the registry's label table.
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        packet_dissector_mpls::MplsDissector.visit_sub_dissectors(visit);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -2525,15 +2523,21 @@ impl Dissector for UdpEncapDispatcher {
         "UDPENCAP"
     }
 
-    /// Empty: this dispatcher never emits a layer of its own, it delegates to
-    /// the ESP or IKE dissector, each of which is also registered under its
-    /// own dispatch key and so already contributes its schema.
+    /// Empty: this dispatcher never emits a layer of its own. The ESP and
+    /// IKE schemas are exposed through
+    /// [`visit_sub_dissectors`](Dissector::visit_sub_dissectors).
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         &[]
     }
 
     fn references(&self) -> &'static [SpecReference] {
         UDP_ENCAP_REFERENCES
+    }
+
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&self.esp);
+        #[cfg(feature = "ike")]
+        visit(&packet_dissector_ike::IkeDissector);
     }
 
     fn layer(&self) -> Option<ProtocolLayer> {
@@ -2611,10 +2615,17 @@ impl Dissector for GtpcDispatcher {
     }
 
     /// Empty: this dispatcher never emits a layer of its own. The GTPv1-C
-    /// and GTPv2-C schemas are exposed by
-    /// [`DissectorRegistry::for_each_unique_dissector`].
+    /// and GTPv2-C schemas are exposed through
+    /// [`visit_sub_dissectors`](Dissector::visit_sub_dissectors).
     fn field_descriptors(&self) -> &'static [FieldDescriptor] {
         &[]
+    }
+
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        #[cfg(feature = "gtpv1c")]
+        visit(&packet_dissector_gtpv1c::Gtpv1cDissector);
+        #[cfg(feature = "gtpv2c")]
+        visit(&packet_dissector_gtpv2c::Gtpv2cDissector);
     }
 
     fn references(&self) -> &'static [SpecReference] {
@@ -2679,7 +2690,7 @@ impl Dissector for GtpcDispatcher {
 ///
 /// It reports `other`'s names and schema, so it can replace `other`'s
 /// registration without changing the registry's schema output; the DTLS
-/// schema is exposed by `for_each_unique_dissector`.
+/// schema is exposed through `visit_sub_dissectors`.
 #[cfg(all(
     feature = "udp",
     feature = "dtls",
@@ -2713,6 +2724,11 @@ impl Dissector for DtlsDemux {
 
     fn layer(&self) -> Option<ProtocolLayer> {
         self.other.layer()
+    }
+
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&packet_dissector_tls::DtlsDissector);
+        self.other.visit_sub_dissectors(visit);
     }
 
     fn dissect<'pkt>(
@@ -5660,6 +5676,225 @@ mod tests {
         assert!(names.contains(&"llc"));
         assert!(names.contains(&"rt-fb"));
         assert!(names.contains(&"lt"));
+    }
+
+    /// Body of [`Dissector::visit_sub_dissectors`] for a [`TreeStub`].
+    type VisitSubs = fn(&mut dyn FnMut(&dyn Dissector));
+
+    /// Dissector with a configurable schema and sub-dissectors.
+    struct TreeStub {
+        short_name: &'static str,
+        fields: &'static [FieldDescriptor],
+        subs: VisitSubs,
+    }
+
+    impl Dissector for TreeStub {
+        fn name(&self) -> &'static str {
+            self.short_name
+        }
+        fn short_name(&self) -> &'static str {
+            self.short_name
+        }
+        fn field_descriptors(&self) -> &'static [FieldDescriptor] {
+            self.fields
+        }
+        fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+            (self.subs)(visit);
+        }
+        fn dissect<'pkt>(
+            &self,
+            _data: &'pkt [u8],
+            _buf: &mut DissectBuffer<'pkt>,
+            _offset: usize,
+        ) -> Result<DissectResult, packet_dissector_core::error::PacketError> {
+            Ok(DissectResult::new(0, DispatchHint::End))
+        }
+    }
+
+    static TREE_FIELDS: &[FieldDescriptor] = &[FieldDescriptor::new(
+        "x",
+        "X",
+        packet_dissector_core::field::FieldType::U8,
+    )];
+
+    fn no_subs(_: &mut dyn FnMut(&dyn Dissector)) {}
+
+    /// A dispatcher named "disp" with an empty schema that delegates to a
+    /// "disp" with fields and to "inner".
+    fn dispatcher_stub() -> TreeStub {
+        TreeStub {
+            short_name: "disp",
+            fields: &[],
+            subs: |visit| {
+                visit(&TreeStub {
+                    short_name: "disp",
+                    fields: TREE_FIELDS,
+                    subs: no_subs,
+                });
+                visit(&TreeStub {
+                    short_name: "inner",
+                    fields: TREE_FIELDS,
+                    subs: no_subs,
+                });
+            },
+        }
+    }
+
+    #[test]
+    fn all_field_schemas_prefer_delegate_schema_over_empty_dispatcher() {
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_udp_port(1, Box::new(dispatcher_stub()))
+            .unwrap();
+
+        let schemas = reg.all_field_schemas();
+        let names: Vec<&str> = schemas.iter().map(|s| s.short_name).collect();
+        assert_eq!(names, ["disp", "inner"]);
+        assert!(schemas.iter().all(|s| s.fields == TREE_FIELDS));
+    }
+
+    #[test]
+    fn all_field_schemas_walk_sub_dissectors_of_deduplicated_dispatcher() {
+        let mut reg = DissectorRegistry::new();
+        // The real "disp" is listed first; the dispatcher registered after
+        // it adds nothing under its own name but still reveals "inner".
+        reg.register_by_udp_port(
+            1,
+            Box::new(TreeStub {
+                short_name: "disp",
+                fields: TREE_FIELDS,
+                subs: no_subs,
+            }),
+        )
+        .unwrap();
+        reg.register_by_udp_port(2, Box::new(dispatcher_stub()))
+            .unwrap();
+
+        let schemas = reg.all_field_schemas();
+        let names: Vec<&str> = schemas.iter().map(|s| s.short_name).collect();
+        assert_eq!(names, ["disp", "inner"]);
+        assert!(schemas.iter().all(|s| s.fields == TREE_FIELDS));
+    }
+
+    #[test]
+    fn all_field_schemas_stop_on_sub_dissector_cycle() {
+        fn myself(visit: &mut dyn FnMut(&dyn Dissector)) {
+            visit(&TreeStub {
+                short_name: "cycle",
+                fields: TREE_FIELDS,
+                subs: myself,
+            });
+        }
+        let mut reg = DissectorRegistry::new();
+        reg.register_by_udp_port(
+            1,
+            Box::new(TreeStub {
+                short_name: "cycle",
+                fields: TREE_FIELDS,
+                subs: myself,
+            }),
+        )
+        .unwrap();
+
+        let names: Vec<&str> = reg
+            .all_field_schemas()
+            .iter()
+            .map(|s| s.short_name)
+            .collect();
+        assert_eq!(names, ["cycle"]);
+    }
+
+    #[test]
+    fn all_field_schemas_follow_table_key_order() {
+        const NAMES: [&str; 8] = ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"];
+        let mut reg = DissectorRegistry::new();
+        // Insert in reverse so the order cannot come from insertion.
+        for (port, name) in NAMES.iter().enumerate().rev() {
+            reg.register_by_udp_port(port as u16, Box::new(StubDissector(name)))
+                .unwrap();
+        }
+        reg.register_dissector_factory("zz", || Box::new(StubDissector("zz")));
+        reg.register_dissector_factory("aa", || Box::new(StubDissector("aa")));
+
+        let names: Vec<&str> = reg
+            .all_field_schemas()
+            .iter()
+            .map(|s| s.short_name)
+            .collect();
+        assert_eq!(
+            names,
+            ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "aa", "zz"]
+        );
+    }
+
+    #[test]
+    fn default_all_field_schemas_are_stable_and_unique() {
+        let names = |reg: &DissectorRegistry| -> Vec<&'static str> {
+            reg.all_field_schemas()
+                .iter()
+                .map(|s| s.short_name)
+                .collect()
+        };
+        let first = names(&DissectorRegistry::default());
+        let second = names(&DissectorRegistry::default());
+        assert_eq!(first, second);
+
+        let mut unique = first.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), first.len());
+    }
+
+    #[test]
+    fn default_all_field_schemas_include_dispatched_and_embedded_dissectors() {
+        let schemas = DissectorRegistry::default().all_field_schemas();
+        let fields = |short_name: &str| {
+            schemas
+                .iter()
+                .find(|s| s.short_name == short_name)
+                .map(|s| s.fields)
+                .unwrap_or_else(|| panic!("{short_name} missing from all_field_schemas()"))
+        };
+        #[allow(unused_mut)]
+        let mut expected: Vec<(&str, &'static [FieldDescriptor])> = Vec::new();
+        #[cfg(feature = "http")]
+        expected.push((
+            "HTTP",
+            packet_dissector_http::HttpDissector.field_descriptors(),
+        ));
+        #[cfg(feature = "http2")]
+        expected.push((
+            "HTTP2",
+            packet_dissector_http2::Http2Dissector.field_descriptors(),
+        ));
+        #[cfg(feature = "l2tp")]
+        expected.push((
+            "L2TP",
+            packet_dissector_l2tp::L2tpDissector.field_descriptors(),
+        ));
+        #[cfg(feature = "l2tpv3")]
+        expected.push((
+            "L2TPv3-UDP",
+            packet_dissector_l2tpv3::L2tpv3UdpDissector.field_descriptors(),
+        ));
+        #[cfg(feature = "rtp")]
+        expected.push((
+            "RTP",
+            packet_dissector_rtp::RtpDissector.field_descriptors(),
+        ));
+        #[cfg(feature = "nas5g")]
+        expected.push((
+            "NAS-5G",
+            packet_dissector_nas5g::Nas5gDissector.field_descriptors(),
+        ));
+        #[cfg(feature = "nas-eps")]
+        expected.push((
+            "NAS-EPS",
+            packet_dissector_nas_eps::NasEpsDissector.field_descriptors(),
+        ));
+        for (short_name, descriptors) in expected {
+            assert!(!descriptors.is_empty(), "{short_name}");
+            assert_eq!(fields(short_name), descriptors, "{short_name}");
+        }
     }
 
     // --- all_protocol_info ---

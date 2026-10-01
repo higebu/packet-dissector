@@ -302,6 +302,13 @@ impl Dissector for RtpDissector {
         Some(ProtocolLayer::Application)
     }
 
+    /// RTCP: RTP and RTCP may share a port (RFC 5761, Section 4 —
+    /// <https://www.rfc-editor.org/rfc/rfc5761#section-4>).
+    #[cfg(feature = "rtcp-mux")]
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&RtcpDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -1496,5 +1503,13 @@ mod tests {
             buf.field_by_name(layer, "payload_type").unwrap().value,
             FieldValue::U8(72)
         );
+    }
+
+    #[cfg(feature = "rtcp-mux")]
+    #[test]
+    fn visit_sub_dissectors_lists_embedded_layers() {
+        let mut names = Vec::new();
+        RtpDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+        assert_eq!(names, ["RTCP"]);
     }
 }

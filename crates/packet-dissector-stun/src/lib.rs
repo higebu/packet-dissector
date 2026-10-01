@@ -1131,6 +1131,12 @@ impl Dissector for StunDissector {
         Some(ProtocolLayer::Application)
     }
 
+    /// TURN ChannelData, which shares the transport with STUN (RFC 8656,
+    /// Section 12 — <https://www.rfc-editor.org/rfc/rfc8656#section-12>).
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&TurnChannelDataDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -1170,6 +1176,10 @@ impl Dissector for StunTcpDissector {
 
     fn layer(&self) -> Option<ProtocolLayer> {
         Some(ProtocolLayer::Application)
+    }
+
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        StunDissector.visit_sub_dissectors(visit);
     }
 
     fn dissect<'pkt>(
@@ -3219,5 +3229,14 @@ mod tests {
         assert_eq!(StunDissector.layer(), Some(ProtocolLayer::Application));
         // STUN on the shared port also emits TURN ChannelData layers.
         assert!(references.iter().any(|r| r.id == "RFC 8656"));
+    }
+
+    #[test]
+    fn visit_sub_dissectors_lists_turn_channel_data() {
+        for d in [&StunDissector as &dyn Dissector, &StunTcpDissector] {
+            let mut names = Vec::new();
+            d.visit_sub_dissectors(&mut |sub| names.push(sub.short_name()));
+            assert_eq!(names, [CHANNELDATA_SHORT_NAME], "{}", d.short_name());
+        }
     }
 }

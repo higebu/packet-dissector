@@ -42,6 +42,8 @@
     feature = "dns"
 ))]
 
+mod common;
+
 use packet_dissector::field::FieldValue;
 use packet_dissector::packet::DissectBuffer;
 use packet_dissector::registry::DissectorRegistry;
@@ -158,7 +160,10 @@ fn names(buf: &DissectBuffer<'_>) -> Vec<&'static str> {
     buf.layers().iter().map(|l| l.name).collect()
 }
 
+/// Assert that all layers have contiguous, non-empty byte ranges, and that
+/// each is listed with fields by `all_field_schemas()`.
 fn assert_layers_contiguous(buf: &DissectBuffer<'_>) {
+    common::assert_layers_have_schema(buf);
     let mut expected_start = 0;
     for layer in buf.layers() {
         assert_eq!(layer.range.start, expected_start, "layer {}", layer.name);

@@ -134,6 +134,11 @@ impl Dissector for EapolDissector {
         Some(ProtocolLayer::Link)
     }
 
+    /// EAP: an EAP-Packet body is pushed as an `EAP` layer.
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&EapDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -424,5 +429,12 @@ mod tests {
         assert_eq!(EapolDissector.field_descriptors().len(), 5);
         assert_eq!(EapolDissector.references()[0].id, "IEEE 802.1X-2020");
         assert_eq!(EapolDissector.layer(), Some(ProtocolLayer::Link));
+    }
+
+    #[test]
+    fn visit_sub_dissectors_lists_embedded_layers() {
+        let mut names = Vec::new();
+        EapolDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+        assert_eq!(names, ["EAP"]);
     }
 }

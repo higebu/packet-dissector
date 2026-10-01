@@ -1852,6 +1852,13 @@ impl Dissector for NetflowDissector {
         Some(ProtocolLayer::Application)
     }
 
+    /// The version-specific dissectors this dispatcher delegates to.
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&NetflowV5Dissector);
+        visit(&self.v9);
+        visit(&self.ipfix);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -3578,5 +3585,12 @@ mod tests {
             assert_eq!(v9_scope_type_name(&FieldValue::U16(id), &[]), Some(name));
         }
         assert_eq!(v9_scope_type_name(&FieldValue::U16(6), &[]), None);
+    }
+
+    #[test]
+    fn visit_sub_dissectors_lists_embedded_layers() {
+        let mut names = Vec::new();
+        NetflowDissector::new().visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+        assert_eq!(names, ["NetFlow-v5", "NetFlow-v9", "IPFIX"]);
     }
 }

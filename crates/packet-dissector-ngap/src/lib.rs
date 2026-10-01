@@ -171,6 +171,12 @@ impl Dissector for NgapDissector {
         Some(ProtocolLayer::Application)
     }
 
+    /// NAS-5G: a NAS-PDU IE is pushed as a `NAS-5G` layer (3GPP TS 38.413,
+    /// Section 9.3.3.4).
+    fn visit_sub_dissectors(&self, visit: &mut dyn FnMut(&dyn Dissector)) {
+        visit(&packet_dissector_nas5g::Nas5gDissector);
+    }
+
     fn dissect<'pkt>(
         &self,
         data: &'pkt [u8],
@@ -954,5 +960,12 @@ mod tests {
             read_aper_length(&data, 0),
             Err(PacketError::InvalidHeader(_))
         ));
+    }
+
+    #[test]
+    fn visit_sub_dissectors_lists_embedded_layers() {
+        let mut names = Vec::new();
+        NgapDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+        assert_eq!(names, ["NAS-5G"]);
     }
 }

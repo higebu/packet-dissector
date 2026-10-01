@@ -677,3 +677,10 @@ fn name_tables() {
     assert_eq!(d.layer(), Some(ProtocolLayer::Application));
     assert_eq!(d.field_descriptors().len(), FD_COMPONENTS + 1);
 }
+
+#[test]
+fn visit_sub_dissectors_lists_embedded_layers() {
+    let mut names = Vec::new();
+    MapDissector.visit_sub_dissectors(&mut |d| names.push(d.short_name()));
+    assert_eq!(names, ["TCAP"]);
+}
