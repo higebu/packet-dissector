@@ -935,22 +935,22 @@ named_u8!(
 );
 /// Fields of a 5GSM message decoded from an N1 SM payload container.
 ///
-/// An array static, referenced by address, so the recursive schema
-/// (`information_elements` → `n1_sm_message` → `information_elements`)
-/// does not form an initializer cycle.
-static N1_SM_CHILDREN: [FieldDescriptor; 7] = [
+/// An N1 SM message is never decoded inside another one, so its
+/// `information_elements` use [`N1_SM_IE_CHILDREN`], which has no
+/// `n1_sm_message`: the schema stays acyclic.
+static N1_SM_CHILDREN: &[FieldDescriptor] = &[
     crate::FD_EPD,
     crate::FD_PDU_SESSION_ID,
     crate::FD_PTI,
     crate::FD_SM_MESSAGE_TYPE,
-    FD_INFORMATION_ELEMENTS,
+    FD_N1_SM_INFORMATION_ELEMENTS,
     FD_UNDECODED_OCTETS,
     FD_MISSING_MANDATORY_IE,
 ];
 static FD_N1_SM_MESSAGE: FieldDescriptor =
     FieldDescriptor::new("n1_sm_message", "N1 SM Message", FieldType::Object)
         .optional()
-        .with_children(&N1_SM_CHILDREN);
+        .with_children(N1_SM_CHILDREN);
 plain!(FD_PDU_SESSION_ID, "pdu_session_id", "PDU Session ID", U8);
 named_u8!(
     FD_REQUEST_TYPE,
@@ -1217,90 +1217,110 @@ static FD_QOS_FLOWS: FieldDescriptor = FieldDescriptor::new(
 .optional()
 .with_children(QOS_FLOW_CHILDREN);
 
+// Child fields of an `ie` object, with `n1_sm_message` where an N1 SM
+// payload container may be decoded.
+macro_rules! ie_children {
+    ($($n1_sm_message:expr)?) => {
+        &[
+            FD_IE_NAME,
+            FD_IE_IEI,
+            FieldDescriptor::new("length", "Length", FieldType::Any).optional(),
+            FieldDescriptor::new("value", "Value", FieldType::Any).optional(),
+            // 5GS mobile identity.
+            FD_TYPE_OF_IDENTITY,
+            FD_ODD_EVEN,
+            FD_IDENTITY_DIGITS,
+            FD_SUPI_FORMAT,
+            FD_MCC,
+            FD_MNC,
+            FD_ROUTING_INDICATOR,
+            FD_PROTECTION_SCHEME,
+            FD_HN_PKI,
+            FD_MSIN,
+            FD_SCHEME_OUTPUT,
+            FD_SUCI_NAI,
+            FD_AMF_REGION_ID,
+            FD_AMF_SET_ID,
+            FD_AMF_POINTER,
+            FD_TMSI,
+            FD_MAURI,
+            FD_MAC_ADDRESS,
+            FD_EUI64,
+            // NAS key set identifier, registration type and result.
+            FD_TSC,
+            FD_KSI,
+            FD_FOR,
+            FD_REGISTRATION_TYPE,
+            FD_DISASTER_ROAMING_RESULT,
+            FD_EMERGENCY_REGISTERED,
+            FD_NSSAA,
+            FD_SMS_ALLOWED,
+            FD_REGISTRATION_RESULT,
+            // Causes (5GMM and 5GSM share the name `cause`).
+            FD_MM_CAUSE,
+            // S-NSSAI, NSSAI, TAI and TAI list.
+            FD_SST,
+            FD_SD,
+            FD_MAPPED_SST,
+            FD_MAPPED_SD,
+            FD_S_NSSAI_LIST,
+            FD_TAC,
+            FD_PARTIAL_TAI_LISTS,
+            // Security.
+            FD_EA_5G,
+            FD_IA_5G,
+            FD_EEA,
+            FD_EIA,
+            FD_CIPHERING_ALGORITHM,
+            FD_INTEGRITY_ALGORITHM,
+            // Transport.
+            FD_PAYLOAD_CONTAINER_TYPE,
+            $($n1_sm_message,)?
+            FD_PDU_SESSION_ID,
+            FD_REQUEST_TYPE,
+            FD_SWITCH_OFF,
+            FD_REREGISTRATION_REQUIRED,
+            FD_ACCESS_TYPE,
+            FD_SERVICE_TYPE,
+            // 5GSM.
+            FD_PDU_SESSION_TYPE,
+            FD_SSC_MODE,
+            FD_DNN,
+            FD_SI6LLA,
+            FD_IPV4_ADDRESS,
+            FD_IPV6_IID,
+            FD_SMF_IPV6_LLA,
+            FD_UPLINK_RATE,
+            FD_DOWNLINK_RATE,
+            FD_AMBR_DL_UNIT,
+            FD_AMBR_DL,
+            FD_AMBR_UL_UNIT,
+            FD_AMBR_UL,
+            FD_QOS_RULES,
+            FD_QOS_FLOWS,
+        ]
+    };
+}
 /// Child fields of an `ie` object in `information_elements`.
 ///
 /// `name` is always present. `iei` is present for optional IEs, `length`
 /// for LV, LV-E, TLV and TLV-E IEs. The remaining fields depend on the IE
 /// type; an IE without a dedicated decoder, or whose value does not match
 /// its coding, carries its value part as `value`.
-pub(crate) static IE_CHILDREN: &[FieldDescriptor] = &[
-    FD_IE_NAME,
-    FD_IE_IEI,
-    FieldDescriptor::new("length", "Length", FieldType::Any).optional(),
-    FieldDescriptor::new("value", "Value", FieldType::Any).optional(),
-    // 5GS mobile identity.
-    FD_TYPE_OF_IDENTITY,
-    FD_ODD_EVEN,
-    FD_IDENTITY_DIGITS,
-    FD_SUPI_FORMAT,
-    FD_MCC,
-    FD_MNC,
-    FD_ROUTING_INDICATOR,
-    FD_PROTECTION_SCHEME,
-    FD_HN_PKI,
-    FD_MSIN,
-    FD_SCHEME_OUTPUT,
-    FD_SUCI_NAI,
-    FD_AMF_REGION_ID,
-    FD_AMF_SET_ID,
-    FD_AMF_POINTER,
-    FD_TMSI,
-    FD_MAURI,
-    FD_MAC_ADDRESS,
-    FD_EUI64,
-    // NAS key set identifier, registration type and result.
-    FD_TSC,
-    FD_KSI,
-    FD_FOR,
-    FD_REGISTRATION_TYPE,
-    FD_DISASTER_ROAMING_RESULT,
-    FD_EMERGENCY_REGISTERED,
-    FD_NSSAA,
-    FD_SMS_ALLOWED,
-    FD_REGISTRATION_RESULT,
-    // Causes (5GMM and 5GSM share the name `cause`).
-    FD_MM_CAUSE,
-    // S-NSSAI, NSSAI, TAI and TAI list.
-    FD_SST,
-    FD_SD,
-    FD_MAPPED_SST,
-    FD_MAPPED_SD,
-    FD_S_NSSAI_LIST,
-    FD_TAC,
-    FD_PARTIAL_TAI_LISTS,
-    // Security.
-    FD_EA_5G,
-    FD_IA_5G,
-    FD_EEA,
-    FD_EIA,
-    FD_CIPHERING_ALGORITHM,
-    FD_INTEGRITY_ALGORITHM,
-    // Transport.
-    FD_PAYLOAD_CONTAINER_TYPE,
-    FD_N1_SM_MESSAGE,
-    FD_PDU_SESSION_ID,
-    FD_REQUEST_TYPE,
-    FD_SWITCH_OFF,
-    FD_REREGISTRATION_REQUIRED,
-    FD_ACCESS_TYPE,
-    FD_SERVICE_TYPE,
-    // 5GSM.
-    FD_PDU_SESSION_TYPE,
-    FD_SSC_MODE,
-    FD_DNN,
-    FD_SI6LLA,
-    FD_IPV4_ADDRESS,
-    FD_IPV6_IID,
-    FD_SMF_IPV6_LLA,
-    FD_UPLINK_RATE,
-    FD_DOWNLINK_RATE,
-    FD_AMBR_DL_UNIT,
-    FD_AMBR_DL,
-    FD_AMBR_UL_UNIT,
-    FD_AMBR_UL,
-    FD_QOS_RULES,
-    FD_QOS_FLOWS,
-];
+pub(crate) static IE_CHILDREN: &[FieldDescriptor] = ie_children!(FD_N1_SM_MESSAGE);
+
+/// Child fields of an `ie` object in the `information_elements` of an
+/// `n1_sm_message`, which never nests another `n1_sm_message`.
+static N1_SM_IE_CHILDREN: &[FieldDescriptor] = ie_children!();
+
+/// The `information_elements` array of an `n1_sm_message`.
+const FD_N1_SM_INFORMATION_ELEMENTS: FieldDescriptor = FieldDescriptor::new(
+    "information_elements",
+    "Information Elements",
+    FieldType::Array,
+)
+.optional()
+.with_children(N1_SM_IE_CHILDREN);
 
 /// One IE object in `information_elements`.
 static FD_IE: FieldDescriptor =
@@ -1780,7 +1800,10 @@ fn push_mobile_identity<'pkt>(
                 data.len() >= 2
             }
         }
-        // No identity, IMEI, IMEISV.
+        // No identity: "For Type of identity "No identity", the length of
+        // mobile identity contents parameter shall be set to 1".
+        0 => data.len() == 1,
+        // IMEI, IMEISV.
         _ => true,
     };
     if !expected_ok {

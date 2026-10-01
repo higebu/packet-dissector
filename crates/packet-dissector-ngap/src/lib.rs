@@ -290,12 +290,11 @@ impl Dissector for NgapDissector {
                 FieldValue::Bytes(value_data),
                 offset + pos..offset + total_consumed,
             );
-        } else if value_data.len() > SEQUENCE_PREAMBLE_SIZE {
-            let ie_data = &value_data[SEQUENCE_PREAMBLE_SIZE..];
+        } else if let Some((&preamble, ie_data)) = value_data.split_first() {
             let ie_offset = ie_base_offset + SEQUENCE_PREAMBLE_SIZE;
             // ITU-T Rec. X.691, Section 19.1: the first bit of the message
             // SEQUENCE is its extension bit.
-            let extended = value_data[0] & 0x80 != 0;
+            let extended = preamble & 0x80 != 0;
             if !container::push_ie_container(
                 buf,
                 &FIELD_DESCRIPTORS[FD_IES],
@@ -309,12 +308,22 @@ impl Dissector for NgapDissector {
                     FieldValue::Str("IE count truncated"),
                     ie_offset..ie_offset + ie_data.len(),
                 );
-                buf.push_field(
-                    &container::FD_UNDECODED_IES,
-                    FieldValue::Bytes(ie_data),
-                    ie_offset..ie_offset + ie_data.len(),
-                );
+                if !ie_data.is_empty() {
+                    buf.push_field(
+                        &container::FD_UNDECODED_IES,
+                        FieldValue::Bytes(ie_data),
+                        ie_offset..ie_offset + ie_data.len(),
+                    );
+                }
             }
+        } else {
+            // The message SEQUENCE always encodes its preamble and the
+            // ProtocolIE-Container count, so an empty value is malformed.
+            buf.push_field(
+                &container::FD_IE_CONTAINER_ERROR,
+                FieldValue::Str("message value empty"),
+                ie_base_offset..ie_base_offset,
+            );
         }
 
         buf.end_layer();
@@ -341,6 +350,8 @@ mod tests {
     //! | 9.5          | APER IE values (UEContextReleaseRequest) | parse_aper_ue_context_release_request |
     //! | 9.4.5        | PDUSessionResourceSetupRequest: N3 TEID | parse_aper_pdu_session_resource_setup_request |
     //! | 9.4.4        | IE count missing                 | parse_ngap_ie_count_truncated     |
+    //! | 9.4.4        | IE count absent (preamble only)  | parse_ngap_ie_count_absent        |
+    //! | 9.4          | Empty message value              | parse_ngap_empty_message_value    |
     //! | X.691 11.9.3.8 | Fragmented message value       | parse_ngap_fragmented_value       |
     //! | X.691 11.9   | Public length determinant reader | read_aper_length_forms            |
 
@@ -870,6 +881,34 @@ mod tests {
             buf.field_by_name(layer, "undecoded_ies").unwrap().value,
             FieldValue::Bytes(&[0x00])
         );
+    }
+
+    #[test]
+    fn parse_ngap_ie_count_absent() {
+        // Value: only the SEQUENCE preamble, no IE count.
+        let data = build_ngap_pdu(0, 15, 0, &[0x00]);
+        let mut buf = DissectBuffer::new();
+        NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("NGAP").unwrap();
+        assert_eq!(
+            buf.field_by_name(layer, "ie_container_error")
+                .unwrap()
+                .value,
+            FieldValue::Str("IE count truncated")
+        );
+        assert!(buf.field_by_name(layer, "undecoded_ies").is_none());
+    }
+
+    #[test]
+    fn parse_ngap_empty_message_value() {
+        let data = build_ngap_pdu(0, 15, 0, &[]);
+        let mut buf = DissectBuffer::new();
+        NgapDissector.dissect(&data, &mut buf, 0).unwrap();
+        let layer = buf.layer_by_name("NGAP").unwrap();
+        let error = buf.field_by_name(layer, "ie_container_error").unwrap();
+        assert_eq!(error.value, FieldValue::Str("message value empty"));
+        assert_eq!(error.range, 4..4);
+        assert!(buf.field_by_name(layer, "undecoded_ies").is_none());
     }
 
     #[test]

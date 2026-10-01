@@ -11,6 +11,7 @@
 //! | 9.11.3.4             | IMEISV                                       | security_mode_complete_imeisv                |
 //! | 9.11.3.4             | IMEI, MAC address, EUI-64, no identity       | identity_response_other_identity_types       |
 //! | 9.11.3.4             | Malformed identity kept as raw value         | malformed_ie_value_falls_back_to_raw         |
+//! | 9.11.3.4             | No identity with extra octets kept raw       | no_identity_with_extra_octets_kept_raw       |
 //! | 9.11.3.7, 9.11.3.32  | Registration type, ngKSI                     | registration_request_suci_imsi               |
 //! | 9.11.3.32            | Non-current ngKSI (TV type 1)                | registration_request_optional_ies            |
 //! | 9.11.3.54            | UE security capability                       | registration_request_optional_ies            |
@@ -46,9 +47,10 @@
 //! | 4.4.5, 9.1.1         | IEs of integrity protected inner message     | integrity_protected_inner_message_ies        |
 //! |                      | Dissector trait path decodes IEs             | dissector_decodes_ies                        |
 //! |                      | Arbitrary bodies: no panic, ranges in bounds | arbitrary_bodies_never_panic                 |
+//! | 9.11.3.39            | Field descriptor schema is acyclic           | field_descriptor_schema_is_acyclic           |
 
 use packet_dissector_core::dissector::Dissector;
-use packet_dissector_core::field::{Field, FieldValue, FormatContext};
+use packet_dissector_core::field::{Field, FieldDescriptor, FieldValue, FormatContext};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_nas5g::{Nas5gDissector, push_nas_pdu};
 
@@ -1022,6 +1024,44 @@ fn malformed_ie_value_falls_back_to_raw() {
     let nssai = ie(&buf, &top, "Allowed NSSAI");
     assert_eq!(bytes_of(&nssai, "value"), &[0x03, 0x01, 0x02, 0x03]);
     assert!(top.iter().all(|f| f.name() != "undecoded_octets"));
+}
+
+#[test]
+fn no_identity_with_extra_octets_kept_raw() {
+    // TS 24.501, 9.11.3.4: "For Type of identity "No identity", the length
+    // of mobile identity contents parameter shall be set to 1".
+    let buf = dissect(&[0x7e, 0x00, 0x5c, 0x00, 0x03, 0x00, 0x12, 0x34]);
+    let top = top_level(&buf);
+    let id = ie(&buf, &top, "Mobile identity");
+    assert_eq!(bytes_of(&id, "value"), &[0x00, 0x12, 0x34]);
+    assert!(id.iter().all(|f| f.name() != "type_of_identity"));
+}
+
+/// Panics if a descriptor's `children` slice is reachable from itself.
+fn assert_acyclic(fields: &'static [FieldDescriptor], ancestors: &mut Vec<*const FieldDescriptor>) {
+    for fd in fields {
+        let Some(children) = fd.children else {
+            continue;
+        };
+        let ptr = children.as_ptr();
+        assert!(
+            !ancestors.contains(&ptr),
+            "`{}` contains one of its ancestors",
+            fd.name
+        );
+        ancestors.push(ptr);
+        assert_acyclic(children, ancestors);
+        ancestors.pop();
+    }
+}
+
+#[test]
+fn field_descriptor_schema_is_acyclic() {
+    // A cyclic schema makes any recursive walk of `children`, including
+    // `FieldDescriptor`'s `PartialEq`, recurse without bound.
+    let fields = Nas5gDissector.field_descriptors();
+    assert_acyclic(fields, &mut vec![fields.as_ptr()]);
+    assert_eq!(fields, Nas5gDissector.field_descriptors());
 }
 
 #[test]
