@@ -58,12 +58,19 @@ pub(crate) const AEAD_TAG_LEN: usize = 16;
 /// Header protection sample length (see [`AEAD_TAG_LEN`]).
 const SAMPLE_LEN: usize = 16;
 
-/// Size of the on-stack work buffer. Packets up to this size (an Initial
-/// in a 1500-byte Ethernet MTU always fits) are decrypted without heap
-/// allocation. Larger Initials (jumbo frames, loopback captures) are rare;
-/// they are decrypted in a heap buffer, the only allocating path of the
-/// dissector, rather than left undecrypted.
+/// Size of the on-stack work buffer for common packets (an Initial in a
+/// 1500-byte Ethernet MTU always fits).
 pub(crate) const STACK_BUF_LEN: usize = 1500;
+
+/// Size of the on-stack work buffer for larger Initials (jumbo frames,
+/// loopback captures): the largest UDP payload, so that decryption never
+/// allocates. A packet can be no longer than the UDP datagram that carries
+/// it.
+///
+/// RFC 9000, Section 18.2 — <https://www.rfc-editor.org/rfc/rfc9000#section-18.2>:
+/// "The default for this parameter is the maximum permitted UDP payload of
+/// 65527."
+pub(crate) const MAX_UDP_PAYLOAD_LEN: usize = 65527;
 
 /// Packet protection keys for one direction.
 ///
@@ -167,8 +174,29 @@ pub(crate) struct UnprotectedHeader {
 /// of the Packet Number field. Returns `None` when the version has no known
 /// Initial keys, the packet is too short for a header protection sample, or
 /// the AEAD tag does not verify (for example a server Initial, whose keys
-/// derive from a connection ID that is not in the packet).
+/// derive from a connection ID that is not in the packet), or the packet
+/// is longer than [`MAX_UDP_PAYLOAD_LEN`].
 pub(crate) fn unprotect_client_initial<R>(
+    version: u32,
+    packet: &[u8],
+    dcid: &[u8],
+    pn_offset: usize,
+    f: impl FnOnce(&UnprotectedHeader, &[u8]) -> R,
+) -> Option<R> {
+    // The work buffer lives on the stack so that dissection does not
+    // allocate; only packets that need the large buffer pay for it.
+    if packet.len() <= STACK_BUF_LEN {
+        unprotect_in::<STACK_BUF_LEN, R>(version, packet, dcid, pn_offset, f)
+    } else if packet.len() <= MAX_UDP_PAYLOAD_LEN {
+        unprotect_in::<MAX_UDP_PAYLOAD_LEN, R>(version, packet, dcid, pn_offset, f)
+    } else {
+        None
+    }
+}
+
+/// [`unprotect_client_initial`] with an `N`-byte on-stack work buffer.
+#[inline(never)]
+fn unprotect_in<const N: usize, R>(
     version: u32,
     packet: &[u8],
     dcid: &[u8],
@@ -200,14 +228,8 @@ pub(crate) fn unprotect_client_initial<R>(
     let header_len = pn_offset + packet_number_length;
     let tag_start = packet.len() - AEAD_TAG_LEN;
 
-    let mut stack = [0u8; STACK_BUF_LEN];
-    let mut heap = Vec::new();
-    let work: &mut [u8] = if packet.len() <= STACK_BUF_LEN {
-        &mut stack[..packet.len()]
-    } else {
-        heap.resize(packet.len(), 0);
-        &mut heap
-    };
+    let mut stack = [0u8; N];
+    let work = &mut stack[..packet.len()];
     work.copy_from_slice(packet);
     work[0] = first_byte;
     let mut packet_number = 0u64;
@@ -266,6 +288,7 @@ mod tests {
     // | 9001 §5.4.2          | Too short for the HP sample           | test_too_short_for_sample          |
     // | 9001 §5.4.1          | Unknown version: not decrypted        | test_unknown_version_not_decrypted |
     // | ---                  | Packet larger than the stack buffer   | test_decrypt_large_packet          |
+    // | 9000 §18.2           | Longer than a UDP payload: no decrypt | test_longer_than_udp_payload       |
 
     fn keys(version: u32, label: &[u8]) -> PacketKeys {
         derive_keys(version, &DCID, label).unwrap()
@@ -387,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_decrypt_large_packet() {
-        // A packet larger than the stack work buffer takes the heap path.
+        // A packet larger than the small work buffer uses the large one.
         // Protect a synthetic Initial with the RFC 9001 Appendix A.1 client
         // keys, then remove the protection again.
         let k = keys(VERSION_1, CLIENT_IN);
@@ -414,6 +437,34 @@ mod tests {
             assert_eq!(p, &plain[..]);
         });
         assert!(out.is_some());
+    }
+
+    #[test]
+    fn test_longer_than_udp_payload() {
+        // RFC 9000, Section 18.2 — https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+        // A packet longer than the largest UDP payload cannot come from a
+        // UDP datagram and does not fit the work buffer: it is left
+        // undecrypted even when correctly protected.
+        let k = keys(VERSION_1, CLIENT_IN);
+        let payload_len = MAX_UDP_PAYLOAD_LEN;
+        let mut packet = Vec::new();
+        packet.push(0xc1); // Initial, 2-byte packet number
+        packet.extend_from_slice(&VERSION_1.to_be_bytes());
+        packet.push(DCID.len() as u8);
+        packet.extend_from_slice(&DCID);
+        packet.push(0); // SCID length
+        packet.push(0); // Token Length
+        let length = (2 + payload_len + AEAD_TAG_LEN) as u32 | 0x8000_0000;
+        packet.extend_from_slice(&length.to_be_bytes());
+        let pn_offset = packet.len();
+        packet.extend_from_slice(&[0x00, 0x07]); // packet number 7
+        let mut plain = vec![0u8; payload_len];
+        plain[0] = 0x01; // PING, then PADDING
+        protect(&k, &mut packet, pn_offset, 2, 7, &plain);
+        assert!(packet.len() > MAX_UDP_PAYLOAD_LEN);
+
+        let out = unprotect_client_initial(VERSION_1, &packet, &DCID, pn_offset, |_, _| ());
+        assert!(out.is_none());
     }
 
     /// Apply packet protection (RFC 9001, Section 5.3 —
