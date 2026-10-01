@@ -94,17 +94,18 @@ impl TcpReassemblyService {
     /// Evict the oldest stream other than `keep` to free resources.
     /// Returns `true` if a stream was evicted.
     fn evict_oldest(&mut self, keep: &StreamKey) -> bool {
-        let mut kept = false;
-        while let Some(key) = self.order.pop_front() {
-            if key == *keep && self.streams.contains_key(&key) {
+        // `order` may hold `keep` more than once (a stale key left by a
+        // completed stream, then the live one), so stop after one full
+        // rotation rather than on the second sighting of `keep`.
+        let mut remaining = self.order.len();
+        while let Some(key) = (remaining > 0).then(|| self.order.pop_front()).flatten() {
+            remaining -= 1;
+            if key == *keep {
                 // The stream being processed is never evicted before its own
                 // segment is inserted; move it to the back and go on.
-                if kept {
+                if self.streams.contains_key(&key) {
                     self.order.push_back(key);
-                    return false;
                 }
-                kept = true;
-                self.order.push_back(key);
                 continue;
             }
             if let Some(state) = self.streams.remove(&key) {
@@ -371,10 +372,21 @@ impl DissectorRegistry {
             // gap in the buffer; keep the state so the missing segments can
             // still complete it. Otherwise nothing more can follow the FIN.
             let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
-            let has_gap = service
-                .streams
-                .get(&ctx.stream_key)
-                .is_some_and(|state| state.buffer.bytes_received() > state.buffer.contiguous_len());
+            //
+            // The FIN may also overtake the last data segment without leaving
+            // a gap inside the buffer, so its own end is compared with the end
+            // of the contiguous data (RFC 9293, Section 3.10 — segments "are
+            // generally queued and processed in sequence number order"
+            // <https://www.rfc-editor.org/rfc/rfc9293#section-3.10>).
+            let fin_end = ctx.seq.wrapping_add(ctx.payload_len as u32);
+            let has_gap = service.streams.get(&ctx.stream_key).is_some_and(|state| {
+                let contiguous_end = state
+                    .base_seq
+                    .wrapping_add(state.buffer.contiguous_len() as u32);
+                let beyond = fin_end.wrapping_sub(contiguous_end) as usize;
+                state.buffer.bytes_received() > state.buffer.contiguous_len()
+                    || (beyond > 0 && beyond <= MAX_STREAM_WINDOW)
+            });
             if !has_gap {
                 service.forget(&ctx.stream_key);
                 drop(service);
@@ -836,6 +848,22 @@ mod tests {
         add_stream(&mut service, key(0), b"x");
         assert!(!service.evict_oldest(&key(0)));
         assert!(service.streams.contains_key(&key(0)));
+    }
+
+    #[test]
+    fn eviction_skips_duplicate_keys_of_the_stream_being_processed() {
+        let mut service = TcpReassemblyService::new();
+        // The kept stream completes (its key lingers in `order`) and is
+        // buffered again, so its key is at the front of `order` twice.
+        add_stream(&mut service, key(0), b"x");
+        service.consume_from_stream(&key(0), 1);
+        add_stream(&mut service, key(0), b"x");
+        for port in 1..=MAX_REASSEMBLY_STREAMS as u16 {
+            add_stream(&mut service, key(port), b"x");
+        }
+        assert_eq!(service.evict_to_limits(&key(0)), 1);
+        assert!(service.streams.contains_key(&key(0)));
+        assert!(!service.streams.contains_key(&key(1)));
     }
 
     #[test]

@@ -11,6 +11,8 @@
 //! | RFC 9293 3.5         | SYN discards stale reassembly state for the direction    | syn_resets_stale_reassembly_state                       |
 //! | RFC 9293 3.6         | FIN releases the direction's reassembly state            | fin_releases_reassembly_state                           |
 //! | RFC 9293 3.10        | FIN overtaking missing data keeps the buffer             | fin_before_missing_data_keeps_reassembly_state          |
+//! | RFC 9293 3.10        | Bare FIN overtaking the last segment keeps the buffer    | bare_fin_overtaking_last_segment_keeps_reassembly_state |
+//! | —                    | Projection sees layers added by the TCP middleware       | projection_sees_layers_added_by_tcp_middleware          |
 //! | RFC 9293 3.10.7.4    | RST flushes both directions' reassembly state            | rst_flushes_both_directions                             |
 //! | RFC 9293 3.10        | Reordered earlier data is inserted before the buffer     | reordered_earlier_segment_is_inserted_after_syn         |
 //! | RFC 9293 3.10        | Reordered earlier data after a delivered message         | reordered_earlier_segment_is_inserted_after_delivered_message |
@@ -842,4 +844,41 @@ fn syn_forgets_stale_delivery_position_near() {
     let mut buf = DissectBuffer::new();
     reg.dissect(&pkt, &mut buf).unwrap();
     assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+#[test]
+fn bare_fin_overtaking_last_segment_keeps_reassembly_state() {
+    let reg = DissectorRegistry::default();
+    let (head, rest) = SIP_OPTIONS.split_at(20);
+    let seq_rest = 1000 + head.len() as u32;
+    let fin_seq = seq_rest + rest.len() as u32;
+
+    let pkt = c2s(5060, 1000, PSH_ACK, head);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert!(reassembly_in_progress(&buf));
+    // A bare FIN overtakes the last data segment: the buffer has no
+    // internal gap, but the FIN's sequence number is past its end.
+    let pkt = c2s(5060, fin_seq, FIN | ACK, &[]);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+
+    let pkt = c2s(5060, seq_rest, PSH_ACK, rest);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+#[test]
+fn projection_sees_layers_added_by_tcp_middleware() {
+    use packet_dissector::summary::FieldProjection;
+
+    let reg = DissectorRegistry::default();
+    let mut projection = FieldProjection::new([("SIP", "method")]);
+    let pkt = c2s(5060, 1000, PSH_ACK, SIP_OPTIONS);
+    let mut buf = DissectBuffer::new();
+    reg.dissect_projected(&pkt, &mut buf, &mut projection)
+        .unwrap();
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+    assert!(projection.is_satisfied());
 }
