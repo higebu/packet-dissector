@@ -65,7 +65,7 @@ jobs:
           pattern: benchmark-results-*
           merge-multiple: true
           path: results
-      - uses: bencherdev/bencher@a8f4931e5d833de7fe0b34c339d9ec5af5900d90 # main
+      - uses: bencherdev/bencher@dcefffa55c92ec2b8a65964e912ff275fc8f7ffe # main
       - name: Combine benchmark results
         run: |
           ls -la results/
@@ -104,7 +104,7 @@ jobs:
           pattern: benchmark-results-*
           merge-multiple: true
           path: results
-      - uses: bencherdev/bencher@a8f4931e5d833de7fe0b34c339d9ec5af5900d90 # main
+      - uses: bencherdev/bencher@dcefffa55c92ec2b8a65964e912ff275fc8f7ffe # main
       - name: Combine benchmark results
         run: |
           ls -la results/
@@ -131,7 +131,7 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: bencherdev/bencher@a8f4931e5d833de7fe0b34c339d9ec5af5900d90 # main
+      - uses: bencherdev/bencher@dcefffa55c92ec2b8a65964e912ff275fc8f7ffe # main
       - name: Archive closed PR branch
         run: |
           bencher archive \
