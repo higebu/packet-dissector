@@ -22,6 +22,7 @@
 //!
 //! ## References
 //! - RFC 3032 (MPLS Label Stack Encoding): <https://www.rfc-editor.org/rfc/rfc3032>
+//! - RFC 3429 (OAM Alert Label, label 14): <https://www.rfc-editor.org/rfc/rfc3429>
 //! - RFC 4182 (updates RFC 3032 — Explicit NULL may appear anywhere in the stack):
 //!   <https://www.rfc-editor.org/rfc/rfc4182>
 //! - RFC 4385 (PW Control Word and PW Associated Channel):
@@ -110,7 +111,7 @@ fn special_purpose_label_name(label: u32) -> Option<&'static str> {
         4 => Some("MPLS Network Actions"),
         LABEL_ELI => Some("Entropy Label Indicator (ELI)"),
         LABEL_GAL => Some("Generic Associated Channel Label"),
-        14 => Some("OAM Alert Label"),
+        LABEL_OAM_ALERT => Some("OAM Alert Label"),
         LABEL_XL => Some("Extension Label (XL)"),
         _ => None,
     }
@@ -284,6 +285,13 @@ const LABEL_ELI: u32 = 7;
 /// bottom of the label stack (S=1) and MUST NOT be used with pseudowires.
 const LABEL_GAL: u32 = 13;
 
+/// Special-purpose label value: OAM Alert Label.
+///
+/// RFC 3429, Section 3 — marks Y.1711 user-plane OAM packets, so the
+/// payload after a bottom-of-stack OAM Alert Label is an OAM PDU.
+/// <https://www.rfc-editor.org/rfc/rfc3429#section-3>
+const LABEL_OAM_ALERT: u32 = 14;
+
 /// Special-purpose label value: Extension Label (XL).
 ///
 /// RFC 7274, Section 3.1 — the label that follows the XL is an extended
@@ -297,6 +305,11 @@ static REFERENCES: &[SpecReference] = &[
         "RFC 3032",
         "MPLS Label Stack Encoding",
         "https://www.rfc-editor.org/rfc/rfc3032",
+    ),
+    SpecReference::new(
+        "RFC 3429",
+        "Assignment of the 'OAM Alert Label' for MPLS OAM Functions",
+        "https://www.rfc-editor.org/rfc/rfc3429",
     ),
     SpecReference::new(
         "RFC 4182",
@@ -951,7 +964,7 @@ impl MplsDissector {
         // RFC 3032, Section 2.1 — the label stack contains no explicit
         // network-layer protocol identifier; the payload type must be
         // inferable from the bottom label.  Reserved label semantics are
-        // fixed by RFC 3032 / RFC 5586; all other bottom labels are told
+        // fixed by RFC 3032 / RFC 3429 / RFC 5586; all other bottom labels are told
         // apart by the first nibble of the payload (RFC 4928, Section 3;
         // RFC 4385, Sections 3 and 5). A bottom-of-stack entropy label or
         // extended special-purpose label carries an arbitrary value, not a
@@ -988,6 +1001,13 @@ impl MplsDissector {
                 if let Some(result) = result {
                     return nested(pos, result?);
                 }
+                // RFC 3429, Section 3 — a Y.1711 OAM PDU follows a
+                // bottom-of-stack OAM Alert Label; its zero first nibble is
+                // not a PW control word.
+                // https://www.rfc-editor.org/rfc/rfc3429#section-3
+                if bottom_may_be_special && bottom_label == LABEL_OAM_ALERT {
+                    return Ok(DissectResult::new(pos, DispatchHint::End));
+                }
                 match first_nibble {
                     // RFC 4928, Section 3 — existing equipment infers IPv4 or
                     // IPv6 from the first nibble of the MPLS payload.
@@ -1021,7 +1041,7 @@ impl MplsDissector {
 mod tests {
     use super::*;
 
-    // # RFC 3032 / RFC 4928 / RFC 5462 / RFC 5586 (MPLS) Coverage
+    // # RFC 3032 / RFC 3429 / RFC 4928 / RFC 5462 / RFC 5586 (MPLS) Coverage
     //
     // | RFC Section | Description                        | Test                                |
     // |-------------|------------------------------------|-------------------------------------|
@@ -1032,6 +1052,7 @@ mod tests {
     // | 3032 §2.1   | IPv6 Explicit NULL (2)             | parse_mpls_ipv6_explicit_null       |
     // | 5586 §4     | GAL bottom → ACH → channel type    | parse_mpls_gal_ach_bfd              |
     // | 5586 §2.1   | GAL without a valid ACH            | parse_mpls_gal_without_valid_ach    |
+    // | 3429 §3     | Bottom OAM Alert is not a CW       | parse_mpls_oam_alert_is_not_control_word |
     // | 4385 §5     | PW-ACH (first nibble 1)            | parse_mpls_pw_ach_ipv4              |
     // | 4385 §5     | ACH version, reserved              | parse_mpls_ach_unknown_version      |
     // | 4385 §3     | PW control word + Ethernet guess   | parse_mpls_pw_control_word_ethernet |
@@ -1448,6 +1469,23 @@ mod tests {
         assert_eq!(result.bytes_consumed, 4);
         assert_eq!(result.next, DispatchHint::End);
         assert!(buf.layer_by_name("ACH").is_none());
+    }
+
+    /// RFC 3429, Section 3 — a bottom-of-stack OAM Alert Label (14) is
+    /// followed by a Y.1711 OAM PDU, whose first octet (OAM Function Type)
+    /// gives a zero first nibble; it is not a PW control word.
+    /// <https://www.rfc-editor.org/rfc/rfc3429#section-3>
+    #[test]
+    fn parse_mpls_oam_alert_is_not_control_word() {
+        let mut raw = mpls_entry(100, 0, 0, 64).to_vec();
+        raw.extend_from_slice(&mpls_entry(14, 0, 1, 1));
+        raw.push(0x01); // Y.1711 OAM Function Type: CV
+        raw.extend_from_slice(&[0x00; 43]);
+        let (buf, result) = dissect(&raw).expect("dissect failed");
+        assert_eq!(result.bytes_consumed, 8);
+        assert_eq!(result.next, DispatchHint::End);
+        assert!(buf.layer_by_name("PW-CW").is_none());
+        assert_eq!(buf.layers().len(), 1);
     }
 
     /// RFC 4385, Section 3 — first nibble 0000 is the PW MPLS Control Word:
