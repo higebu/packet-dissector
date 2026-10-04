@@ -72,6 +72,10 @@ jobs:
           cat results/*.txt > combined.txt
           wc -l combined.txt
       - name: Track base branch benchmarks
+        # No --err here: a push to main cannot be blocked, so alerts are left to
+        # the Bencher report instead of failing the run. The 0.999 boundary keeps
+        # runner noise across many benchmarks from raising alerts on most runs;
+        # PRs inherit it via --start-point-clone-thresholds.
         run: |
           bencher run \
           --project packet-dissector \
@@ -81,12 +85,11 @@ jobs:
           --threshold-measure latency \
           --threshold-test t_test \
           --threshold-max-sample-size 64 \
-          --threshold-upper-boundary 0.99 \
+          --threshold-upper-boundary 0.999 \
           --threshold-min-sample-size 30 \
           --thresholds-reset \
           --adapter rust_criterion \
           --github-actions '${{ secrets.GITHUB_TOKEN }}' \
-          --err \
           "cat combined.txt"
 
   report_pr:
@@ -133,8 +136,18 @@ jobs:
     steps:
       - uses: bencherdev/bencher@31146392b3a4361964da02d5dc0f05a4041e9158 # main
       - name: Archive closed PR branch
+        # PRs whose benchmarks never ran (e.g. release-plz PRs left awaiting
+        # approval) have no Bencher branch, so a missing branch is not an error.
         run: |
-          bencher archive \
-          --project packet-dissector \
-          --token '${{ secrets.BENCHER_API_TOKEN }}' \
-          --branch "$GITHUB_HEAD_REF"
+          if ! out=$(bencher archive \
+            --project packet-dissector \
+            --token '${{ secrets.BENCHER_API_TOKEN }}' \
+            --branch "$GITHUB_HEAD_REF" 2>&1); then
+            echo "$out"
+            if grep -q 'Could not find an entry with name' <<<"$out"; then
+              echo "Branch $GITHUB_HEAD_REF was never tracked; nothing to archive."
+              exit 0
+            fi
+            exit 1
+          fi
+          echo "$out"
