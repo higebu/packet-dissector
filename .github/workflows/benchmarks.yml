@@ -65,7 +65,7 @@ jobs:
           pattern: benchmark-results-*
           merge-multiple: true
           path: results
-      - uses: bencherdev/bencher@375b9abc3a273f7d9e2254a434f1c4204f58d0ca # main
+      - uses: bencherdev/bencher@5906f3055605020d1c6111a564300ae2c6770a2a # main
       - name: Combine benchmark results
         run: |
           ls -la results/
@@ -107,7 +107,7 @@ jobs:
           pattern: benchmark-results-*
           merge-multiple: true
           path: results
-      - uses: bencherdev/bencher@375b9abc3a273f7d9e2254a434f1c4204f58d0ca # main
+      - uses: bencherdev/bencher@5906f3055605020d1c6111a564300ae2c6770a2a # main
       - name: Combine benchmark results
         run: |
           ls -la results/
@@ -134,7 +134,7 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: bencherdev/bencher@375b9abc3a273f7d9e2254a434f1c4204f58d0ca # main
+      - uses: bencherdev/bencher@5906f3055605020d1c6111a564300ae2c6770a2a # main
       - name: Archive closed PR branch
         # PRs whose benchmarks never ran (e.g. release-plz PRs left awaiting
         # approval) have no Bencher branch, so a missing branch is not an error.
