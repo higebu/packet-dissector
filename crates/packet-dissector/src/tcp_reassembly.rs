@@ -39,6 +39,11 @@ const MAX_REASSEMBLY_STREAMS: usize = 512;
 /// plus one MAX_STREAM_WINDOW.
 const MAX_REASSEMBLY_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
+/// Maximum bytes buffered behind a hole at the start of a stream (data
+/// that skipped ahead of the next expected byte) before the hole is given
+/// up as never captured and dissection resumes from the current segment.
+const MAX_GAP_WAIT_BYTES: usize = 64 * 1024;
+
 /// Maximum number of stream directions whose delivery position is
 /// remembered (two per connection). Oldest entries are forgotten first.
 const MAX_TRACKED_DIRECTIONS: usize = 131_072;
@@ -56,6 +61,10 @@ pub(crate) struct TcpStreamState {
     /// re-dissection is skipped until at least this many contiguous bytes
     /// are available, avoiding O(n²) repeated parsing attempts.
     pub(crate) min_needed: Option<usize>,
+    /// The layer the upper-layer dissector started for the message in
+    /// progress before it reported `Truncated` (e.g. `HTTP2` behind the
+    /// `HTTP` port dissector), used to name the reassembly placeholder.
+    pub(crate) in_progress: Option<&'static str>,
 }
 
 /// Centralized TCP stream reassembly service.
@@ -211,6 +220,7 @@ impl TcpReassemblyService {
             state.base_seq = new_base_seq;
             state.segment_count = 0;
             state.min_needed = None;
+            state.in_progress = None;
         }
     }
 
@@ -226,6 +236,7 @@ impl TcpReassemblyService {
         state.base_seq = state.base_seq.wrapping_add(consumed as u32);
         state.segment_count = 0;
         state.min_needed = None;
+        state.in_progress = None;
         let base_seq = state.base_seq;
         if state.buffer.contiguous_len() == 0 && after == 0 {
             self.streams.remove(key);
@@ -267,6 +278,7 @@ impl TcpReassemblyService {
             state.base_seq = seq;
             state.segment_count = 0;
             state.min_needed = None;
+            state.in_progress = None;
             let _ = state.buffer.insert(0, data);
             // After reset, bytes_before must reflect the new (empty) baseline
             // so the delta below adds the full new buffer size.
@@ -274,7 +286,11 @@ impl TcpReassemblyService {
         }
         let bytes_after = state.buffer.bytes_received();
         self.total_bytes += bytes_after.saturating_sub(bytes_before);
-        state.segment_count += 1;
+        // A duplicate of buffered data (the same segment captured twice, or
+        // a retransmission) adds no segment.
+        if bytes_after > bytes_before {
+            state.segment_count += 1;
+        }
     }
 
     /// Insert reordered data that ends at (or overlaps) the stream's base:
@@ -292,6 +308,7 @@ impl TcpReassemblyService {
         state.base_seq = state.base_seq.wrapping_sub(data.len() as u32);
         state.segment_count += 1;
         state.min_needed = None;
+        state.in_progress = None;
         let after = state.buffer.bytes_received();
         self.total_bytes += after.saturating_sub(before);
     }
@@ -358,7 +375,8 @@ impl DissectorRegistry {
         } else if captured_all {
             self.handle_tcp_reassembly(ctx, payload, upper, buf, offset)
         } else {
-            self.dissect_stream_messages(upper, ctx, payload, buf, offset)
+            // Not buffered: what a truncated message parsed is all there is.
+            self.dissect_stream_messages(upper, ctx, payload, buf, offset, true)
                 .1
         };
 
@@ -402,6 +420,10 @@ impl DissectorRegistry {
     /// exhausted or a message fails. Returns the number of bytes consumed
     /// by complete messages and the first error, if any.
     ///
+    /// With `keep_partial` unset, whatever a message that reports
+    /// `Truncated` pushed is removed: its bytes are buffered and dissected
+    /// again once complete, and a reassembly placeholder stands in for it.
+    ///
     /// Loops to handle pipelined messages — RFC 7766, Section 6.2.1 allows
     /// multiple DNS messages on a single TCP connection.
     /// <https://www.rfc-editor.org/rfc/rfc7766#section-6.2.1>
@@ -412,12 +434,22 @@ impl DissectorRegistry {
         data: &'a [u8],
         buf: &mut DissectBuffer<'a>,
         offset: usize,
+        keep_partial: bool,
     ) -> (usize, Result<(), PacketError>) {
         let mut pos = 0;
         while pos < data.len() {
+            let (layers, fields) = (buf.layers().len(), buf.field_count() as usize);
             match self.dissect_stream_message(upper, ctx, &data[pos..], buf, offset + pos) {
                 Ok(n) => pos += n,
-                Err(e) => return (pos, Err(e)),
+                Err(e) => {
+                    if !keep_partial && matches!(e, PacketError::Truncated { .. }) {
+                        while buf.layers().len() > layers {
+                            buf.pop_layer();
+                        }
+                        buf.truncate_fields(fields);
+                    }
+                    return (pos, Err(e));
+                }
             }
         }
         (pos, Ok(()))
@@ -520,16 +552,51 @@ impl DissectorRegistry {
         // try the upper dissector directly on the payload slice to avoid an
         // allocation+copy. Only fall through to the buffered path when the
         // upper dissector reports Truncated.
-        let (no_buffered_data, evicted) = {
+        let (no_buffered_data, evicted, expected) = {
             let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
             let evicted = service.evict_to_limits(&key);
-            (!service.streams.contains_key(&key), evicted)
+            let no_buffered_data = !service.streams.contains_key(&key);
+            // The next byte the upper layer expects: right after the last
+            // delivered message, or the stream start (ISN+1) after a SYN.
+            let expected = no_buffered_data
+                .then(|| service.delivered_seq(&key).or(ctx.stream_start))
+                .flatten();
+            (no_buffered_data, evicted, expected)
         };
         if evicted > 0 {
             Self::add_eviction_field(buf, offset, payload.len(), evicted);
         }
-        if no_buffered_data {
-            let (consumed, result) = self.dissect_stream_messages(upper, ctx, payload, buf, offset);
+        // Where a new stream starts: at the segment, or at the expected byte
+        // when the segment skipped ahead of it.
+        let mut stream_base = seq;
+        if let Some(expected) = expected {
+            let behind = expected.wrapping_sub(seq) as usize;
+            let ahead = seq.wrapping_sub(expected) as usize;
+            if behind > 0 && behind <= MAX_STREAM_WINDOW {
+                // RFC 9293, Section 3.10 — "When a segment overlaps other
+                // already received segments, we reconstruct the segment to
+                // contain just the new data"
+                // <https://www.rfc-editor.org/rfc/rfc9293#section-3.10>.
+                // Bytes before `expected` were already dissected: a
+                // retransmission, or the same segment captured again.
+                if behind >= payload.len() {
+                    Self::add_retransmission_field(buf, offset, payload.len());
+                    return Ok(());
+                }
+                payload = &payload[behind..];
+                seq = expected;
+                offset += behind;
+                stream_base = seq;
+            } else if ahead > 0 && ahead <= MAX_STREAM_WINDOW {
+                // Data after a hole: earlier bytes are late (reordered) or
+                // lost. Buffer it behind the hole instead of dissecting it
+                // as the start of a message.
+                stream_base = expected;
+            }
+        }
+        if no_buffered_data && stream_base == seq {
+            let (consumed, result) =
+                self.dissect_stream_messages(upper, ctx, payload, buf, offset, false);
             if consumed > 0 {
                 let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
                 service.record_delivered(key, seq.wrapping_add(consumed as u32));
@@ -553,11 +620,27 @@ impl DissectorRegistry {
                 key,
                 TcpStreamState {
                     buffer: ReassemblyBuffer::new(),
-                    base_seq: seq,
+                    base_seq: stream_base,
                     segment_count: 0,
                     min_needed: None,
+                    in_progress: None,
                 },
             );
+        }
+
+        // A hole at the start that enough data has waited behind was never
+        // captured: give it up and resume from this segment.
+        if let Some(state) = service.streams.get(&key) {
+            let waiting = state.buffer.contiguous_len() == 0 && state.buffer.bytes_received() > 0;
+            let forward = seq.wrapping_sub(state.base_seq) as usize;
+            if waiting
+                && forward > 0
+                && forward <= MAX_STREAM_WINDOW
+                && state.buffer.bytes_received() + payload.len() > MAX_GAP_WAIT_BYTES
+            {
+                service.reset_stream(&key, seq);
+                service.set_delivered(key, seq);
+            }
         }
 
         // Handle TCP sequence number wrapping and distinguish between:
@@ -633,18 +716,13 @@ impl DissectorRegistry {
         };
         let available = state.buffer.contiguous_len();
         let segment_count = state.segment_count;
+        let placeholder = state.in_progress.unwrap_or(upper.short_name());
 
         // Skip re-dissection if we haven't accumulated enough contiguous
         // bytes to satisfy the upper dissector's last Truncated requirement.
         if state.min_needed.is_some_and(|needed| available < needed) || available == 0 {
             drop(service);
-            Self::add_reassembly_fields(
-                buf,
-                offset,
-                payload.len(),
-                segment_count,
-                upper.short_name(),
-            );
+            Self::add_reassembly_fields(buf, offset, payload.len(), segment_count, placeholder);
             return Ok(());
         }
 
@@ -705,9 +783,11 @@ impl DissectorRegistry {
                     // Not enough data yet — record the minimum needed bytes so
                     // subsequent segments can skip re-dissection until enough
                     // contiguous data has accumulated.
+                    let started = tmp_buf.layers().first().map(|l| l.name);
                     let mut service = self.tcp_reassembly.lock().map_err(lock_poisoned)?;
                     if let Some(state) = service.streams.get_mut(&key) {
                         state.min_needed = Some(expected);
+                        state.in_progress = started.or(state.in_progress);
                     }
                     drop(service);
                     // Only add reassembly fields if no message was parsed yet
@@ -718,7 +798,7 @@ impl DissectorRegistry {
                             offset,
                             payload.len(),
                             segment_count,
-                            upper.short_name(),
+                            started.unwrap_or(placeholder),
                         );
                     }
                     break;
@@ -753,6 +833,20 @@ impl DissectorRegistry {
             &[Field {
                 descriptor: &TCP_FD[FD_REASSEMBLY_EVICTED],
                 value: FieldValue::U32(evicted),
+                range: offset..offset + data_len,
+            }],
+        );
+    }
+
+    /// Mark the TCP layer of a segment whose data was already dissected.
+    fn add_retransmission_field(buf: &mut DissectBuffer<'_>, offset: usize, data_len: usize) {
+        use packet_dissector_tcp::{FD_RETRANSMISSION, FIELD_DESCRIPTORS as TCP_FD};
+
+        buf.append_fields_to_layer(
+            "TCP",
+            &[Field {
+                descriptor: &TCP_FD[FD_RETRANSMISSION],
+                value: FieldValue::U8(1),
                 range: offset..offset + data_len,
             }],
         );
@@ -827,6 +921,7 @@ mod tests {
                 base_seq: 0,
                 segment_count: 0,
                 min_needed: None,
+                in_progress: None,
             },
         );
         service.insert_segment(&k, 0, data, 0);
