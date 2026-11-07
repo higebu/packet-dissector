@@ -18,10 +18,23 @@
 # crate. New versions of existing crates keep using CARGO_REGISTRY_TOKEN
 # (the Trusted Publishing token).
 #
+# The facade crate (TAG_OWNER) is left to release-plz: release-plz creates
+# the workspace's git tag and GitHub release only when it publishes that
+# crate itself, so publishing it here on a regular release would leave the
+# version without a tag or release. It is published here only when the
+# version's tag already exists, the case release-plz skips.
+#
 # `--detect-new` only looks up which crates are new and writes them to
 # $GITHUB_OUTPUT as `new_crates`, so the workflow can hand NEW_CRATE_TOKEN
-# to the publish step only in runs that actually create a crate.
+# to the publish step only in runs that actually create a crate. It also
+# prints which crates this script would publish.
 set -euo pipefail
+
+# The crate that owns the workspace tag and release, and the tag name for a
+# version; both must match release-plz.toml (`git_tag_enable`,
+# `git_tag_name = "v{{ version }}"`).
+TAG_OWNER="packet-dissector"
+tag_name() { echo "v$1"; }
 
 # crates.io rejects requests with no descriptive User-Agent (returns 403),
 # per https://crates.io/data-access.
@@ -76,10 +89,15 @@ for entry in "${candidates[@]}"; do
   # instead of being swallowed by the `[` test.
   version_status=$(lookup_status "$name" "$version")
   if [ "$version_status" = "404" ]; then
-    missing+=("$name")
     # The version is missing; a 404 for the crate itself means the crate
     # was never published, so it has to be created.
     crate_status=$(lookup_status "$name" "")
+    if [ "$name" = "$TAG_OWNER" ] && [ "$crate_status" = "200" ] &&
+      ! git rev-parse -q --verify "refs/tags/$(tag_name "$version")" >/dev/null; then
+      echo "${name} ${version}: left to release-plz, which tags and releases it"
+      continue
+    fi
+    missing+=("$name")
     if [ "$crate_status" = "404" ]; then
       is_new[$name]=1
       new_crates+=("$name")
@@ -89,6 +107,7 @@ done
 
 if [ "${1:-}" = "--detect-new" ]; then
   echo "New crates (not on crates.io at all): ${new_crates[*]:-none}"
+  echo "Published by this script: ${missing[*]:-none}"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "new_crates=${new_crates[*]}" >>"$GITHUB_OUTPUT"
   fi
