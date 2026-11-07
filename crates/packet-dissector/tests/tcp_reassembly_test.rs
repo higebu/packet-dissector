@@ -21,6 +21,11 @@
 //! | RFC 9293 3.5         | SYN forgets the old connection's delivery position (ahead) | syn_forgets_stale_delivery_position_ahead             |
 //! | RFC 9293 3.5         | SYN forgets the old connection's delivery position (near)  | syn_forgets_stale_delivery_position_near              |
 //! | RFC 9293 3.10        | Retransmitted delivered data is not inserted             | retransmission_of_delivered_data_is_not_inserted        |
+//! | RFC 9293 3.10        | Duplicates of a delivered message are not re-dissected   | duplicates_of_a_delivered_message_are_dropped           |
+//! | RFC 9293 3.10        | Same, after a SYN                                        | duplicates_after_syn_are_dropped                        |
+//! | RFC 9293 3.10        | Data after a gap waits for the missing segment           | data_after_a_gap_waits_for_the_missing_segment          |
+//! | RFC 9293 3.10        | A duplicate segment adds no segment to the count         | duplicate_segment_is_counted_once                       |
+//! | —                    | A gap never filled is skipped after a bounded wait       | unfilled_gap_is_skipped_after_a_bounded_wait            |
 //! | —                    | Stream eviction is reported on the TCP layer             | eviction_is_reported_on_tcp_layer                       |
 //! | RFC 9293 3.10        | Overlapping retransmission contributes only new bytes    | overlapping_retransmission_is_trimmed                   |
 //! | RFC 9293 3.10        | Old data separated from the buffer by a gap is ignored   | old_segment_before_gap_is_ignored                       |
@@ -582,6 +587,160 @@ fn retransmission_of_delivered_data_is_not_inserted() {
     let mut buf = DissectBuffer::new();
     reg.dissect(&pkt, &mut buf).unwrap();
     assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+/// A REGISTER whose second segment starts inside a header line, like an
+/// IMS REGISTER split after 1,020 bytes: parsed on its own, that segment is
+/// an invalid request line (not `Truncated`).
+const REGISTER: &[u8] = b"REGISTER sip:ims.example.com SIP/2.0\r\n\
+From: <sip:alice@ims.example.com>\r\n\
+Security-Client: ipsec-3gpp; alg=hmac-md5-96; spi-c=1; spi-s=2\r\n\
+Content-Length: 0\r\n\r\n";
+
+/// `REGISTER` split one byte into its `Security-Client` header.
+fn register_split() -> (&'static [u8], &'static [u8]) {
+    let at = REGISTER
+        .windows(16)
+        .position(|w| w == b"Security-Client:")
+        .unwrap();
+    REGISTER.split_at(at + 1)
+}
+
+fn retransmission(buf: &DissectBuffer<'_>) -> bool {
+    buf.layer_by_name("TCP")
+        .and_then(|l| buf.field_u8(l, "retransmission"))
+        == Some(1)
+}
+
+fn segment_count(buf: &DissectBuffer<'_>) -> Option<u32> {
+    buf.layer_by_name("TCP")
+        .and_then(|l| buf.field_u32(l, "segment_count"))
+}
+
+/// Dissect `pkt` with `reg`, which must succeed, and return the buffer.
+fn dissect_ok<'a>(reg: &DissectorRegistry, pkt: &'a [u8]) -> DissectBuffer<'a> {
+    let mut buf = DissectBuffer::new();
+    reg.dissect(pkt, &mut buf).unwrap();
+    buf
+}
+
+/// The same segments captured several times (e.g. at two points of a
+/// path): once a message is delivered, copies of its segments are
+/// retransmissions and are not dissected as the start of a new message.
+#[test]
+fn duplicates_of_a_delivered_message_are_dropped() {
+    let reg = DissectorRegistry::default();
+    let (a, b) = register_split();
+    let seq_b = 100 + a.len() as u32;
+    let (pkt_a, pkt_b) = (c2s(5060, 100, PSH_ACK, a), c2s(5060, seq_b, PSH_ACK, b));
+
+    for _ in 0..2 {
+        // One placeholder layer for the message in progress.
+        let buf = dissect_ok(&reg, &pkt_a);
+        assert!(reassembly_in_progress(&buf));
+        assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "TCP", "SIP"]);
+    }
+    let buf = dissect_ok(&reg, &pkt_b);
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["REGISTER"]);
+
+    for pkt in [&pkt_b, &pkt_b, &pkt_a] {
+        let buf = dissect_ok(&reg, pkt);
+        assert!(retransmission(&buf));
+        assert!(
+            buf.layer_by_name("SIP").is_none(),
+            "{:?}",
+            layer_names(&buf)
+        );
+        assert!(!reassembly_in_progress(&buf));
+    }
+
+    // The stream is still in step: the next message parses.
+    let next = c2s(5060, seq_b + b.len() as u32, PSH_ACK, SIP_OPTIONS);
+    let buf = dissect_ok(&reg, &next);
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+#[test]
+fn duplicates_after_syn_are_dropped() {
+    let reg = DissectorRegistry::default();
+    let isn = 7000u32;
+    let (a, b) = register_split();
+    let seq_b = isn + 1 + a.len() as u32;
+
+    let pkt_b = c2s(5060, seq_b, PSH_ACK, b);
+    dissect_ok(&reg, &c2s(5060, isn, SYN, &[]));
+    dissect_ok(&reg, &c2s(5060, isn + 1, PSH_ACK, a));
+    let buf = dissect_ok(&reg, &pkt_b);
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["REGISTER"]);
+    assert!(!retransmission(&buf));
+
+    let buf = dissect_ok(&reg, &pkt_b);
+    assert!(retransmission(&buf));
+    assert!(
+        buf.layer_by_name("SIP").is_none(),
+        "{:?}",
+        layer_names(&buf)
+    );
+}
+
+/// After the SYN, a segment that skips ahead of the stream start (the one
+/// before it is late or lost) waits for the missing data instead of being
+/// dissected as the start of a message.
+#[test]
+fn data_after_a_gap_waits_for_the_missing_segment() {
+    let reg = DissectorRegistry::default();
+    let isn = 9000u32;
+    let (a, b) = register_split();
+    let pkt_b = c2s(5060, isn + 1 + a.len() as u32, PSH_ACK, b);
+
+    dissect_ok(&reg, &c2s(5060, isn, SYN, &[]));
+    for _ in 0..2 {
+        // Only the reassembly placeholder, no message.
+        let buf = dissect_ok(&reg, &pkt_b);
+        assert!(str_fields(&buf, "SIP", "method").is_empty());
+        assert!(reassembly_in_progress(&buf));
+    }
+
+    let pkt_a = c2s(5060, isn + 1, PSH_ACK, a);
+    let buf = dissect_ok(&reg, &pkt_a);
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["REGISTER"]);
+}
+
+/// A segment lost before the capture point never arrives: after enough
+/// data has waited behind the hole, dissection resumes from the current
+/// segment.
+#[test]
+fn unfilled_gap_is_skipped_after_a_bounded_wait() {
+    let reg = DissectorRegistry::default();
+    let isn = 20_000u32;
+    dissect_ok(&reg, &c2s(5060, isn, SYN, &[]));
+
+    // A 10-byte hole, then 64 KiB of data behind it.
+    let mut seq = isn + 1 + 10;
+    let filler = [b'x'; 1024];
+    for _ in 0..64 {
+        let pkt = c2s(5060, seq, PSH_ACK, &filler);
+        let buf = dissect_ok(&reg, &pkt);
+        assert!(reassembly_in_progress(&buf));
+        seq += filler.len() as u32;
+    }
+
+    let pkt = c2s(5060, seq, PSH_ACK, SIP_OPTIONS);
+    let buf = dissect_ok(&reg, &pkt);
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+    let pkt = c2s(5060, seq + SIP_OPTIONS.len() as u32, PSH_ACK, SIP_OPTIONS);
+    let buf = dissect_ok(&reg, &pkt);
+    assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+#[test]
+fn duplicate_segment_is_counted_once() {
+    let reg = DissectorRegistry::default();
+    let (a, _) = register_split();
+    let pkt = c2s(5060, 100, PSH_ACK, a);
+
+    assert_eq!(segment_count(&dissect_ok(&reg, &pkt)), Some(1));
+    assert_eq!(segment_count(&dissect_ok(&reg, &pkt)), Some(1));
 }
 
 #[test]

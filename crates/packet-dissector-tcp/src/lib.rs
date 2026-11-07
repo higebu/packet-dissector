@@ -56,6 +56,13 @@ pub const FD_SEGMENT_COUNT: usize = 14;
 /// memory limits. The value is the number of streams evicted.
 pub const FD_REASSEMBLY_EVICTED: usize = 15;
 const FD_CHECKSUM_STATUS: usize = 16;
+/// Index of the `retransmission` field in [`FIELD_DESCRIPTORS`].
+///
+/// Emitted by the registry's TCP reassembly middleware on the TCP layer of
+/// a segment whose data was already handed to the upper-layer dissector (a
+/// retransmission, or the same segment captured again), so the data is not
+/// dissected a second time. The value is always 1.
+pub const FD_RETRANSMISSION: usize = 17;
 
 /// IP protocol number of TCP, used in the checksum pseudo-header.
 const IP_PROTO_TCP: u8 = 6;
@@ -118,6 +125,7 @@ pub static FIELD_DESCRIPTORS: &[FieldDescriptor] = &[
     )
     .optional(),
     checksum_status_descriptor("checksum_status", "Checksum Status"),
+    FieldDescriptor::new("retransmission", "Retransmitted Data", FieldType::U8).optional(),
 ];
 
 /// Bit-to-name table for TCP control bits.
