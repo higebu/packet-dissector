@@ -12727,3 +12727,74 @@ fn integration_ethernet_ipv4_tcp_llmnr() {
         FieldValue::U16(msg_len)
     );
 }
+
+/// Build Ethernet → IPv6 → ESP (NULL, transport mode, 12-byte ICV) → TCP
+/// (44578 → 5060) carrying `payload` at sequence number `seq`.
+///
+/// RFC 4303, Section 2 — the trailer pads the payload so that Pad Length and
+/// Next Header end on a 4-byte boundary, followed by the ICV.
+/// <https://www.rfc-editor.org/rfc/rfc4303#section-2>
+fn build_eth_ipv6_esp_null_tcp_segment(seq: u32, payload: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    push_ethernet(&mut pkt, MAC_DST, MAC_SRC, 0x86DD);
+    let ipv6_start = push_ipv6(&mut pkt, 50, [0x20; 16], [0x30; 16]);
+    pkt.extend_from_slice(&0x0000_4004u32.to_be_bytes()); // SPI
+    pkt.extend_from_slice(&seq.to_be_bytes()); // Sequence Number
+    let tcp_start = pkt.len();
+    push_tcp(&mut pkt, 44578, 5060, 0x18); // PSH+ACK
+    pkt[tcp_start + 4..tcp_start + 8].copy_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(payload);
+    let inner_len = pkt.len() - tcp_start;
+    let pad_length = (4 - (inner_len + 2) % 4) % 4;
+    pkt.extend((1..=pad_length as u8).collect::<Vec<_>>());
+    pkt.push(pad_length as u8);
+    pkt.push(6); // Next Header: TCP
+    pkt.extend_from_slice(&[0xAB; 12]); // ICV (HMAC-SHA1-96)
+    fixup_ipv6_payload_length(&mut pkt, ipv6_start);
+    pkt
+}
+
+/// Ethernet → IPv6 → ESP (NULL) → TCP → SIP: TCP decoded from an ESP NULL
+/// payload is tracked as a stream like any other, so a SIP message split
+/// across two segments is reassembled (IMS signalling between a UE and its
+/// P-CSCF, 3GPP TS 33.203). The IPv6 Payload Length covers the ESP header
+/// and trailer, so it must not be taken as the TCP segment length.
+#[test]
+#[cfg(all(feature = "esp", feature = "tcp", feature = "sip", feature = "ipv6"))]
+fn integration_ethernet_ipv6_esp_null_tcp_sip_reassembled() {
+    let reg = DissectorRegistry::default();
+    let message: &[u8] = b"OPTIONS sip:p-cscf.example.com SIP/2.0\r\n\
+        Via: SIP/2.0/TCP [2001:db8::1]:44578;branch=z9hG4bK1\r\n\
+        Call-ID: esp-1\r\n\
+        CSeq: 1 OPTIONS\r\n\
+        Content-Length: 0\r\n\r\n";
+    let (first, second) = message.split_at(40);
+
+    let pkt = build_eth_ipv6_esp_null_tcp_segment(1000, first);
+    let mut buf = DissectBuffer::new();
+    let _ = reg.dissect(&pkt, &mut buf);
+    let tcp = buf.layer_by_name("TCP").unwrap();
+    assert!(
+        buf.field_by_name(tcp, "stream_id").is_some(),
+        "TCP inside ESP must be keyed on the enclosing IPv6 addresses"
+    );
+    // The first segment is buffered, not cut short by the ESP trailer
+    // counted in the IPv6 Payload Length.
+    assert_eq!(
+        buf.field_by_name(tcp, "reassembly_in_progress")
+            .unwrap()
+            .value,
+        FieldValue::U8(1)
+    );
+
+    let pkt = build_eth_ipv6_esp_null_tcp_segment(1000 + first.len() as u32, second);
+    let mut buf = DissectBuffer::new();
+    reg.dissect(&pkt, &mut buf).unwrap();
+    let sip = buf
+        .layer_by_name("SIP")
+        .expect("the SIP message must be reassembled from both segments");
+    assert_eq!(
+        buf.field_by_name(sip, "method").unwrap().value,
+        FieldValue::Str("OPTIONS")
+    );
+}

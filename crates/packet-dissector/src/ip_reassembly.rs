@@ -29,7 +29,7 @@ use packet_dissector_core::field::{Field, FieldValue};
 use packet_dissector_core::packet::DissectBuffer;
 use packet_dissector_reassembly::ReassemblyBuffer;
 
-use super::registry::{DissectorRegistry, TmpPrefix, no_stop};
+use super::registry::{DissectorRegistry, no_stop};
 
 /// Fragment reassembly key, see [`IpFragmentContext::frag_key`].
 pub(crate) type FragKey = ([u8; 16], [u8; 16], u8, u32);
@@ -421,18 +421,7 @@ impl DissectorRegistry {
 
         let mut tmp_buf = DissectBuffer::new();
         tmp_buf.set_verify_checksums(buf.verify_checksums());
-        for layer in buf.layers() {
-            tmp_buf.push_layer(layer.clone());
-        }
-        for field in buf.fields() {
-            tmp_buf.push_raw_field(field.clone());
-        }
-        tmp_buf.extend_scratch(buf.scratch());
-        let prefix = TmpPrefix {
-            layers: buf.layers().len(),
-            fields: buf.field_count(),
-            scratch: buf.scratch_len(),
-        };
+        let prefix = Self::seed_tmp_buf(&mut tmp_buf, buf);
 
         // RFC 8200, Section 4.5 — "Only the value from the Offset zero
         // fragment packet is used for reassembly."
