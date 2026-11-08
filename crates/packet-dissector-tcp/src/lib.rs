@@ -251,14 +251,21 @@ fn canonicalize_key(key: StreamKey) -> StreamKey {
 /// The result may exceed the captured bytes (snaplen truncation); the
 /// caller takes the larger of it and the captured length.
 fn ip_payload_len(buf: &DissectBuffer, tcp_offset: usize, tcp_header_len: usize) -> Option<usize> {
-    // Use the innermost (last) IP layer whose range precedes the TCP offset.
+    // Use the innermost (last) IP layer whose range precedes the TCP offset,
+    // when only IPv6 extension headers and AH lie between it and TCP. Any
+    // other layer in between (e.g. ESP, whose trailer and ICV follow the
+    // payload: RFC 4303, Section 2
+    // <https://www.rfc-editor.org/rfc/rfc4303#section-2>) is counted in the
+    // IP length too, which then no longer gives the segment length.
     let ip_layer = buf
         .layers()
         .iter()
         .rev()
-        .find(|l| (l.name == "IPv4" || l.name == "IPv6") && l.range.start < tcp_offset);
-
-    let ip_layer = ip_layer?;
+        .filter(|l| l.range.start < tcp_offset)
+        .find(|l| !is_ip_extension(l.name))?;
+    if ip_layer.name != "IPv4" && ip_layer.name != "IPv6" {
+        return None;
+    }
     let fields = buf.layer_fields(ip_layer);
 
     if ip_layer.name == "IPv4" {
@@ -282,6 +289,14 @@ fn ip_payload_len(buf: &DissectBuffer, tcp_offset: usize, tcp_header_len: usize)
             .checked_add(tcp_header_len)?;
         Some(payload_length.saturating_sub(ext_and_tcp))
     }
+}
+
+/// Whether a layer named `name` sits between IP and TCP without adding
+/// bytes after the TCP segment: an IPv6 extension header (RFC 8200,
+/// Section 4 <https://www.rfc-editor.org/rfc/rfc8200#section-4>) or AH
+/// (RFC 4302, Section 2 <https://www.rfc-editor.org/rfc/rfc4302#section-2>).
+fn is_ip_extension(name: &str) -> bool {
+    name.starts_with("IPv6 ") || name == "AH"
 }
 
 /// Maximum number of tracked TCP streams before the coldest (oldest)

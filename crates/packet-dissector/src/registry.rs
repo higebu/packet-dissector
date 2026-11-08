@@ -1500,8 +1500,12 @@ impl DissectorRegistry {
                 // instantiation does not depend on `F` and monomorphization
                 // terminates. `full` is passed on so a shallow caller never
                 // feeds inner IP fragments to the reassembly state.
+                // The temporary buffer starts with a copy of `buf`'s layers
+                // so inner dissectors see the enclosing layers (e.g. TCP in
+                // ESP transport mode keys its streams on the IP addresses).
                 let mut tmp_buf = DissectBuffer::new();
                 tmp_buf.set_verify_checksums(buf.verify_checksums());
+                let prefix = Self::seed_tmp_buf(&mut tmp_buf, buf);
                 let mut inner_stop = no_stop;
                 let inner = self.dispatch_loop(
                     &padded,
@@ -1525,7 +1529,7 @@ impl DissectorRegistry {
                 // Fields may borrow from `padded`, so we remap Bytes/Str
                 // references into buf.aux_data (which stores the same data
                 // and outlives the fields).
-                Self::merge_tmp_buf(buf, tmp_buf, &padded, virtual_start, aux_handle);
+                Self::merge_tmp_tail(buf, tmp_buf, prefix, &padded, virtual_start, aux_handle);
                 break;
             }
 
@@ -1585,6 +1589,27 @@ impl DissectorRegistry {
 
         Ok(())
     }
+    /// Copy `buf`'s layers, fields and scratch bytes into the empty
+    /// `tmp_buf`, so dissectors run on it see the enclosing layers, and
+    /// return their counts for [`merge_tmp_tail`](Self::merge_tmp_tail).
+    pub(crate) fn seed_tmp_buf<'a>(
+        tmp_buf: &mut DissectBuffer<'a>,
+        buf: &DissectBuffer<'a>,
+    ) -> TmpPrefix {
+        for layer in buf.layers() {
+            tmp_buf.push_layer(layer.clone());
+        }
+        for field in buf.fields() {
+            tmp_buf.push_raw_field(field.clone());
+        }
+        tmp_buf.extend_scratch(buf.scratch());
+        TmpPrefix {
+            layers: buf.layers().len(),
+            fields: buf.field_count(),
+            scratch: buf.scratch_len(),
+        }
+    }
+
     /// Merge a temporary `DissectBuffer` (produced by recursive dissection of
     /// decrypted or reassembled data stored in a local `padded` vec) into the
     /// main buffer.
