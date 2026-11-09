@@ -624,6 +624,14 @@ fn dissect_ok<'a>(reg: &DissectorRegistry, pkt: &'a [u8]) -> DissectBuffer<'a> {
     buf
 }
 
+/// Assert `buf` is a retransmission: marked as one, with no upper layer
+/// and no reassembly placeholder.
+fn assert_retransmission(buf: &DissectBuffer<'_>) {
+    assert!(retransmission(buf), "{:?}", layer_names(buf));
+    assert!(buf.layer_by_name("SIP").is_none(), "{:?}", layer_names(buf));
+    assert!(!reassembly_in_progress(buf));
+}
+
 /// The same segments captured several times (e.g. at two points of a
 /// path): once a message is delivered, copies of its segments are
 /// retransmissions and are not dissected as the start of a new message.
@@ -634,30 +642,52 @@ fn duplicates_of_a_delivered_message_are_dropped() {
     let seq_b = 100 + a.len() as u32;
     let (pkt_a, pkt_b) = (c2s(5060, 100, PSH_ACK, a), c2s(5060, seq_b, PSH_ACK, b));
 
-    for _ in 0..2 {
-        // One placeholder layer for the message in progress.
-        let buf = dissect_ok(&reg, &pkt_a);
-        assert!(reassembly_in_progress(&buf));
-        assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "TCP", "SIP"]);
-    }
+    // One placeholder layer for the message in progress.
+    let buf = dissect_ok(&reg, &pkt_a);
+    assert!(reassembly_in_progress(&buf));
+    assert_eq!(layer_names(&buf), ["Ethernet", "IPv4", "TCP", "SIP"]);
+    assert!(!retransmission(&buf));
+    // A copy of the buffered segment adds nothing: a retransmission.
+    assert_retransmission(&dissect_ok(&reg, &pkt_a));
+
     let buf = dissect_ok(&reg, &pkt_b);
     assert_eq!(str_fields(&buf, "SIP", "method"), ["REGISTER"]);
 
     for pkt in [&pkt_b, &pkt_b, &pkt_a] {
-        let buf = dissect_ok(&reg, pkt);
-        assert!(retransmission(&buf));
-        assert!(
-            buf.layer_by_name("SIP").is_none(),
-            "{:?}",
-            layer_names(&buf)
-        );
-        assert!(!reassembly_in_progress(&buf));
+        assert_retransmission(&dissect_ok(&reg, pkt));
     }
 
     // The stream is still in step: the next message parses.
     let next = c2s(5060, seq_b + b.len() as u32, PSH_ACK, SIP_OPTIONS);
     let buf = dissect_ok(&reg, &next);
     assert_eq!(str_fields(&buf, "SIP", "method"), ["OPTIONS"]);
+}
+
+/// A message whose last segment never arrives: every copy of the segments
+/// buffered so far is a retransmission, not another message in progress,
+/// and a segment adding data still counts as one.
+#[test]
+fn duplicates_of_a_message_in_progress_are_retransmissions() {
+    let reg = DissectorRegistry::default();
+    let (a, _) = register_split();
+    let (head, rest) = a.split_at(20);
+    let pkt_head = c2s(5060, 300, PSH_ACK, head);
+    let pkt_a = c2s(5060, 300, PSH_ACK, a);
+
+    let buf = dissect_ok(&reg, &pkt_head);
+    assert!(reassembly_in_progress(&buf));
+    assert_eq!(segment_count(&buf), Some(1));
+    for _ in 0..3 {
+        assert_retransmission(&dissect_ok(&reg, &pkt_head));
+    }
+    // Overlapping the buffered data but longer: new bytes, not a copy.
+    let buf = dissect_ok(&reg, &pkt_a);
+    assert!(!retransmission(&buf));
+    assert!(reassembly_in_progress(&buf));
+    assert_eq!(segment_count(&buf), Some(2));
+    // Data already buffered from the middle: a copy again.
+    let pkt_rest = c2s(5060, 300 + head.len() as u32, PSH_ACK, rest);
+    assert_retransmission(&dissect_ok(&reg, &pkt_rest));
 }
 
 #[test]
@@ -694,12 +724,12 @@ fn data_after_a_gap_waits_for_the_missing_segment() {
     let pkt_b = c2s(5060, isn + 1 + a.len() as u32, PSH_ACK, b);
 
     dissect_ok(&reg, &c2s(5060, isn, SYN, &[]));
-    for _ in 0..2 {
-        // Only the reassembly placeholder, no message.
-        let buf = dissect_ok(&reg, &pkt_b);
-        assert!(str_fields(&buf, "SIP", "method").is_empty());
-        assert!(reassembly_in_progress(&buf));
-    }
+    // Only the reassembly placeholder, no message.
+    let buf = dissect_ok(&reg, &pkt_b);
+    assert!(str_fields(&buf, "SIP", "method").is_empty());
+    assert!(reassembly_in_progress(&buf));
+    // A copy of the waiting segment is a retransmission.
+    assert_retransmission(&dissect_ok(&reg, &pkt_b));
 
     let pkt_a = c2s(5060, isn + 1, PSH_ACK, a);
     let buf = dissect_ok(&reg, &pkt_a);
@@ -740,7 +770,10 @@ fn duplicate_segment_is_counted_once() {
     let pkt = c2s(5060, 100, PSH_ACK, a);
 
     assert_eq!(segment_count(&dissect_ok(&reg, &pkt)), Some(1));
-    assert_eq!(segment_count(&dissect_ok(&reg, &pkt)), Some(1));
+    // The copy adds no segment: it is a retransmission.
+    let copy = dissect_ok(&reg, &pkt);
+    assert!(retransmission(&copy));
+    assert_eq!(segment_count(&copy), None);
 }
 
 #[test]

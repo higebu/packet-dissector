@@ -255,6 +255,8 @@ impl TcpReassemblyService {
     }
 
     /// Insert a segment into the reassembly buffer, tracking total bytes.
+    /// Returns whether it added bytes: `false` for a copy of buffered data
+    /// (the same segment captured twice, or a retransmission).
     ///
     /// If the offset causes an internal overflow, the stream is reset and
     /// this segment (at `seq`) is treated as the first one.
@@ -264,9 +266,9 @@ impl TcpReassemblyService {
         byte_offset: usize,
         data: &[u8],
         seq: u32,
-    ) {
+    ) -> bool {
         let Some(state) = self.streams.get_mut(key) else {
-            return;
+            return false;
         };
         let mut bytes_before = state.buffer.bytes_received();
         if state.buffer.insert(byte_offset, data).is_none() {
@@ -288,9 +290,11 @@ impl TcpReassemblyService {
         self.total_bytes += bytes_after.saturating_sub(bytes_before);
         // A duplicate of buffered data (the same segment captured twice, or
         // a retransmission) adds no segment.
-        if bytes_after > bytes_before {
+        let added = bytes_after > bytes_before;
+        if added {
             state.segment_count += 1;
         }
+        added
     }
 
     /// Insert reordered data that ends at (or overlaps) the stream's base:
@@ -654,11 +658,23 @@ impl DissectorRegistry {
         let byte_offset: usize;
         let segment: &[u8];
 
+        // RFC 9293, Section 3.10 — a segment whose data was all received
+        // before is a duplicate: a retransmission, or the same segment
+        // captured again. It is not another message in progress.
+        // <https://www.rfc-editor.org/rfc/rfc9293#section-3.10>
+        let duplicate = |service: std::sync::MutexGuard<'_, TcpReassemblyService>,
+                         buf: &mut DissectBuffer<'pkt>| {
+            drop(service);
+            Self::add_retransmission_field(buf, offset, payload.len());
+            Ok(())
+        };
         if forward <= MAX_STREAM_WINDOW {
             // In-window forward data (or an exact match with base_seq).
             byte_offset = forward;
             segment = payload;
-            service.insert_segment(&key, byte_offset, segment, seq);
+            if !service.insert_segment(&key, byte_offset, segment, seq) {
+                return duplicate(service, buf);
+            }
         } else if backward <= MAX_STREAM_WINDOW {
             if backward > payload.len() {
                 // Entirely before the buffered stream with a gap in between:
@@ -698,7 +714,9 @@ impl DissectorRegistry {
                 // that aligns with base_seq at offset 0 in the buffer.
                 segment = &payload[backward..];
                 byte_offset = 0;
-                service.insert_segment(&key, byte_offset, segment, base_seq);
+                if !service.insert_segment(&key, byte_offset, segment, base_seq) {
+                    return duplicate(service, buf);
+                }
             }
         } else {
             // The distance in either direction is unreasonably large:
